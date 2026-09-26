@@ -161,7 +161,7 @@ fn resize_without_overflow_stays_at_the_top() {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
-    app.display_messages = vec![DisplayMessage::assistant("short response")];
+    app.display_messages.replace(vec![DisplayMessage::assistant("short response")]);
     app.bump_display_messages_version();
     app.auto_scroll_paused = false;
     app.status = ProcessingStatus::Idle;

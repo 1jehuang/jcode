@@ -1,4 +1,5 @@
 use super::state_ui::RestoredReloadInput;
+use super::transcript::Transcript;
 use super::*;
 use crate::tui::{backend, keybind};
 
@@ -407,7 +408,7 @@ impl App {
             mcp_manager,
             messages: Vec::new(),
             session,
-            display_messages: Vec::new(),
+            display_messages: Transcript::new(),
             display_messages_version: 0,
             display_user_message_count: 0,
             display_edit_tool_message_count: 0,
@@ -522,6 +523,7 @@ impl App {
             copy_badge_ui: CopyBadgeUiState::default(),
             copy_selection_mode: false,
             copy_selection_anchor: None,
+            pending_selection_rebase: None,
             copy_selection_cursor: None,
             copy_selection_pending_anchor: None,
             copy_selection_dragging: false,
@@ -864,7 +866,7 @@ impl App {
             mcp_manager,
             messages: Vec::new(),
             session,
-            display_messages: Vec::new(),
+            display_messages: Transcript::new(),
             display_messages_version: 0,
             display_user_message_count: 0,
             display_edit_tool_message_count: 0,
@@ -979,6 +981,7 @@ impl App {
             copy_badge_ui: CopyBadgeUiState::default(),
             copy_selection_mode: false,
             copy_selection_anchor: None,
+            pending_selection_rebase: None,
             copy_selection_cursor: None,
             copy_selection_pending_anchor: None,
             copy_selection_dragging: false,

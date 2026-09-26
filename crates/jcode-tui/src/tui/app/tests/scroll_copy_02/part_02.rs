@@ -254,7 +254,7 @@ fn make_edit_badge_test_app(
     let new_string = (0..old_line_count)
         .map(|idx| format!("new line {idx}\n"))
         .collect::<String>();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("please edit demo.txt"),
         DisplayMessage::tool(
             "Edited demo.txt".to_string(),
@@ -270,7 +270,7 @@ fn make_edit_badge_test_app(
                 thought_signature: None,
             },
         ),
-    ];
+    ]);
     app.bump_display_messages_version();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.scroll_offset = 0;
@@ -1082,7 +1082,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
     );
 
     // Mirror the session into the display transcript the body renderer walks.
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("read the screenshot"),
         DisplayMessage::tool(
             "read shot.png",
@@ -1094,7 +1094,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
                 thought_signature: None,
             },
         ),
-    ];
+    ]);
     app.bump_display_messages_version();
     app.invalidate_side_pane_images_signature();
     app.pin_images = true;
@@ -1235,7 +1235,7 @@ fn test_real_draw_never_emits_inline_image_marker_text() {
         ],
     );
 
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("read the screenshot"),
         DisplayMessage::tool(
             "read shot.png",
@@ -1247,7 +1247,7 @@ fn test_real_draw_never_emits_inline_image_marker_text() {
                 thought_signature: None,
             },
         ),
-    ];
+    ]);
     app.bump_display_messages_version();
     app.invalidate_side_pane_images_signature();
     app.pin_images = true;

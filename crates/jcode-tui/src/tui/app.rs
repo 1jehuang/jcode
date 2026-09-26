@@ -1,3 +1,4 @@
+use self::transcript::Transcript;
 use super::DisplayMessageRoleExt;
 use super::keybind::{
     CenteredToggleKeys, ModelSwitchKeys, OptionalBinding, ScrollKeys, WorkspaceNavigationKeys,
@@ -111,6 +112,7 @@ mod terminal_liveness;
 mod terminal_setup_command;
 mod terminal_title;
 mod todos_view;
+mod transcript;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
@@ -637,6 +639,12 @@ pub(super) struct HistoryScrollAnchor {
     /// to detect when a frame with the newly-loaded content has rendered (its
     /// total differs), so the anchor can be reconciled into `scroll_offset`.
     pub base_total: usize,
+    /// Transcript length at capture. A resize rewraps the transcript and changes
+    /// `base_total` without loading anything, so the wrapped total alone would
+    /// let a resize resolve (and drop) this anchor before the requested history
+    /// arrives. Requiring the transcript to have actually grown distinguishes
+    /// the two.
+    pub base_msg_count: usize,
 }
 
 /// Resize anchor captured against the pre-resize geometry.
@@ -659,6 +667,21 @@ pub(super) struct PendingResizeAnchor {
     /// Resolved row the screen was showing when the anchor was captured, used
     /// to tell the stale published value from the post-resize one.
     pub captured_scroll: usize,
+}
+
+/// A transcript selection captured against the pre-resize geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PendingSelectionRebase {
+    pub anchor: jcode_tui_messages::Anchor,
+    pub cursor: jcode_tui_messages::Anchor,
+    /// Display column of each endpoint measured from the start of its logical
+    /// line rather than its wrapped row, so a rewrap that splits the row still
+    /// resolves to the same character.
+    pub anchor_column: usize,
+    pub cursor_column: usize,
+    /// Viewport width at capture; the frame that resolves these is laid out at
+    /// a different one.
+    pub captured_width: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -871,7 +894,7 @@ pub struct App {
     mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,
-    display_messages: Vec<DisplayMessage>,
+    display_messages: Transcript,
     display_messages_version: u64,
     display_user_message_count: usize,
     display_edit_tool_message_count: usize,
@@ -1185,6 +1208,10 @@ pub struct App {
     copy_selection_mode: bool,
     copy_selection_anchor: Option<crate::tui::CopySelectionPoint>,
     copy_selection_cursor: Option<crate::tui::CopySelectionPoint>,
+    /// Transcript selection endpoints captured in content coordinates across a
+    /// resize, so the reader's selection still covers the text they dragged
+    /// over instead of being reinterpreted as a new wrapped line index.
+    pending_selection_rebase: Option<PendingSelectionRebase>,
     copy_selection_pending_anchor: Option<crate::tui::CopySelectionPoint>,
     copy_selection_dragging: bool,
     copy_selection_goal_column: Option<usize>,

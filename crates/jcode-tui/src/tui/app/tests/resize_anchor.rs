@@ -11,9 +11,9 @@ fn anchored_scroll_test_app() -> crate::tui::app::App {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
-    app.display_messages = (0..40)
+    app.display_messages.replace((0..40)
         .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(8))))
-        .collect();
+        .collect());
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -194,10 +194,9 @@ fn resuming_the_tail_drops_a_pending_resize_anchor() {
 
 #[test]
 fn a_prepend_invalidates_a_pending_resize_anchor() {
-    // A resize anchor captured before older history is prepended has a stale
-    // occurrence ordinal: a prepended duplicate becomes occurrence zero, so the
-    // resolver would name that older message instead of the reader's. The
-    // prepend anchor is authoritative and must supersede it.
+    // A resize anchor captured before older history is prepended is measured
+    // against the older content; the prepend anchor is authoritative and must
+    // supersede it.
     let _lock = scroll_render_test_lock();
     crate::perf::pin_full_profile_for_tests();
     let mut app = anchored_scroll_test_app();
@@ -242,13 +241,13 @@ fn a_pending_prepend_does_not_block_a_resize_capture() {
 }
 
 /// The message owning the row at the top of the viewport.
-fn top_message_hash() -> Option<u64> {
+fn top_message_id() -> Option<jcode_tui_messages::ItemId> {
     let frame = crate::tui::ui::last_chat_frame()?;
     match jcode_tui_messages::content_pos_at_row(
         &frame,
         crate::tui::ui::last_resolved_chat_scroll(),
     )? {
-        jcode_tui_messages::ContentPos::Message(anchor) => Some(anchor.msg_hash),
+        jcode_tui_messages::ContentPos::Message(anchor) => Some(anchor.item_id),
         jcode_tui_messages::ContentPos::Section { .. } => None,
     }
 }
@@ -266,9 +265,9 @@ fn resize_during_a_pending_prepend_keeps_the_same_message() {
     app.diagram_pane_enabled = false;
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
-    app.display_messages = (0..30)
+    app.display_messages.replace((0..30)
         .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(20))))
-        .collect();
+        .collect());
     app.bump_display_messages_version();
 
     let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
@@ -276,7 +275,7 @@ fn resize_during_a_pending_prepend_keeps_the_same_message() {
     app.scroll_offset = 40;
     app.auto_scroll_paused = true;
     render_and_snap(&app, &mut wide);
-    let before = top_message_hash().expect("a message under the reader");
+    let before = top_message_id().expect("a message under the reader");
 
     // Older history is queued (its anchor is a row distance at 100 columns).
     app.capture_history_anchor(0);
@@ -288,7 +287,7 @@ fn resize_during_a_pending_prepend_keeps_the_same_message() {
     render_and_snap(&app, &mut narrow);
 
     assert_eq!(
-        top_message_hash(),
+        top_message_id(),
         Some(before),
         "the reader must stay on the same message while history is loading"
     );
@@ -319,7 +318,7 @@ fn resize_then_prepend_of_a_duplicate_does_not_teleport_the_reader() {
     let target_body = format!("TOKENsame - {}", "identical body ".repeat(8));
     let mut visible: Vec<DisplayMessage> = (0..30).map(resize_anchor_filler).collect();
     visible.insert(8, DisplayMessage::assistant(target_body.clone()));
-    app.display_messages = visible.clone();
+    app.display_messages.replace(visible.clone());
     app.bump_display_messages_version();
     app.compacted_history_lazy = super::CompactedHistoryLazyState {
         total_messages: visible.len() + 2,
@@ -359,6 +358,7 @@ fn resize_then_prepend_of_a_duplicate_does_not_teleport_the_reader() {
     render_and_snap(&app, &mut narrow);
     // What the tick loop would have adopted before the prepend lands.
     app.scroll_offset = crate::tui::ui::last_resolved_chat_scroll();
+    let before_area = anchored_chat_area(&narrow);
 
     // Older history containing an identical duplicate of TARGET is prepended.
     let mut older: Vec<DisplayMessage> = vec![resize_anchor_filler(100)];
@@ -373,6 +373,11 @@ fn resize_then_prepend_of_a_duplicate_does_not_teleport_the_reader() {
     assert!(
         after >= before,
         "the reader must not teleport up to the prepended duplicate: before={before} after={after}"
+    );
+    assert_eq!(
+        top_token(&anchored_chat_area(&narrow)),
+        top_token(&before_area),
+        "the reader must still be looking at TARGET after the prepend"
     );
 
     // The invariant behind that outcome: the prepend's anchor is authoritative,
@@ -439,5 +444,84 @@ fn resize_keeps_a_reader_parked_in_live_output_on_the_same_text() {
     assert!(
         after_top.starts_with("STREAM040"),
         "the reader must stay on the same live text: {after_top:?}"
+    );
+}
+
+/// The ambiguous corner: the prepended message is word-for-word identical to the
+/// anchored one, so nothing in the content says which copy the reader was on.
+/// Identity carries the answer instead. The reader is pushed down by the
+/// prepended height (the prepend's own distance-from-bottom anchor), and what
+/// they are looking at must not change -- same text, so the same prompt number.
+#[test]
+fn an_identical_prepend_keeps_the_readers_text_and_number() {
+    let _lock = scroll_render_test_lock();
+    crate::perf::pin_full_profile_for_tests();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    let prompt = "TOKENsame - identical prompt";
+    let mut visible: Vec<DisplayMessage> = vec![DisplayMessage::user(prompt)];
+    visible.extend((0..30).map(resize_anchor_filler));
+    app.display_messages.replace(visible.clone());
+    app.bump_display_messages_version();
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+
+    // Park the reader with the prompt at the top of the viewport.
+    let target_row = {
+        let frame = crate::tui::ui::last_chat_frame().expect("frame");
+        (0..frame.total_wrapped_lines())
+            .find(|row| {
+                frame
+                    .wrapped_plain_line(*row)
+                    .is_some_and(|text| text.contains("TOKENsame"))
+            })
+            .expect("target row")
+    };
+    app.scroll_offset = target_row;
+    app.auto_scroll_paused = true;
+    render_and_snap(&app, &mut terminal);
+    let before_row = crate::tui::ui::last_resolved_chat_scroll();
+    assert_eq!(
+        before_row, target_row,
+        "fixture must park the reader on the prompt without clamping"
+    );
+
+    // Older history whose single message is identical to the anchored one.
+    let mut older: Vec<DisplayMessage> = vec![DisplayMessage::user(prompt)];
+    older.extend(visible.iter().cloned());
+    let total = older.len();
+    app.capture_history_anchor(0);
+    app.apply_compacted_history_window(older, Vec::new(), total, total, 0, 0);
+    render_and_snap(&app, &mut terminal);
+
+    let after_row = crate::tui::ui::last_resolved_chat_scroll();
+    assert_eq!(
+        after_row,
+        before_row + 2,
+        "the prepended prompt must push the reader down by its own height"
+    );
+    // The displayed prompt number above the reader is a separate, pre-existing
+    // concern: the prepend path resolves the reader by distance from the bottom
+    // (phase 4), and this fixture reveals a prompt without adjusting the hidden
+    // prompt offset, so `1>` becomes `2>`. Identity's claim is narrower -- the
+    // reader keeps the same message -- so compare everything after the number.
+    let message_text = |row: usize| {
+        crate::tui::ui::copy_viewport_line_text(row)
+            .map(|line| line.split_once(' ').map(|(_, rest)| rest.to_string()).unwrap_or(line))
+    };
+    assert_eq!(
+        message_text(after_row),
+        Some("TOKENsame - identical prompt".to_string()),
+        "an identical prepend must keep the same message under the reader"
+    );
+    assert_eq!(
+        message_text(after_row),
+        message_text(before_row),
+        "the message under the reader must be unchanged by an identical prepend"
     );
 }

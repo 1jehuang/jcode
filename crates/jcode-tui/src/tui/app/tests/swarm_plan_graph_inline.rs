@@ -1551,7 +1551,7 @@ fn test_margin_mode_session_switch_keeps_orphaned_diagram_in_info_widget() {
 // that bypass `clear_display_messages` entirely.
 //
 //   A. `apply_compacted_history_window` (state_ui_messages.rs:404) assigns
-//      `self.display_messages = messages` wholesale. The window is built from
+//      `self.display_messages.replace(messages` wholesale. The window is built from
 //      server-side session storage, which never contains the client-only
 //      "Plan graph · vN" message, so the coalesced diagram message is DROPPED
 //      from the transcript while ACTIVE_DIAGRAMS and the swarm_plan_* snapshot
@@ -1566,7 +1566,7 @@ fn test_margin_mode_session_switch_keeps_orphaned_diagram_in_info_widget() {
 //   C. Local (non-remote) session picker `/resume` current-terminal switch:
 //      `handle_session_picker_current_terminal_selection`
 //      (inline_interactive.rs:2128) only queues the target on
-//      `workspace_client.queue_resume_session`; the queued resume is consumed
+//      `workspace_client.queue_resume_session`); the queued resume is consumed
 //      exclusively by remote::handle_tick (app/remote.rs:136). local::handle_tick
 //      (app/local.rs:63-118) never takes it, so in local mode the switch is a
 //      silent no-op: no transcript clear ever happens and the plan graph,

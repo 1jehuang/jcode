@@ -129,7 +129,7 @@ impl App {
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
         messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
         compact_display_messages_for_storage(&mut messages);
-        self.display_messages = messages;
+        self.display_messages.replace(messages);
         self.attempt_committed_assistant_messages = 0;
         self.sync_compacted_history_lazy_from_display_messages();
         self.bump_display_messages_version();
@@ -411,7 +411,9 @@ impl App {
             .iter()
             .rposition(Self::is_reload_message)
         {
-            let msg = &mut self.display_messages[idx];
+            let Some(msg) = self.display_messages.get_mut(idx) else {
+                return;
+            };
             if !msg.content.is_empty() {
                 msg.content.push('\n');
             }
@@ -580,7 +582,7 @@ impl App {
         hidden_user_prompts: usize,
     ) {
         compact_display_messages_for_storage(&mut messages);
-        self.display_messages = messages;
+        self.display_messages.replace(messages);
         self.remote_side_pane_images = images;
         self.invalidate_side_pane_images_signature();
         self.compacted_history_lazy = CompactedHistoryLazyState {
@@ -657,6 +659,7 @@ impl App {
         self.pending_history_anchor = Some(super::HistoryScrollAnchor {
             lines_from_bottom,
             base_total: total,
+            base_msg_count: self.display_messages.len(),
         });
     }
 
@@ -667,9 +670,15 @@ impl App {
             return false;
         };
         let total = crate::tui::ui::last_total_wrapped_lines();
-        // Wait until a frame with the prepended content has actually rendered
-        // (its total wrapped-line count differs from the captured base).
-        if total == 0 || total == anchor.base_total {
+        // Wait until a frame with the prepended content has actually rendered:
+        // the wrapped total must differ from the captured base *and* the
+        // transcript must have grown. A resize alone changes the total without
+        // adding messages, and must not resolve (and drop) this anchor before
+        // the requested history arrives.
+        if total == 0
+            || total == anchor.base_total
+            || self.display_messages.len() == anchor.base_msg_count
+        {
             return false;
         }
         let resolved = crate::tui::ui::last_resolved_chat_scroll();
