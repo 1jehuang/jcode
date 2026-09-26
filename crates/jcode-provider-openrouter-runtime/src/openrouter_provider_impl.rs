@@ -337,6 +337,14 @@ impl Provider for OpenRouterProvider {
             return false;
         }
 
+        // The catalog already states which modalities each model accepts, so
+        // honour that before falling back to a per-provider guess. Without this
+        // a vision-capable model on the native OpenRouter route is clamped to
+        // text even though the provider advertised image input for it.
+        if self.catalog_declares_image_input(&model_id) {
+            return true;
+        }
+
         // Direct OpenAI-compatible local providers such as Ollama and LM Studio
         // document image content support on /v1/chat/completions. We already
         // serialize image blocks using OpenAI's image_url content-part shape in
@@ -886,5 +894,29 @@ impl OpenRouterProvider {
         // `[[providers.<name>.models]]` entries must survive background
         // `/models` catalog refreshes (issue #579).
         self.supports_provider_features || self.profile_id.is_none() || self.is_user_named_profile()
+    }
+
+    /// Whether the fetched model catalog declares `image` as an accepted input
+    /// modality for this model.
+    ///
+    /// Returns false when the catalog is unavailable, still being refreshed, or
+    /// silent about this model, so a missing field stays missing instead of
+    /// being read as a capability the provider never claimed. `supports_image_input`
+    /// is a sync trait method, so this uses `try_read` rather than awaiting the
+    /// tokio lock; a busy lock simply falls back to the existing behaviour.
+    pub(crate) fn catalog_declares_image_input(&self, model_id: &str) -> bool {
+        if !self.supports_model_catalog {
+            return false;
+        }
+        let Ok(cache) = self.models_cache.try_read() else {
+            return false;
+        };
+        cache.models.iter().any(|model| {
+            model.id.trim().to_ascii_lowercase() == model_id
+                && model
+                    .input
+                    .iter()
+                    .any(|modality| modality.eq_ignore_ascii_case("image"))
+        })
     }
 }
