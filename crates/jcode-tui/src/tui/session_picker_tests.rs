@@ -92,6 +92,7 @@ fn make_session_with_flags(
         server_name: None,
         server_icon: None,
         source: SessionSource::Jcode,
+        hook_trigger: None,
         resume_target: ResumeTarget::JcodeSession {
             session_id: id.to_string(),
         },
@@ -795,6 +796,24 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     assert_eq!(picker.filter_mode, SessionFilterMode::Active);
     // No live processes own these synthetic sessions, so the Active view is
     // empty in tests.
+    assert_eq!(picker.visible_sessions.len(), 0);
+
+    // Worker view matches sessions with a parent_id (swarm/hook children).
+    picker.all_sessions[1].parent_id = Some("session_saved".to_string());
+    picker.filter_mode = SessionFilterMode::Worker;
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert!(
+        picker
+            .visible_session_iter()
+            .all(|session| session.parent_id.is_some())
+    );
+    picker.all_sessions[1].parent_id = None;
+    picker.filter_mode = SessionFilterMode::Active;
+    picker.rebuild_items();
+
+    picker.cycle_filter_mode();
+    assert_eq!(picker.filter_mode, SessionFilterMode::Worker);
     assert_eq!(picker.visible_sessions.len(), 0);
 
     picker.cycle_filter_mode();

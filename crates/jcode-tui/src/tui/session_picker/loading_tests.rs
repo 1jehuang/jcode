@@ -127,6 +127,7 @@ fn cached_grouped_sessions_round_trip_from_disk() {
         server_name: None,
         server_icon: None,
         source: SessionSource::Jcode,
+        hook_trigger: None,
         resume_target: ResumeTarget::JcodeSession {
             session_id: "session_cache_test_1770000000000".to_string(),
         },
