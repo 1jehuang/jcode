@@ -415,10 +415,22 @@ mod tests {
         ));
         let _listener = Listener::bind(&path).expect("bind named pipe");
 
+        // A second, separately bound pipe for `remove_socket`. Probing consumes
+        // the only available instance of a pipe, so reusing `path` would let the
+        // second probe return ERROR_PIPE_BUSY and never reach the code under
+        // test, which is exactly the coverage a single shared pipe left out.
+        let remove_path = std::env::temp_dir().join(format!(
+            "jcode-plain-thread-remove-{}-{}.sock",
+            std::process::id(),
+            BUSY_PIPE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _remove_listener = Listener::bind(&remove_path).expect("bind second named pipe");
+
         let probe = path.clone();
+        let remove_probe = remove_path.clone();
         let joined = std::thread::spawn(move || {
             let reachable = is_socket_path(&probe);
-            remove_socket(&probe);
+            remove_socket(&remove_probe);
             reachable
         })
         .join();
