@@ -239,6 +239,12 @@ pub struct Agent {
     /// MCP tools to wait for), this is set so the per-turn registry scan stops.
     /// Reset whenever the tool list is intentionally unlocked.
     mcp_late_register_resolved: bool,
+    /// Whether `locked_tools` was built for provider-native deferred MCP
+    /// loading. A mid-session model/provider switch can change that
+    /// capability; the snapshot must then be rebuilt, or the new provider
+    /// would get a surface built for the other path (for example
+    /// `mcp_search` without `mcp_call` or any MCP tools).
+    locked_tools_native_deferred: bool,
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
@@ -330,6 +336,7 @@ impl Agent {
             last_usage: TokenUsage::default(),
             locked_tools: None,
             mcp_late_register_resolved: false,
+            locked_tools_native_deferred: false,
             agents_md_snapshot,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,

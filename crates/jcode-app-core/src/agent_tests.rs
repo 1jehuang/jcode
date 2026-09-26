@@ -2613,3 +2613,61 @@ fn tool_reference_metadata_becomes_reference_blocks() {
         .collect();
     assert_eq!(refs, vec![("call_9", "mcp__a__x"), ("call_9", "mcp__b__y")]);
 }
+
+/// Provider whose deferred-loading capability can flip, like a mid-session
+/// switch between Claude and a non-native route.
+struct SwitchableDeferredProvider(Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait]
+impl Provider for SwitchableDeferredProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "switchable"
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(Arc::clone(&self.0)))
+    }
+}
+
+#[tokio::test]
+async fn switching_away_from_native_deferred_restores_mcp_fallback_surface() {
+    let _guard = crate::storage::lock_test_env();
+    let native = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let provider: Arc<dyn Provider> = Arc::new(SwitchableDeferredProvider(Arc::clone(&native)));
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
+
+    let on_native = agent.tool_definitions().await;
+    assert!(on_native.iter().any(|t| t.name == "mcp_call" && t.defer_loading));
+
+    native.store(false, std::sync::atomic::Ordering::SeqCst);
+    let fallback = agent.tool_definitions().await;
+    assert!(
+        fallback
+            .iter()
+            .any(|t| t.name == "mcp_call" && !t.defer_loading),
+        "non-native provider must get an eager mcp_call"
+    );
+    assert!(fallback.iter().all(|t| !t.defer_loading));
+
+    native.store(true, std::sync::atomic::Ordering::SeqCst);
+    let back = agent.tool_definitions().await;
+    assert!(back.iter().any(|t| t.name == "mcp_call" && t.defer_loading));
+}

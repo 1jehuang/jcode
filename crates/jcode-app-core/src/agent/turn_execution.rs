@@ -445,7 +445,20 @@ impl Agent {
         // the cached prefix, so the eager snapshot never changes when servers
         // connect, reconnect, or register late. Refresh the deferred subset
         // every turn instead of unlocking.
-        if self.native_deferred_mcp() {
+        let native = self.native_deferred_mcp();
+        if self.locked_tools.is_some() && self.locked_tools_native_deferred != native {
+            // The active provider's deferred-loading capability changed (model
+            // or provider switch). The prefix changes with the provider anyway,
+            // so rebuilding costs nothing extra and keeps MCP usable.
+            logging::info(&format!(
+                "Rebuilding tool snapshot: native deferred MCP loading {} after provider change",
+                if native { "enabled" } else { "disabled" }
+            ));
+            self.locked_tools = None;
+            self.mcp_late_register_resolved = false;
+            self.cache_tracker.reset();
+        }
+        if native {
             return self.native_deferred_tool_definitions().await;
         }
 
@@ -518,6 +531,7 @@ impl Agent {
             tools.len()
         ));
         self.locked_tools = Some(tools.clone());
+        self.locked_tools_native_deferred = false;
         tools
     }
 
@@ -551,6 +565,7 @@ impl Agent {
                     eager.len()
                 ));
                 self.locked_tools = Some(eager.clone());
+                self.locked_tools_native_deferred = true;
                 eager
             }
         };
