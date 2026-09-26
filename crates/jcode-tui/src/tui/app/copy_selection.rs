@@ -158,12 +158,14 @@ impl App {
         self.copy_selection_goal_column = Some(point.column);
     }
 
-    /// Capture a transcript selection in content coordinates before a resize
-    /// rewraps the transcript.
+    /// Capture a transcript selection in the frame's raw coordinates before a
+    /// resize rewraps the transcript.
     ///
     /// The endpoints are wrapped line indices, so a rewrap reinterprets them and
-    /// the selection silently starts covering different text. Only the transcript
-    /// pane is affected: the other panes are not transcript-relative.
+    /// the selection silently starts covering different text. Raw text does not
+    /// move with the width, and it is the space the copy path extracts through,
+    /// so capture and extraction agree at any width. Only the transcript pane is
+    /// affected: the other panes are not transcript-relative.
     pub(super) fn capture_selection_rebase(&mut self) {
         use crate::tui::{CopySelectionPane, ui};
 
@@ -175,43 +177,15 @@ impl App {
         if anchor_point.pane != CopySelectionPane::Chat || cursor_point.pane != anchor_point.pane {
             return;
         }
-        let Some(frame) = ui::last_chat_frame() else {
-            return;
-        };
-        let (Some(anchor), Some(cursor)) = (
-            jcode_tui_messages::anchor_at_row(&frame, anchor_point.abs_line),
-            jcode_tui_messages::anchor_at_row(&frame, cursor_point.abs_line),
-        ) else {
-            return;
-        };
-        // A column only means something inside one wrapped row, so measure it
-        // from the start of the message instead: the rows above it plus the
-        // offset inside its own row. That survives the row splitting in two.
-        let row_width = |row: usize| {
-            frame
-                .wrapped_plain_line(row)
-                .map(unicode_width::UnicodeWidthStr::width)
-                .unwrap_or(0)
-        };
-        let logical_column = |anchor: &jcode_tui_messages::Anchor, row: usize, column: usize| {
-            let (start, _) = jcode_tui_messages::resolve_range(anchor, &frame)?;
-            let mut logical = column;
-            for above in start..row {
-                logical += row_width(above);
-            }
-            Some(logical)
-        };
-        let (Some(anchor_column), Some(cursor_column)) = (
-            logical_column(&anchor, anchor_point.abs_line, anchor_point.column),
-            logical_column(&cursor, cursor_point.abs_line, cursor_point.column),
+        let (Some(anchor_raw), Some(cursor_raw)) = (
+            ui::copy_viewport_raw_point(anchor_point),
+            ui::copy_viewport_raw_point(cursor_point),
         ) else {
             return;
         };
         self.pending_selection_rebase = Some(super::PendingSelectionRebase {
-            anchor,
-            cursor,
-            anchor_column,
-            cursor_column,
+            anchor_raw,
+            cursor_raw,
             captured_width: ui::last_layout_snapshot()
                 .map(|layout| layout.messages_area.width)
                 .unwrap_or(0),
@@ -235,57 +209,28 @@ impl App {
         }
         self.pending_selection_rebase = None;
 
-        let Some(frame) = ui::last_chat_frame() else {
-            return false;
-        };
-        // Re-derive the row and display column from the logical column, so a row
-        // that split in two still resolves to the character the reader selected.
-        // An endpoint whose message is gone resolves to `None` and keeps its line
-        // index: something is better than dropping the selection entirely.
-        let row_column = |anchor: &jcode_tui_messages::Anchor, logical: usize| {
-            let (start, len) = jcode_tui_messages::resolve_range(anchor, &frame)?;
-            let mut consumed = 0usize;
-            let mut fallback = (start, 0usize);
-            for row in start..start + len {
-                let width = frame
-                    .wrapped_plain_line(row)
-                    .map(unicode_width::UnicodeWidthStr::width)
-                    .unwrap_or(0);
-                // Blank rows (message separators) carry no column.
-                if width == 0 {
-                    continue;
-                }
-                if logical <= consumed + width {
-                    return Some((row, logical - consumed));
-                }
-                consumed += width;
-                fallback = (row, width);
-            }
-            // Past the end of the message: land on the end of its last row.
-            Some(fallback)
-        };
         let mut changed = false;
-        if let (Some((row, column)), Some(mut point)) = (
-            row_column(&pending.anchor, pending.anchor_column),
-            self.copy_selection_anchor,
-        ) && point.pane == CopySelectionPane::Chat
-            && (point.abs_line, point.column) != (row, column)
-        {
-            point.abs_line = row;
-            point.column = column;
-            self.copy_selection_anchor = Some(point);
-            changed = true;
-        }
-        if let (Some((row, column)), Some(mut point)) = (
-            row_column(&pending.cursor, pending.cursor_column),
-            self.copy_selection_cursor,
-        ) && point.pane == CopySelectionPane::Chat
-            && (point.abs_line, point.column) != (row, column)
-        {
-            point.abs_line = row;
-            point.column = column;
-            self.copy_selection_cursor = Some(point);
-            changed = true;
+        for (raw, slot) in [
+            (pending.anchor_raw, &mut self.copy_selection_anchor),
+            (pending.cursor_raw, &mut self.copy_selection_cursor),
+        ] {
+            let Some(mut point) = *slot else {
+                continue;
+            };
+            if point.pane != CopySelectionPane::Chat {
+                continue;
+            }
+            // An endpoint whose raw line is gone from the new frame keeps its
+            // line index: something is better than dropping the selection.
+            let Some(resolved) = ui::copy_viewport_point_from_raw(raw.0, raw.1) else {
+                continue;
+            };
+            if (point.abs_line, point.column) != (resolved.abs_line, resolved.column) {
+                point.abs_line = resolved.abs_line;
+                point.column = resolved.column;
+                *slot = Some(point);
+                changed = true;
+            }
         }
         changed
     }

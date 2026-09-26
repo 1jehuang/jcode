@@ -9,9 +9,11 @@ fn selection_test_app() -> crate::tui::app::App {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
-    app.display_messages = (0..40)
-        .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(8))))
-        .collect();
+    app.display_messages.replace(
+        (0..40)
+            .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(8))))
+            .collect(),
+    );
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -20,10 +22,12 @@ fn selection_test_app() -> crate::tui::app::App {
     app
 }
 
-/// Drag from the first to the third visible `TOKEN` line and return the copy.
-fn drag_over_three_token_lines(
+/// Drag from the first to the third visible row containing `needle`, returning
+/// the copy.
+fn drag_over_three_lines_containing(
     app: &mut crate::tui::app::App,
     terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+    needle: &str,
 ) -> String {
     render_and_snap(app, terminal);
     app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
@@ -35,7 +39,7 @@ fn drag_over_three_token_lines(
     let mut token_lines = Vec::new();
     for abs in visible_start..visible_end {
         let text = crate::tui::ui::copy_viewport_line_text(abs).unwrap_or_default();
-        if text.contains("TOKEN") {
+        if text.contains(needle) {
             token_lines.push(abs);
         }
     }
@@ -49,7 +53,7 @@ fn drag_over_three_token_lines(
 
     // Walk the rendered row with the same hit-test the mouse path uses, so the
     // drag lands on real cells (issue #430 pattern).
-    let mut point_at = |abs: usize, row: u16| {
+    let point_at = |abs: usize, row: u16| {
         (layout.messages_area.x..layout.messages_area.right())
             .filter_map(|column| {
                 crate::tui::ui::copy_viewport_point_from_screen(column, row)
@@ -93,7 +97,7 @@ fn transcript_selection_covers_the_same_text_after_a_resize() {
     let mut app = selection_test_app();
     let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
 
-    let before = drag_over_three_token_lines(&mut app, &mut wide);
+    let before = drag_over_three_lines_containing(&mut app, &mut wide, "TOKEN");
     assert!(before.contains("TOKEN"), "fixture must select token text");
 
     let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
@@ -144,5 +148,46 @@ fn non_transcript_selection_is_left_alone() {
     assert!(
         app.pending_selection_rebase.is_none(),
         "an input-pane selection is not transcript-relative"
+    );
+}
+
+/// A selection spanning a wrapped markdown list must keep the same text after
+/// the transcript narrows.
+///
+/// The list continuation indent is not copy content, so a capture that measures
+/// wrapped display widths drifts onto neighbouring characters (greptile saw
+/// `TARGETALPHA` become `d TARGETALP`). Capture and extraction now share the
+/// frame's raw coordinates, which rewrapping cannot move.
+#[test]
+fn transcript_selection_on_a_wrapped_list_keeps_its_text_across_a_resize() {
+    let _lock = scroll_render_test_lock();
+    crate::perf::pin_full_profile_for_tests();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    let filler = "filler ".repeat(12);
+    app.display_messages.replace(vec![DisplayMessage::assistant(format!(
+        "- TARGET001 {filler}TARGET002\n- TARGET003 {filler}TARGET004\n- TARGET005 {filler}TARGET006"
+    ))]);
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let before = drag_over_three_lines_containing(&mut app, &mut wide, "TARGET");
+    assert!(before.contains("TARGET"), "fixture must select target text");
+
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
+    assert!(app.should_redraw_after_resize());
+    render_and_snap(&app, &mut narrow);
+    assert!(app.rebase_selection_after_resize());
+
+    render_and_snap(&app, &mut narrow);
+    let after = app.current_copy_selection_text().unwrap_or_default();
+    assert_eq!(
+        after, before,
+        "a wrapped list selection must still cover the text the reader dragged over"
     );
 }

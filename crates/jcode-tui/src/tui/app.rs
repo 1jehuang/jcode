@@ -672,13 +672,12 @@ pub(super) struct PendingResizeAnchor {
 /// A transcript selection captured against the pre-resize geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PendingSelectionRebase {
-    pub anchor: jcode_tui_messages::Anchor,
-    pub cursor: jcode_tui_messages::Anchor,
-    /// Display column of each endpoint measured from the start of its logical
-    /// line rather than its wrapped row, so a rewrap that splits the row still
-    /// resolves to the same character.
-    pub anchor_column: usize,
-    pub cursor_column: usize,
+    /// Endpoints in the frame's raw (unwrapped) coordinates: `(raw line, raw
+    /// column)`. Raw text is width-independent and is the space the copy path
+    /// extracts through, so resolving against a rewrapped frame lands on the
+    /// same characters the reader dragged over.
+    pub anchor_raw: (usize, usize),
+    pub cursor_raw: (usize, usize),
     /// Viewport width at capture; the frame that resolves these is laid out at
     /// a different one.
     pub captured_width: u16,
