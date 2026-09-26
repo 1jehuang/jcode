@@ -1008,3 +1008,35 @@ fn focus_query_text_falls_back_when_all_stripped() {
     // Nothing substantive survives -> fall back to raw rather than empty.
     assert_eq!(focused, raw);
 }
+
+#[test]
+fn jev_recall_prefilter_bounds_candidates_and_keeps_relevant_memories() {
+    let mut entries: Vec<MemoryEntry> = (0..2000)
+        .map(|i| {
+            MemoryEntry::new(
+                MemoryCategory::Fact,
+                &format!("unrelated note number {i} about gardening"),
+            )
+        })
+        .collect();
+    entries.push(MemoryEntry::new(
+        MemoryCategory::Fact,
+        "The fundraising CRM lives on Bookface and uses a 40M post-money SAFE cap",
+    ));
+    let kept = prefilter_for_jev(entries, "update the fundraising CRM notes for the SAFE");
+    assert!(kept.len() <= MAX_JEV_RECALL_CANDIDATES);
+    assert!(kept.iter().any(|e| e.content.contains("fundraising CRM")));
+    // At most three Jev batches of 24 per recall instead of ~84 for this store.
+    assert!(kept.len().div_ceil(crate::memory_jev::MAX_BATCH_ENTRIES) <= 3);
+}
+
+#[test]
+fn jev_recall_prefilter_leaves_small_stores_untouched() {
+    let entries: Vec<MemoryEntry> = (0..10)
+        .map(|i| MemoryEntry::new(MemoryCategory::Fact, &format!("note {i}")))
+        .collect();
+    assert_eq!(
+        prefilter_for_jev(entries, "completely different words").len(),
+        10
+    );
+}
