@@ -169,21 +169,7 @@ pub(crate) fn calculate_placements_anchored(
     }
 
     // Format: (side, top, height, width, x_offset, margin_index)
-    let mut all_rects: Vec<(Side, u16, u16, u16, u16, usize)> = Vec::new();
-    for (margin_idx, margin) in margin_spaces.iter().enumerate() {
-        let rects = find_all_empty_rects(&margin.widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
-        for (top, height, width) in rects {
-            // Clamp to the area width as well: a margin profile reporting more
-            // free width than the area is wide (caller bug) must not produce a
-            // rect that pokes out of the viewport and panics the renderer.
-            let clamped_width = width.min(MAX_WIDGET_WIDTH).min(messages_area.width);
-            let x = match margin.side {
-                Side::Right => margin.x_offset.saturating_sub(clamped_width),
-                Side::Left => margin.x_offset,
-            };
-            all_rects.push((margin.side, top, height, clamped_width, x, margin_idx));
-        }
-    }
+    let mut all_rects = candidate_rects(&margin_spaces, messages_area);
 
     let mut placements: Vec<WidgetPlacement> = Vec::new();
     // Anchors to carry into the next frame, keyed by widget kind.
@@ -273,6 +259,15 @@ pub(crate) fn calculate_placements_anchored(
         if height == 0 || row_end > widths.len() || row_end > messages_area.height as usize {
             continue;
         }
+        // Overview can be seated in a pocket that only fits its current content
+        // (e.g. model + context). If that content grows (todos appear), the old
+        // slot can no longer show it; holding the anchor would suppress the parts
+        // and leave the slot blank. Let it re-home at its new height instead.
+        if prev.kind == WidgetKind::Overview
+            && prev.rect.height < phase2_min_height(WidgetKind::Overview, data)
+        {
+            continue;
+        }
 
         // Widest the widget can be without overrunning the text on any of its rows.
         let fit_width = widths[row_start..row_end]
@@ -349,23 +344,141 @@ pub(crate) fn calculate_placements_anchored(
         reserve_rows(&mut all_rects, prev.side, row_start, row_end);
     }
 
-    // Phase 2: greedily place remaining widgets.
-    //
-    // `overview_active` already covers the case where Overview is shown OR only
-    // hidden-in-place; in both cases its mergeable widgets (model/context/...) are
-    // suppressed so they don't pop in at a *different* location while Overview is
-    // momentarily covered. `overview_placed` additionally covers a brand-new
-    // Overview placed within this very Phase 2 pass.
+    let mut phase = Phase2State {
+        placements,
+        next_anchors,
+        held: &anchored,
+        all_rects,
+    };
+
+    // Re-merge. When Overview's parts were docked as separate boxes (space was
+    // scarce) and no Overview is held, try seating one Overview instead: run
+    // Phase 2 on a copy with the parts Overview renders retired, their rows
+    // released, and every other held widget (visible or hidden-in-place) still
+    // reserving its rows. Commit only if that trial actually places Overview -
+    // a higher-priority widget (e.g. Diagrams) may claim the pocket first - so
+    // no information ever disappears. Swarm and compaction are Overview-
+    // suppressed but not rendered by it, so they are never retired.
+    if !overview_active && available.contains(&WidgetKind::Overview) {
+        let retired: HashSet<WidgetKind> = phase
+            .placements
+            .iter()
+            .map(|p| p.kind)
+            .filter(|&kind| overview_renders(kind))
+            .collect();
+        if !retired.is_empty() {
+            let held: HashSet<WidgetKind> = anchored.difference(&retired).copied().collect();
+            let mut freed = candidate_rects(&margin_spaces, messages_area);
+            for a in &phase.next_anchors {
+                if retired.contains(&a.placement.kind) {
+                    continue;
+                }
+                let top = a.content_top.saturating_sub(margins.scroll_top);
+                reserve_rows(
+                    &mut freed,
+                    a.placement.side,
+                    top,
+                    top + a.placement.rect.height as usize,
+                );
+            }
+            let mut trial = Phase2State {
+                placements: phase
+                    .placements
+                    .iter()
+                    .filter(|p| !retired.contains(&p.kind))
+                    .cloned()
+                    .collect(),
+                next_anchors: phase
+                    .next_anchors
+                    .iter()
+                    .filter(|a| !retired.contains(&a.placement.kind))
+                    .cloned()
+                    .collect(),
+                held: &held,
+                all_rects: freed,
+            };
+            let ctx = Phase2Context {
+                available: &available,
+                data,
+                margins,
+                margin_spaces: &margin_spaces,
+                messages_area,
+            };
+            if place_remaining(&mut trial, &ctx, false) {
+                return PlacementOutcome {
+                    visible: trial.placements,
+                    anchors: trial.next_anchors,
+                };
+            }
+        }
+    }
+
+    let ctx = Phase2Context {
+        available: &available,
+        data,
+        margins,
+        margin_spaces: &margin_spaces,
+        messages_area,
+    };
+    place_remaining(&mut phase, &ctx, overview_active);
+    PlacementOutcome {
+        visible: phase.placements,
+        anchors: phase.next_anchors,
+    }
+}
+
+/// Mutable Phase 2 state: what is placed so far, the anchors to carry over,
+/// widgets already held by Phase 1, and the free pockets left to dock into.
+struct Phase2State<'a> {
+    placements: Vec<WidgetPlacement>,
+    next_anchors: Vec<WidgetAnchor>,
+    held: &'a HashSet<WidgetKind>,
+    all_rects: Vec<(Side, u16, u16, u16, u16, usize)>,
+}
+
+/// Read-only inputs Phase 2 needs.
+struct Phase2Context<'a> {
+    available: &'a [WidgetKind],
+    data: &'a InfoWidgetData,
+    margins: &'a Margins,
+    margin_spaces: &'a [MarginSpace],
+    messages_area: Rect,
+}
+
+/// Phase 2: greedily place remaining widgets. Returns whether Overview was
+/// placed in this pass.
+///
+/// `overview_active` covers the case where Overview is already shown OR only
+/// hidden-in-place; in both cases its mergeable widgets (model/context/...) are
+/// suppressed so they don't pop in at a *different* location while Overview is
+/// momentarily covered. `overview_placed` additionally covers a brand-new
+/// Overview placed within this very pass.
+fn place_remaining(
+    state: &mut Phase2State<'_>,
+    ctx: &Phase2Context<'_>,
+    overview_active: bool,
+) -> bool {
+    let Phase2Context {
+        available,
+        data,
+        margins,
+        margin_spaces,
+        messages_area,
+    } = *ctx;
     let mut overview_placed = overview_active;
-    for kind in available {
-        if kept.contains(&kind)
-            || anchored.contains(&kind)
-            || (overview_placed && is_overview_mergeable(kind))
-        {
+    let mut placed_overview_now = false;
+    let placements = &mut state.placements;
+    let next_anchors = &mut state.next_anchors;
+    let all_rects = &mut state.all_rects;
+    for &kind in available {
+        let held = state.held.contains(&kind)
+            || placements.iter().any(|p| p.kind == kind)
+            || next_anchors.iter().any(|a| a.placement.kind == kind);
+        if held || (overview_placed && is_overview_mergeable(kind)) {
             continue;
         }
 
-        let min_h = kind.min_height() + 2;
+        let min_h = phase2_min_height(kind, data);
         let preferred = kind.preferred_side();
         let mut best_idx: Option<usize> = None;
         let mut best_score = i32::MIN;
@@ -416,6 +529,7 @@ pub(crate) fn calculate_placements_anchored(
         });
         if kind == WidgetKind::Overview {
             overview_placed = true;
+            placed_overview_now = true;
         }
 
         let remaining_height = height.saturating_sub(widget_height);
@@ -450,10 +564,66 @@ pub(crate) fn calculate_placements_anchored(
             Side::Left => margin.x_offset,
         };
     }
+    placed_overview_now
+}
 
-    PlacementOutcome {
-        visible: placements,
-        anchors: next_anchors,
+/// Every empty margin pocket a widget could dock in, before any anchored widget
+/// reserves rows. Entries are `(side, top, height, width, x, margin_index)`.
+fn candidate_rects(
+    margin_spaces: &[MarginSpace],
+    messages_area: Rect,
+) -> Vec<(Side, u16, u16, u16, u16, usize)> {
+    let mut all_rects = Vec::new();
+    for (margin_idx, margin) in margin_spaces.iter().enumerate() {
+        let rects = find_all_empty_rects(&margin.widths, MIN_WIDGET_WIDTH, MIN_WIDGET_HEIGHT);
+        for (top, height, width) in rects {
+            // Clamp to the area width as well: a margin profile reporting more
+            // free width than the area is wide (caller bug) must not produce a
+            // rect that pokes out of the viewport and panics the renderer.
+            let clamped_width = width.min(MAX_WIDGET_WIDTH).min(messages_area.width);
+            let x = match margin.side {
+                Side::Right => margin.x_offset.saturating_sub(clamped_width),
+                Side::Left => margin.x_offset,
+            };
+            all_rects.push((margin.side, top, height, clamped_width, x, margin_idx));
+        }
+    }
+    all_rects
+}
+
+/// Parts whose information the Overview box actually renders (see
+/// `compact_overview_height`). Only these may be retired in favour of a merged
+/// Overview: swarm and compaction are Overview-suppressed but not shown in it.
+fn overview_renders(kind: WidgetKind) -> bool {
+    matches!(
+        kind,
+        WidgetKind::ModelInfo
+            | WidgetKind::ContextUsage
+            | WidgetKind::Todos
+            | WidgetKind::BackgroundTasks
+            | WidgetKind::UsageLimits
+            | WidgetKind::KvCache
+            | WidgetKind::GitStatus
+    )
+}
+
+/// Smallest pocket (in rows, borders included) Phase 2 may seat `kind` in.
+///
+/// Overview's static floor (8 content rows + borders = 10) is far taller than
+/// what it actually renders for a typical session (model + context is ~5
+/// rows). Gating on the floor meant a ragged transcript with no 10-row pocket
+/// never got the combined box, and its parts were scattered down the margin as
+/// separate boxes instead. Use its real rendered height at full width.
+fn phase2_min_height(kind: WidgetKind, data: &InfoWidgetData) -> u16 {
+    let floor = kind.min_height() + 2;
+    if kind != WidgetKind::Overview {
+        return floor;
+    }
+    let natural = calculate_widget_height(kind, data, MAX_WIDGET_WIDTH, u16::MAX);
+    if natural > 2 {
+        natural.min(floor)
+    } else {
+        floor
     }
 }
 
