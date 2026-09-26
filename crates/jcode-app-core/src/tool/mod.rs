@@ -190,6 +190,18 @@ fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
     policy
 }
 
+/// Whether `tool_name` survives the session policy for `session_id`.
+/// No policy registered means unrestricted (true).
+pub(crate) fn session_tool_policy_allows_tool(session_id: &str, tool_name: &str) -> bool {
+    session_tool_policy(session_id).is_none_or(|policy| {
+        policy
+            .allowed_tools
+            .as_ref()
+            .is_none_or(|allowed| tool_name_is_allowed(allowed, tool_name))
+            && !tool_name_is_disabled(&policy.disabled_tools, tool_name)
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn session_tool_policy_allows_tool_for_test(
     session_id: &str,
