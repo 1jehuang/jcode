@@ -8,11 +8,12 @@
 
 use serde_json::Value;
 
-/// Where a card-number-shaped value was found. Holds no part of the value.
+/// Where a card-number-shaped value was found. Holds no part of the value:
+/// `role` is a fixed label, never text copied from the request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanFinding {
     pub message_index: usize,
-    pub role: String,
+    pub role: &'static str,
 }
 
 /// First message in an OpenAI-style `messages` array that contains a PAN.
@@ -26,12 +27,23 @@ pub fn find_pan_in_messages(messages: &Value) -> Option<PanFinding> {
         .find(|(_, message)| value_contains_pan(message))
         .map(|(message_index, message)| PanFinding {
             message_index,
-            role: message
-                .get("role")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
+            role: role_label(message.get("role").and_then(Value::as_str)),
         })
+}
+
+/// The request's role mapped onto a closed set, so a crafted role (for example
+/// from `extra_body`) cannot carry the blocked value into the error.
+fn role_label(role: Option<&str>) -> &'static str {
+    const KNOWN: [&str; 6] = [
+        "system",
+        "developer",
+        "user",
+        "assistant",
+        "tool",
+        "function",
+    ];
+    role.and_then(|role| KNOWN.into_iter().find(|known| *known == role))
+        .unwrap_or("unknown")
 }
 
 fn value_contains_pan(value: &Value) -> bool {
@@ -212,6 +224,15 @@ mod tests {
         let finding = find_pan_in_messages(&messages).expect("tool output holds a PAN");
         assert_eq!(finding.message_index, 2);
         assert_eq!(finding.role, "tool");
+        assert!(!format!("{finding:?}").contains("4242"));
+    }
+
+    #[test]
+    fn a_card_shaped_role_is_never_echoed() {
+        // `extra_body` can replace `messages`, so the role is untrusted text.
+        let messages = serde_json::json!([{"role": visa(), "content": "hi"}]);
+        let finding = find_pan_in_messages(&messages).expect("the role holds a PAN");
+        assert_eq!(finding.role, "unknown");
         assert!(!format!("{finding:?}").contains("4242"));
     }
 }

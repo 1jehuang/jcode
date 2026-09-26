@@ -38,6 +38,9 @@ pub(crate) fn is_non_retryable_auto_poke_error(error: &str) -> bool {
         "file too large",
         "content_policy_violation",
         "safety_violation",
+        // Gateway guardrails and the local pre-send card check. The block
+        // follows the history, so every automatic resend is blocked too.
+        "blocked by content filter",
         "permission_denied",
         "unauthorized",
         "401 unauthorized",
