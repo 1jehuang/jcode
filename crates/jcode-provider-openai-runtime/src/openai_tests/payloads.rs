@@ -1,4 +1,45 @@
 #[test]
+fn test_base_chatgpt_request_has_no_access_programs() {
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.4",
+        "system".to_string(),
+        &[],
+        &[],
+        true,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(
+        request.get("access_programs").is_none(),
+        "the base request never carries access_programs"
+    );
+}
+
+#[test]
+fn test_cyber_access_program_sent_only_to_models_that_list_it() {
+    let sol = vec!["standard".to_string(), "daybreak_blue".to_string()];
+    let astra = vec!["standard".to_string()];
+    assert_eq!(
+        select_cyber_access_program("daybreak_blue", Some(&sol)),
+        Some("daybreak_blue".to_string())
+    );
+    assert_eq!(
+        select_cyber_access_program(" Daybreak_Blue ", Some(&sol)),
+        Some("daybreak_blue".to_string())
+    );
+    assert_eq!(
+        select_cyber_access_program("daybreak_blue", Some(&astra)),
+        None
+    );
+    assert_eq!(select_cyber_access_program("daybreak_blue", None), None);
+    assert_eq!(select_cyber_access_program("", Some(&sol)), None);
+}
+
+#[test]
 fn test_build_response_request_includes_stream_for_http() {
     let request = OpenAIProvider::build_response_request(
         "gpt-5.4",

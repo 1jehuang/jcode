@@ -918,6 +918,10 @@ impl Provider for OpenAIProvider {
             Ok(mut efforts) => *efforts = catalog.reasoning_efforts.clone(),
             Err(poisoned) => *poisoned.into_inner() = catalog.reasoning_efforts.clone(),
         }
+        match self.model_cyber_access_programs.write() {
+            Ok(mut programs) => *programs = catalog.cyber_access_programs.clone(),
+            Err(poisoned) => *poisoned.into_inner() = catalog.cyber_access_programs.clone(),
+        }
         self.revalidate_reasoning_effort();
         jcode_base::provider::persist_openai_model_catalog(&catalog);
         if !catalog.context_limits.is_empty() {
@@ -1241,6 +1245,8 @@ impl Provider for OpenAIProvider {
                     .unwrap_or_else(|poisoned| poisoned.into_inner().clone()),
             )),
             model_reasoning_efforts: Arc::clone(&self.model_reasoning_efforts),
+            model_cyber_access_programs: Arc::clone(&self.model_cyber_access_programs),
+            cyber_access_program: self.cyber_access_program.clone(),
             service_tier: Arc::new(StdRwLock::new(self.service_tier())),
             native_compaction_mode: self.native_compaction_mode,
             native_compaction_threshold_tokens: self.native_compaction_threshold_tokens,

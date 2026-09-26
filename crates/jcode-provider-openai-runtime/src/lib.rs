@@ -82,6 +82,20 @@ fn model_supports_image_generation(model_id: &str) -> bool {
     !model_id.to_ascii_lowercase().contains("codex")
 }
 
+/// Pick the cyber access program for a request. Returns the requested program
+/// only when the model's catalog entry lists it, so unsupported models (and
+/// models without catalog data) keep sending no `access_programs` field.
+fn select_cyber_access_program(requested: &str, supported: Option<&[String]>) -> Option<String> {
+    let requested = requested.trim().to_ascii_lowercase();
+    if requested.is_empty() {
+        return None;
+    }
+    supported?
+        .iter()
+        .any(|program| program.eq_ignore_ascii_case(&requested))
+        .then_some(requested)
+}
+
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
 
@@ -744,6 +758,10 @@ pub struct OpenAIProvider {
     max_output_tokens: Option<u32>,
     reasoning_effort: Arc<StdRwLock<Option<String>>>,
     model_reasoning_efforts: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+    /// Cyber access programs each model accepts, from the Codex catalog.
+    model_cyber_access_programs: Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+    /// Requested cyber access program (`provider.openai_cyber_access_program`).
+    cyber_access_program: Option<String>,
     service_tier: Arc<StdRwLock<Option<String>>>,
     native_compaction_mode: OpenAINativeCompactionMode,
     native_compaction_threshold_tokens: usize,
@@ -870,6 +888,14 @@ impl OpenAIProvider {
             .max(1000);
         let model_reasoning_efforts =
             jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
+        let model_cyber_access_programs =
+            jcode_base::provider::cached_openai_cyber_access_programs().unwrap_or_default();
+        let cyber_access_program = jcode_base::config::config()
+            .provider
+            .openai_cyber_access_program
+            .as_deref()
+            .map(|program| program.trim().to_ascii_lowercase())
+            .filter(|program| !program.is_empty() && program != "off" && program != "none");
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
@@ -881,6 +907,8 @@ impl OpenAIProvider {
             max_output_tokens,
             reasoning_effort: Arc::new(StdRwLock::new(reasoning_effort)),
             model_reasoning_efforts: Arc::new(StdRwLock::new(model_reasoning_efforts)),
+            model_cyber_access_programs: Arc::new(StdRwLock::new(model_cyber_access_programs)),
+            cyber_access_program,
             service_tier: Arc::new(StdRwLock::new(service_tier)),
             native_compaction_mode,
             native_compaction_threshold_tokens,
@@ -969,7 +997,26 @@ impl OpenAIProvider {
             Ok(mut efforts) => *efforts = cached,
             Err(poisoned) => *poisoned.into_inner() = cached,
         }
+        let programs =
+            jcode_base::provider::cached_openai_cyber_access_programs().unwrap_or_default();
+        match self.model_cyber_access_programs.write() {
+            Ok(mut guard) => *guard = programs,
+            Err(poisoned) => *poisoned.into_inner() = programs,
+        }
         self.revalidate_reasoning_effort();
+    }
+
+    /// The cyber access program to send for `model_id`, if the user requested one
+    /// and the model's catalog entry lists it. Models without catalog data, or
+    /// that do not list the program (for example Astra for Daybreak Blue), get
+    /// no `access_programs` field so their requests are unchanged.
+    fn cyber_access_program_for_model(&self, model_id: &str) -> Option<String> {
+        let requested = self.cyber_access_program.as_deref()?;
+        let programs = self
+            .model_cyber_access_programs
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        select_cyber_access_program(requested, programs.get(model_id).map(Vec::as_slice))
     }
 
     pub(crate) fn credential_mode_snapshot(&self) -> OpenAICredentialMode {
@@ -1277,7 +1324,7 @@ impl OpenAIProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         let native_compaction_threshold =
             self.native_compaction_threshold_for_context_window(self.context_window());
-        Self::build_response_request(
+        let mut request = Self::build_response_request(
             model_id,
             system.to_string(),
             input,
@@ -1289,7 +1336,11 @@ impl OpenAIProvider {
             self.prompt_cache_key.as_deref(),
             self.prompt_cache_retention.as_deref(),
             native_compaction_threshold,
-        )
+        );
+        if is_chatgpt_mode && let Some(program) = self.cyber_access_program_for_model(model_id) {
+            request["access_programs"] = serde_json::json!({ "cyber": program });
+        }
+        request
     }
 
     #[expect(

@@ -801,6 +801,13 @@ impl Config {
                 }
             }
         }
+        if let Ok(v) = std::env::var("JCODE_OPENAI_CYBER_ACCESS_PROGRAM") {
+            let trimmed = v.trim().to_ascii_lowercase();
+            self.provider.openai_cyber_access_program = match trimmed.as_str() {
+                "" | "off" | "none" => None,
+                _ => Some(trimmed),
+            };
+        }
         if let Ok(v) = std::env::var("JCODE_PRESERVE_REASONING_CONTEXT") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.provider.preserve_reasoning_context = parsed;

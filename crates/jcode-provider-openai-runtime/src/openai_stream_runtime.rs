@@ -741,6 +741,9 @@ async fn continue_persistent_ws_locked(
     if let Some(prompt_cache_retention) = request.get("prompt_cache_retention") {
         continuation_request["prompt_cache_retention"] = prompt_cache_retention.clone();
     }
+    if let Some(access_programs) = request.get("access_programs") {
+        continuation_request["access_programs"] = access_programs.clone();
+    }
     continuation_request["store"] = serde_json::json!(false);
     continuation_request["parallel_tool_calls"] = serde_json::json!(false);
 
