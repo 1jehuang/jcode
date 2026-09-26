@@ -1,5 +1,8 @@
 use super::*;
 use crate::agent::environment::EnvSnapshotDetail;
+use crate::agent::tools::{
+    tool_output_to_content_blocks, tool_output_to_content_blocks_with_image_support,
+};
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use crate::tool::Registry;
@@ -486,6 +489,63 @@ fn tool_output_to_content_blocks_preserves_labeled_images() {
         }
         other => panic!("expected trailing label text, got {other:?}"),
     }
+}
+
+#[test]
+fn tool_output_blocks_text_only_model_omits_images_with_note() {
+    let output = ToolOutput::new("Image ready").with_labeled_image(
+        "image/png",
+        "ZmFrZQ==",
+        "screenshots/example.png",
+    );
+
+    let blocks =
+        tool_output_to_content_blocks_with_image_support("call_1".to_string(), output, false);
+    assert_eq!(blocks.len(), 2);
+
+    match &blocks[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            assert_eq!(tool_use_id, "call_1");
+            assert_eq!(content, "Image ready");
+            assert_eq!(*is_error, None);
+        }
+        other => panic!("expected tool result, got {other:?}"),
+    }
+
+    match &blocks[1] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.contains("Image output omitted"));
+            assert!(text.contains("does not support image input"));
+            assert!(text.contains("screenshots/example.png"));
+            assert!(text.contains("`ocr`"));
+            assert!(
+                !text.contains("ZmFrZQ=="),
+                "pixels must not leak into the note"
+            );
+        }
+        other => panic!("expected omission note text block, got {other:?}"),
+    }
+}
+
+#[test]
+fn tool_output_blocks_image_capable_model_keeps_images() {
+    let output = ToolOutput::new("Image ready").with_labeled_image(
+        "image/png",
+        "ZmFrZQ==",
+        "screenshots/example.png",
+    );
+
+    let blocks =
+        tool_output_to_content_blocks_with_image_support("call_1".to_string(), output, true);
+    assert_eq!(blocks.len(), 3);
+    assert!(
+        matches!(&blocks[1], ContentBlock::Image { media_type, data }
+        if media_type == "image/png" && data == "ZmFrZQ==")
+    );
 }
 
 #[tokio::test]

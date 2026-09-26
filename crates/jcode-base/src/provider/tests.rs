@@ -798,6 +798,7 @@ struct StubExternalRuntime {
     models: &'static [&'static str],
     model: std::sync::RwLock<String>,
     credential_mode: std::sync::RwLock<jcode_provider_core::CredentialMode>,
+    supports_images: std::sync::atomic::AtomicBool,
 }
 
 impl StubExternalRuntime {
@@ -814,7 +815,18 @@ impl StubExternalRuntime {
             models,
             model: std::sync::RwLock::new(models[0].to_string()),
             credential_mode: std::sync::RwLock::new(jcode_provider_core::CredentialMode::Auto),
+            supports_images: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Opt this stub into advertising image support so capability-override
+    /// tests can observe a recorded rejection flipping the answer to false.
+    /// Takes and returns the shared `Arc` so the same instance can be handed
+    /// to a `MultiProvider` while the test keeps a handle for assertions.
+    fn with_image_support(self: Arc<Self>) -> Arc<Self> {
+        self.supports_images
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self
     }
 
     fn cursor() -> Self {
@@ -930,6 +942,10 @@ impl Provider for StubExternalRuntime {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
         Ok(())
+    }
+    fn supports_image_input(&self) -> bool {
+        self.supports_images
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(StubExternalRuntime::new(
@@ -1199,6 +1215,231 @@ fn profile_catalog_cache_needs_refresh_for_missing_cache() {
         assert!(
             super::catalog_scheduler::profile_catalog_cache_needs_refresh(profile),
             "a missing catalog cache must be reported as needing a refresh"
+        );
+    });
+}
+
+/// A runtime image-input rejection must flip `supports_image_input` to false
+/// even when the underlying runtime advertises image support, and a model
+/// switch must clear the override.
+#[test]
+fn recorded_rejection_overrides_supports_image_input() {
+    use jcode_provider_core::provider_key;
+
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+
+        // A real-shaped anthropic runtime so a model switch can succeed and
+        // exercise the clear-on-success path, and a failure can be provoked
+        // with a model the runtime rejects. It advertises image support so a
+        // recorded rejection flipping the answer to false is observable.
+        let anthropic_stub = test_anthropic_runtime().with_image_support();
+        let provider = MultiProvider {
+            anthropic: RwLock::new(Some(anthropic_stub.clone() as Arc<dyn Provider>)),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(None),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::Claude),
+            startup_notices: RwLock::new(Vec::new()),
+            initial_provider: Some(ActiveProvider::Claude),
+            routes_memo: std::sync::Mutex::new(None),
+            post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        provider.set_active_provider(ActiveProvider::Claude);
+
+        let key = provider_key(ActiveProvider::Claude);
+        let model = "claude-opus-4-5";
+        // The rejection lookup is scoped to the runtime's CURRENT model, so
+        // make the stub actually serve the model the test records against
+        // (its constructor defaults to AVAILABLE_MODELS[0]).
+        anthropic_stub
+            .set_model(model)
+            .expect("stub accepts its own catalog models");
+        super::image_capability::clear_image_input_overrides_for_provider(key);
+
+        // No rejection recorded: MultiProvider falls through to the runtime's
+        // static answer (stub opted into image support -> true).
+        assert!(provider.supports_image_input());
+
+        // Record a rejection for the exact (provider, model) pair; the
+        // recorded rejection must override the runtime's static answer.
+        super::image_capability::record_image_input_rejection(
+            Some(key),
+            model,
+            "model does not support image input",
+        );
+        assert!(super::image_capability::image_input_rejected(key, model));
+        assert!(
+            !provider.supports_image_input(),
+            "a recorded rejection must override the runtime's static image support"
+        );
+
+        // A FAILED switch must keep the override: the previous model stays
+        // active, and wiping its capability restriction would let the very
+        // next request ship pixels to the endpoint that just rejected them.
+        let switch_result = provider.set_model("not-a-real-model");
+        assert!(
+            switch_result.is_err(),
+            "stub runtime must reject the unknown model so the switch fails"
+        );
+        assert!(
+            !provider.supports_image_input(),
+            "a failed model switch must not clear the runtime image-input rejection"
+        );
+        assert!(
+            super::image_capability::image_input_rejected(key, model),
+            "rejection record must survive a failed model switch"
+        );
+
+        // A model switch that SUCCEEDS clears the override so the new model
+        // gets a fresh capability answer.
+        provider
+            .set_model("claude-opus-5")
+            .expect("stub accepts its own model");
+        assert!(
+            !super::image_capability::image_input_rejected(key, model),
+            "a successful model switch must clear the provider's image-input overrides"
+        );
+        assert!(
+            provider.supports_image_input(),
+            "after the clear the runtime's static answer (true) applies again"
+        );
+    });
+}
+
+/// A runtime whose first completion fails with an image-modality rejection and
+/// whose subsequent completions succeed, so the retry path can be observed.
+struct ImageRejectingRuntime {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Provider for ImageRejectingRuntime {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let calls = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if calls == 0 {
+            anyhow::bail!("this model does not support image input");
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let _ = tx.try_send(Ok(crate::message::StreamEvent::TextDelta("ok".to_string())));
+        Ok(Box::pin(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })))
+    }
+    fn name(&self) -> &'static str {
+        "image-rejecting-stub"
+    }
+    fn model(&self) -> String {
+        "stub-model".to_string()
+    }
+    // Mirror the real bug scenario: optimistic direct OpenAI-compatible
+    // endpoints advertise image support (trait default in their runtimes)
+    // while the model behind them is text-only. Without this the entry-time
+    // filter strips the image before attempt 1 and the retry path never runs.
+    fn supports_image_input(&self) -> bool {
+        true
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(ImageRejectingRuntime {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+}
+
+/// End-to-end: a request carrying an image block that hits an image-modality
+/// rejection is replayed once with the images filtered to text markers, on the
+/// same provider, without provider failover.
+#[test]
+fn image_modality_rejection_is_retried_with_filtered_messages() {
+    use jcode_message_types::{ContentBlock, Role};
+
+    with_clean_provider_test_env(|| {
+        let runtime = enter_test_runtime();
+        let _enter = runtime.enter();
+
+        let stub = Arc::new(ImageRejectingRuntime {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let provider = MultiProvider {
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(None),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::Claude),
+            startup_notices: RwLock::new(Vec::new()),
+            initial_provider: Some(ActiveProvider::Claude),
+            routes_memo: std::sync::Mutex::new(None),
+            post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        *provider
+            .anthropic
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(stub.clone() as Arc<dyn Provider>);
+        super::image_capability::clear_image_input_overrides_for_provider(
+            jcode_provider_core::provider_key(ActiveProvider::Claude),
+        );
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is in this picture?".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "ZmFrZQ==".to_string(),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let stream = futures::executor::block_on(provider.complete(&messages, &[], "system", None))
+            .expect("retry with filtered images must succeed");
+        let text = futures::executor::block_on(async {
+            use futures::StreamExt;
+            let mut stream = stream;
+            let mut text = String::new();
+            while let Some(event) = stream.next().await {
+                if let Ok(crate::message::StreamEvent::TextDelta(delta)) = event {
+                    text.push_str(&delta);
+                }
+            }
+            text
+        });
+        assert_eq!(text, "ok");
+        assert_eq!(
+            stub.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "first call rejects, filtered retry succeeds on the same provider"
+        );
+        assert!(
+            super::image_capability::image_input_rejected(
+                jcode_provider_core::provider_key(ActiveProvider::Claude),
+                "stub-model"
+            ),
+            "rejection must be recorded so subsequent requests are pre-filtered"
         );
     });
 }

@@ -24,7 +24,10 @@ fn mermaid_prompt_module_follows_capability() {
         false,
         None,
         None,
-        PromptCapabilities { mermaid: true },
+        PromptCapabilities {
+            mermaid: true,
+            text_only_model: false,
+        },
     );
     assert!(enabled.static_part.contains(MERMAID_PROMPT));
 
@@ -34,10 +37,48 @@ fn mermaid_prompt_module_follows_capability() {
         false,
         None,
         None,
-        PromptCapabilities { mermaid: false },
+        PromptCapabilities {
+            mermaid: false,
+            text_only_model: false,
+        },
     );
     assert!(!disabled.static_part.contains("Mermaid diagrams"));
     assert!(!disabled.static_part.contains("fenced `mermaid` code block"));
+}
+
+#[test]
+fn text_only_model_prompt_follows_capability() {
+    let (text_only, _) = build_system_prompt_split_with_capabilities(
+        None,
+        &[],
+        false,
+        None,
+        None,
+        PromptCapabilities {
+            mermaid: false,
+            text_only_model: true,
+        },
+    );
+    assert!(text_only.static_part.contains(TEXT_ONLY_MODEL_PROMPT));
+    assert!(
+        text_only
+            .static_part
+            .contains("does not support image input")
+    );
+
+    let (vision, _) = build_system_prompt_split_with_capabilities(
+        None,
+        &[],
+        false,
+        None,
+        None,
+        PromptCapabilities {
+            mermaid: false,
+            text_only_model: false,
+        },
+    );
+    assert!(!vision.static_part.contains("Model Image Capability"));
+    assert!(!vision.static_part.contains("does not support image input"));
 }
 
 /// Verify skill prompts don't accidentally introduce "Claude Code" identity
@@ -199,6 +240,10 @@ fn agents_md_distinct_project_and_global_files_are_both_loaded() {
 
 #[test]
 fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
+    // Serialize against tests that mutate JCODE_HOME: the static prompt embeds
+    // global preferred-tools content, so a parallel env swap breaks the
+    // before/after equality below.
+    let _guard = crate::storage::lock_test_env();
     let project_dir = tempfile::TempDir::new().unwrap();
     let agents_md = project_dir.path().join("AGENTS.md");
     std::fs::write(&agents_md, "original session instructions").unwrap();

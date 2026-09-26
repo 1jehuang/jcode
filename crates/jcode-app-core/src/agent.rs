@@ -12,7 +12,7 @@ mod provider;
 mod response_recovery;
 mod status;
 mod streaming;
-mod tools;
+pub(crate) mod tools;
 mod turn_execution;
 mod turn_loops;
 mod turn_streaming_mpsc;
@@ -21,7 +21,7 @@ mod utils;
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
 use self::tools::{
     cap_sdk_tool_content_for_history, cap_tool_output_for_history, print_tool_summary,
-    tool_output_side_pane_images, tool_output_to_content_blocks,
+    tool_output_side_pane_images, tool_output_to_content_blocks_with_image_support,
 };
 use self::utils::trace_enabled;
 use crate::build;

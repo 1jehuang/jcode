@@ -34,22 +34,38 @@ pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
 
+/// Prompt guidance injected when the active model cannot accept image input.
+///
+/// Text-only models happily call screenshot/browser-capture tools because the
+/// tool list does not say anything about modality; without this notice the
+/// pixels get injected into the request and the turn fails. The notice is
+/// part of the static prompt (model changes are rare and rebuild the split),
+/// so the model knows up front that it must rely on textual alternatives.
+pub const TEXT_ONLY_MODEL_PROMPT: &str = "# Model Image Capability\n\nThe model you are running does not support image input. Tool outputs that produce images (screenshots, browser captures, `read` of image files, generated images) will not carry their pixels into your context: jcode omits them and tells you so. Do not attempt visual inspection of images; rely on text-based alternatives (for example the `ocr` action for screen text, file contents, tool textual summaries) or ask the user to describe what is visible.";
+
 /// Harness capabilities that conditionally contribute prompt modules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptCapabilities {
     pub mermaid: bool,
+    /// True when the active provider/model cannot accept image input and the
+    /// prompt should say so.
+    pub text_only_model: bool,
 }
 
 impl Default for PromptCapabilities {
     fn default() -> Self {
-        Self { mermaid: true }
+        Self {
+            mermaid: true,
+            text_only_model: false,
+        }
     }
 }
 
 impl PromptCapabilities {
-    fn current() -> Self {
+    pub fn current() -> Self {
         Self {
             mermaid: crate::config::config().features.mermaid,
+            text_only_model: false,
         }
     }
 }
@@ -61,6 +77,9 @@ fn base_system_prompt_parts(
     let mut parts = vec![load_base_system_prompt(working_dir)];
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
+    }
+    if capabilities.text_only_model {
+        parts.push(TEXT_ONLY_MODEL_PROMPT.to_string());
     }
     parts
 }
@@ -583,7 +602,30 @@ pub fn build_system_prompt_split_with_agents_md(
     )
 }
 
-fn build_system_prompt_split_with_capabilities_and_agents_md(
+/// Build a split prompt with explicit harness capabilities and an already
+/// captured AGENTS.md snapshot. Callers that know the active model's image
+/// capability (the agent's provider) pass it via `capabilities.text_only_model`.
+pub fn build_system_prompt_split_with_capabilities_and_agents_md(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    capabilities: PromptCapabilities,
+    agents_md: (Option<String>, ContextInfo),
+) -> (SplitSystemPrompt, ContextInfo) {
+    build_system_prompt_split_with_capabilities_and_agents_md_inner(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        capabilities,
+        agents_md,
+    )
+}
+
+fn build_system_prompt_split_with_capabilities_and_agents_md_inner(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
     is_selfdev: bool,

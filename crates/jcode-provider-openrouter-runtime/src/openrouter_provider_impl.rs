@@ -266,8 +266,20 @@ impl Provider for OpenRouterProvider {
         let send_openrouter_headers = self.send_openrouter_headers;
         let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
-        let model_for_stream = model.clone();
+        // The stream records image-modality rejections under this model
+        // string, and its consumers (runtime `supports_image_input` and the
+        // `OpenRouterStream` provider-pin matching) compare against the bare
+        // model id that `set_model` normalizes into state. The raw state
+        // string can transiently carry a session-routing
+        // `<profile>:<model>` prefix (right after session restore, before
+        // `set_model` normalizes it, see #403); recording under that spelling
+        // would never match the stripped lookups, so hand the stream the
+        // same stripped form the lookups use.
+        let model_for_stream = self.strip_session_profile_prefix(&model).to_string();
         let provider_pin = Arc::clone(&self.provider_pin);
+        // Same capability scope `supports_image_input` looks up under: the
+        // stream records rejections under the identical key the lookup uses.
+        let capability_scope_key = self.capability_scope_key();
 
         tokio::spawn(async move {
             if tx
@@ -289,6 +301,7 @@ impl Provider for OpenRouterProvider {
                 tx,
                 provider_pin,
                 model_for_stream,
+                capability_scope_key,
             )
             .await;
         });
@@ -298,6 +311,10 @@ impl Provider for OpenRouterProvider {
 
     fn name(&self) -> &str {
         "openrouter"
+    }
+
+    fn capability_scope(&self) -> Option<String> {
+        Some(self.capability_scope_key())
     }
 
     fn display_name(&self) -> String {
@@ -317,6 +334,20 @@ impl Provider for OpenRouterProvider {
             .strip_session_profile_prefix(&raw_model)
             .trim()
             .to_ascii_lowercase();
+        // A recorded runtime rejection (this endpoint/model answered "no
+        // image input" earlier, see `jcode_provider_core::image_capability`)
+        // is authoritative over the optimistic direct-endpoint default below,
+        // so follow-up requests filter images at build time. The lookup key is
+        // the same capability scope the streaming retry loop records under
+        // (profile id or endpoint base), so a rejection on one OpenAI-compatible
+        // profile never suppresses images for another profile serving the same
+        // model name.
+        if jcode_provider_core::image_capability::image_input_rejected(
+            &self.capability_scope_key(),
+            &model_id,
+        ) {
+            return false;
+        }
         if let Some(supports_images) = self.static_image_input_support.get(&model_id) {
             return *supports_images;
         }
@@ -812,6 +843,43 @@ impl Provider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// Stable capability-record scope for this runtime instance.
+    ///
+    /// Image-input rejections are recorded per concrete endpoint, not per
+    /// provider slot: named OpenAI-compatible profiles are distinguished by
+    /// profile id, and endpoint-only runtimes (explicit `OPENROUTER_BASE_URL`,
+    /// autodetected Ollama/LM Studio) by their api base. A profile id and an
+    /// api base are both stable for the instance lifetime and both are known
+    /// at construction, so record and lookup paths derive the identical key.
+    /// Falls back to the bare slot key when neither is present.
+    pub(crate) fn capability_scope_key(&self) -> String {
+        if let Some(profile_id) = self.profile_id.as_deref().map(str::trim)
+            && !profile_id.is_empty()
+        {
+            return format!(
+                "{}::profile:{}",
+                jcode_provider_core::selection::provider_key(
+                    jcode_provider_core::selection::ActiveProvider::OpenRouter,
+                ),
+                profile_id.to_ascii_lowercase(),
+            );
+        }
+        let api_base = self.api_base.trim();
+        if !api_base.is_empty() {
+            return format!(
+                "{}::endpoint:{}",
+                jcode_provider_core::selection::provider_key(
+                    jcode_provider_core::selection::ActiveProvider::OpenRouter,
+                ),
+                api_base.to_ascii_lowercase(),
+            );
+        }
+        jcode_provider_core::selection::provider_key(
+            jcode_provider_core::selection::ActiveProvider::OpenRouter,
+        )
+        .to_string()
+    }
+
     /// The disk-cache namespace this provider's *foreground* catalog reads and
     /// writes should use.
     ///
