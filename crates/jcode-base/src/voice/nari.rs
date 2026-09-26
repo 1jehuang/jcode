@@ -292,6 +292,7 @@ impl NariSession {
                 .await?;
             }
             sender_stopping.store(true, Ordering::SeqCst);
+            super::timing::mark("pcm eof, sending final commit");
             send(
                 &mut sink,
                 json!({"type":"input_audio_buffer.commit", "event_id":END}),
@@ -315,6 +316,9 @@ impl NariSession {
                 }
                 incoming = receive(&mut source) => {
                     let incoming = incoming?;
+                    if stopping.load(Ordering::SeqCst) {
+                        super::timing::mark(incoming["type"].as_str().unwrap_or("?"));
+                    }
                     if state.apply(&incoming, stopping.load(Ordering::SeqCst))? {
                         if !first_text { first_text = true; super::timing::mark("first transcript revision"); }
                         event(NariEvent::Transcript(state.text()));
