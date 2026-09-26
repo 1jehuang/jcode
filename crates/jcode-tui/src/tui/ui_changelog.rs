@@ -153,7 +153,7 @@ pub(super) fn get_grouped_changelog() -> Vec<ChangelogGroup> {
 }
 
 /// Get changelog entries the user hasn't seen yet.
-/// Reads the last-seen commit hash from ~/.jcode/last_seen_changelog,
+/// Reads the last-seen commit hash from the configured Jcode home,
 /// filters the embedded changelog to only new entries, then saves the latest hash.
 /// Returns just the commit subjects (not the hashes).
 pub(super) fn get_unseen_changelog_entries() -> &'static Vec<String> {
@@ -164,9 +164,9 @@ pub(super) fn get_unseen_changelog_entries() -> &'static Vec<String> {
             return Vec::new();
         }
 
-        let state_file = dirs::home_dir()
-            .map(|h| h.join(".jcode").join("last_seen_changelog"))
-            .unwrap_or_else(|| std::path::PathBuf::from(".jcode/last_seen_changelog"));
+        // jcode_dir() honours JCODE_HOME, so a sandboxed process (tests, self-dev) never
+        // marks the changelog seen in the user's real ~/.jcode.
+        let state_file = last_seen_changelog_path();
 
         let last_seen_hash = std::fs::read_to_string(&state_file)
             .ok()
@@ -196,4 +196,28 @@ pub(super) fn get_unseen_changelog_entries() -> &'static Vec<String> {
 
         new_entries
     })
+}
+
+fn last_seen_changelog_path() -> std::path::PathBuf {
+    crate::storage::jcode_dir()
+        .map(|dir| dir.join("last_seen_changelog"))
+        .unwrap_or_else(|_| std::path::PathBuf::from(".jcode/last_seen_changelog"))
+}
+
+#[cfg(test)]
+mod home_tests {
+    #[test]
+    fn last_seen_changelog_respects_jcode_home() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let sandbox = tempfile::tempdir().unwrap();
+        let _home = crate::env::ScopedVar::set("HOME", home.path());
+        let _sandbox = crate::env::ScopedVar::set("JCODE_HOME", sandbox.path());
+
+        assert_eq!(
+            super::last_seen_changelog_path(),
+            sandbox.path().join("last_seen_changelog")
+        );
+        assert!(!home.path().join(".jcode/last_seen_changelog").exists());
+    }
 }

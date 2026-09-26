@@ -668,7 +668,7 @@ mod batch_crash_tests {
     fn find_session_by_name_or_id_matches_custom_title() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = crate::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let session_id = "session_renamecli_1770000000000";
         let mut session = Session::create_with_id(
@@ -688,15 +688,13 @@ mod batch_crash_tests {
             find_session_by_name_or_id("Rename").expect("resolve title fragment"),
             session_id
         );
-
-        crate::env::remove_var("JCODE_HOME");
     }
 
     #[test]
     fn find_session_by_name_or_id_accepts_imported_session_ids() -> anyhow::Result<()> {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir()?;
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = crate::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let imported_id = "imported_codex_test_resume";
         let mut session =
@@ -707,7 +705,6 @@ mod batch_crash_tests {
         let resolved = find_session_by_name_or_id(imported_id)?;
         assert_eq!(resolved, imported_id);
 
-        crate::env::remove_var("JCODE_HOME");
         Ok(())
     }
 
@@ -720,7 +717,7 @@ mod batch_crash_tests {
     -> anyhow::Result<()> {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir()?;
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = crate::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let provider_id = "ses_2c72f8f4cffee6Qh7GId7D81Se";
         let imported_id = crate::import::imported_opencode_session_id(provider_id);
@@ -739,7 +736,6 @@ mod batch_crash_tests {
         let resolved = find_session_by_name_or_id(provider_id)?;
         assert_eq!(resolved, imported_id);
 
-        crate::env::remove_var("JCODE_HOME");
         Ok(())
     }
 
@@ -749,13 +745,12 @@ mod batch_crash_tests {
     fn find_session_by_name_or_id_bare_id_without_snapshot_still_errors() -> anyhow::Result<()> {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir()?;
-        crate::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = crate::env::ScopedVar::set("JCODE_HOME", temp.path());
         std::fs::create_dir_all(temp.path().join("sessions"))?;
 
         let err = find_session_by_name_or_id("ses_does_not_exist_anywhere");
         assert!(err.is_err(), "expected unknown bare id to error");
 
-        crate::env::remove_var("JCODE_HOME");
         Ok(())
     }
 }

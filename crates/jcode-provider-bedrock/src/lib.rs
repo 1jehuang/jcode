@@ -1519,6 +1519,9 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        // XDG_CONFIG_HOME alone does not isolate macOS (config lives under
+        // ~/Library/Application Support); JCODE_HOME is the portable override.
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let _removed = [
             "JCODE_BEDROCK_ENABLE",
             API_KEY_ENV,
@@ -1552,6 +1555,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         for key in [
             "JCODE_BEDROCK_ENABLE",
             API_KEY_ENV,
@@ -1591,6 +1595,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let _removed = [
             "JCODE_BEDROCK_ENABLE",
             API_KEY_ENV,
@@ -1646,6 +1651,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         p.profile_required_models
             .write()
@@ -1666,6 +1672,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_inference_profiles.write().unwrap() = vec![
             "global.amazon.nova-2-lite-v1:0".to_string(),
@@ -1682,6 +1689,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
         *p.fetched_inference_profiles.write().unwrap() =
@@ -1714,6 +1722,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
         *p.fetched_inference_profiles.write().unwrap() =
@@ -1742,6 +1751,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_models.write().unwrap() = vec!["amazon.nova-2-lite-v1:0".to_string()];
         p.profile_required_models
@@ -1786,6 +1796,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         {
             let _region = EnvVarGuard::set(REGION_ENV, "us-east-1");
             BedrockProvider::persist_catalog(
@@ -1903,6 +1914,7 @@ mod tests {
         let _guard = lock_test_env();
         let temp = tempfile::tempdir().unwrap();
         let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path().as_os_str());
+        let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
         let p = BedrockProvider::new();
         *p.fetched_models.write().unwrap() =
             vec!["anthropic.claude-3-haiku-20240307-v1:0".to_string()];

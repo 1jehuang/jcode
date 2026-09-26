@@ -139,7 +139,7 @@ fn spawn_lock_serializes_shared_server_bootstrap() {
 fn resolve_resume_id_imports_raw_codex_session_ids() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    let _jcode_home = crate::env::ScopedVar::set("JCODE_HOME", temp.path());
 
     let codex_dir = temp.path().join("external/.codex/sessions/2026/04/16");
     std::fs::create_dir_all(&codex_dir).expect("create codex dir");
@@ -159,8 +159,6 @@ fn resolve_resume_id_imports_raw_codex_session_ids() {
 
     let session = crate::session::Session::load(&resolved).expect("load imported session");
     assert_eq!(session.messages.len(), 2);
-
-    crate::env::remove_var("JCODE_HOME");
 }
 
 #[test]

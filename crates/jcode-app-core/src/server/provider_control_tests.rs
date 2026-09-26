@@ -292,7 +292,11 @@ impl EnvGuard {
             .map(|key| (*key, std::env::var(key).ok()))
             .collect();
         for key in &all_keys {
-            crate::env::remove_var(key);
+            // JCODE_HOME is overwritten below; unsetting it first opens a window
+            // in which concurrent work resolves paths under the real ~/.jcode.
+            if *key != "JCODE_HOME" {
+                crate::env::remove_var(key);
+            }
         }
         let temp_home = tempfile::tempdir().expect("create temp JCODE_HOME");
         crate::env::set_var("JCODE_HOME", temp_home.path());

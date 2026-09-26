@@ -704,7 +704,8 @@ mod tests {
         let _guard = crate::storage::lock_test_env();
         crate::env::remove_var(JCODE_TIER_ENV);
         let temp = tempfile::tempdir().expect("temp home");
-        crate::env::set_var("JCODE_HOME", temp.path().to_string_lossy().to_string());
+        let _jcode_home =
+            crate::env::ScopedVar::set("JCODE_HOME", temp.path().to_string_lossy().to_string());
 
         assert_eq!(cached_tier(), None);
         assert_eq!(effective_tier(), JcodeTier::Plus);
@@ -737,7 +738,6 @@ mod tests {
         store_cached_tier(None).expect("clear tier");
         assert_eq!(cached_tier(), None);
 
-        crate::env::remove_var("JCODE_HOME");
         crate::env::remove_var(JCODE_TIER_ENV);
     }
 

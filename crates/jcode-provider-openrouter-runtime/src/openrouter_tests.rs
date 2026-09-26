@@ -1183,6 +1183,8 @@ fn autodetects_single_saved_openai_compatible_profile() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    // HOME drives config resolution here; an inherited JCODE_HOME would take precedence.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1208,6 +1210,8 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    // HOME drives config resolution here; an inherited JCODE_HOME would take precedence.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1241,6 +1245,8 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    // HOME drives config resolution here; an inherited JCODE_HOME would take precedence.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1304,6 +1310,8 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    // HOME drives config resolution here; an inherited JCODE_HOME would take precedence.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1338,6 +1346,8 @@ fn autodetected_profile_seeds_default_model_and_cache_namespace() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    // HOME drives config resolution here; an inherited JCODE_HOME would take precedence.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1948,6 +1958,8 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp home");
     let _home = EnvVarGuard::set("HOME", temp.path());
+    // HOME drives config resolution here; an inherited JCODE_HOME would take precedence.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _namespace = EnvVarGuard::set(
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
@@ -2035,6 +2047,8 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
     let _lock = ENV_LOCK.lock();
     let temp = TempDir::new().expect("create temp home");
     let _home = EnvVarGuard::set("HOME", temp.path());
+    // HOME drives config resolution here; an inherited JCODE_HOME would take precedence.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _namespace = EnvVarGuard::set(
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
@@ -2355,6 +2369,8 @@ fn named_openai_compatible_loads_api_key_from_env_file() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    // HOME drives config resolution here; an inherited JCODE_HOME would take precedence.
+    let _jcode_home = EnvVarGuard::remove("JCODE_HOME");
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _api_key = EnvVarGuard::remove("CUSTOM_API_KEY");
