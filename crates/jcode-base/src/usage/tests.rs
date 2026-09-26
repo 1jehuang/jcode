@@ -904,7 +904,7 @@ fn jcode_me(memory_used: u64, upgrade: bool) -> crate::subscription_api::Subscri
 #[test]
 fn jcode_usage_shows_daily_allowances_without_upsell_when_low() {
     let report = jcode_usage_report(&jcode_me(100, true));
-    assert_eq!(report.provider_name, "Jcode");
+    assert_eq!(report.provider_name, "Jcode subscription");
     assert_eq!(report.limits.len(), 2);
     assert_eq!(report.limits[0].name, "Memory recall (daily)");
     assert!((report.limits[0].usage_percent - 10.0).abs() < 0.01);
