@@ -14,10 +14,7 @@ pub const MAX_INSTANCES_PER_SESSION: usize = 64;
 static LOCK: Mutex<()> = Mutex::new(());
 
 fn state_file(session_id: &str) -> Result<PathBuf> {
-    if session_id.is_empty()
-        || session_id.contains(['/', '\\'])
-        || session_id.starts_with('.')
-    {
+    if session_id.is_empty() || session_id.contains(['/', '\\']) || session_id.starts_with('.') {
         bail!("invalid session id for applets: {session_id:?}");
     }
     Ok(crate::storage::jcode_dir()?
@@ -224,8 +221,7 @@ mod tests {
         assert_eq!(snap.instances[1].id, "b");
 
         let bad: Vec<PatchOp> =
-            serde_json::from_value(json!([{"op":"replace","path":"/state","value":[1]}]))
-                .unwrap();
+            serde_json::from_value(json!([{"op":"replace","path":"/state","value":[1]}])).unwrap();
         assert!(patch(sid, "a", None, &bad).is_err());
         let ops: Vec<PatchOp> =
             serde_json::from_value(json!([{"op":"replace","path":"/title","value":"T"}])).unwrap();
@@ -357,8 +353,8 @@ mod mcp_tests {
 
     #[test]
     fn mcp_resources_map_to_documents() {
-        let html = document_for_mcp_resource("ui://w/chart", Some("text/html"), Some("<b>x</b>"))
-            .unwrap();
+        let html =
+            document_for_mcp_resource("ui://w/chart", Some("text/html"), Some("<b>x</b>")).unwrap();
         assert_eq!(serde_json::to_value(&html.view).unwrap()["type"], "html");
         validate(&html).unwrap();
         let link = document_for_mcp_resource(
@@ -368,7 +364,11 @@ mod mcp_tests {
         )
         .unwrap();
         validate(&link).unwrap();
-        assert!(serde_json::to_string(&link).unwrap().contains("host.open_url"));
+        assert!(
+            serde_json::to_string(&link)
+                .unwrap()
+                .contains("host.open_url")
+        );
         let native = document_for_mcp_resource(
             "file:///x",
             Some(agent::JCODE_APPLET_MIME),

@@ -636,7 +636,16 @@ async fn tool_descriptions_stay_under_token_cap() {
     // (e1576e9e3 and earlier), pinned by browser_tests.
     // todo carries a deliberate "use it very often" directive requested by the
     // user, so planning happens proactively rather than only when prompted.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm", "batch", "browser", "todo"];
+    // applet carries the whole view-node vocabulary inline, since the model has
+    // no other way to learn which node types and props the host renders.
+    const EXEMPT: &[&str] = &[
+        "integration_tools",
+        "swarm",
+        "batch",
+        "browser",
+        "todo",
+        "applet",
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -696,10 +705,17 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
     // The feedback-loop relevance rubric defines every enum state inline
     // (abb0baabc, d21916db5) and todo::tests pins each concept, so it is
     // deliberately longer than the cap.
-    const EXEMPT: &[(&str, &str)] = &[(
-        "todo",
-        "$.properties.goals.items.properties.feedback_loop_relevance",
-    )];
+    // applet placement lists every shorthand so the model can pick a surface
+    // without a round trip. desktop_selfdev action carries a safety warning:
+    // killing the harness bridge by hand strands the calling session.
+    const EXEMPT: &[(&str, &str)] = &[
+        (
+            "todo",
+            "$.properties.goals.items.properties.feedback_loop_relevance",
+        ),
+        ("applet", "$.properties.placement"),
+        ("desktop_selfdev", "$.properties.action"),
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -1777,7 +1793,8 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
 async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode() {
     /// Built-ins that legitimately cannot be strict. Verified against master
     /// before the #711/#713 eligibility changes, so this is pre-existing.
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser", "swarm"];
+    // applet's view is a recursive, open-ended node tree.
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["applet", "batch", "browser", "swarm"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;

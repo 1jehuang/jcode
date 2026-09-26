@@ -45,7 +45,11 @@ fn deferred_tools_follow_eager_and_breakpoint_stays_on_last_eager() {
         let out = tools_json(&format_tools(&tools, oauth, false));
         let deferred_flags: Vec<bool> = out
             .iter()
-            .map(|t| t.get("defer_loading").and_then(|v| v.as_bool()).unwrap_or(false))
+            .map(|t| {
+                t.get("defer_loading")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
             .collect();
         let first_deferred = deferred_flags.iter().position(|d| *d).unwrap();
         assert!(
@@ -156,7 +160,12 @@ fn tool_reference_renders_as_reference_only_tool_result() {
     );
     // The original result text is preserved right after the tool_results.
     assert_eq!(content[1]["type"], "text");
-    assert!(content[1]["text"].as_str().unwrap().contains("mcp__weather__forecast"));
+    assert!(
+        content[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("mcp__weather__forecast")
+    );
 }
 
 #[test]
@@ -170,6 +179,7 @@ fn tool_reference_without_available_definition_keeps_plain_result() {
     assert!(content[0]["content"].is_string());
 
     // Legacy entry point ignores references entirely.
-    let legacy = serde_json::to_value(&format_messages(&reference_conversation(), false)[2]).unwrap();
+    let legacy =
+        serde_json::to_value(&format_messages(&reference_conversation(), false)[2]).unwrap();
     assert_eq!(legacy, last);
 }

@@ -13,7 +13,10 @@ fn context(session: &str, call: &str) -> ToolContext {
     }
 }
 
-struct Home(Option<std::ffi::OsString>, #[allow(dead_code)] tempfile::TempDir);
+struct Home(
+    Option<std::ffi::OsString>,
+    #[allow(dead_code)] tempfile::TempDir,
+);
 impl Drop for Home {
     fn drop(&mut self) {
         match &self.0 {
@@ -87,7 +90,11 @@ async fn mount_patch_wait_and_close() {
     .await
     .unwrap();
     assert_eq!(
-        crate::applets::snapshot_for_session("s1").unwrap().instances[0].document.title,
+        crate::applets::snapshot_for_session("s1")
+            .unwrap()
+            .instances[0]
+            .document
+            .title,
         "P2"
     );
 
@@ -115,7 +122,12 @@ async fn mount_patch_wait_and_close() {
     tool.execute(json!({"action":"close","instance":id}), context("s1", "c"))
         .await
         .unwrap();
-    assert!(crate::applets::snapshot_for_session("s1").unwrap().instances.is_empty());
+    assert!(
+        crate::applets::snapshot_for_session("s1")
+            .unwrap()
+            .instances
+            .is_empty()
+    );
 }
 
 #[test]

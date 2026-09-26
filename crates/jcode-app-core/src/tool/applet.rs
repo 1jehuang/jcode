@@ -93,6 +93,7 @@ pub fn generate_instance_id(title: &str) -> String {
     format!("{slug}-{:04x}", rand::random::<u16>())
 }
 
+#[derive(Default)]
 pub struct AppletTool;
 
 impl AppletTool {
@@ -163,14 +164,21 @@ fn resolve_placement(raw: Option<&Value>, ctx: &ToolContext) -> Result<Placement
         .as_object()
         .cloned()
         .ok_or_else(|| anyhow!("placement must be a string or object"))?;
-    let kind = obj.get("kind").and_then(Value::as_str).unwrap_or("inline").to_string();
+    let kind = obj
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("inline")
+        .to_string();
     let kind = kind.as_str();
     obj.insert("kind".into(), json!(kind));
     if matches!(kind, "inline" | "composer") {
         obj.insert("session_id".into(), json!(ctx.session_id));
     }
     if kind == "inline" && !obj.contains_key("anchor") {
-        obj.insert("anchor".into(), json!({"kind":"tool_call","call_id":ctx.tool_call_id}));
+        obj.insert(
+            "anchor".into(),
+            json!({"kind":"tool_call","call_id":ctx.tool_call_id}),
+        );
     }
     serde_json::from_value(Value::Object(obj)).context("invalid placement")
 }

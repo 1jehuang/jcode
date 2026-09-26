@@ -10,168 +10,6 @@ pub(in crate::tui::app) struct Onboarding {
     task: Option<Task>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::super::command::ProviderStatus;
-    use super::super::tests::with_app;
-    use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers};
-
-    fn empty_status() -> Vec<ProviderStatus> {
-        crate::provider_catalog::auth_status_login_providers()
-            .into_iter()
-            .map(|p| ProviderStatus {
-                id: p.id.into(),
-                state: crate::auth::AuthState::NotConfigured,
-                method_detail: "not configured".into(),
-            })
-            .collect()
-    }
-
-    fn queue_empty_status(app: &mut App) {
-        app.remote_login_onboarding = Onboarding {
-            checked: false,
-            task: Some(Task::ready(Ok(Reply::Status {
-                providers: empty_status(),
-            }))),
-        };
-    }
-
-    #[test]
-    fn ssh_onboarding_requires_complete_empty_status_including_api_keys() {
-        assert!(remote_has_no_logins(&empty_status()));
-        assert!(!remote_has_no_logins(&[]));
-        let mut partial = empty_status();
-        partial.pop();
-        assert!(!remote_has_no_logins(&partial));
-        for index in 0..empty_status().len() {
-            for state in [
-                crate::auth::AuthState::Available,
-                crate::auth::AuthState::Expired,
-            ] {
-                let mut statuses = empty_status();
-                statuses[index].state = state;
-                assert!(!remote_has_no_logins(&statuses), "{}", statuses[index].id);
-            }
-        }
-    }
-
-    #[test]
-    fn ssh_onboarding_offers_once_and_no_opens_normal_login_without_copying() {
-        with_app(|app| {
-            queue_empty_status(app);
-            assert!(app.poll_ssh_login_onboarding());
-            assert!(app.remote_login.as_ref().unwrap().phase == Phase::ImportOffer);
-            assert!(app.remote_login.as_ref().unwrap().task.is_none());
-            assert!(
-                app.display_messages()
-                    .last()
-                    .unwrap()
-                    .content
-                    .contains("No logins are configured on test-remote")
-            );
-            let picker = app.inline_interactive_state.as_ref().unwrap();
-            assert_eq!(picker.entries[picker.selected].name, "No");
-            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
-            assert!(app.remote_login.as_ref().unwrap().phase == Phase::Choosing);
-            assert!(app.inline_interactive_state.as_ref().unwrap().entries.len() > 2);
-            app.cancel_ssh_login();
-            assert!(!app.poll_ssh_login_onboarding());
-            assert!(app.remote_login.is_none());
-            assert!(app.pasted_contents.is_empty());
-            assert!(app.queued_messages.is_empty());
-        });
-    }
-
-    #[test]
-    fn ssh_onboarding_yes_chooses_provider_then_requires_separate_copy_consent() {
-        with_app(|app| {
-            queue_empty_status(app);
-            assert!(app.poll_ssh_login_onboarding());
-            app.handle_ssh_login_key(KeyCode::Up, KeyModifiers::NONE, None);
-            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
-            assert_eq!(
-                app.inline_interactive_state.as_ref().unwrap().entries.len(),
-                2
-            );
-            assert!(app.remote_login.as_ref().unwrap().task.is_none());
-            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
-            assert!(app.remote_login.as_ref().unwrap().phase == Phase::ImportConsent);
-            assert_eq!(app.remote_login.as_ref().unwrap().provider, "openai");
-            assert!(app.remote_login.as_ref().unwrap().task.is_none());
-            // Default No is conservative even after Yes to the initial offer.
-            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
-            assert!(app.remote_login.is_none());
-            assert!(
-                app.display_messages()
-                    .last()
-                    .unwrap()
-                    .content
-                    .contains("No local credentials were read or copied")
-            );
-        });
-    }
-
-    #[test]
-    fn ssh_onboarding_pasted_yes_and_no_stay_private() {
-        with_app(|app| {
-            queue_empty_status(app);
-            assert!(app.poll_ssh_login_onboarding());
-            app.handle_paste("yes".into());
-            assert_eq!(app.input, "[hidden login input]");
-            assert!(app.pasted_contents.is_empty());
-            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
-            assert_eq!(
-                app.inline_interactive_state.as_ref().unwrap().entries.len(),
-                2
-            );
-            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
-            app.handle_paste("no".into());
-            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
-            assert!(app.remote_login.is_none());
-            assert!(app.input.is_empty());
-        });
-    }
-
-    #[test]
-    fn ssh_onboarding_never_replaces_drafts_or_explicit_login() {
-        with_app(|app| {
-            queue_empty_status(app);
-            app.input = "unfinished draft".into();
-            assert!(!app.poll_ssh_login_onboarding());
-            assert_eq!(app.input, "unfinished draft");
-            assert!(app.remote_login.is_none());
-            app.input.clear();
-            app.pending_turn = true;
-            assert!(!app.poll_ssh_login_onboarding());
-            app.pending_turn = false;
-            app.handle_ssh_login_command("/login");
-            assert!(app.remote_login_onboarding.task.is_none());
-            app.cancel_ssh_login();
-            assert!(!app.poll_ssh_login_onboarding());
-        });
-    }
-
-    #[test]
-    fn ssh_onboarding_unknown_status_never_claims_signed_out_or_retries() {
-        with_app(|app| {
-            for reply in [
-                Err("status failed"),
-                Ok(Reply::Status { providers: vec![] }),
-            ] {
-                app.remote_login_onboarding = Onboarding {
-                    checked: false,
-                    task: Some(Task::ready(reply)),
-                };
-                assert!(!app.poll_ssh_login_onboarding());
-                assert!(app.remote_login_onboarding.checked);
-                assert!(app.remote_login.is_none());
-                assert!(!app.poll_ssh_login_onboarding());
-            }
-        });
-    }
-}
-
 impl Onboarding {
     pub(super) fn dismiss(&mut self) {
         self.checked = true;
@@ -343,5 +181,167 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::command::ProviderStatus;
+    use super::super::tests::with_app;
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    fn empty_status() -> Vec<ProviderStatus> {
+        crate::provider_catalog::auth_status_login_providers()
+            .into_iter()
+            .map(|p| ProviderStatus {
+                id: p.id.into(),
+                state: crate::auth::AuthState::NotConfigured,
+                method_detail: "not configured".into(),
+            })
+            .collect()
+    }
+
+    fn queue_empty_status(app: &mut App) {
+        app.remote_login_onboarding = Onboarding {
+            checked: false,
+            task: Some(Task::ready(Ok(Reply::Status {
+                providers: empty_status(),
+            }))),
+        };
+    }
+
+    #[test]
+    fn ssh_onboarding_requires_complete_empty_status_including_api_keys() {
+        assert!(remote_has_no_logins(&empty_status()));
+        assert!(!remote_has_no_logins(&[]));
+        let mut partial = empty_status();
+        partial.pop();
+        assert!(!remote_has_no_logins(&partial));
+        for index in 0..empty_status().len() {
+            for state in [
+                crate::auth::AuthState::Available,
+                crate::auth::AuthState::Expired,
+            ] {
+                let mut statuses = empty_status();
+                statuses[index].state = state;
+                assert!(!remote_has_no_logins(&statuses), "{}", statuses[index].id);
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_onboarding_offers_once_and_no_opens_normal_login_without_copying() {
+        with_app(|app| {
+            queue_empty_status(app);
+            assert!(app.poll_ssh_login_onboarding());
+            assert!(app.remote_login.as_ref().unwrap().phase == Phase::ImportOffer);
+            assert!(app.remote_login.as_ref().unwrap().task.is_none());
+            assert!(
+                app.display_messages()
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("No logins are configured on test-remote")
+            );
+            let picker = app.inline_interactive_state.as_ref().unwrap();
+            assert_eq!(picker.entries[picker.selected].name, "No");
+            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+            assert!(app.remote_login.as_ref().unwrap().phase == Phase::Choosing);
+            assert!(app.inline_interactive_state.as_ref().unwrap().entries.len() > 2);
+            app.cancel_ssh_login();
+            assert!(!app.poll_ssh_login_onboarding());
+            assert!(app.remote_login.is_none());
+            assert!(app.pasted_contents.is_empty());
+            assert!(app.queued_messages.is_empty());
+        });
+    }
+
+    #[test]
+    fn ssh_onboarding_yes_chooses_provider_then_requires_separate_copy_consent() {
+        with_app(|app| {
+            queue_empty_status(app);
+            assert!(app.poll_ssh_login_onboarding());
+            app.handle_ssh_login_key(KeyCode::Up, KeyModifiers::NONE, None);
+            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+            assert_eq!(
+                app.inline_interactive_state.as_ref().unwrap().entries.len(),
+                2
+            );
+            assert!(app.remote_login.as_ref().unwrap().task.is_none());
+            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+            assert!(app.remote_login.as_ref().unwrap().phase == Phase::ImportConsent);
+            assert_eq!(app.remote_login.as_ref().unwrap().provider, "openai");
+            assert!(app.remote_login.as_ref().unwrap().task.is_none());
+            // Default No is conservative even after Yes to the initial offer.
+            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+            assert!(app.remote_login.is_none());
+            assert!(
+                app.display_messages()
+                    .last()
+                    .unwrap()
+                    .content
+                    .contains("No local credentials were read or copied")
+            );
+        });
+    }
+
+    #[test]
+    fn ssh_onboarding_pasted_yes_and_no_stay_private() {
+        with_app(|app| {
+            queue_empty_status(app);
+            assert!(app.poll_ssh_login_onboarding());
+            app.handle_paste("yes".into());
+            assert_eq!(app.input, "[hidden login input]");
+            assert!(app.pasted_contents.is_empty());
+            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+            assert_eq!(
+                app.inline_interactive_state.as_ref().unwrap().entries.len(),
+                2
+            );
+            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+            app.handle_paste("no".into());
+            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+            assert!(app.remote_login.is_none());
+            assert!(app.input.is_empty());
+        });
+    }
+
+    #[test]
+    fn ssh_onboarding_never_replaces_drafts_or_explicit_login() {
+        with_app(|app| {
+            queue_empty_status(app);
+            app.input = "unfinished draft".into();
+            assert!(!app.poll_ssh_login_onboarding());
+            assert_eq!(app.input, "unfinished draft");
+            assert!(app.remote_login.is_none());
+            app.input.clear();
+            app.pending_turn = true;
+            assert!(!app.poll_ssh_login_onboarding());
+            app.pending_turn = false;
+            app.handle_ssh_login_command("/login");
+            assert!(app.remote_login_onboarding.task.is_none());
+            app.cancel_ssh_login();
+            assert!(!app.poll_ssh_login_onboarding());
+        });
+    }
+
+    #[test]
+    fn ssh_onboarding_unknown_status_never_claims_signed_out_or_retries() {
+        with_app(|app| {
+            for reply in [
+                Err("status failed"),
+                Ok(Reply::Status { providers: vec![] }),
+            ] {
+                app.remote_login_onboarding = Onboarding {
+                    checked: false,
+                    task: Some(Task::ready(reply)),
+                };
+                assert!(!app.poll_ssh_login_onboarding());
+                assert!(app.remote_login_onboarding.checked);
+                assert!(app.remote_login.is_none());
+                assert!(!app.poll_ssh_login_onboarding());
+            }
+        });
     }
 }

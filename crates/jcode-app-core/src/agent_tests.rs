@@ -1948,12 +1948,14 @@ fn empty_post_tool_response_gets_more_than_one_retry() {
     // transient hiccup, not a finished task. With only one retry allowed, a
     // single empty response (observed once in 43 turns) ended a 20-hour agent
     // run with the work half-done and the submission unoptimized.
-    assert!(
-        Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS > 1,
-        "a single retry lets one transient empty response end a long run"
-    );
-    // Bounded, so a genuinely finished agent still exits instead of looping.
-    assert!(Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS <= 10);
+    const {
+        assert!(
+            Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS > 1,
+            "a single retry lets one transient empty response end a long run"
+        );
+        // Bounded, so a genuinely finished agent still exits instead of looping.
+        assert!(Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS <= 10);
+    }
 }
 
 #[test]
@@ -2655,7 +2657,11 @@ async fn switching_away_from_native_deferred_restores_mcp_fallback_surface() {
     agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
 
     let on_native = agent.tool_definitions().await;
-    assert!(on_native.iter().any(|t| t.name == "mcp_call" && t.defer_loading));
+    assert!(
+        on_native
+            .iter()
+            .any(|t| t.name == "mcp_call" && t.defer_loading)
+    );
 
     native.store(false, std::sync::atomic::Ordering::SeqCst);
     let fallback = agent.tool_definitions().await;

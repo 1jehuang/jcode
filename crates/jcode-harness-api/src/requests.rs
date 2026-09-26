@@ -269,7 +269,10 @@ pub enum ApiRequest {
     },
 
     /// The user closed an agent applet instance. The agent is not woken.
-    CloseApplet { session_id: String, instance: String },
+    CloseApplet {
+        session_id: String,
+        instance: String,
+    },
 
     /// Restore the history that the last `Rewind` removed.
     ///

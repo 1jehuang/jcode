@@ -48,7 +48,7 @@ pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<
     let current_label = active_account_label_for_provider(provider);
     let mut labels: Vec<String> = Vec::new();
     let mut exhausted: Vec<String> = Vec::new();
-    let mut push_unique = |labels: &mut Vec<String>, label: String| {
+    let push_unique = |labels: &mut Vec<String>, label: String| {
         if !labels.contains(&label) {
             labels.push(label);
         }

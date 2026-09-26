@@ -2468,9 +2468,7 @@ impl Provider for MultiProvider {
 
     fn service_tier(&self) -> Option<String> {
         match self.active_provider() {
-            ActiveProvider::Claude => {
-                self.anthropic_provider().and_then(|a| a.service_tier())
-            }
+            ActiveProvider::Claude => self.anthropic_provider().and_then(|a| a.service_tier()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.service_tier()),
             _ => None,
         }

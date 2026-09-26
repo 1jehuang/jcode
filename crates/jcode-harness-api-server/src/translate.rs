@@ -1655,7 +1655,9 @@ impl BridgeState {
                 let session_id = event["session_id"].as_str().or(self.session_id.as_deref());
                 match (session_id, event.get("snapshot")) {
                     (Some(session_id), Some(snapshot)) if !snapshot.is_null() => {
-                        Self::applet_frame(session_id, snapshot).into_iter().collect()
+                        Self::applet_frame(session_id, snapshot)
+                            .into_iter()
+                            .collect()
                     }
                     _ => vec![],
                 }

@@ -33,6 +33,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 1,
             session_id: session_id.to_string(),
             messages: vec![],
@@ -105,6 +106,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            applets: Default::default(),
             id: 1,
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {

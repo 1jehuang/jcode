@@ -1015,7 +1015,7 @@ fn jev_recall_prefilter_bounds_candidates_and_keeps_relevant_memories() {
         .map(|i| {
             MemoryEntry::new(
                 MemoryCategory::Fact,
-                &format!("unrelated note number {i} about gardening"),
+                format!("unrelated note number {i} about gardening"),
             )
         })
         .collect();
@@ -1033,7 +1033,7 @@ fn jev_recall_prefilter_bounds_candidates_and_keeps_relevant_memories() {
 #[test]
 fn jev_recall_prefilter_leaves_small_stores_untouched() {
     let entries: Vec<MemoryEntry> = (0..10)
-        .map(|i| MemoryEntry::new(MemoryCategory::Fact, &format!("note {i}")))
+        .map(|i| MemoryEntry::new(MemoryCategory::Fact, format!("note {i}")))
         .collect();
     assert_eq!(
         prefilter_for_jev(entries, "completely different words").len(),

@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::discover_secrets::contains_recognizable_secret;
 use super::{Tool, ToolContext, ToolExecutionMode, ToolOutput};
 use anyhow::Result;

@@ -862,11 +862,11 @@ fn jcode_search_index_keeps_late_turns_after_reaching_its_budget() {
 fn raw_search_excerpt_samples_suffix_of_one_long_message_without_splitting_utf8() {
     let prefix = "opening-message-needle";
     let suffix = "晚い-message-needle";
-    let raw: Box<serde_json::value::RawValue> = serde_json::from_str(&format!(
-        "{}",
-        serde_json::to_string(&format!("{prefix} {} {suffix}", "─".repeat(6_000)))
+    let raw: Box<serde_json::value::RawValue> = serde_json::from_str(
+        &serde_json::to_string(&format!("{prefix} {} {suffix}", "─".repeat(6_000)))
             .expect("serialize content")
-    ))
+            .to_string(),
+    )
     .expect("raw value");
 
     let excerpt =
