@@ -1,0 +1,800 @@
+//! Upgrade-safe external provider manifests and local registry.
+//!
+//! This crate deliberately owns metadata and registration only. Providers are
+//! executed by `jcode-provider-subprocess`, which keeps executable lifecycle,
+//! deadlines, cancellation, and frame limits outside the persistence layer.
+
+mod bundle;
+mod remote;
+mod runtime;
+
+pub use bundle::{
+    BundleComponents, BundleError, PLUGIN_MANIFEST_VERSION, PluginBundle, PluginManifest,
+    SkillMetadata,
+};
+pub use remote::{
+    InstalledPlugin, PluginInstallMetadata, PluginSource, PluginStore, PluginStoreSnapshot,
+    RemotePluginError,
+};
+pub use runtime::{
+    EmbeddedExtension, EmbeddedExtensionManifest, ExtensionBackend, ExtensionEvent,
+    ExtensionInvocation, ExtensionRequest, ExtensionRuntimeRegistry,
+};
+
+pub use jcode_provider_protocol::Frame;
+use jcode_provider_protocol::PROTOCOL_VERSION;
+use jcode_provider_subprocess::{AdapterError, Handshake, SubprocessProvider};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const MANIFEST_VERSION: u32 = 1;
+pub const REGISTRY_VERSION: u32 = 1;
+pub const DEFAULT_REGISTRY_FILE: &str = "providers.json";
+pub const PROVIDER_MANIFEST_FILE: &str = "provider.toml";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExtensionError {
+    #[error("invalid provider manifest: {0}")]
+    InvalidManifest(String),
+    #[error("provider '{0}' is already registered")]
+    DuplicateProvider(String),
+    #[error("provider '{0}' is not registered")]
+    MissingProvider(String),
+    #[error("failed to read {path}: {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to write {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to decode {path}: {source}")]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to parse manifest {path}: {source}")]
+    ParseToml {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("failed to encode provider registry: {0}")]
+    Encode(#[from] serde_json::Error),
+    #[error("failed to resolve provider registry path: {0}")]
+    Path(String),
+    #[error("provider '{0}' is disabled")]
+    DisabledProvider(String),
+    #[error("provider '{0}' is not trusted")]
+    UntrustedProvider(String),
+    #[error("provider process failed: {0}")]
+    Process(#[from] AdapterError),
+    #[error("provider '{provider}' requests denied permission '{permission:?}'")]
+    PermissionDenied {
+        provider: String,
+        permission: Permission,
+    },
+    #[error("embedded extension '{0}' is already registered")]
+    DuplicateEmbeddedExtension(String),
+    #[error("extension '{0}' is not registered")]
+    MissingExtension(String),
+    #[error("extension request failed: {0}")]
+    RequestFailed(String),
+    #[error("extension cancellation is not supported by '{0}'")]
+    CancellationUnsupported(String),
+    #[error("plugin operation failed: {0}")]
+    Plugin(#[from] RemotePluginError),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PermissionPolicy {
+    allowed: BTreeSet<Permission>,
+}
+
+impl PermissionPolicy {
+    pub fn allow(mut self, permission: Permission) -> Self {
+        self.allowed.insert(permission);
+        self
+    }
+
+    pub fn allows(&self, permission: &Permission) -> bool {
+        self.allowed.contains(permission)
+    }
+}
+
+/// A registered provider process with its completed protocol handshake.
+///
+/// The manifest and registry remain independent from process state. Dropping
+/// this value drops the bounded subprocess adapter, which terminates the child
+/// process instead of leaving an orphan behind.
+pub struct ExternalProviderProcess {
+    manifest: ProviderManifest,
+    transport: SubprocessProvider,
+    handshake: Handshake,
+}
+
+impl ExternalProviderProcess {
+    pub async fn start(record: &ProviderRecord, client: &str) -> Result<Self, ExtensionError> {
+        Self::start_with_policy(record, client, &PermissionPolicy::default()).await
+    }
+
+    pub async fn start_with_policy(
+        record: &ProviderRecord,
+        client: &str,
+        policy: &PermissionPolicy,
+    ) -> Result<Self, ExtensionError> {
+        if !record.enabled {
+            return Err(ExtensionError::DisabledProvider(record.manifest.id.clone()));
+        }
+        if !record.trusted {
+            return Err(ExtensionError::UntrustedProvider(
+                record.manifest.id.clone(),
+            ));
+        }
+        record.manifest.validate()?;
+        for permission in &record.manifest.permissions {
+            if !policy.allows(permission) {
+                return Err(ExtensionError::PermissionDenied {
+                    provider: record.manifest.id.clone(),
+                    permission: permission.clone(),
+                });
+            }
+        }
+        let transport = SubprocessProvider::spawn_with_config(
+            &record.manifest.executable,
+            &record.manifest.args,
+            client,
+            record.manifest.capabilities.clone(),
+            jcode_provider_subprocess::SubprocessConfig {
+                environment: Some(minimal_environment()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let handshake = transport.handshake().await?;
+        Ok(Self {
+            manifest: record.manifest.clone(),
+            transport,
+            handshake,
+        })
+    }
+
+    pub fn manifest(&self) -> &ProviderManifest {
+        &self.manifest
+    }
+
+    pub fn handshake(&self) -> &Handshake {
+        &self.handshake
+    }
+
+    pub async fn request_and_collect(
+        &self,
+        id: impl Into<String>,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Result<Vec<Frame>, ExtensionError> {
+        Ok(self
+            .transport
+            .request_and_collect(id, method, params)
+            .await?)
+    }
+
+    pub async fn cancel(&self, request_id: impl Into<String>) -> Result<(), ExtensionError> {
+        Ok(self.transport.cancel(request_id).await?)
+    }
+
+    pub async fn kill(&self) -> Result<(), ExtensionError> {
+        Ok(self.transport.kill().await?)
+    }
+}
+
+fn minimal_environment() -> Vec<(OsString, OsString)> {
+    let mut environment = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        environment.push((OsString::from("PATH"), path));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        environment.push((OsString::from("SystemRoot"), system_root));
+    }
+    environment
+}
+
+/// Return deterministic user and project discovery locations. Discovery is
+/// explicit and never executes a provider by itself.
+pub fn provider_directories() -> Result<Vec<PathBuf>, ExtensionError> {
+    let user_root = if let Some(home) = std::env::var_os("JCODE_HOME") {
+        PathBuf::from(home).join("providers")
+    } else {
+        let config = dirs::config_dir()
+            .ok_or_else(|| ExtensionError::Path("no platform config directory".to_string()))?;
+        config.join("jcode").join("providers")
+    };
+    let project_root = std::env::current_dir()
+        .map_err(|error| {
+            ExtensionError::Path(format!("cannot resolve current directory: {error}"))
+        })?
+        .join(".jcode")
+        .join("providers");
+    Ok(vec![user_root, project_root])
+}
+
+/// Find provider manifests in the standard directories without loading or
+/// executing them. Results are sorted for stable CLI and doctor output.
+pub fn discover_manifest_files() -> Result<Vec<PathBuf>, ExtensionError> {
+    discover_manifest_files_in(&provider_directories()?)
+}
+
+fn discover_manifest_files_in(directories: &[PathBuf]) -> Result<Vec<PathBuf>, ExtensionError> {
+    let mut manifests = Vec::new();
+    for directory in directories {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(ExtensionError::Read {
+                    path: directory.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|source| ExtensionError::Read {
+                path: directory.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                let manifest = path.join(PROVIDER_MANIFEST_FILE);
+                if manifest.is_file() {
+                    manifests.push(manifest);
+                }
+            }
+        }
+    }
+    manifests.sort();
+    manifests.dedup();
+    Ok(manifests)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderManifest {
+    #[serde(default = "default_manifest_version")]
+    pub manifest_version: u32,
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub executable: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub permissions: Vec<Permission>,
+}
+
+fn default_manifest_version() -> u32 {
+    MANIFEST_VERSION
+}
+
+fn default_protocol_version() -> String {
+    PROTOCOL_VERSION.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    Network,
+    Filesystem,
+    Environment,
+    Subprocess,
+    NativeTools,
+}
+
+impl ProviderManifest {
+    pub fn from_toml(contents: &str, path: impl Into<PathBuf>) -> Result<Self, ExtensionError> {
+        let path = path.into();
+        let manifest: Self =
+            toml::from_str(contents).map_err(|source| ExtensionError::ParseToml {
+                path: path.clone(),
+                source,
+            })?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn validate(&self) -> Result<(), ExtensionError> {
+        if self.manifest_version != MANIFEST_VERSION {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "unsupported manifest_version {}, expected {}",
+                self.manifest_version, MANIFEST_VERSION
+            )));
+        }
+        validate_identifier("id", &self.id)?;
+        validate_non_empty("name", &self.name)?;
+        validate_non_empty("version", &self.version)?;
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "unsupported protocol_version '{}', expected '{}'",
+                self.protocol_version, PROTOCOL_VERSION
+            )));
+        }
+        validate_executable(&self.executable)?;
+        for (kind, values) in [("capability", &self.capabilities), ("model", &self.models)] {
+            for value in values {
+                validate_non_empty(kind, value)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_identifier(field: &str, value: &str) -> Result<(), ExtensionError> {
+    let valid = !value.is_empty()
+        && value.len() <= 64
+        && value.chars().enumerate().all(|(index, ch)| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || (index > 0 && matches!(ch, '-' | '_'))
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(ExtensionError::InvalidManifest(format!(
+            "{field} must match [a-z0-9][a-z0-9_-]{{0,63}}"
+        )))
+    }
+}
+
+fn validate_non_empty(field: &str, value: &str) -> Result<(), ExtensionError> {
+    if value.trim().is_empty() || value.contains(['\0', '\n', '\r']) {
+        return Err(ExtensionError::InvalidManifest(format!(
+            "{field} must be non-empty and contain no control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_executable(path: &Path) -> Result<(), ExtensionError> {
+    if path.as_os_str().is_empty() {
+        return Err(ExtensionError::InvalidManifest(
+            "executable must not be empty".to_string(),
+        ));
+    }
+    if path.to_string_lossy().contains('\0') {
+        return Err(ExtensionError::InvalidManifest(
+            "executable must not contain NUL".to_string(),
+        ));
+    }
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return Err(ExtensionError::InvalidManifest(
+            "executable must not contain '..' path components".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderRecord {
+    pub manifest: ProviderManifest,
+    #[serde(default)]
+    pub source: Option<PathBuf>,
+    #[serde(default)]
+    pub trusted: bool,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default = "unix_timestamp")]
+    pub registered_at: u64,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RegistryFile {
+    version: u32,
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderRegistry {
+    path: PathBuf,
+    providers: BTreeMap<String, ProviderRecord>,
+}
+
+impl ProviderRegistry {
+    pub fn default_path() -> Result<PathBuf, ExtensionError> {
+        if let Some(home) = std::env::var_os("JCODE_HOME") {
+            return Ok(PathBuf::from(home)
+                .join("config")
+                .join("jcode")
+                .join(DEFAULT_REGISTRY_FILE));
+        }
+        let config = dirs::config_dir()
+            .ok_or_else(|| ExtensionError::Path("no platform config directory".to_string()))?;
+        Ok(config.join("jcode").join(DEFAULT_REGISTRY_FILE))
+    }
+
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, ExtensionError> {
+        let path = path.into();
+        if !path.exists() {
+            return Ok(Self {
+                path,
+                providers: BTreeMap::new(),
+            });
+        }
+        let bytes = fs::read(&path).map_err(|source| ExtensionError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let file: RegistryFile =
+            serde_json::from_slice(&bytes).map_err(|source| ExtensionError::Decode {
+                path: path.clone(),
+                source,
+            })?;
+        if file.version != REGISTRY_VERSION {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "unsupported registry version {}, expected {}",
+                file.version, REGISTRY_VERSION
+            )));
+        }
+        for record in file.providers.values() {
+            record.manifest.validate()?;
+        }
+        Ok(Self {
+            path,
+            providers: file.providers,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn list(&self) -> impl Iterator<Item = &ProviderRecord> {
+        self.providers.values()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&ProviderRecord> {
+        self.providers.get(id)
+    }
+
+    pub fn register(
+        &mut self,
+        manifest: ProviderManifest,
+        source: Option<PathBuf>,
+        trusted: bool,
+    ) -> Result<(), ExtensionError> {
+        manifest.validate()?;
+        if self.providers.contains_key(&manifest.id) {
+            return Err(ExtensionError::DuplicateProvider(manifest.id));
+        }
+        let id = manifest.id.clone();
+        self.providers.insert(
+            id,
+            ProviderRecord {
+                manifest,
+                source,
+                trusted,
+                enabled: true,
+                registered_at: unix_timestamp(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Register a provider from an installed plugin, or update that plugin's
+    /// existing provider while preserving its enabled and trust state.
+    ///
+    /// A provider ID may only be replaced when the previous source is inside
+    /// the same plugin root. This prevents a plugin install from silently
+    /// taking over an unrelated user-managed provider with the same ID.
+    pub fn register_or_update_plugin(
+        &mut self,
+        manifest: ProviderManifest,
+        source: PathBuf,
+        plugin_root: &Path,
+        trusted: bool,
+    ) -> Result<(), ExtensionError> {
+        manifest.validate()?;
+        if !source.starts_with(plugin_root) {
+            return Err(ExtensionError::InvalidManifest(
+                "plugin provider source must remain inside its plugin root".to_string(),
+            ));
+        }
+        if let Some(existing) = self.providers.get_mut(&manifest.id) {
+            if !existing
+                .source
+                .as_deref()
+                .is_some_and(|path| path.starts_with(plugin_root))
+            {
+                return Err(ExtensionError::DuplicateProvider(manifest.id));
+            }
+            existing.manifest = manifest;
+            existing.source = Some(source);
+            existing.trusted |= trusted;
+            return Ok(());
+        }
+        self.register(manifest, Some(source), trusted)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Result<ProviderRecord, ExtensionError> {
+        self.providers
+            .remove(id)
+            .ok_or_else(|| ExtensionError::MissingProvider(id.to_string()))
+    }
+
+    pub fn set_enabled(&mut self, id: &str, enabled: bool) -> Result<(), ExtensionError> {
+        let record = self
+            .providers
+            .get_mut(id)
+            .ok_or_else(|| ExtensionError::MissingProvider(id.to_string()))?;
+        record.enabled = enabled;
+        Ok(())
+    }
+
+    pub fn set_trusted(&mut self, id: &str, trusted: bool) -> Result<(), ExtensionError> {
+        let record = self
+            .providers
+            .get_mut(id)
+            .ok_or_else(|| ExtensionError::MissingProvider(id.to_string()))?;
+        record.trusted = trusted;
+        Ok(())
+    }
+
+    pub fn save(&self) -> Result<(), ExtensionError> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(|source| ExtensionError::Write {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let bytes = serde_json::to_vec_pretty(&RegistryFile {
+            version: REGISTRY_VERSION,
+            providers: self.providers.clone(),
+        })?;
+        let mut encoded = bytes;
+        encoded.push(b'\n');
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let temp = self
+            .path
+            .with_extension(format!("json.tmp.{}.{}", std::process::id(), nonce));
+        fs::write(&temp, encoded).map_err(|source| ExtensionError::Write {
+            path: temp.clone(),
+            source,
+        })?;
+        if let Err(source) = fs::rename(&temp, &self.path) {
+            let _ = fs::remove_file(&temp);
+            return Err(ExtensionError::Write {
+                path: self.path.clone(),
+                source,
+            });
+        }
+        Ok(())
+    }
+}
+
+pub fn load_manifest_file(path: impl AsRef<Path>) -> Result<ProviderManifest, ExtensionError> {
+    let path = path.as_ref().to_path_buf();
+    let contents = fs::read_to_string(&path).map_err(|source| ExtensionError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    ProviderManifest::from_toml(&contents, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn manifest(id: &str) -> ProviderManifest {
+        ProviderManifest {
+            manifest_version: MANIFEST_VERSION,
+            id: id.to_string(),
+            name: "Fixture Provider".to_string(),
+            version: "1.2.3".to_string(),
+            executable: PathBuf::from("fixture-provider"),
+            args: vec!["--stdio".to_string()],
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            capabilities: vec!["streaming".to_string()],
+            models: vec!["fixture-model".to_string()],
+            permissions: vec![Permission::Network],
+        }
+    }
+
+    #[test]
+    fn manifest_toml_roundtrip_and_validation() {
+        let input = r#"
+manifest_version = 1
+id = "fixture-provider"
+name = "Fixture Provider"
+version = "1.2.3"
+executable = "fixture-provider"
+args = ["--stdio"]
+protocol_version = "0.1"
+capabilities = ["streaming"]
+models = ["fixture-model"]
+permissions = ["network"]
+"#;
+        let parsed = ProviderManifest::from_toml(input, "provider.toml").unwrap();
+        assert_eq!(parsed, manifest("fixture-provider"));
+    }
+
+    #[test]
+    fn unsafe_manifest_values_are_rejected() {
+        let mut invalid = manifest("Bad-ID");
+        assert!(invalid.validate().is_err());
+        invalid = manifest("valid");
+        invalid.executable = PathBuf::from("../provider");
+        assert!(invalid.validate().is_err());
+        invalid = manifest("valid");
+        invalid.protocol_version = "9.0".to_string();
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn registry_roundtrip_duplicate_and_lifecycle() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        let mut registry = ProviderRegistry::open(&path).unwrap();
+        registry
+            .register(manifest("fixture-provider"), None, true)
+            .unwrap();
+        assert!(matches!(
+            registry.register(manifest("fixture-provider"), None, true),
+            Err(ExtensionError::DuplicateProvider(_))
+        ));
+        registry.set_enabled("fixture-provider", false).unwrap();
+        registry.save().unwrap();
+
+        let mut loaded = ProviderRegistry::open(&path).unwrap();
+        assert!(!loaded.get("fixture-provider").unwrap().enabled);
+        loaded.remove("fixture-provider").unwrap();
+        assert_eq!(loaded.list().count(), 0);
+    }
+
+    #[test]
+    fn plugin_provider_update_preserves_state_and_rejects_foreign_owner() {
+        let dir = tempdir().unwrap();
+        let plugin_root = dir.path().join("plugin");
+        let old_source = plugin_root.join("versions/1.0.0+old");
+        let new_source = plugin_root.join("versions/1.1.0+new");
+        let foreign_source = dir.path().join("other/versions/1.1.0+new");
+        let mut registry = ProviderRegistry::open(dir.path().join("providers.json")).unwrap();
+        registry
+            .register(manifest("fixture-provider"), Some(old_source), true)
+            .unwrap();
+        registry.set_enabled("fixture-provider", false).unwrap();
+
+        let mut updated = manifest("fixture-provider");
+        updated.version = "1.1.0".to_string();
+        registry
+            .register_or_update_plugin(updated.clone(), new_source, &plugin_root, false)
+            .unwrap();
+        let record = registry.get("fixture-provider").unwrap();
+        assert_eq!(record.manifest.version, "1.1.0");
+        assert!(!record.enabled);
+        assert!(record.trusted);
+
+        assert!(matches!(
+            registry.register_or_update_plugin(updated, foreign_source, &plugin_root, false,),
+            Err(ExtensionError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn missing_registry_starts_empty() {
+        let dir = tempdir().unwrap();
+        let registry = ProviderRegistry::open(dir.path().join("missing.json")).unwrap();
+        assert_eq!(registry.list().count(), 0);
+    }
+
+    #[test]
+    fn discovery_is_sorted_and_does_not_require_registration() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("z-provider");
+        let second = dir.path().join("a-provider");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join(PROVIDER_MANIFEST_FILE), "id = 'z'").unwrap();
+        fs::write(second.join(PROVIDER_MANIFEST_FILE), "id = 'a'").unwrap();
+        let discovered = discover_manifest_files_in(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(
+            discovered,
+            vec![
+                second.join(PROVIDER_MANIFEST_FILE),
+                first.join(PROVIDER_MANIFEST_FILE)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_enabled_record_starts_and_collects_a_request() {
+        let script = concat!(
+            "import sys,json\n",
+            "for line in sys.stdin:\n",
+            " f=json.loads(line)\n",
+            " if f['kind']=='hello':\n",
+            "  print(json.dumps({'kind':'hello_ok','protocol_version':'0.1','provider':{'id':'fixture','name':'Fixture','version':'1'},'capabilities':['streaming']}),flush=True)\n",
+            " elif f['kind']=='request':\n",
+            "  print(json.dumps({'kind':'response','protocol_version':'0.1','id':f['id'],'ok':True,'result':{'text':'ok'}}),flush=True)\n",
+        );
+        let mut provider = manifest("fixture");
+        provider.executable = PathBuf::from("python3");
+        provider.args = vec!["-c".to_string(), script.to_string()];
+        provider.permissions.clear();
+        let record = ProviderRecord {
+            manifest: provider,
+            source: None,
+            trusted: true,
+            enabled: true,
+            registered_at: 0,
+        };
+        let process = ExternalProviderProcess::start(&record, "jcode-test")
+            .await
+            .unwrap();
+        assert_eq!(process.handshake().provider.id, "fixture");
+        let frames = process
+            .request_and_collect("request-1", "complete", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(matches!(
+            frames.last(),
+            Some(Frame::Response { id, ok: true, .. }) if id == "request-1"
+        ));
+        process.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabled_untrusted_and_denied_records_do_not_start() {
+        let mut record = ProviderRecord {
+            manifest: manifest("fixture"),
+            source: None,
+            trusted: false,
+            enabled: true,
+            registered_at: 0,
+        };
+        assert!(matches!(
+            ExternalProviderProcess::start(&record, "jcode-test").await,
+            Err(ExtensionError::UntrustedProvider(_))
+        ));
+        record.trusted = true;
+        record.enabled = false;
+        assert!(matches!(
+            ExternalProviderProcess::start(&record, "jcode-test").await,
+            Err(ExtensionError::DisabledProvider(_))
+        ));
+        record.enabled = true;
+        record.manifest.permissions = vec![Permission::Network];
+        assert!(matches!(
+            ExternalProviderProcess::start(&record, "jcode-test").await,
+            Err(ExtensionError::PermissionDenied { .. })
+        ));
+    }
+}
