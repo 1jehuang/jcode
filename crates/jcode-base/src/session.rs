@@ -46,6 +46,7 @@ pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
+pub use jcode_session_types::prompt_title;
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
@@ -1303,8 +1304,40 @@ request in this new forked session, using the inherited conversation only as con
         self.memory_profile_cache
             .message_stats
             .merge_from(&summarize_blocks(&message.content));
+        self.adopt_prompt_title(&message);
         self.messages.push(message);
         self.mark_messages_append_dirty();
+    }
+
+    /// Name an untitled session after its first real user prompt so lists show
+    /// something recognizable instead of a generic placeholder. Renames,
+    /// bookmark labels, and todo goals still take precedence at display time.
+    fn adopt_prompt_title(&mut self, message: &StoredMessage) {
+        if self.title.is_some()
+            || message.role != Role::User
+            || !is_visible_conversation_message(message)
+        {
+            return;
+        }
+        self.title = message.content.iter().find_map(|block| match block {
+            ContentBlock::Text { text, .. } => prompt_title(text),
+            _ => None,
+        });
+    }
+
+    /// Give sessions recorded before prompt titles existed the same fallback.
+    pub(crate) fn backfill_prompt_title(&mut self) {
+        if self.title.is_some() {
+            return;
+        }
+        let first_prompt = self
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User && is_visible_conversation_message(message))
+            .cloned();
+        if let Some(message) = first_prompt {
+            self.adopt_prompt_title(&message);
+        }
     }
 
     pub fn insert_message(&mut self, index: usize, message: StoredMessage) {

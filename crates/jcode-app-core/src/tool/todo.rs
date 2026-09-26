@@ -727,7 +727,8 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update structured todo items and optional goal-level assessments."
+        "Read or update structured todo items and optional goal-level assessments. \
+         Use it very often: plan non-trivial work up front and update statuses as you go."
     }
 
     fn parameters_schema(&self) -> Value {

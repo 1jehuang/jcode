@@ -634,7 +634,9 @@ async fn tool_descriptions_stay_under_token_cap() {
     // batch_tests::description_includes_parallel_tool_call_example).
     // browser carries the status-first and handoff-by-default routing policy
     // (e1576e9e3 and earlier), pinned by browser_tests.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm", "batch", "browser"];
+    // todo carries a deliberate "use it very often" directive requested by the
+    // user, so planning happens proactively rather than only when prompted.
+    const EXEMPT: &[&str] = &["integration_tools", "swarm", "batch", "browser", "todo"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;

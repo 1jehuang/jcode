@@ -753,6 +753,8 @@ impl BridgeState {
                             .map(|metadata| (id.clone(), metadata))
                     })
                     .collect();
+                let mut metadata = metadata;
+                Self::backfill_prompt_titles(&ids, &indexed_metadata, &mut metadata);
                 let metadata_loaded = list_started.elapsed();
                 for id in &ids {
                     if !self.session_dirs.contains_key(id)
@@ -2530,6 +2532,142 @@ impl BridgeState {
 
     fn recent_session_index_path() -> Option<std::path::PathBuf> {
         Some(Self::jcode_home()?.join("session-metadata-v1.sqlite3"))
+    }
+
+    /// Name sessions recorded before first-prompt titles existed. Each
+    /// session is derived once and cached in the shared index (an empty
+    /// value marks "no usable prompt"). The work is time-boxed per request,
+    /// newest first, so a large backlog is spread across list calls.
+    fn backfill_prompt_titles(
+        ids: &BTreeSet<String>,
+        indexed: &BTreeMap<String, RecentSessionIndexEntry>,
+        metadata: &mut BTreeMap<String, PersistedSessionMetadata>,
+    ) {
+        const BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let mut pending: Vec<_> = ids
+            .iter()
+            .filter_map(|id| indexed.get(id))
+            .filter(|entry| entry.generated_title.is_none())
+            .collect();
+        pending.sort_by_key(|entry| {
+            std::cmp::Reverse(entry.last_active_at_ms.unwrap_or(entry.updated_at_ms))
+        });
+        for entry in pending {
+            if started.elapsed() > BUDGET {
+                break;
+            }
+            let id = &entry.session_id;
+            let title = Self::first_prompt_title(id);
+            // Empty marks "no usable prompt" so the record is not rescanned.
+            if let Some(path) = Self::recent_session_index_path()
+                && let Ok(connection) = Connection::open(path)
+            {
+                let _ = connection.execute(
+                    "UPDATE recent_sessions SET generated_title = ?2
+                     WHERE session_id = ?1 AND generated_title IS NULL",
+                    params![id, title.clone().unwrap_or_default()],
+                );
+            }
+            if let Some(title) = title
+                && let Some(value) = metadata.get_mut(id)
+            {
+                value.title = Some(title);
+            }
+        }
+    }
+
+    /// Title derived from a session's first visible user prompt, matching the
+    /// runtime's own fallback. Streams the record so only that prompt's text
+    /// is materialized, then falls back to the append journal.
+    fn first_prompt_title(session_id: &str) -> Option<String> {
+        use serde::de::{IgnoredAny, SeqAccess, Visitor};
+
+        #[derive(Deserialize)]
+        struct LiteBlock {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            text: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct LiteMessage {
+            role: String,
+            #[serde(default)]
+            display_role: Option<IgnoredAny>,
+            #[serde(default)]
+            content: Vec<LiteBlock>,
+        }
+        impl LiteMessage {
+            fn title(&self) -> Option<String> {
+                if self.role != "user" || self.display_role.is_some() {
+                    return None;
+                }
+                let mut texts = self
+                    .content
+                    .iter()
+                    .filter(|block| block.kind == "text")
+                    .filter_map(|block| block.text.as_deref());
+                let first = texts.next()?;
+                if first.trim_start().starts_with("<system-reminder>") {
+                    return None;
+                }
+                std::iter::once(first)
+                    .chain(texts)
+                    .find_map(jcode_session_types::prompt_title)
+            }
+        }
+        #[derive(Default)]
+        struct FirstPrompt(Option<String>);
+        impl<'de> Deserialize<'de> for FirstPrompt {
+            fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+                struct Scan;
+                impl<'de> Visitor<'de> for Scan {
+                    type Value = FirstPrompt;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("a message list")
+                    }
+                    fn visit_seq<A: SeqAccess<'de>>(
+                        self,
+                        mut seq: A,
+                    ) -> Result<FirstPrompt, A::Error> {
+                        let mut found = None;
+                        while found.is_none() {
+                            match seq.next_element::<LiteMessage>()? {
+                                Some(message) => found = message.title(),
+                                None => return Ok(FirstPrompt(None)),
+                            }
+                        }
+                        while seq.next_element::<IgnoredAny>()?.is_some() {}
+                        Ok(FirstPrompt(found))
+                    }
+                }
+                de.deserialize_seq(Scan)
+            }
+        }
+        #[derive(Deserialize)]
+        struct Record {
+            #[serde(default)]
+            messages: FirstPrompt,
+        }
+        #[derive(Deserialize)]
+        struct JournalEntry {
+            #[serde(default)]
+            append_messages: FirstPrompt,
+        }
+
+        let path = Self::session_record_path(session_id)?;
+        let file = std::fs::File::open(&path).ok()?;
+        let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(file));
+        if let Some(title) = Record::deserialize(&mut de).ok().and_then(|r| r.messages.0) {
+            return Some(title);
+        }
+        let journal = path.with_file_name(format!("{session_id}.journal.jsonl"));
+        let reader = std::io::BufReader::new(std::fs::File::open(journal).ok()?);
+        std::io::BufRead::lines(reader)
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str::<JournalEntry>(&line).ok())
+            .find_map(|entry| entry.append_messages.0)
     }
 
     fn recent_session_index_entries() -> Vec<RecentSessionIndexEntry> {
