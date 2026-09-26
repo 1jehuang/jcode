@@ -152,10 +152,40 @@ static LOG_INFO_HOOK: OnceLock<fn(&str)> = OnceLock::new();
 static LOG_WARN_HOOK: OnceLock<fn(&str)> = OnceLock::new();
 static RENDER_COMPLETED_HOOK: OnceLock<fn()> = OnceLock::new();
 static MEMORY_SNAPSHOT_HOOK: OnceLock<fn() -> ProcessMemorySnapshot> = OnceLock::new();
+/// Direct writer for Kitty transmit payloads under grid multiplexers whose APC
+/// passthrough degrades when a huge transmit rides inside a single cell write
+/// (measured on luvus 0.14.2: the parser stalls partway through a giant
+/// in-cell APC string and the trailing placement then forwards at whatever
+/// cursor the multiplexer has reached, landing on its bottom chrome). When
+/// installed, the multiplexed real-placement path streams the transmit through
+/// this hook in paced chunk writes instead of embedding it in the anchor
+/// cell's symbol; the cell then carries only the small delete+placement pair.
+/// Without a hook the renderer keeps the in-cell embedding as a fallback.
+/// A Mutex (not OnceLock like the other hooks) so tests can swap/clear it
+/// while holding `IMAGE_TEST_LOCK`.
+static TRANSMIT_WRITER_HOOK: Mutex<Option<fn(&[u8])>> = Mutex::new(None);
 
 pub fn set_log_hooks(info: fn(&str), warn: fn(&str)) {
     let _ = LOG_INFO_HOOK.set(info);
     let _ = LOG_WARN_HOOK.set(warn);
+}
+
+/// Install the direct transmit writer (TUI only). Called once at startup.
+pub fn set_transmit_writer_hook(hook: fn(&[u8])) {
+    if let Ok(mut slot) = TRANSMIT_WRITER_HOOK.lock() {
+        *slot = Some(hook);
+    }
+}
+
+pub(crate) fn transmit_writer_hook() -> Option<fn(&[u8])> {
+    TRANSMIT_WRITER_HOOK.lock().ok().and_then(|guard| *guard)
+}
+
+#[cfg(test)]
+pub(crate) fn clear_transmit_writer_hook_for_tests() {
+    if let Ok(mut slot) = TRANSMIT_WRITER_HOOK.lock() {
+        *slot = None;
+    }
 }
 
 pub fn set_render_completed_hook(hook: fn()) {
@@ -982,6 +1012,27 @@ impl KittyViewportCache {
         Some((unique_id, pending))
     }
 
+    /// Like `take_pending_transmit`, but also returns the fitted cell geometry
+    /// and the cell pixel size the state was built with, so a caller that
+    /// re-displays through a real kitty placement can size and crop it without
+    /// touching the global picker.
+    fn take_pending_transmit_with_geometry(
+        &mut self,
+        hash: u64,
+    ) -> Option<(u32, u16, u16, (u16, u16), Option<String>)> {
+        let state = self.get_mut(hash)?;
+        let unique_id = state.unique_id;
+        let full_cols = state.full_cols;
+        let full_rows = state.full_rows;
+        let font_size = state.font_size;
+        let pending = state.pending_transmit.take();
+        let pending_bytes = std::mem::take(&mut state.pending_transmit_bytes);
+        self.total_pending_transmit_bytes = self
+            .total_pending_transmit_bytes
+            .saturating_sub(pending_bytes);
+        Some((unique_id, full_cols, full_rows, font_size, pending))
+    }
+
     #[cfg(feature = "renderer")]
     fn remove(&mut self, hash: &u64) {
         if let Some(state) = self.entries.remove(hash) {
@@ -1579,6 +1630,21 @@ pub fn take_terminal_image_cleanup_payload() -> String {
 /// frame. Escape sequences are zero-width, so preserving the original symbol
 /// keeps the rendered frame visually unchanged even when no image remains.
 pub fn render_pending_terminal_image_cleanup(buf: &mut Buffer) -> bool {
+    // Close the frame first: a real Kitty placement is terminal-side state, so an
+    // image that emitted one last frame and none in this frame still owns a
+    // placement the terminal keeps painting (the multiplexer never repaints the
+    // cells it covered). This must run even for a zero-sized buffer so the frame
+    // bookkeeping stays in step.
+    // The fitted state stays cached on purpose: it is bounded by the viewport
+    // state cache's own LRU, and keeping it warm is what makes scrolling past an
+    // image and back cheap - re-entering an image re-places from the cached fit
+    // instead of rebuilding it (decoded bytes + a fresh transmit). The scroll
+    // benchmark pins that steady state
+    // (`image_scroll_steady_state_has_no_per_frame_stats_or_rebuilds`).
+    for (_hash, unique_id, placement_id) in viewport_render::take_placements_no_longer_drawn() {
+        viewport_render::queue_kitty_placement_delete(unique_id, placement_id);
+    }
+
     let area = *buf.area();
     if area.width == 0 || area.height == 0 {
         return false;
