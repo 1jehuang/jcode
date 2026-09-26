@@ -250,6 +250,7 @@ fn resolved_named_profile_suggests_newest_cached_live_release() {
                 context_length: None,
                 pricing: Default::default(),
                 created: Some(1_700_000_000),
+                ..Default::default()
             },
             jcode_provider_openrouter::ModelInfo {
                 id: "newer-model".to_string(),
@@ -257,6 +258,7 @@ fn resolved_named_profile_suggests_newest_cached_live_release() {
                 context_length: None,
                 pricing: Default::default(),
                 created: Some(1_800_000_000),
+                ..Default::default()
             },
         ],
         Some(CEREBRAS_PROFILE.api_base),
@@ -287,6 +289,7 @@ fn resolved_named_profile_skips_non_chat_models_when_picking_newest_default() {
                 context_length: None,
                 pricing: Default::default(),
                 created: Some(1_700_000_000),
+                ..Default::default()
             },
             jcode_provider_openrouter::ModelInfo {
                 id: "newer-chat-model".to_string(),
@@ -294,6 +297,7 @@ fn resolved_named_profile_skips_non_chat_models_when_picking_newest_default() {
                 context_length: None,
                 pricing: Default::default(),
                 created: Some(1_800_000_000),
+                ..Default::default()
             },
             // Newest of all, but a non-chat (TTS) model that must be skipped.
             jcode_provider_openrouter::ModelInfo {
@@ -302,6 +306,7 @@ fn resolved_named_profile_skips_non_chat_models_when_picking_newest_default() {
                 context_length: None,
                 pricing: Default::default(),
                 created: Some(1_900_000_000),
+                ..Default::default()
             },
             jcode_provider_openrouter::ModelInfo {
                 id: "whisper-large-v3".to_string(),
@@ -309,6 +314,7 @@ fn resolved_named_profile_skips_non_chat_models_when_picking_newest_default() {
                 context_length: None,
                 pricing: Default::default(),
                 created: Some(1_950_000_000),
+                ..Default::default()
             },
         ],
         Some(CEREBRAS_PROFILE.api_base),
@@ -1145,6 +1151,7 @@ fn newest_release_picker_prefers_strongest_tier_over_newest_cheap() {
         context_length: None,
         pricing: Default::default(),
         created: Some(created),
+        ..Default::default()
     };
 
     // A heterogeneous proxy catalog (like OpenCode Zen): the NEWEST model is a
@@ -1181,6 +1188,7 @@ fn newest_release_picker_uses_recency_within_a_tier() {
         context_length: None,
         pricing: Default::default(),
         created: Some(created),
+        ..Default::default()
     };
 
     // All same (bare frontier) tier: recency decides.

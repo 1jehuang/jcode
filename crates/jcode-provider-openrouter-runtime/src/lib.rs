@@ -2934,6 +2934,10 @@ mod openrouter_catalog_merge_tests;
 mod openrouter_pricing_deadlock_tests;
 
 #[cfg(test)]
+#[path = "openrouter_input_modalities_tests.rs"]
+mod openrouter_input_modalities_tests;
+
+#[cfg(test)]
 #[path = "issue_1056_tests.rs"]
 mod issue_1056_tests;
 
