@@ -42,6 +42,14 @@ impl Agent {
         pending && batch_available
     }
 
+    pub(super) fn plan_limit_reminder(
+        notice: &crate::subscription_notice::QuotaExceeded,
+    ) -> String {
+        format!(
+            "<system-reminder>Jcode plan limit: {notice} Briefly tell the user this in your reply, including the upgrade link if one is given. Do not open checkout or purchase anything. Continue the task without that feature.</system-reminder>"
+        )
+    }
+
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
@@ -146,6 +154,12 @@ impl Agent {
                 messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
+            }
+            // Background features (memory recall) can hit a plan limit with no
+            // visible failure. Surface it once through the agent so every UI
+            // shows the upgrade prompt instead of silently degrading.
+            if let Some(notice) = crate::subscription_notice::take() {
+                messages_with_memory.push(Message::user(&Self::plan_limit_reminder(&notice)));
             }
 
             logging::info(&format!(
@@ -1320,5 +1334,21 @@ mod tests {
         assert!(!Agent::should_inject_batch_nudge(true, false));
         assert!(Agent::BATCH_NUDGE.contains("use the batch tool"));
         assert!(Agent::BATCH_NUDGE.contains("result is required"));
+    }
+
+    #[test]
+    fn plan_limit_reminder_relays_upgrade_link_without_purchasing() {
+        let reminder = Agent::plan_limit_reminder(&crate::subscription_notice::QuotaExceeded {
+            feature: "memory".into(),
+            tier: Some("plus".into()),
+            upgrade_tier: Some("pro".into()),
+            upgrade_url: Some("https://jcode.sh/pricing".into()),
+            resets_at: None,
+        });
+        assert!(reminder.starts_with("<system-reminder>"));
+        assert!(reminder.contains("Daily memory recall limit reached on your Plus plan"));
+        assert!(reminder.contains("Upgrade to Pro"));
+        assert!(reminder.contains("https://jcode.sh/pricing"));
+        assert!(reminder.contains("Do not open checkout"));
     }
 }

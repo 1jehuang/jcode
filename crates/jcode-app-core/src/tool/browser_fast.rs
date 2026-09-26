@@ -725,7 +725,19 @@ pub(super) async fn run(
     }.await;
     let (status, reason) = match result {
         Ok(pair) => pair,
-        Err(error) => ("hand_back", format!("{error:#}")),
+        Err(error) => {
+            if let Some(quota) = crate::subscription_notice::from_error(&error) {
+                // A plan limit cannot be fixed by retrying. Tell the agent to
+                // relay the upgrade prompt to the user and use direct actions.
+                requested_help = Some("upgrade");
+                (
+                    "hand_back",
+                    format!("{quota} Tell the user this and continue with direct browser actions."),
+                )
+            } else {
+                ("hand_back", format!("{error:#}"))
+            }
+        }
     };
     if status == "hand_back"
         && let Some(last) = trace.last_mut()
