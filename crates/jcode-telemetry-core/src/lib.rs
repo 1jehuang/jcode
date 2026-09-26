@@ -2,6 +2,7 @@ use jcode_logging as logging;
 use jcode_storage as storage;
 mod concurrency;
 mod lifecycle;
+pub mod otel;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;
 mod state_support;
@@ -48,6 +49,7 @@ static TELEMETRY_QUEUE_OVERFLOW_WARNED: AtomicBool = AtomicBool::new(false);
 #[cfg(not(test))]
 static TELEMETRY_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
 #[cfg(not(test))]
+#[allow(dead_code)] // live in non-test builds; shadowed by cfg(test) early return in send_transcript_payload
 static TRANSCRIPT_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
 #[cfg(not(test))]
 static TELEMETRY_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
@@ -231,6 +233,7 @@ struct TurnTelemetry {
     todo_gate_intent_count: u32,
     todo_gate_completion_count: u32,
     todo_gate_spike_count: u32,
+    otel_start_nanos: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +350,9 @@ struct SessionTelemetry {
     provider_switches: u32,
     model_switches: u32,
     todo: TodoSessionTelemetry,
+    // OTEL span tracking
+    otel_start_nanos: u64,
+    otel_session_span_id: String,
 }
 
 impl TurnTelemetry {
@@ -414,6 +420,7 @@ impl TurnTelemetry {
             todo_gate_intent_count: 0,
             todo_gate_completion_count: 0,
             todo_gate_spike_count: 0,
+            otel_start_nanos: otel::now_unix_nanos(),
         }
     }
 }
@@ -580,6 +587,24 @@ fn share_content_marker_path() -> Option<std::path::PathBuf> {
         // Version the marker so introducing actual uploads cannot silently turn
         // an older, pre-upload UI choice into consent for the new program.
         .map(|d| d.join("telemetry_share_transcripts_v1"))
+}
+
+// ── Active session tracking helpers ─────────────────────────────────────────
+// Mirrors jcode-app-core::telemetry_state so lifecycle.rs can manage
+// active-session files without depending on the higher-level app-core crate.
+
+fn active_sessions_dir() -> Option<std::path::PathBuf> {
+    storage::jcode_dir().ok().map(|d| d.join("telemetry_active_sessions"))
+}
+
+fn active_session_file(session_id: &str) -> Option<std::path::PathBuf> {
+    active_sessions_dir().map(|dir| dir.join(format!("{}.active", session_id)))
+}
+
+pub(crate) fn unregister_active_session(session_id: &str) {
+    if let Some(path) = active_session_file(session_id) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Whether the user has opted in to sharing prompt/transcript content.
@@ -1358,6 +1383,7 @@ fn post_payload_with_retry(payload: serde_json::Value, timeout: Duration) -> boo
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)] // called from transcript_background_sender, which is cfg(not(test))-only path
 fn post_transcript_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
@@ -1416,6 +1442,7 @@ fn background_sender() -> &'static SyncSender<Value> {
 }
 
 #[cfg(not(test))]
+#[allow(dead_code)] // live in non-test builds; send_transcript_payload returns early in cfg(test)
 fn transcript_background_sender() -> &'static SyncSender<Value> {
     TRANSCRIPT_BACKGROUND_SENDER.get_or_init(|| {
         spawn_background_worker(64, |payload| {
@@ -1566,6 +1593,8 @@ fn finalize_current_turn(
     let Some(turn) = state.current_turn.take() else {
         return;
     };
+    // Capture OTEL start timestamp before turn fields are consumed.
+    let turn_otel_start_nanos = turn.otel_start_nanos;
     let idle_after_turn_ms = now
         .checked_duration_since(turn.last_activity_at)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
@@ -1699,6 +1728,36 @@ fn finalize_current_turn(
         ran_from_cargo: from_cargo,
     };
     let _ = emit_turn_end_event(event, mode);
+    // Export OTEL turn span when a collector is configured.
+    if otel::is_otel_enabled() {
+        let turn_end_nanos = otel::now_unix_nanos();
+        let trace_id = otel::trace_id_from_uuid(&state.session_id);
+        let span_id_raw = uuid::Uuid::new_v4().to_string();
+        let span_id = otel::span_id_from_uuid(&span_id_raw);
+        otel::export_turn_span(&otel::TurnSpanData {
+            trace_id: &trace_id,
+            span_id: &span_id,
+            parent_span_id: &state.otel_session_span_id,
+            session_id: &state.session_id,
+            turn_index: state.turns,
+            start_nanos: turn_otel_start_nanos,
+            end_nanos: turn_end_nanos,
+            input_tokens: turn.input_tokens,
+            output_tokens: turn.output_tokens,
+            total_tokens: turn.total_tokens,
+            tool_calls: turn.tool_calls,
+            tool_failures: turn.tool_failures,
+            executed_tool_calls: turn.executed_tool_calls,
+            file_write_calls: turn.file_write_calls,
+            tests_run: turn.tests_run,
+            tests_passed: turn.tests_passed,
+            turn_success,
+            turn_abandoned,
+            end_reason,
+            provider: &state.provider_start,
+            model: &state.model_start,
+        });
+    }
 }
 
 fn maybe_emit_session_start() {
@@ -1985,9 +2044,10 @@ fn begin_session_with_mode(
     parent_session_id: Option<String>,
     resumed_session: bool,
 ) {
-    if !is_enabled() {
-        return;
-    }
+    // Always populate SESSION_STATE so OTEL export works regardless of the
+    // anonymous-telemetry opt-out. The analytics upload in emit_lifecycle_event
+    // is independently gated by is_enabled(), so skipping this init would only
+    // prevent OTEL from seeing a complete session span.
     logging::info(&format!(
         "begin telemetry session provider={} model={} resumed={} parent={}",
         sanitize_telemetry_label(provider),
@@ -1999,9 +2059,20 @@ fn begin_session_with_mode(
     let started_at_utc = Utc::now();
     let session_id = uuid::Uuid::new_v4().to_string();
     let correlation_id = uuid::Uuid::new_v4().to_string();
-    let (previous_session_gap_secs, sessions_started_24h, sessions_started_7d) = get_or_create_id()
-        .map(|id| update_session_start_history(&id, started_at_utc))
-        .unwrap_or((None, 0, 0));
+    // get_or_create_id() creates a persistent on-disk identity file and
+    // update_session_start_history() writes activity records. When both
+    // anonymous telemetry AND OTEL export are disabled these writes serve
+    // no purpose and would be a regression vs. the pre-OTEL behaviour where
+    // opted-out sessions performed no disk activity. The in-memory SESSION_STATE
+    // is still populated so OTEL export works when an endpoint is configured.
+    let (previous_session_gap_secs, sessions_started_24h, sessions_started_7d) =
+        if is_enabled() || otel::is_otel_enabled() {
+            get_or_create_id()
+                .map(|id| update_session_start_history(&id, started_at_utc))
+                .unwrap_or((None, 0, 0))
+        } else {
+            (None, 0, 0)
+        };
     // The process-global accumulator cannot attribute logical Agent concurrency.
     // These legacy struct fields are stripped from all emitted payloads.
     let (active_sessions_at_start, other_active_sessions_at_start) = (0, 0);
@@ -2116,6 +2187,11 @@ fn begin_session_with_mode(
         provider_switches: 0,
         model_switches: 0,
         todo: TodoSessionTelemetry::default(),
+        otel_start_nanos: otel::now_unix_nanos(),
+        otel_session_span_id: {
+            let raw_id = uuid::Uuid::new_v4().to_string();
+            otel::span_id_from_uuid(&raw_id)
+        },
     };
     // A live session in the slot means the process is switching sessions
     // without anyone calling end_session (agent create/attach both call
@@ -2134,8 +2210,16 @@ fn begin_session_with_mode(
         Err(_) => None,
     };
     if let Some((provider_start, model_start, start_event_sent)) = superseded {
-        // Only worth an end event if the start was actually emitted; an
-        // unsent start has no orphan to pair with.
+        // Export the OTEL session span BEFORE emit_lifecycle_event clears
+        // SESSION_STATE. Turn spans for this trace_id may have already been
+        // shipped; without a matching parent session span the collector cannot
+        // join them. This is gated by is_otel_enabled() inside the function
+        // and is a no-op when no endpoint is configured. In non-test builds
+        // the export is fire-and-forget (background thread) so session
+        // replacement is never blocked by network I/O.
+        export_otel_session_span_from_state(SessionEndReason::Superseded);
+        // Emit the anonymous lifecycle end event only when the start was sent;
+        // an unsent start has no orphan event to pair with.
         if start_event_sent {
             emit_lifecycle_event(
                 "session_end",
@@ -2558,11 +2642,52 @@ pub fn end_session(provider_end: &str, model_end: &str) {
 }
 
 pub fn end_session_with_reason(provider_end: &str, model_end: &str, reason: SessionEndReason) {
+    // Export OTEL span unconditionally (independent of anonymous telemetry
+    // opt-out). OTEL is an independent enterprise feature.
+    export_otel_session_span_from_state(reason);
     emit_lifecycle_event("session_end", provider_end, model_end, reason, true);
 }
 
 pub fn record_crash(provider_end: &str, model_end: &str, reason: SessionEndReason) {
+    export_otel_session_span_from_state(reason);
     emit_lifecycle_event("session_crash", provider_end, model_end, reason, true);
+}
+
+/// Export an OTEL session span directly from SESSION_STATE, bypassing the
+/// anonymous-telemetry `is_enabled()` guard. OTEL is an independent enterprise
+/// feature that must fire even when `JCODE_NO_TELEMETRY=1`.
+fn export_otel_session_span_from_state(reason: SessionEndReason) {
+    if !otel::is_otel_enabled() {
+        return;
+    }
+    let state_snapshot = match SESSION_STATE.lock().ok().and_then(|g| g.clone()) {
+        Some(s) => s,
+        None => return,
+    };
+    let end_nanos = otel::now_unix_nanos();
+    let trace_id = otel::trace_id_from_uuid(&state_snapshot.session_id);
+    otel::export_session_span(&otel::SessionSpanData {
+        trace_id: &trace_id,
+        span_id: &state_snapshot.otel_session_span_id,
+        session_id: &state_snapshot.session_id,
+        correlation_id: &state_snapshot.correlation_id,
+        provider: &state_snapshot.provider_start,
+        model: &state_snapshot.model_start,
+        start_nanos: state_snapshot.otel_start_nanos,
+        end_nanos,
+        end_reason: reason.as_str(),
+        turns: state_snapshot.turns,
+        input_tokens: state_snapshot.input_tokens,
+        output_tokens: state_snapshot.output_tokens,
+        total_tokens: state_snapshot.total_tokens,
+        tool_calls: state_snapshot.tool_calls,
+        tool_failures: state_snapshot.tool_failures,
+        resumed: state_snapshot.resumed_session,
+        parent_session_id: state_snapshot.parent_session_id.as_deref(),
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        version: version().as_str(),
+    });
 }
 
 pub fn current_provider_model() -> Option<(String, String)> {
