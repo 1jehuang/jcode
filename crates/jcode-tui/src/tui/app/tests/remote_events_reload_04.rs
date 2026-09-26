@@ -366,6 +366,53 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
 }
 
 #[test]
+fn test_remote_content_filter_block_fails_fast_without_retry_budget() {
+    // Measured 2026-09-25: an OpenRouter guardrail block on text in the history
+    // was resent as an empty continuation every few seconds. The block is
+    // decided by the request content, so no resend can succeed.
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: String::new(),
+        images: vec![],
+        is_system: true,
+        system_reminder: Some("continue".to_string()),
+        auto_retry: true,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 22,
+            message: "OpenAI-compatible chat request failed\n  endpoint: https://openrouter.ai/api/v1/chat/completions\n  model: openrouter/auto\n  auth: OPENROUTER_API_KEY\n  status: 403 Forbidden\n  response: {\"error\":{\"message\":\"Request blocked by content filter: [CREDIT_CARD]\",\"code\":403}}".to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.rate_limit_reset.is_none());
+    let contents: Vec<String> = app
+        .display_messages()
+        .iter()
+        .map(|m| m.content.clone())
+        .collect();
+    assert!(
+        contents
+            .iter()
+            .any(|c| c.contains("Not retrying") && c.contains("[CREDIT_CARD]")),
+        "expected a content-filter hint naming the entity, got: {contents:?}"
+    );
+    assert!(!contents.iter().any(|c| c.contains("attempt 1/")));
+}
+
+#[test]
 fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

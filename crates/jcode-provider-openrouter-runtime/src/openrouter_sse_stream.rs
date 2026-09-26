@@ -1,6 +1,78 @@
 use super::*;
 use jcode_provider_openrouter::stream::OpenRouterStream;
 
+/// Whether the parsed host is exactly `localhost` or a loopback address. A
+/// prefix match would exempt remote hosts such as `localhost.example.com`.
+fn is_loopback_base(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Client for loopback bases, which skip the PAN check: it never follows a
+/// redirect and never goes through a system proxy, so the body cannot be
+/// forwarded off the machine by the HTTP layer. `None` if it cannot be built,
+/// in which case the loopback base loses its exemption.
+fn loopback_client() -> Option<Client> {
+    static CLIENT: OnceLock<Option<Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            let built = Client::builder()
+                .user_agent(jcode_provider_core::JCODE_USER_AGENT)
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build();
+            match built {
+                Ok(client) => Some(client),
+                Err(error) => {
+                    jcode_base::logging::warn(&format!(
+                        "loopback HTTP client unavailable: {error}"
+                    ));
+                    None
+                }
+            }
+        })
+        .clone()
+}
+
+/// Only the documented `=1` opts out; `0` or any other value keeps the check.
+fn pan_check_opted_out(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "1")
+}
+
+/// Fail closed before a payment card number leaves the machine. A loopback
+/// base sent through `loopback_client` (no redirects, no proxy) is exempt, and
+/// `JCODE_DISABLE_PAN_CHECK=1` is the escape hatch for a false positive. The
+/// error names the message, never the value, and keeps the gateway's wording so
+/// the TUI stops auto-retry.
+fn pan_pre_send_block(loopback_exempt: bool, request: &Value) -> Option<anyhow::Error> {
+    if loopback_exempt
+        || std::env::var("JCODE_DISABLE_PAN_CHECK")
+            .is_ok_and(|value| pan_check_opted_out(Some(&value)))
+    {
+        return None;
+    }
+    let finding =
+        jcode_provider_core::failover::pan_check::find_pan_in_messages(request.get("messages")?)?;
+    Some(anyhow::anyhow!(
+        "Local pre-send check: request blocked by content filter: [PAN]\n  \
+         a payment card number (issuer prefix + Luhn) is in message #{} (role: {}); nothing was sent.\n  \
+         Remove it from the conversation (compact or start a new session), or set \
+         JCODE_DISABLE_PAN_CHECK=1 if this is a false positive.",
+        finding.message_index,
+        finding.role
+    ))
+}
+
 fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static str {
     let lower = api_base.to_ascii_lowercase();
     if lower.contains("localhost:11434") || lower.contains("127.0.0.1:11434") {
@@ -38,6 +110,13 @@ pub(super) async fn run_stream_with_retries(
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
 ) {
+    let loopback = is_loopback_base(&api_base).then(loopback_client).flatten();
+    if let Some(blocked) = pan_pre_send_block(loopback.is_some(), &request) {
+        if tx.send(Err(blocked)).await.is_err() {
+            jcode_base::logging::info("card-number block not delivered: stream receiver dropped");
+        }
+        return;
+    }
     let mut last_error = None;
     let mut next_retry_delay = None;
     let config = jcode_base::config::config();
@@ -82,7 +161,9 @@ pub(super) async fn run_stream_with_retries(
         // poisoned other idle pooled connections opened through the same path,
         // so reusing the shared pool can fail identically. A fresh client
         // guarantees a brand-new TCP+TLS connection.
-        let attempt_client = if attempt == 0 {
+        let attempt_client = if let Some(loopback) = &loopback {
+            loopback.clone()
+        } else if attempt == 0 {
             client.clone()
         } else {
             jcode_provider_core::fresh_transport_client()
@@ -110,7 +191,7 @@ pub(super) async fn run_stream_with_retries(
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
                 let error_str = format!("{e:#}").to_lowercase();
-                if is_retryable_error(&error_str) && attempt + 1 < max_retries {
+                if should_retry(&error_str, attempt, max_retries) {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
                         // to discard the partial attempt so the retried
@@ -306,6 +387,23 @@ fn parsed_http_status(error_str: &str) -> Option<u16> {
     }
 }
 
+/// Retries allowed for a 429 that OpenRouter attributes to the upstream
+/// provider's shared key pool (`limit_source: upstream_provider_shared_pool`).
+/// OpenRouter has already tried every provider it could route to before
+/// answering, so a full backoff ladder mostly waits; measured 2026-09-24: 394
+/// such 429s against `openrouter/auto`, each held for the whole budget.
+const SHARED_POOL_429_MAX_RETRIES: u32 = 2;
+
+/// Whether a failed zero-based `attempt` should be retried.
+fn should_retry(error_str: &str, attempt: u32, max_retries: u32) -> bool {
+    if !is_retryable_error(error_str) || attempt + 1 >= max_retries {
+        return false;
+    }
+    let shared_pool_429 = parsed_http_status(error_str) == Some(429)
+        && error_str.contains("upstream_provider_shared_pool");
+    !(shared_pool_429 && attempt >= SHARED_POOL_429_MAX_RETRIES)
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
     // Explicit non-retryable HTTP statuses take precedence over the loose
     // substring heuristics below. These are deterministic client-side failures
@@ -348,6 +446,147 @@ mod tests {
         assert!(hint.contains("LM Studio"));
         assert!(hint.contains("Local Server"));
         assert!(hint.contains("/v1/models"));
+    }
+
+    #[test]
+    fn shared_pool_429_retries_at_most_twice() {
+        let pool = "status: 429 too many requests\n  response: {\"error\":{\"code\":429,\"metadata\":{\"limit_source\":\"upstream_provider_shared_pool\"}}}";
+        assert!(should_retry(pool, 0, 8));
+        assert!(should_retry(pool, 1, 8));
+        assert!(!should_retry(pool, 2, 8), "three sends is the cap");
+        // An ordinary rate limit keeps the configured ladder.
+        assert!(should_retry("status: 429 too many requests", 5, 8));
+        assert!(!should_retry("status: 429 too many requests", 7, 8));
+        // The cap is for 429s only: a 503 naming the pool keeps its budget.
+        let pool_503 = "status: 503 service unavailable\n  response: {\"error\":{\"metadata\":{\"limit_source\":\"upstream_provider_shared_pool\"}}}";
+        assert!(should_retry(pool_503, 5, 8));
+    }
+
+    #[test]
+    fn content_filter_block_is_never_retried() {
+        let blocked = "status: 403 forbidden\n  response: {\"error\":{\"message\":\"request blocked by content filter: [credit_card]\",\"code\":403}}";
+        assert!(!should_retry(blocked, 0, 8));
+    }
+
+    #[test]
+    fn pan_pre_send_blocks_a_card_number_without_echoing_it() {
+        let pan = "4242".repeat(4);
+        let request = serde_json::json!({"messages": [
+            {"role": "user", "content": "issues 1113 1114 1115 1116"},
+            {"role": "assistant", "content": format!("card {pan}")},
+        ]});
+        let blocked = pan_pre_send_block(false, &request).expect("a PAN must block");
+        let text = format!("{blocked:#}");
+        assert!(text.contains("message #1 (role: assistant)"), "{text}");
+        assert!(!text.contains(&pan), "the value must never be echoed");
+        assert_eq!(
+            jcode_provider_core::failover::content_filter_block_label(&text).as_deref(),
+            Some("[PAN]"),
+            "the TUI fail-fast path must recognise the local block"
+        );
+        let clean = serde_json::json!({"messages": [
+            {"role": "user", "content": "for n in 1113 1114 1115 1116; do gh issue view $n; done"},
+        ]});
+        assert!(pan_pre_send_block(false, &clean).is_none());
+        assert!(pan_pre_send_block(true, &request).is_none());
+    }
+
+    #[test]
+    fn loopback_base_is_parsed_not_prefix_matched() {
+        assert!(is_loopback_base("http://127.0.0.1:1234/v1"));
+        assert!(is_loopback_base("http://localhost:11434/v1"));
+        assert!(is_loopback_base("http://[::1]:8080/v1"));
+        assert!(!is_loopback_base("https://localhost.example.com/v1"));
+        assert!(!is_loopback_base("https://openrouter.ai/api/v1"));
+    }
+
+    /// A card number sent to a loopback base reaches the local server, but a
+    /// redirect from it is not followed, so the body never leaves that server.
+    #[test]
+    fn loopback_pan_request_is_sent_but_redirect_is_not_followed() {
+        use std::io::{Read, Write};
+        let target = std::net::TcpListener::bind("127.0.0.1:0").expect("bind target");
+        let target_port = target.local_addr().expect("target addr").port();
+        let (target_tx, target_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            for _ in target.incoming() {
+                let _ = target_tx.send(());
+            }
+        });
+        let local = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local");
+        let local_port = local.local_addr().expect("local addr").port();
+        let (local_tx, local_rx) = std::sync::mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            for stream in local.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut buf = vec![0u8; 65536];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let _ = local_tx.send(raw.contains("/v1/chat/completions"));
+                let response = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{target_port}/v1/chat/completions\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let pan = "4242".repeat(4);
+        let request = serde_json::json!({"model": "m", "stream": true, "messages": [
+            {"role": "user", "content": format!("card {pan}")},
+        ]});
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let errors = rt.block_on(async {
+            let (tx, mut events) = mpsc::channel::<Result<StreamEvent>>(64);
+            run_stream_with_retries(
+                Client::new(),
+                format!("http://127.0.0.1:{local_port}/v1"),
+                ProviderAuth::None {
+                    label: "test".to_string(),
+                },
+                false,
+                "conv-pan-loopback".to_string(),
+                request,
+                tx,
+                Arc::new(Mutex::new(None)),
+                "m".to_string(),
+            )
+            .await;
+            let mut errors = Vec::new();
+            while let Some(event) = events.recv().await {
+                if let Err(e) = event {
+                    errors.push(format!("{e:#}"));
+                }
+            }
+            errors
+        });
+        assert!(
+            local_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the loopback server must receive the request"),
+            "local server saw an unexpected request"
+        );
+        assert!(
+            errors.iter().all(|e| !e.contains("[PAN]")),
+            "loopback request was blocked by the pre-send check"
+        );
+        assert!(
+            target_rx
+                .recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
+            "the redirect was followed, so the body left the loopback server"
+        );
+    }
+
+    #[test]
+    fn only_one_opts_out_of_the_pan_check() {
+        assert!(pan_check_opted_out(Some("1")));
+        assert!(!pan_check_opted_out(Some("0")));
+        assert!(!pan_check_opted_out(Some("")));
+        assert!(!pan_check_opted_out(None));
     }
 
     #[test]
