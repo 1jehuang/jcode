@@ -449,6 +449,11 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
     // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
     // opt-out must keep blocking delivery for tests that exercise onboarding.
+    // A parent jcode session exports its named provider profile to child
+    // processes. Running the suite from inside one must not decide whether
+    // built-in OpenAI-compatible profiles count as configured.
+    let prev_named_profile = std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
@@ -463,6 +468,13 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
+    // JCODE_HOME is restored by EnvRestoreGuard above; restore the named profile
+    // this helper cleared.
+    if let Some(prev_named_profile) = prev_named_profile {
+        crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", prev_named_profile);
+    } else {
+        crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+    }
     // Drop any config loaded from the temp home so it cannot leak into the next
     // test, which is process-global state shared across this suite.
     crate::config::invalidate_config_cache();
