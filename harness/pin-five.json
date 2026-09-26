@@ -1,0 +1,7 @@
+{
+  "embedder": "minilm-l6-v2:LOCAL-384d",
+  "judge": "exact-match-plus-span-check",
+  "judge_version": "v1",
+  "query_set_sha256": "e335d56e20bd75ae12d3fe160f1fb5907dd9b053c317ef2887349bbd91c98e60",
+  "seed": 42
+}

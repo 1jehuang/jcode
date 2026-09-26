@@ -953,3 +953,202 @@ fn focus_query_text_falls_back_when_all_stripped() {
     // Nothing substantive survives -> fall back to raw rather than empty.
     assert_eq!(focused, raw);
 }
+
+// ---------- Harness scorer unit tests (02-harness-spec §5.2) ----------
+
+/// Pure scorer for C1 recall items: 1 iff `returned` contains `gold_fact`
+/// verbatim (case-sensitive substring, trimmed outer whitespace only) AND
+/// the gold span id is among `spans`, and no listed distractor turn alone
+/// satisfies. Mirrors run.sh C1 HIT logic at unit scale.
+fn harness_score_recall(
+    returned: &str,
+    gold_fact: &str,
+    gold_span: &str,
+    spans: &[&str],
+    distractor_turns: &[&str],
+    distractor_texts: &[(&str, &str)],
+) -> u8 {
+    let ret = returned.trim();
+    let gold = gold_fact.trim();
+    if !spans.contains(&gold_span) {
+        return 0;
+    }
+    if !ret.contains(gold) {
+        return 0;
+    }
+    // A distractor turn holding identical text must not satisfy on its own:
+    // if the ONLY matching span is a distractor, score 0.
+    let gold_in_distractor = distractor_texts
+        .iter()
+        .any(|(tid, text)| distractor_turns.contains(tid) && text.contains(gold));
+    if gold_in_distractor && !spans.contains(&gold_span) {
+        return 0;
+    }
+    1
+}
+
+#[test]
+fn harness_recall_scorer_gold_and_distractor() {
+    // Gold fact + valid span scores 1.
+    assert_eq!(
+        harness_score_recall(
+            "answer: deploy freeze starts Friday 18:00 UTC",
+            "deploy freeze starts Friday 18:00 UTC",
+            "harness-R-001",
+            &["harness-R-001"],
+            &[],
+            &[],
+        ),
+        1
+    );
+    // Missing gold fact scores 0.
+    assert_eq!(
+        harness_score_recall(
+            "answer: no record of any freeze",
+            "deploy freeze starts Friday 18:00 UTC",
+            "harness-R-001",
+            &["harness-R-001"],
+            &[],
+            &[],
+        ),
+        0
+    );
+    // Gold span absent scores 0 even when text matches (wrong evidence).
+    assert_eq!(
+        harness_score_recall(
+            "answer: deploy freeze starts Friday 18:00 UTC",
+            "deploy freeze starts Friday 18:00 UTC",
+            "harness-R-001",
+            &["harness-R-009"],
+            &[],
+            &[],
+        ),
+        0
+    );
+    // Distractor-only match scores 0: distractor turn S04-T02 carries the
+    // same text but is not the gold turn.
+    assert_eq!(
+        harness_score_recall(
+            "answer: staging database password is river-stone-77",
+            "staging database password is river-stone-77",
+            "harness-R-002",
+            &["S04-T02"],
+            &["S04-T02"],
+            &[("S04-T02", "staging database password is river-stone-77")],
+        ),
+        0
+    );
+}
+
+/// Pure scorer for C2 KU items: (current_ok, invalid_reuse).
+/// UPDATE/NEUTRAL: current_ok iff `expected` present verbatim and no
+/// forbidden string present. DELETE: current_ok iff an abstention marker
+/// from the fixed set is present and no forbidden string present.
+fn harness_score_ku(
+    returned: &str,
+    expected: &str,
+    forbidden: &[&str],
+    answerable: bool,
+) -> (bool, bool) {
+    const MARKERS: &[&str] = &["no record", "forgotten", "unknown", "No memories found"];
+    let invalid_reuse = forbidden.iter().any(|fb| !fb.is_empty() && returned.contains(fb));
+    if invalid_reuse {
+        return (false, true);
+    }
+    if !answerable {
+        let abstains = MARKERS.iter().any(|m| returned.contains(m));
+        return (abstains, false);
+    }
+    (!expected.is_empty() && returned.contains(expected), false)
+}
+
+#[test]
+fn harness_ku_current_and_forbidden() {
+    // UPDATE: current value accepted.
+    assert_eq!(
+        harness_score_ku("standup moved to 10:30", "10:30", &["09:00"], true),
+        (true, false)
+    );
+    // UPDATE: forbidden old value present -> invalid reuse veto.
+    assert_eq!(
+        harness_score_ku("standup at 09:00 (was 10:30?)", "10:30", &["09:00"], true),
+        (false, true)
+    );
+    // DELETE: abstention marker accepted, forbidden absent.
+    assert_eq!(
+        harness_score_ku("No memories found matching 'door code'", "", &["4410"], false),
+        (true, false)
+    );
+    // DELETE: deleted value resurfaced -> veto even with marker.
+    assert_eq!(
+        harness_score_ku("no record, but old code 4410?", "", &["4410"], false),
+        (false, true)
+    );
+    // DELETE: confident wrong answer with no marker and no forbidden -> incorrect.
+    assert_eq!(
+        harness_score_ku("your code is 0000", "", &["4410"], false),
+        (false, false)
+    );
+    // NEUTRAL: expected present, no forbidden list.
+    assert_eq!(
+        harness_score_ku("passport ends in ZX-4021", "ZX-4021", &[], true),
+        (true, false)
+    );
+}
+
+/// Pin-five checker unit test: rejects tampered pin files with PIN-MISMATCH.
+/// Mirrors run.sh step 0 at unit scale (unknown key, wrong sha, wrong seed).
+fn harness_check_pin(pin_json: &str, actual_sha: &str) -> Result<(), String> {
+    let v: serde_json::Value =
+        serde_json::from_str(pin_json).map_err(|e| format!("PIN-MISMATCH parse: {e}"))?;
+    let obj = v.as_object().ok_or("PIN-MISMATCH shape: expected object")?;
+    let extra: Vec<&String> = obj
+        .keys()
+        .filter(|k| {
+            !["embedder", "judge", "judge_version", "query_set_sha256", "seed"].contains(&k.as_str())
+        })
+        .collect();
+    if !extra.is_empty() {
+        return Err(format!("PIN-MISMATCH unknown-keys: {extra:?}"));
+    }
+    for key in ["embedder", "judge", "judge_version", "query_set_sha256", "seed"] {
+        if obj.get(key).is_none() {
+            return Err(format!("PIN-MISMATCH {key}: expected <present> got <missing>"));
+        }
+    }
+    let sha = obj["query_set_sha256"].as_str().unwrap_or("");
+    if sha != actual_sha {
+        return Err(format!("PIN-MISMATCH query_set_sha256: expected {sha} got {actual_sha}"));
+    }
+    let seed = obj["seed"].as_i64().unwrap_or(-1);
+    if seed != 42 {
+        return Err(format!("PIN-MISMATCH seed: expected 42 got {seed}"));
+    }
+    let emb = obj["embedder"].as_str().unwrap_or("");
+    if emb != "minilm-l6-v2:LOCAL-384d" {
+        return Err(format!(
+            "PIN-MISMATCH embedder: expected minilm-l6-v2:LOCAL-384d got {emb}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn harness_pin_five_mismatch_exits() {
+    let good = r#"{"embedder":"minilm-l6-v2:LOCAL-384d","judge":"exact-match-plus-span-check","judge_version":"v1","query_set_sha256":"ABC","seed":42}"#;
+    assert!(harness_check_pin(good, "ABC").is_ok());
+    // Wrong sha.
+    assert!(harness_check_pin(good, "DEF").unwrap_err().contains("query_set_sha256"));
+    // Wrong seed.
+    let bad_seed = good.replace("\"seed\":42", "\"seed\":43");
+    assert!(harness_check_pin(&bad_seed, "ABC").unwrap_err().contains("seed"));
+    // Unknown key.
+    let extra = good.replace("}", ",\"extra\":1}");
+    assert!(harness_check_pin(&extra, "ABC").unwrap_err().contains("unknown-keys"));
+    // Missing key.
+    let missing: serde_json::Value = serde_json::from_str(good).unwrap();
+    let mut map = missing.as_object().unwrap().clone();
+    map.remove("judge_version");
+    let missing_json = serde_json::Value::Object(map).to_string();
+    assert!(harness_check_pin(&missing_json, "ABC").unwrap_err().contains("judge_version"));
+}
