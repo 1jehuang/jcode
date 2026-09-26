@@ -801,6 +801,11 @@ impl Config {
                 }
             }
         }
+        if let Ok(v) = std::env::var("JCODE_OPENAI_USE_MAX_CONTEXT_WINDOW") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.provider.openai_use_max_context_window = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_PRESERVE_REASONING_CONTEXT") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.provider.preserve_reasoning_context = parsed;
