@@ -16,6 +16,8 @@ async fn communicate_assign_task_can_spawn_fallback_agent() {
     let _outer_home = EnvGuard::set("JCODE_HOME", outer_home.path());
     // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
     let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
+    // The env override would set agents.swarm_model regardless of JCODE_HOME.
+    let _swarm_model = EnvGuard::remove("JCODE_SWARM_MODEL");
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
     crate::config::invalidate_config_cache();
