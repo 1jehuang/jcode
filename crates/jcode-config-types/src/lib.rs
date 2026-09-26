@@ -601,10 +601,12 @@ pub struct AgentsConfig {
     pub swarm_deep_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
-    /// Maximum percentage (1-90) of the chat column height the inline swarm
-    /// gallery band may occupy. Leave unset to use the built-in default (40%).
-    /// Lower values keep more of the transcript visible; set near the minimum
-    /// to effectively collapse the gallery to a thin strip.
+    /// Deprecated and unread.
+    ///
+    /// This sized the inline swarm gallery band, which was replaced by the
+    /// compact swarm strip above the status line. The field is retained so
+    /// existing config files keep parsing, but no code consults it. Use
+    /// `swarm_strip_layout` to control the strip's presentation instead.
     pub swarm_gallery_max_pct: Option<u8>,
     /// Layout of the inline swarm strip above the status line:
     /// `"vertical"` (default) lists one agent per row (session icon + status
