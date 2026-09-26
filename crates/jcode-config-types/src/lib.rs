@@ -420,6 +420,14 @@ pub struct CompactionConfig {
     /// on large-window providers. This bounds the compaction trigger budget,
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
+    /// Proactive tool-result clearing: when set to N, tool results older than
+    /// the last N provider-bound messages are stubbed at send time
+    /// (`[cleared by retention: was N chars]`). The ToolUse blocks (name +
+    /// input) and result IDs are always kept, so provider tool-pairing never
+    /// breaks; results under 200 chars are left alone. The session file is
+    /// never modified — clearing applies to the send view only, so a later
+    /// compaction still summarizes the full history. Off when unset.
+    pub clear_tool_results_older_than: Option<usize>,
 }
 
 impl Default for CompactionConfig {
@@ -436,6 +444,7 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            clear_tool_results_older_than: None,
         }
     }
 }

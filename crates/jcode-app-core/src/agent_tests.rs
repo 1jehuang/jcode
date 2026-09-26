@@ -32,6 +32,8 @@ struct NativeAutoCompactionProvider;
 
 struct NativeCompactionStreamProvider;
 
+const TEST_SESSION_ID: &str = "test-session-masking-spec";
+
 #[derive(Clone, Default)]
 struct SignatureSessionProvider {
     requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
@@ -216,6 +218,577 @@ fn content_text(content: &[ContentBlock]) -> &str {
 
 fn message_text(message: &Message) -> &str {
     content_text(&message.content)
+}
+
+#[test]
+fn tool_result_clearing_is_off_by_default() {
+    let _guard = crate::storage::lock_test_env();
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: "x".repeat(5000),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let out = Agent::apply_tool_result_clearing(messages.clone(), TEST_SESSION_ID);
+    assert_eq!(format!("{out:?}"), format!("{messages:?}"));
+}
+
+#[test]
+fn tool_result_clearing_stubs_old_keeps_recent_and_pairing() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "2");
+    crate::config::Config::invalidate_cache();
+
+    let big_old = "o".repeat(5000);
+    let big_recent = "r".repeat(5000);
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_old".to_string(),
+        name: "read".to_string(),
+        input: serde_json::json!({"path": "/x"}),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_old".to_string(),
+                content: big_old,
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "keep going".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_new".to_string(),
+                content: big_recent.clone(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, TEST_SESSION_ID);
+    // Index 1 is older than the last 2: offloaded, but the id survives.
+    match &out[1].content[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } => {
+            assert_eq!(tool_use_id, "call_old");
+            assert!(
+                content.starts_with("[jcode-retention:offloaded was 5000 chars,"),
+                "got: {content}"
+            );
+            assert!(content.contains("_c00.txt"), "got: {content}");
+            assert!(content.contains("read file_path="), "got: {content}");
+        }
+        other => panic!("result block must survive, got: {other:?}"),
+    }
+    // ToolUse intent untouched.
+    assert!(matches!(out[0].content[0], ContentBlock::ToolUse { .. }));
+    // Recent result untouched.
+    match &out[3].content[0] {
+        ContentBlock::ToolResult { content, .. } => assert_eq!(content, &big_recent),
+        other => panic!("recent result must survive, got: {other:?}"),
+    }
+
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn tool_result_clearing_stubs_sibling_images_past_cutoff() {
+    use crate::message::{ContentBlock, Message, Role};
+    let img = ContentBlock::Image {
+        media_type: "image/png".to_string(),
+        data: "A".repeat(200_000),
+    };
+    let old_msg = Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "t-old".to_string(),
+                content: "tiny".to_string(),
+                is_error: None,
+            },
+            img,
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let recent_msg = Message {
+        role: Role::User,
+        content: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "B".repeat(200_000),
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    // Seed the window so only old_msg falls past the cutoff.
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let mut cfg = crate::config::Config::default();
+    cfg.compaction.clear_tool_results_older_than = Some(1);
+    cfg.save().expect("save config");
+    crate::config::Config::invalidate_cache();
+    let out = Agent::apply_tool_result_clearing(vec![old_msg, recent_msg], TEST_SESSION_ID);
+    // Old text kept (tiny), old image stubbed with pairing ID intact.
+    match &out[0].content[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } => {
+            assert_eq!(tool_use_id, "t-old");
+            assert_eq!(content, "tiny");
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+    match &out[0].content[1] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.contains("cleared image by retention"), "{text}");
+            assert!(text.contains("image/png"), "{text}");
+        }
+        other => panic!("expected stub Text, got {other:?}"),
+    }
+    // Recent image untouched.
+    assert!(matches!(&out[1].content[0], ContentBlock::Image { .. }));
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn tool_result_clearing_keeps_user_uploaded_images() {
+    use crate::message::{ContentBlock, Message, Role};
+    // Image-only user message past the cutoff: no ToolResult, so this is a
+    // user upload, not tool output. Must survive clearing intact.
+    let upload = Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "what does this screenshot show?".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "U".repeat(200_000),
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let recent = Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "t-new".to_string(),
+            content: "fresh".to_string(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let mut cfg = crate::config::Config::default();
+    cfg.compaction.clear_tool_results_older_than = Some(1);
+    cfg.save().expect("save config");
+    crate::config::Config::invalidate_cache();
+    let out = Agent::apply_tool_result_clearing(vec![upload, recent], TEST_SESSION_ID);
+    assert!(matches!(&out[0].content[1], ContentBlock::Image { .. }));
+    if let ContentBlock::Image { data, .. } = &out[0].content[1] {
+        assert_eq!(data.len(), 200_000);
+    }
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+fn tool_result_clearing_keeps_small_results() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "0");
+    crate::config::Config::invalidate_cache();
+
+    let small = "ok".to_string();
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: small.clone(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let out = Agent::apply_tool_result_clearing(messages, TEST_SESSION_ID);
+    match &out[0].content[0] {
+        ContentBlock::ToolResult { content, .. } => assert_eq!(content, &small),
+        other => panic!("small result must survive, got: {other:?}"),
+    }
+
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn tool_result_clearing_counts_characters_not_bytes() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "0");
+    crate::config::Config::invalidate_cache();
+
+    // 100 CJK chars = 300 bytes: under the 200-char policy, must survive.
+    let cjk = "\u{4e2d}".repeat(100);
+    assert_eq!(cjk.len(), 300);
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call_cjk".to_string(),
+            content: cjk.clone(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    // keep=0 with a single message: len 1 <= keep... use keep path via two
+    // messages so index 0 clears-or-keeps by size only.
+    let two = vec![messages[0].clone(), messages[0].clone()];
+    let out = Agent::apply_tool_result_clearing(two, TEST_SESSION_ID);
+    match &out[0].content[0] {
+        ContentBlock::ToolResult { content, .. } => assert_eq!(content, &cjk),
+        other => panic!("CJK result under policy must survive, got: {other:?}"),
+    }
+    // 300 CJK chars = 900 bytes: over policy, stubbed with char count.
+    let big_cjk = "\u{4e2d}".repeat(300);
+    let two_big = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_big".to_string(),
+                content: big_cjk,
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        messages[0].clone(),
+    ];
+    let out = Agent::apply_tool_result_clearing(two_big, TEST_SESSION_ID);
+    match &out[0].content[0] {
+        ContentBlock::ToolResult { content, .. } => assert!(
+            content.starts_with("[jcode-retention:offloaded was 300 chars,"),
+            "got: {content}"
+        ),
+        other => panic!("big CJK result must offload with char count, got: {other:?}"),
+    }
+
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn tool_result_offload_chunks_at_2000_chars() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "1");
+    crate::config::Config::invalidate_cache();
+
+    // 4500 chars of line-capped content -> 3 chunks at the 2000-char cap.
+    let line = "x".repeat(100);
+    let content: String = (0..45).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+    assert!(content.chars().count() > 4000);
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_chunk".to_string(),
+        name: "bash".to_string(),
+        input: serde_json::json!({}),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_chunk".to_string(),
+                content,
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "next".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, "session_chunk_test");
+    match &out[1].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            assert!(content.contains("3 chunks"), "got: {content}");
+            assert!(content.contains("_c00.txt"), "got: {content}");
+            assert!(content.contains("_c02.txt"), "got: {content}");
+        }
+        other => panic!("chunked result must substitute, got: {other:?}"),
+    }
+    // One file per chunk with chunk headers.
+    let offload_dir = temp
+        .path()
+        .join("sessions")
+        .join("offloaded")
+        .join(Agent::sanitize_offload_component("session_chunk_test"));
+    let entries: Vec<_> = std::fs::read_dir(&offload_dir)
+        .expect("offload dir")
+        .collect();
+    assert_eq!(entries.len(), 3, "one file per chunk");
+    let mut headers = vec![];
+    for entry in &entries {
+        let body =
+            std::fs::read_to_string(entry.as_ref().expect("entry").path()).expect("read chunk");
+        assert!(body.contains("chunk: "), "header:\n{body}");
+        headers.push(body);
+    }
+    assert!(headers.iter().any(|b| b.contains("chunk: 0/3")), "c00 header");
+    assert!(headers.iter().any(|b| b.contains("chunk: 2/3")), "c02 header");
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn tool_result_cue_ref_format_has_read_recipe() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "1");
+    crate::config::Config::invalidate_cache();
+
+    let content = "y".repeat(2500);
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_cue".to_string(),
+        name: "read".to_string(),
+        input: serde_json::json!({}),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_cue".to_string(),
+                content,
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "next".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, "session_cue_test");
+    match &out[1].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            assert!(content.contains("read file_path=\""), "got: {content}");
+            assert!(content.contains(":1"), "got: {content}");
+            assert!(content.contains("expand:"), "got: {content}");
+        }
+        other => panic!("cue+ref must carry read recipe, got: {other:?}"),
+    }
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn tool_result_kv_record_per_mask() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "2");
+    crate::config::Config::invalidate_cache();
+    jcode_base::cache_invalidation::clear_for_tests();
+
+    let mk = |id: &str| Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: "z".repeat(500),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let messages = vec![mk("call_a"), mk("call_b"), mk("call_c")];
+    let since = std::time::Instant::now();
+    let _out = Agent::apply_tool_result_clearing(messages, "session_kv_test");
+    // Only call_a falls past the keep=2 window: exactly one mask record.
+    let found = jcode_base::cache_invalidation::most_recent_since(since);
+    let entry = found.expect("one record per mask");
+    assert_eq!(entry.source, "tool-result clearing", "got: {entry:?}");
+    assert!(entry.detail.contains("call_a"), "got: {entry:?}");
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn tool_result_guard_prefix_no_collision() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "1");
+    crate::config::Config::invalidate_cache();
+
+    // Genuine tool output starting with the OLD literal must STILL mask:
+    // the new matcher keys on [jcode-retention: only.
+    let adversarial = "[cleared by retention: was 1 chars]".to_string() + &"q".repeat(500);
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_adv".to_string(),
+                content: adversarial,
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "next".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, "session_guard_test");
+    match &out[0].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            assert!(
+                content.starts_with("[jcode-retention:offloaded"),
+                "old literal must not shield content, got: {content}"
+            );
+        }
+        other => panic!("adversarial result must mask, got: {other:?}"),
+    }
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
 }
 
 #[test]

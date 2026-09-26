@@ -40,6 +40,7 @@ use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
@@ -732,6 +733,280 @@ impl Agent {
         Ok(())
     }
 
+    /// Results shorter than this are never stubbed: clearing them saves
+    /// nothing and only adds noise.
+    const TOOL_RESULT_CLEAR_MIN_CHARS: usize = 200;
+
+    /// Preview lines substituted into the send view for an offloaded result
+    /// (LangChain Deep Agents shape: path reference + first-N-lines preview;
+    /// the model re-reads the file with existing tools when it needs more).
+    const TOOL_RESULT_OFFLOAD_PREVIEW_LINES: usize = 10;
+    /// Hard cap on the substituted preview so the substitution itself never
+    /// becomes a context hog on single-line-megablob outputs.
+    const TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS: usize = 500;
+    /// Max chars per offload chunk (§3 of phase1/01-masking-spec): results
+    /// over the floor split into line-preserving chunks of at most this
+    /// size so each masked unit stays coherent (ChunkKV mechanism).
+    const TOOL_RESULT_OFFLOAD_CHUNK_CHARS: usize = 2000;
+    /// Cue chars per chunk in the cue+ref substitution (§4): first-N chars
+    /// of each chunk, truncated with `...` iff longer.
+    const TOOL_RESULT_CUE_CHARS: usize = 60;
+
+    /// Sanitize an id for use as a single path component: keep
+    /// `[A-Za-z0-9-_]`, fold anything else to `_`, truncate, and suffix 8 hex
+    /// of SHA-256 over the raw id so distinct raw ids that sanitize alike
+    /// never share a file. Both ids reaching here are provider- or
+    /// control-plane-influenced strings, never trust them as paths directly.
+    pub(crate) fn sanitize_offload_component(raw: &str) -> String {
+        const KEEP: usize = 64;
+        let kept: String = raw
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(KEEP)
+            .collect();
+        let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
+        format!("{kept}_{}", &hash[..8])
+    }
+
+    /// First-N-lines preview of an offloaded result, capped at
+    /// `TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS` so a 10-line wall of minified
+    /// JSON still cannot blow the substitution budget.
+    pub(crate) fn offload_preview(content: &str) -> String {
+        let first = content
+            .lines()
+            .take(Self::TOOL_RESULT_OFFLOAD_PREVIEW_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if first.chars().count() > Self::TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS {
+            let truncated: String = first
+                .chars()
+                .take(Self::TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS)
+                .collect();
+            format!("{truncated}...(truncated)")
+        } else {
+            first
+        }
+    }
+
+    /// Split content into line-preserving chunks of at most
+    /// `TOOL_RESULT_OFFLOAD_CHUNK_CHARS` chars (§3 of phase1/01-masking-spec).
+    /// Never splits mid-line; a single over-long line is its own chunk.
+    pub(crate) fn split_offload_chunks(content: &str) -> Vec<String> {
+        let mut chunks: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut current_len = 0usize;
+        for line in content.lines() {
+            let line_len = line.chars().count() + 1; // +1 for the newline
+            if !current.is_empty() && current_len + line_len > Self::TOOL_RESULT_OFFLOAD_CHUNK_CHARS
+            {
+                chunks.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+            current.push_str(line);
+            current.push('\n');
+            current_len += line_len;
+        }
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+        chunks
+    }
+
+    /// First-N-chars cue of one chunk (§4): truncated with `...` iff longer.
+    pub(crate) fn chunk_cue(chunk: &str) -> String {
+        let cue: String = chunk.chars().take(Self::TOOL_RESULT_CUE_CHARS).collect();
+        if chunk.chars().count() > Self::TOOL_RESULT_CUE_CHARS {
+            format!("{cue}...")
+        } else {
+            cue
+        }
+    }
+
+    /// Write a cleared tool result to its session-scoped offload file
+    /// (`<jcode_dir>/sessions/offloaded/<session>/<tool>_<hash>.txt`), full
+    /// original bytes under a small deterministic header (no timestamps, so
+    /// rewrites are byte-identical). Returns the absolute path plus the
+    /// preview for the send-view substitution, or `None` on any I/O failure —
+    /// the caller falls back to the lossy stub, so offload can never break a
+    /// send.
+    fn offload_tool_result(
+        session_id: &str,
+        tool_use_id: &str,
+        tool_name: Option<&str>,
+        content: &str,
+    ) -> Option<(PathBuf, String)> {
+        Self::offload_chunk_result(session_id, tool_use_id, tool_name, content, None).map(
+            |(path, preview, _)| (path, preview),
+        )
+    }
+
+    /// Chunk-aware offload (§3): split content into chunks, write one file
+    /// per chunk (`<tool-id>_c{nn}.txt`, header gains `chunk: {nn}/{total}`),
+    /// return the base path, the cue+ref substitution (§4), and the chunk
+    /// count. `None` on any I/O failure (caller fails open to the stub).
+    fn offload_chunk_result(
+        session_id: &str,
+        tool_use_id: &str,
+        tool_name: Option<&str>,
+        content: &str,
+        was_override: Option<usize>,
+    ) -> Option<(PathBuf, String, usize)> {
+        let _ = was_override;
+        let dir = crate::storage::jcode_dir()
+            .ok()?
+            .join("sessions")
+            .join("offloaded")
+            .join(Self::sanitize_offload_component(session_id));
+        std::fs::create_dir_all(&dir).ok()?;
+        let base = Self::sanitize_offload_component(tool_use_id);
+        let was = content.chars().count();
+        let chunks = Self::split_offload_chunks(content);
+        let total = chunks.len().max(1);
+        let tool_label = tool_name.unwrap_or("unknown");
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let path = dir.join(format!("{base}_c{idx:02}.txt"));
+            let body = format!(
+                "# jcode offloaded tool result\nsession: {session_id}\ntool_use_id: {tool_use_id}\ntool: {tool_label}\nchars: {was}\nchunk: {idx}/{total}\n--- result ---\n{chunk}"
+            );
+            std::fs::write(&path, body).ok()?;
+        }
+        let first_path = dir.join(format!("{base}_c00.txt"));
+        let mut refs = String::new();
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let path = dir.join(format!("{base}_c{idx:02}.txt"));
+            let cue = Self::chunk_cue(chunk);
+            let chunk_lines = chunk.lines().count().max(1);
+            refs.push_str(&format!(
+                "c{idx:02}: {cue} -> {}:1 (read file_path=\"{}\" limit={chunk_lines}); ",
+                path.display(),
+                path.display()
+            ));
+        }
+        let substitution = format!(
+            "[jcode-retention:offloaded was {was} chars, {total} chunks, tool {tool_label}; {refs}expand: read file_path=\"{}\" start_line=1 (1-based, whole chunk)]",
+            first_path.display()
+        );
+        Some((first_path, substitution, total))
+    }
+
+    /// Proactive tool-result clearing (Anthropic `clear_tool_uses` primitive,
+    /// deterministic edition). Stubs the content of tool results older than
+    /// the configured window, keeping ToolUse blocks and result IDs intact
+    /// so provider tool-pairing never breaks. Operates on the send view
+    /// only — the session file keeps the full history for later compaction.
+    /// Off when unconfigured: input returns unchanged.
+    pub(crate) fn apply_tool_result_clearing(
+        messages: Vec<Message>,
+        session_id: &str,
+    ) -> Vec<Message> {
+        let keep = match crate::config::config()
+            .compaction
+            .clear_tool_results_older_than
+        {
+            Some(keep) => keep,
+            None => return messages,
+        };
+        if messages.len() <= keep {
+            return messages;
+        }
+        let mut messages = messages;
+        let cutoff = messages.len() - keep;
+        // Tool names live on the ToolUse blocks, not the results: correlate
+        // once (owned — the borrow cannot survive the mutation loop below) so
+        // offloaded files carry the originating tool name in their header.
+        let mut tool_names: HashMap<String, String> = HashMap::new();
+        for message in messages.iter() {
+            for block in message.content.iter() {
+                if let ContentBlock::ToolUse { id, name, .. } = block {
+                    tool_names.entry(id.clone()).or_insert_with(|| name.clone());
+                }
+            }
+        }
+        for message in messages.iter_mut().take(cutoff) {
+            // Tool-returned images ride in the same message as the ToolResult
+            // (tool_output_to_content_blocks) as base64, often 100KB-1MB each:
+            // the largest context hog and the first thing to go. Only images
+            // in a message that also carries a ToolResult are tool output;
+            // user-uploaded images arrive in plain user messages and must
+            // survive — clearing those would destroy user-provided vision
+            // context. Image blocks carry no tool-pairing ID, so a text
+            // placeholder keeps message structure intact.
+            let is_tool_message = message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
+            if !is_tool_message {
+                continue;
+            }
+            for block in message.content.iter_mut() {
+                if let ContentBlock::Image { media_type, data } = block {
+                    let was = data.len();
+                    let media_type = media_type.clone();
+                    *block = ContentBlock::Text {
+                        text: format!(
+                            "[cleared image by retention: was {media_type}, ~{was} base64 chars]"
+                        ),
+                        cache_control: None,
+                    };
+                }
+            }
+            for block in message.content.iter_mut() {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } = block
+                    // Character count, not byte length: a 100-CJK-char result
+                    // is 300 bytes but reads as 100 chars of context.
+                    && content.chars().count() > Self::TOOL_RESULT_CLEAR_MIN_CHARS
+                    && !content.starts_with("[jcode-retention:")
+                {
+                    let was = content.chars().count();
+                    let tool_name = tool_names.get(tool_use_id).map(String::as_str);
+                    match Self::offload_chunk_result(
+                        session_id,
+                        tool_use_id,
+                        tool_name,
+                        content,
+                        None,
+                    ) {
+                        Some((_path, substitution, nchunks)) => {
+                            *content = substitution;
+                            jcode_base::cache_invalidation::record(
+                                "tool-result clearing",
+                                format!(
+                                    "{}/{tool_use_id} {was}ch {nchunks}c -> offload",
+                                    tool_name.unwrap_or("unknown"),
+                                ),
+                            );
+                        }
+                        // Fail open: an unwritable offload dir (read-only
+                        // home, full disk) must never break a send.
+                        None => {
+                            *content = format!(
+                                "[jcode-retention:cleared was {was} chars]"
+                            );
+                            jcode_base::cache_invalidation::record(
+                                "tool-result clearing",
+                                format!(
+                                    "{}/{tool_use_id} {was}ch -> stub",
+                                    tool_name.unwrap_or("unknown"),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        messages
+    }
+
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         if self.provider.supports_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
@@ -783,7 +1058,10 @@ impl Agent {
                         user_count,
                         assistant_count,
                     ));
-                    return (messages, event);
+                    return (
+                        Self::apply_tool_result_clearing(messages, &self.session.id),
+                        event,
+                    );
                 }
                 Err(_) => {
                     logging::info("messages_for_provider: compaction lock failed, using session");
@@ -804,7 +1082,10 @@ impl Agent {
             user_count,
             assistant_count,
         ));
-        (messages, None)
+        (
+            Self::apply_tool_result_clearing(messages, &self.session.id),
+            None,
+        )
     }
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
