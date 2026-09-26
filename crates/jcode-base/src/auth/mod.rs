@@ -136,8 +136,8 @@ fn browser_unusable_here() -> bool {
 }
 
 /// True when the current process is a Rust test binary (`cargo test` /
-/// `cargo nextest`). Test binaries always run from `target/**/deps/`, a
-/// location no installed or self-dev jcode binary ever runs from.
+/// `cargo nextest`). Cargo places hashed test executables in `deps/` beneath
+/// its build directory, which can be relocated with `CARGO_TARGET_DIR`.
 ///
 /// Used to keep tests from opening real browser windows (OAuth login pages,
 /// files) on the developer's desktop: many login/onboarding flows are
@@ -152,12 +152,29 @@ pub fn running_in_test_harness() -> bool {
         }
         std::env::current_exe()
             .ok()
-            .map(|exe| {
-                let path = exe.to_string_lossy().replace('\\', "/");
-                path.contains("/target/") && path.contains("/deps/")
-            })
+            .map(|exe| is_test_harness_path(&exe.to_string_lossy()))
             .unwrap_or(false)
     })
+}
+
+fn is_test_harness_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    // Preserve detection for the default target tree, including custom runners.
+    if path.contains("/target/") && path.contains("/deps/") {
+        return true;
+    }
+    let mut components = path.rsplit('/');
+    let Some(filename) = components.next() else {
+        return false;
+    };
+    if components.next() != Some("deps") {
+        return false;
+    }
+    let stem = filename.strip_suffix(".exe").unwrap_or(filename);
+    let Some((name, hash)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !name.is_empty() && hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn env_truthy(key: &str) -> bool {
