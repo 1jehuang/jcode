@@ -77,7 +77,7 @@ impl ToolCardClaim {
 
 /// Host services an applet must declare. The user approves them once per
 /// applet. Validation rejects views that use undeclared capabilities.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
     /// `host.open_url` actions.
