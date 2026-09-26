@@ -96,6 +96,48 @@ fn builtin_profile_is_not_treated_as_user_named() {
     assert!(!provider.should_merge_static_models_with_live_catalog());
 }
 
+#[tokio::test]
+async fn builtin_catalog_refresh_uses_its_profile_namespace_after_env_switch() {
+    let _lock = ENV_LOCK.lock();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _key = EnvVarGuard::set("CEREBRAS_API_KEY", "test-key");
+
+    let provider = OpenRouterProvider::new_openai_compatible_profile_runtime(
+        jcode_base::provider_catalog::openai_compatible_profile_by_id("cerebras")
+            .expect("built-in Cerebras profile"),
+    )
+    .expect("built-in profile should initialize");
+    assert!(!provider.is_user_named_profile());
+
+    // Simulate another built-in profile changing the global namespace while
+    // this provider still owns an outstanding catalog refresh.
+    let _switched_namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "deepseek");
+    let namespace = provider.foreground_cache_namespace();
+    assert_eq!(namespace.as_deref(), Some("cerebras"));
+
+    let api_base = spawn_models_server(r#"{"data":[{"id":"cerebras-test-model"}]}"#);
+    let models = fetch_models_from_api(
+        provider.client.clone(),
+        api_base.clone(),
+        provider.auth.clone(),
+        std::sync::Arc::clone(&provider.models_cache),
+        namespace,
+    )
+    .await
+    .expect("built-in model catalog fetch should succeed");
+    assert_eq!(models.len(), 1);
+
+    let cache = jcode_provider_openrouter::load_disk_cache_entry_for_namespace("cerebras")
+        .expect("catalog should be written under its own profile namespace");
+    assert_eq!(cache.source_api_base.as_deref(), Some(api_base.as_str()));
+    assert!(
+        !temp.path().join("cache/deepseek_models.json").exists(),
+        "a profile switch must not redirect the in-flight catalog write"
+    );
+}
+
 /// A `[providers.cerebras]` block that shadows a built-in name but points at a
 /// different endpoint is still user-declared, so its models must be preserved.
 #[test]
