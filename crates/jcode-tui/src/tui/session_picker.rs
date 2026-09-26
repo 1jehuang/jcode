@@ -30,6 +30,7 @@ mod loading;
 mod memory;
 mod navigation;
 mod render;
+mod search_input;
 
 #[cfg(test)]
 use loading::collect_recent_session_stems;
@@ -1077,106 +1078,6 @@ impl SessionPicker {
         }
     }
 
-    /// Delete the word immediately before the (implicit) end-of-line cursor in
-    /// the search query. Used for Ctrl+W / Ctrl+Backspace inside the search bar.
-    fn delete_search_word_back(&mut self) {
-        let query = &self.search_query;
-        let mut end = query.len();
-        // Skip trailing whitespace.
-        while end > 0 {
-            let prev = super::core::prev_char_boundary(query, end);
-            let ch = query[prev..].chars().next().unwrap_or(' ');
-            if !ch.is_whitespace() {
-                break;
-            }
-            end = prev;
-        }
-        // Skip the word characters.
-        while end > 0 {
-            let prev = super::core::prev_char_boundary(query, end);
-            let ch = query[prev..].chars().next().unwrap_or(' ');
-            if ch.is_whitespace() {
-                break;
-            }
-            end = prev;
-        }
-        self.search_query.truncate(end);
-    }
-
-    /// Shared handling for key events while the search bar is active. Used by
-    /// both the overlay (`handle_overlay_key`) and the standalone `run` loop so
-    /// the editing and navigation keybindings stay consistent.
-    fn handle_search_key(
-        &mut self,
-        code: KeyCode,
-        modifiers: KeyModifiers,
-    ) -> Result<OverlayAction> {
-        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
-        match code {
-            KeyCode::Esc => {
-                self.search_active = false;
-                self.search_query.clear();
-                self.rebuild_items();
-            }
-            KeyCode::Enter => {
-                self.search_active = false;
-                if self.visible_sessions.is_empty() {
-                    self.search_query.clear();
-                    self.rebuild_items();
-                } else {
-                    let targets = self.selection_or_current_targets();
-                    if !targets.is_empty() {
-                        return Ok(OverlayAction::Selected(
-                            self.selection_result_for_enter(targets, modifiers),
-                        ));
-                    }
-                }
-            }
-            // Ctrl+W / Ctrl+Backspace (and the \u{8} BS alias some terminals
-            // send for Ctrl+Backspace) delete the previous word in the query.
-            KeyCode::Backspace if ctrl => {
-                self.delete_search_word_back();
-                self.rebuild_items();
-            }
-            KeyCode::Char('\u{8}') => {
-                self.delete_search_word_back();
-                self.rebuild_items();
-            }
-            KeyCode::Backspace => {
-                self.search_query.pop();
-                self.rebuild_items();
-            }
-            // Ctrl+U clears the whole query (like readline's kill-to-start).
-            KeyCode::Char('u') if ctrl => {
-                self.search_query.clear();
-                self.rebuild_items();
-            }
-            // Vim-style / readline navigation that keeps working while typing.
-            KeyCode::Char('j') | KeyCode::Char('n') if ctrl => self.next(),
-            KeyCode::Char('k') | KeyCode::Char('p') if ctrl => self.previous(),
-            KeyCode::Char('w') if ctrl => {
-                self.delete_search_word_back();
-                self.rebuild_items();
-            }
-            KeyCode::Char(c) => {
-                if ctrl && c == 'c' {
-                    return Ok(OverlayAction::Close);
-                }
-                // Ignore other control-modified characters so they don't get
-                // inserted as literal text in the search bar.
-                if ctrl {
-                    return Ok(OverlayAction::Continue);
-                }
-                self.search_query.push(c);
-                self.rebuild_items();
-            }
-            KeyCode::Down => self.next(),
-            KeyCode::Up => self.previous(),
-            _ => {}
-        }
-        Ok(OverlayAction::Continue)
-    }
-
     /// Handle a key event when used as an overlay inside the main TUI.
     /// Returns:
     /// - `Some(PickerResult::Selected(targets))` if user selected one or more sessions
@@ -1192,6 +1093,10 @@ impl SessionPicker {
             return Ok(action);
         }
         if self.loading_message.is_some() {
+            // Search-first pickers accept typing while the index loads.
+            if self.handle_loading_search_key(code, modifiers) {
+                return Ok(OverlayAction::Continue);
+            }
             return match code {
                 KeyCode::Esc | KeyCode::Char('q') => Ok(OverlayAction::Close),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1215,6 +1120,11 @@ impl SessionPicker {
             } else {
                 self.onboarding_action = Some(OnboardingAction::ReviewRecentProject);
             }
+            return Ok(OverlayAction::Continue);
+        }
+
+        // Type-to-search: a printable, non-shortcut character starts a search.
+        if self.start_search_from_list_key(code, modifiers) {
             return Ok(OverlayAction::Continue);
         }
 
@@ -2192,7 +2102,6 @@ impl SessionPicker {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let has_banner = self.crashed_sessions.is_some();
-        let has_search = self.search_active || !self.search_query.is_empty();
         let has_onboarding = self.onboarding_banner.is_some();
         // The first-run picker is action-only. Do not render the session list or
         // preview panes underneath it, which would make this look like `/resume`.
@@ -2215,9 +2124,9 @@ impl SessionPicker {
         if has_banner {
             v_constraints.push(Constraint::Length(1));
         }
-        if has_search {
-            v_constraints.push(Constraint::Length(1));
-        }
+        // The search bar row is always present so the picker reads like a
+        // search box: users can just start typing.
+        v_constraints.push(Constraint::Length(1));
         v_constraints.push(Constraint::Min(8));
 
         let v_chunks = Layout::default()
@@ -2239,31 +2148,9 @@ impl SessionPicker {
             chunk_idx += 1;
         }
 
-        // Render search bar if active
-        if has_search {
-            let search_area = v_chunks[chunk_idx];
-            chunk_idx += 1;
-
-            let cursor_char = if self.search_active { "▎" } else { "" };
-            let search_line = Line::from(vec![
-                Span::styled(" 🔍 ", Style::default().fg(rgb(186, 139, 255))),
-                Span::styled(
-                    &self.search_query,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(cursor_char, Style::default().fg(rgb(186, 139, 255))),
-                if self.search_active {
-                    Span::styled("  Esc to clear", Style::default().fg(rgb(60, 60, 60)))
-                } else {
-                    Span::styled("  / to edit", Style::default().fg(rgb(60, 60, 60)))
-                },
-            ]);
-            let search_widget =
-                Paragraph::new(search_line).style(Style::default().bg(rgb(25, 25, 30)));
-            frame.render_widget(search_widget, search_area);
-        }
+        // Search bar row: always visible, placeholder when empty.
+        self.render_search_bar(frame, v_chunks[chunk_idx]);
+        chunk_idx += 1;
 
         let main_area = v_chunks[chunk_idx];
 
@@ -2442,7 +2329,9 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
         return Ok(None);
     }
 
-    let picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+    let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+    // The standalone picker is the CLI resume flow: open search-first.
+    picker.focus_search_input();
     picker.run()
 }
 

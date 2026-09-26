@@ -637,21 +637,27 @@ impl SessionPicker {
         title_parts.push(Span::styled(" ", Style::default()));
 
         let mut help = if self.loading_message.is_some() {
-            " Esc cancel ".to_string()
+            if self.search_query.is_empty() {
+                " Esc cancel ".to_string()
+            } else {
+                " type to search · Esc clear/close ".to_string()
+            }
         } else if self.search_active {
-            " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
+            " type to search · ↑↓ nav · Enter resume · Tab shortcuts · Esc clear/close ".to_string()
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {
-                    " Space select · Enter in place · Ctrl+Enter new terminal · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " type to search · Space select · Enter in place · Ctrl+Enter new terminal · d debug · h/l focus · ↑↓ · q ".to_string()
                 }
                 crate::config::SessionPickerResumeAction::NewTerminal => {
-                    " Space select · Enter new terminal · Ctrl+Enter in place · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " type to search · Space select · Enter new terminal · Ctrl+Enter in place · d debug · h/l focus · ↑↓ · q ".to_string()
                 }
             }
         };
-        if self.selected_live_claude_target().is_some() && !self.search_active {
-            help = format!(" T take over live Claude ·{}", help);
+        if self.selected_live_claude_target().is_some() {
+            // In the search box `T` is text, so point at Tab first.
+            let keys = if self.search_active { "Tab, T" } else { "T" };
+            help = format!(" {keys} take over live Claude ·{}", help);
         }
 
         let border_dim: Color = rgb(70, 70, 70);
