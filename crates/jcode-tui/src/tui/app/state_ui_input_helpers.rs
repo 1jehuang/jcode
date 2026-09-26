@@ -1721,27 +1721,65 @@ impl App {
 
     pub(super) fn remember_input_undo_state(&mut self) {
         let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
-        if self.input_undo_stack.last() == Some(&snapshot) {
+        if self.input_undo_stack.last() == Some(&snapshot)
+            && self.input_undo_image_counts.last() == Some(&self.pending_images.len())
+        {
             return;
         }
+        self.push_input_undo_snapshot(snapshot);
+    }
+
+    /// Push an undo entry together with the current attachment count,
+    /// trimming the oldest entry at the cap.
+    pub(super) fn push_input_undo_snapshot(&mut self, snapshot: (String, usize)) {
         if self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT {
-            self.input_undo_stack.remove(0);
+            self.trim_oldest_input_undo_entry();
         }
         self.input_undo_stack.push(snapshot);
+        self.input_undo_image_counts.push(self.pending_images.len());
+    }
+
+    /// Drop the oldest undo entry, keeping any stashed Ctrl+C images pointed at
+    /// the same snapshot (or dropping them if that snapshot is the one removed).
+    pub(super) fn trim_oldest_input_undo_entry(&mut self) {
+        self.input_undo_stack.remove(0);
+        if !self.input_undo_image_counts.is_empty() {
+            self.input_undo_image_counts.remove(0);
+        }
+        self.cleared_draft_images.retain_mut(|(at, _)| {
+            *at -= 1;
+            *at > 0
+        });
     }
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.input_undo_image_counts.clear();
+        self.cleared_draft_images.clear();
         self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
+        let depth = self.input_undo_stack.len();
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+            let image_count = self.input_undo_image_counts.pop();
             // The composer now holds a restored draft, so the copy stashed by a
             // history jump is stale: a later Down must not resurrect it.
             self.history_draft = None;
             self.input = input;
             self.cursor_pos = cursor_pos.min(self.input.len());
+            if self
+                .cleared_draft_images
+                .last()
+                .is_some_and(|(at, _)| *at == depth)
+                && let Some((_, images)) = self.cleared_draft_images.pop()
+            {
+                self.pending_images = images;
+            } else if let Some(count) = image_count {
+                // Images attached after this snapshot (e.g. the paste being
+                // undone) go with it, so nothing stays attached invisibly.
+                self.pending_images.truncate(count);
+            }
             self.reset_tab_completion();
             self.sync_model_picker_preview_from_input();
             self.set_status_notice("↶ Input restored");

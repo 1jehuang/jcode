@@ -2760,6 +2760,31 @@ pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<
     Ok(true)
 }
 
+/// Idle Ctrl+C/Ctrl+D: discard a pending draft (text and/or attached images)
+/// first and arm quit, so the next press exits. With nothing drafted, fall
+/// through to the normal quit confirmation. Shared by the local, remote and
+/// disconnected key handlers so every mode behaves the same.
+pub(super) fn clear_draft_or_request_quit(app: &mut App) {
+    if app.input.is_empty() && app.pending_images.is_empty() {
+        app.handle_quit_request();
+        return;
+    }
+    // Always push a snapshot (even for an image-only draft that matches the
+    // previous entry) so the stashed images have their own undo step.
+    app.push_input_undo_snapshot((app.input.clone(), app.cursor_pos.min(app.input.len())));
+    if !app.pending_images.is_empty() {
+        let depth = app.input_undo_stack.len();
+        app.cleared_draft_images
+            .push((depth, std::mem::take(&mut app.pending_images)));
+    }
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    app.quit_pending = Some(Instant::now());
+    app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
+}
+
 pub(super) fn handle_global_control_shortcuts(
     app: &mut App,
     code: KeyCode,
@@ -2783,15 +2808,8 @@ pub(super) fn handle_global_control_shortcuts(
                 } else {
                     app.set_status_notice("Interrupting...");
                 }
-            } else if !app.input.is_empty() {
-                // First Ctrl+C: clear the input box
-                app.input.clear();
-                app.pending_images.clear();
-                app.cursor_pos = 0;
-                app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
             } else {
-                // Second Ctrl+C (input already empty): proceed with quit
-                app.handle_quit_request();
+                clear_draft_or_request_quit(app);
             }
             true
         }
@@ -2975,9 +2993,10 @@ pub(super) fn stage_local_interleave(
 
 fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     let size_kb = base64_data.len() / 1024;
+    // Snapshot before attaching, so undoing the paste detaches this image.
+    app.remember_input_undo_state();
     app.pending_images.push((media_type.clone(), base64_data));
     let placeholder = format!("[image {}]", app.pending_images.len());
-    app.remember_input_undo_state();
     app.input.insert_str(app.cursor_pos, &placeholder);
     app.cursor_pos += placeholder.len();
     app.sync_model_picker_preview_from_input();
@@ -2994,6 +3013,11 @@ fn paste_placeholder(content: &str) -> String {
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn handle_paste_image_for_test(&mut self, media_type: &str, base64_data: &str) {
+        attach_image(self, media_type.to_string(), base64_data.to_string());
+    }
+
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
         if self.remote_login.is_some() {
             if matches!(

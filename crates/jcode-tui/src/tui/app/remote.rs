@@ -1958,8 +1958,11 @@ fn handle_disconnected_key_internal(
 
     if modifiers.contains(KeyModifiers::CONTROL) {
         match code {
+            KeyCode::Char('d') if input::try_ctrl_d_forward_delete(app) => {
+                return Ok(());
+            }
             KeyCode::Char('c') | KeyCode::Char('d') => {
-                app.handle_quit_request();
+                input::clear_draft_or_request_quit(app);
                 return Ok(());
             }
             KeyCode::Char('l') if !app.diff_pane_visible() => {

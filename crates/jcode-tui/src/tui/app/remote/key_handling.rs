@@ -742,7 +742,7 @@ async fn handle_remote_key_internal(
                     remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;
                     app.set_status_notice("Interrupting...");
                 } else {
-                    app.handle_quit_request();
+                    input::clear_draft_or_request_quit(app);
                 }
                 return Ok(());
             }
