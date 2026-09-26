@@ -150,6 +150,46 @@ async fn staged_atomic_publication_exposes_only_complete_old_then_new_json() -> 
     Ok(())
 }
 
+/// Status files are rewritten on every progress and completion update while
+/// `bg status`, `bg wait`, and other jcode processes read them. A truncating
+/// write is observable as an empty file, and a reader that hits that window
+/// reports the task as missing instead of returning its status. The hook holds
+/// the write open after its new contents are staged, so the reader runs inside
+/// the write deterministically rather than by scheduling luck.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_reads_during_an_in_flight_write_see_the_previous_status() -> Result<()> {
+    let tmp = tempdir()?;
+    let reader = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let writer = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let path = reader.status_path_for("atomic-status");
+    let old_status = running_status_fixture("atomic-status", "session-before");
+    let mut new_status = old_status.clone();
+    new_status.session_id = "session-after".to_string();
+    writer.write_status_file(&path, &old_status).await;
+
+    let StatusWriteTestControl { staged, resume } = install_status_write_test_hook(path.clone());
+    let update = tokio::spawn({
+        let writer = Arc::clone(&writer);
+        let path = path.clone();
+        async move { writer.write_status_file(&path, &new_status).await }
+    });
+    recv_staged(staged).await?;
+
+    let during = reader.status("atomic-status").await;
+    resume.send(()).expect("resume status publication");
+    update.await?;
+    let during = during.ok_or_else(|| anyhow!("an in-flight status write hid the task"))?;
+    assert_eq!(during.session_id, "session-before");
+    let after = reader
+        .status("atomic-status")
+        .await
+        .ok_or_else(|| anyhow!("published status missing"))?;
+    assert_eq!(after.session_id, "session-after");
+    Ok(())
+}
+
 #[tokio::test]
 async fn terminal_publication_does_not_block_a_single_worker_runtime() -> Result<()> {
     let tmp = tempdir()?;
