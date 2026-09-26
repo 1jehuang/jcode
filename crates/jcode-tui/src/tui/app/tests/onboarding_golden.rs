@@ -705,10 +705,12 @@ fn onboarding_import_happy_path_images() {
 
     // ---- done (review turn): the suggested architecture review accepted ----
     {
+        let _lock = crate::tui::ui::render_state_test_lock();
         // The full frame includes the "Updates" box when the machine running
         // the generator has unseen changelog entries, which makes the artifact
         // depend on developer-local state. Force it empty for determinism.
-        crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(Some(Vec::new()));
+        let _fixture =
+            crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
         // The git info widget would otherwise capture the live ahead/behind and
         // dirty counts of the repo the generator runs in. Pin it to a clean
         // fixture branch. (The version label is compile-time build meta, which
@@ -734,7 +736,6 @@ fn onboarding_import_happy_path_images() {
         app.push_display_message(DisplayMessage::user(prompt));
         app.is_processing = true;
         write_full_frame_svg(&output_dir, "review-turn.svg", &app, width, height);
-        crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(None);
     }
     crate::env::remove_var("OPENROUTER_API_KEY");
     crate::auth::AuthStatus::invalidate_cached_status();

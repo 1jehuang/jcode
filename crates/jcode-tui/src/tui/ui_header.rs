@@ -36,6 +36,26 @@ pub(crate) fn set_unseen_changelog_entries_override_for_tests(entries: Option<Ve
     *guard = entries;
 }
 
+/// Keep an override in place only while its owning render test is in scope.
+/// Callers must hold the shared render-state test lock before creating this guard.
+#[cfg(test)]
+pub(crate) struct ChangelogEntriesOverrideGuard;
+
+#[cfg(test)]
+pub(crate) fn scoped_unseen_changelog_entries_override_for_tests(
+    entries: Vec<String>,
+) -> ChangelogEntriesOverrideGuard {
+    set_unseen_changelog_entries_override_for_tests(Some(entries));
+    ChangelogEntriesOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for ChangelogEntriesOverrideGuard {
+    fn drop(&mut self) {
+        set_unseen_changelog_entries_override_for_tests(None);
+    }
+}
+
 pub(crate) fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -1014,6 +1034,26 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::OnceLock;
+
+    #[test]
+    fn changelog_override_is_cleared_after_a_render_test_panics() {
+        let _lock = crate::tui::ui::render_state_test_lock();
+        let panic = std::panic::catch_unwind(|| {
+            let _fixture = scoped_unseen_changelog_entries_override_for_tests(vec![
+                "temporary changelog entry".to_owned(),
+            ]);
+            assert_eq!(unseen_changelog_entries(), ["temporary changelog entry"]);
+            panic!("injected render failure");
+        });
+        assert!(panic.is_err());
+        assert!(
+            unseen_changelog_entries_override()
+                .lock()
+                .unwrap()
+                .is_none(),
+            "a failed render test must not leak its changelog fixture"
+        );
+    }
 
     struct MockProvider;
 
