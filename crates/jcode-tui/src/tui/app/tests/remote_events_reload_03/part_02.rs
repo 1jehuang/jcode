@@ -388,3 +388,64 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
 
+
+#[test]
+fn test_remote_openference_window_quota_holds_turn_until_resets_at() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "keep going".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(11);
+
+    let resets_at = (chrono::Utc::now() + chrono::Duration::hours(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let message = format!(
+        "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  status: 402 Payment Required\n  response: {{\"error\":\"Request limit exceeded (1500 per 5 hours). Top up your balance to continue.\",\"type\":\"insufficient_quota\",\"code\":\"window_quota_exceeded\",\"resets_at\":\"{resets_at}\"}}"
+    );
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 11,
+            message,
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+
+    assert!(!app.is_processing);
+    assert!(matches!(app.status, ProcessingStatus::Idle));
+    let reset = app.rate_limit_reset.expect("turn should be held for resume");
+    let wait = reset.saturating_duration_since(std::time::Instant::now());
+    assert!(wait > std::time::Duration::from_secs(2 * 3600 - 60));
+    assert!(wait <= std::time::Duration::from_secs(2 * 3600 + 60));
+    assert_eq!(
+        app.rate_limit_pending_message.as_ref().map(|p| p.content.as_str()),
+        Some("keep going")
+    );
+    let last = app.display_messages().last().expect("missing hold notice");
+    assert!(last.content.contains("auto-resuming in 2h"), "{}", last.content);
+}
+
+#[test]
+fn test_rate_limit_notice_survives_out_of_range_reset_secs() {
+    let mut app = create_test_app();
+    for secs in [u64::MAX, i64::MAX as u64 + 1, i64::MAX as u64] {
+        let line = app.rate_limit_notice_with_nudge(secs);
+        assert!(line.contains("auto-resuming in"), "{line}");
+        assert!(!line.contains("(at "), "{line}");
+    }
+    let line = app.rate_limit_notice_with_nudge(2 * 3600);
+    assert!(line.contains("auto-resuming in 2h 00m (at "), "{line}");
+}
