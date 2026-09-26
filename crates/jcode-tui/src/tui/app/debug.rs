@@ -490,7 +490,7 @@ pub(super) struct ScrollTestState {
 impl ScrollTestState {
     fn capture(app: &App) -> Self {
         Self {
-            display_messages: app.display_messages.clone(),
+            display_messages: app.display_messages.to_vec(),
             display_messages_version: app.display_messages_version,
             side_panel: app.side_panel.clone(),
             scroll_offset: app.scroll_offset,
@@ -527,7 +527,7 @@ impl ScrollTestState {
     }
 
     fn restore(self, app: &mut App) {
-        app.display_messages = self.display_messages;
+        app.display_messages.replace(self.display_messages);
         app.display_messages_version = self.display_messages_version;
         app.apply_side_panel_snapshot(self.side_panel);
         app.scroll_offset = self.scroll_offset;

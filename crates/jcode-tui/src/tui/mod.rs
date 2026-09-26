@@ -395,6 +395,12 @@ pub(crate) fn hash_rendered_image_signature_fields(
 pub trait TuiState {
     // ---- Transcript ----
     fn display_messages(&self) -> &[DisplayMessage];
+    /// Stable identity of the message at `idx`, or `None` for states that do
+    /// not track identity (test harnesses, synthetic frames). Callers fall back
+    /// to the content hash in that case.
+    fn display_message_item_id(&self, _idx: usize) -> Option<jcode_tui_messages::ItemId> {
+        None
+    }
     fn display_user_message_count(&self) -> usize;
     /// Number of user prompts hidden before the first visible message because of
     /// compacted-history truncation. Used to keep prompt numbers absolute.

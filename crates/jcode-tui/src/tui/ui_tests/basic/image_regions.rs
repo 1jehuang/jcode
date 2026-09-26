@@ -157,7 +157,7 @@ fn test_incremental_append_offsets_new_image_region_and_keeps_old() {
     let base_region = base.image_regions[0];
     assert_eq!(base_region.hash, inline_image_id_for(IMG_REGION_WIDE_PNG_B64));
 
-    let k = super::prepare::matching_prefix_len(base.as_ref(), &grown_state.display_messages);
+    let k = super::prepare::matching_prefix_len(base.as_ref(), grown_state.display_messages.len(), |i| super::prepare::display_item_key(&grown_state, i));
     assert_eq!(k, 2, "pure append: whole base is a matching prefix");
     let incremented = super::prepare::prepare_body_incremental(&grown_state, width, base, k);
     let full = super::prepare::prepare_body(&grown_state, width, false);
@@ -230,7 +230,7 @@ fn test_prefix_reuse_mid_edit_reoffsets_region_below_boundary() {
     assert_eq!(base.image_regions.len(), 1);
     let base_region = base.image_regions[0];
 
-    let k = super::prepare::matching_prefix_len(base.as_ref(), &edited_state.display_messages);
+    let k = super::prepare::matching_prefix_len(base.as_ref(), edited_state.display_messages.len(), |i| super::prepare::display_item_key(&edited_state, i));
     assert_eq!(k, 1, "prefix match stops at the edited plan-graph message");
 
     let mut reuse = base;
@@ -296,7 +296,7 @@ fn test_prepend_shifts_suffix_image_regions_and_matches_full_build() {
     assert_eq!(base.image_regions.len(), 1, "base has only the new-tool region");
     let base_region = base.image_regions[0];
 
-    let s = super::prepare::matching_suffix_len(base.as_ref(), &prepended_state.display_messages);
+    let s = super::prepare::matching_suffix_len(base.as_ref(), prepended_state.display_messages.len(), |i| super::prepare::display_item_key(&prepended_state, i));
     assert!(s >= 2, "tail must hash-match under the prepend (got {s})");
     // Reuse the tool+assistant tail; re-render the head (marker, revealed tool,
     // and the user prompt whose displayed number shifts under the prepend).
@@ -382,7 +382,7 @@ fn test_prefix_reuse_edit_recomputes_region_height_not_stale() {
     assert_eq!(base.image_regions.len(), 1);
     let base_region = base.image_regions[0];
 
-    let k = super::prepare::matching_prefix_len(base.as_ref(), &edited_state.display_messages);
+    let k = super::prepare::matching_prefix_len(base.as_ref(), edited_state.display_messages.len(), |i| super::prepare::display_item_key(&edited_state, i));
     assert_eq!(k, 1, "prefix match stops at the edited tool message");
     let mut reuse = base;
     super::prepare::truncate_prepared_to_boundary(Arc::make_mut(&mut reuse), k);

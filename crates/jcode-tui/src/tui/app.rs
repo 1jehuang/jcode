@@ -1,3 +1,4 @@
+use self::transcript::Transcript;
 use super::DisplayMessageRoleExt;
 use super::keybind::{
     CenteredToggleKeys, ModelSwitchKeys, OptionalBinding, ScrollKeys, WorkspaceNavigationKeys,
@@ -111,6 +112,7 @@ mod terminal_liveness;
 mod terminal_setup_command;
 mod terminal_title;
 mod todos_view;
+mod transcript;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
@@ -637,6 +639,12 @@ pub(super) struct HistoryScrollAnchor {
     /// to detect when a frame with the newly-loaded content has rendered (its
     /// total differs), so the anchor can be reconciled into `scroll_offset`.
     pub base_total: usize,
+    /// Transcript length at capture. A resize rewraps the transcript and changes
+    /// `base_total` without loading anything, so the wrapped total alone would
+    /// let a resize resolve (and drop) this anchor before the requested history
+    /// arrives. Requiring the transcript to have actually grown distinguishes
+    /// the two.
+    pub base_msg_count: usize,
 }
 
 /// Resize anchor captured against the pre-resize geometry.
@@ -871,7 +879,7 @@ pub struct App {
     mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,
-    display_messages: Vec<DisplayMessage>,
+    display_messages: Transcript,
     display_messages_version: u64,
     display_user_message_count: usize,
     display_edit_tool_message_count: usize,

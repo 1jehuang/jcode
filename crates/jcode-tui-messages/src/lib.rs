@@ -1,5 +1,6 @@
 mod anchor;
 mod cache;
+mod item_id;
 mod message;
 mod prepared;
 mod swarm_collapse;
@@ -13,6 +14,7 @@ pub use cache::{
     MessageCacheContext, centered_wrap_width, get_cached_message_lines,
     left_pad_lines_for_centered_mode,
 };
+pub use item_id::ItemId;
 pub use message::{
     DisplayMessage, TranscriptPreviewLabels, display_messages_from_rendered_messages,
     latest_user_transcript_preview, normalize_transcript_preview_text, transcript_preview_line,

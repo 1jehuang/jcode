@@ -114,7 +114,7 @@ fn test_scroll_render_scrolled_up() {
 fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage {
             role: "user".to_string(),
             content: "This is a deliberately long prompt preview that should wrap into two preview rows at the top of the viewport".to_string(),
@@ -131,7 +131,7 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             title: None,
             tool_data: None,
         },
-    ];
+    ]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -911,6 +911,41 @@ fn test_history_anchor_reconciles_into_scroll_offset_after_render() {
     assert!(app.auto_scroll_paused, "anchored view stays paused");
 }
 
+/// A resize rewraps the transcript and changes the wrapped total, but it loads
+/// no history. It must not satisfy (and drop) a pending history anchor, or the
+/// later prepend finds no anchor and snaps the reader to the top.
+#[test]
+fn a_resize_does_not_resolve_a_pending_history_anchor() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut wide) = anchor_test_app();
+    render_and_snap(&app, &mut wide);
+    app.scroll_offset = 4;
+    app.auto_scroll_paused = true;
+    render_and_snap(&app, &mut wide);
+
+    app.capture_history_anchor(0);
+    assert!(app.pending_history_anchor.is_some());
+    let total_before = crate::tui::ui::last_total_wrapped_lines();
+
+    // The terminal narrows: rewraps into more lines, same messages.
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(50, 25)).unwrap();
+    render_and_snap(&app, &mut narrow);
+
+    assert_ne!(
+        crate::tui::ui::last_total_wrapped_lines(),
+        total_before,
+        "the resize should rewrap the transcript"
+    );
+    assert!(
+        !app.reconcile_history_anchor(),
+        "a resize alone must not resolve the pending history anchor"
+    );
+    assert!(
+        app.pending_history_anchor.is_some(),
+        "the anchor must survive a resize until history loads"
+    );
+}
+
 /// Build a session whose compacted prefix is large enough to actually truncate
 /// (the render window only hides history past ~80 messages / >5 turns), with one
 /// live prompt at the tail. Returns the app with the truncated window applied.
@@ -1657,10 +1692,10 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
     let body = "The flaky test was caused by a race in the setup helper. \
                 I rewrote it to use a barrier and verified 200 consecutive runs pass.";
     let content = jcode_tui_messages::encode_collapsible_swarm_content("fixed the flaky test", body);
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("hi"),
         DisplayMessage::swarm("DM from sheep", content),
-    ];
+    ]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
