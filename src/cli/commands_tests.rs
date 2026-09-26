@@ -1422,9 +1422,11 @@ fn version_command_plain_output_includes_core_fields() {
         build_time: "2026-03-18 18:00:00 +0000".to_string(),
         git_date: "2026-03-18 17:59:00 +0000".to_string(),
         release_build: false,
+        build_channel: "development".to_string(),
+        external_provider_protocol_version: "0.1".to_string(),
     };
     let text = format!(
-        "version\t{}\nsemver\t{}\nbase_semver\t{}\nupdate_semver\t{}\ngit_hash\t{}\ngit_tag\t{}\nbuild_time\t{}\ngit_date\t{}\nrelease_build\t{}\n",
+        "version\t{}\nsemver\t{}\nbase_semver\t{}\nupdate_semver\t{}\ngit_hash\t{}\ngit_tag\t{}\nbuild_time\t{}\ngit_date\t{}\nrelease_build\t{}\nbuild_channel\t{}\nexternal_provider_protocol_version\t{}\n",
         report.version,
         report.semver,
         report.base_semver,
@@ -1433,13 +1435,17 @@ fn version_command_plain_output_includes_core_fields() {
         report.git_tag,
         report.build_time,
         report.git_date,
-        report.release_build
+        report.release_build,
+        report.build_channel,
+        report.external_provider_protocol_version
     );
 
     assert!(text.contains("version\tv1.2.3 (abc1234)"));
     assert!(text.contains("semver\t1.2.3"));
     assert!(text.contains("git_hash\tabc1234"));
     assert!(text.contains("release_build\tfalse"));
+    assert!(text.contains("build_channel\tdevelopment"));
+    assert!(text.contains("external_provider_protocol_version\t0.1"));
 }
 
 #[tokio::test]
