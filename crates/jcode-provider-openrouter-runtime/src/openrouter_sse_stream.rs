@@ -1,9 +1,25 @@
 use super::*;
 use jcode_provider_openrouter::stream::OpenRouterStream;
 
+/// Whether the parsed host is exactly `localhost` or a loopback address. A
+/// prefix match would exempt remote hosts such as `localhost.example.com`.
 fn is_loopback_base(api_base: &str) -> bool {
-    let lower = api_base.to_ascii_lowercase();
-    lower.contains("://localhost") || lower.contains("://127.0.0.1") || lower.contains("://[::1]")
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Only the documented `=1` opts out; `0` or any other value keeps the check.
+fn pan_check_opted_out(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "1")
 }
 
 /// Fail closed before a payment card number leaves the machine. Loopback
@@ -11,7 +27,9 @@ fn is_loopback_base(api_base: &str) -> bool {
 /// is the escape hatch for a false positive. The error names the message, never
 /// the value, and keeps the gateway's wording so the TUI stops auto-retry.
 fn pan_pre_send_block(api_base: &str, request: &Value) -> Option<anyhow::Error> {
-    if is_loopback_base(api_base) || std::env::var_os("JCODE_DISABLE_PAN_CHECK").is_some() {
+    if is_loopback_base(api_base)
+        || pan_check_opted_out(std::env::var("JCODE_DISABLE_PAN_CHECK").ok().as_deref())
+    {
         return None;
     }
     let finding =
@@ -347,7 +365,9 @@ fn should_retry(error_str: &str, attempt: u32, max_retries: u32) -> bool {
     if !is_retryable_error(error_str) || attempt + 1 >= max_retries {
         return false;
     }
-    !(error_str.contains("upstream_provider_shared_pool") && attempt >= SHARED_POOL_429_MAX_RETRIES)
+    let shared_pool_429 = parsed_http_status(error_str) == Some(429)
+        && error_str.contains("upstream_provider_shared_pool");
+    !(shared_pool_429 && attempt >= SHARED_POOL_429_MAX_RETRIES)
 }
 
 fn is_retryable_error(error_str: &str) -> bool {
@@ -403,6 +423,9 @@ mod tests {
         // An ordinary rate limit keeps the configured ladder.
         assert!(should_retry("status: 429 too many requests", 5, 8));
         assert!(!should_retry("status: 429 too many requests", 7, 8));
+        // The cap is for 429s only: a 503 naming the pool keeps its budget.
+        let pool_503 = "status: 503 service unavailable\n  response: {\"error\":{\"metadata\":{\"limit_source\":\"upstream_provider_shared_pool\"}}}";
+        assert!(should_retry(pool_503, 5, 8));
     }
 
     #[test]
@@ -429,10 +452,23 @@ mod tests {
             "the TUI fail-fast path must recognise the local block"
         );
         assert!(pan_pre_send_block("http://127.0.0.1:1234/v1", &request).is_none());
+        assert!(pan_pre_send_block("http://localhost:11434/v1", &request).is_none());
+        assert!(pan_pre_send_block("http://[::1]:8080/v1", &request).is_none());
+        // A remote host that merely starts with a loopback name is remote.
+        assert!(pan_pre_send_block("https://localhost.example.com/v1", &request).is_some());
+        assert!(pan_pre_send_block("https://127.0.0.1.example.com/v1", &request).is_some());
         let clean = serde_json::json!({"messages": [
             {"role": "user", "content": "for n in 1113 1114 1115 1116; do gh issue view $n; done"},
         ]});
         assert!(pan_pre_send_block("https://openrouter.ai/api/v1", &clean).is_none());
+    }
+
+    #[test]
+    fn only_one_opts_out_of_the_pan_check() {
+        assert!(pan_check_opted_out(Some("1")));
+        assert!(!pan_check_opted_out(Some("0")));
+        assert!(!pan_check_opted_out(Some("")));
+        assert!(!pan_check_opted_out(None));
     }
 
     #[test]

@@ -118,6 +118,15 @@ fn transient_server_error_remains_retryable_for_auto_poke() {
 }
 
 #[test]
+fn local_pan_block_is_non_retryable_for_auto_poke() {
+    // The local pre-send check sends nothing, so it carries no HTTP status.
+    use super::is_non_retryable_auto_poke_error;
+    assert!(is_non_retryable_auto_poke_error(
+        "Local pre-send check: request blocked by content filter: [PAN]"
+    ));
+}
+
+#[test]
 fn openai_usage_limit_reached_is_non_retryable() {
     use super::is_non_retryable_auto_poke_error;
     assert!(is_non_retryable_auto_poke_error(
