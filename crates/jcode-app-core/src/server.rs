@@ -342,7 +342,7 @@ fn headless_member_should_restore(status: &str, is_headless: bool) -> bool {
     is_headless
         && !matches!(
             status,
-            "ready" | "completed" | "done" | "failed" | "stopped"
+            "ready" | "completed" | "done" | "failed" | "stopped" | "stopping"
         )
 }
 
@@ -591,7 +591,8 @@ pub use self::state::{
     SwarmState,
 };
 use self::state::{
-    SessionInterruptQueues, fanout_live_client_event, fanout_session_event,
+    SessionInterruptQueues, begin_session_interrupt_delivery, begin_session_interrupt_stop,
+    complete_session_interrupt_stop, fanout_live_client_event, fanout_session_event,
     queue_soft_interrupt_for_session, register_background_tool_signal,
     register_session_event_sender, register_session_interrupt_queue, remove_background_tool_signal,
     remove_session_interrupt_queue, rename_background_tool_signal, rename_session_interrupt_queue,
