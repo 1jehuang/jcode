@@ -121,6 +121,17 @@ tmux is the most common source of rendering issues in TUI apps because it interp
 - **TERM mismatch**: If the inner `TERM` doesn't match tmux's advertised capabilities (e.g., app sees `xterm-256color` but tmux only passes `screen-256color`), color/capability negotiation fails silently.
 - **Clipboard**: OSC 52 clipboard support works but must be explicitly enabled (`set -g set-clipboard on`).
 
+### 9. luvus (Agent Multiplexer) APC Passthrough Limits
+
+Measured against luvus 0.14.2 (2026-09-26, outer terminal Ghostty 1.3.1). luvus re-parses pane output into its own cell grid and forwards kitty graphics APCs to the outer terminal; small APCs forward inline at the correct cell, but large in-band image traffic is fragile:
+
+- **Giant single writes stall the parser**: one ~780 KB cell-symbol write (a whole chunked transmit embedded in a ratatui cell) stalled the passthrough partway. Sequences that follow it then forward at whatever cursor luvus has drifted to (its bottom chrome, on top of the user's input).
+- **Unpaced chunk streams drop payload segments**: separate 4 KiB APC chunk writes with no delay lost segments around the 350-425 KB mark of a 1.4 MiB transmit. 2 ms per chunk still lost data near a 96 KiB boundary; **5 ms per chunk forwarded 1.4 MiB fully intact**.
+- **Placement position is forward-time state**: a real kitty placement (`a=p`) anchors wherever luvus's cursor is when the APC is forwarded, and the multiplexer never repaints placements by itself. A placement that lands wrong (or whose pixel data was dropped) persists until something re-emits it.
+- **`U=1` is passed through verbatim** on small transmits, so the `a=T,U=1` virtual-placement idiom works; the failure mode is volume, not key handling.
+
+Mitigations implemented in this repo (see `crates/jcode-tui-mermaid/src/mermaid_viewport.rs`): stream transmits through the direct writer hook in 5 ms-paced chunk writes instead of embedding them in a cell, and alternate the placement APC key order every emission so the anchor cell diff-rewrites each frame and a grid multiplexer re-forwards the delete+placement pair at the correct anchor.
+
 ---
 
 ## Recommendations for TUI Developers
