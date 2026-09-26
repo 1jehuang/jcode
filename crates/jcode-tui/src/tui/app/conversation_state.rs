@@ -329,11 +329,17 @@ impl App {
             return (base_messages, None);
         }
         let compaction = self.registry.compaction();
+        // Refresh the live plan snapshot so the todo list rides at the tail of
+        // the context. Computed before taking the compaction lock because it
+        // borrows the session. Mirrors agent::messages_for_provider: without
+        // it, the TUI path would compact plan state away entirely.
+        let plan_context = crate::todo::format_plan_context(&self.session.id);
         match compaction.try_write() {
             Ok(mut manager) => {
                 let discarded_oversized_native =
                     manager.discard_oversized_openai_native_compaction();
                 if self.provider.uses_jcode_compaction() {
+                    manager.set_plan_context(plan_context);
                     let action = manager.ensure_context_fits(&base_messages, self.provider.clone());
                     match action {
                         crate::compaction::CompactionAction::BackgroundStarted { trigger } => {

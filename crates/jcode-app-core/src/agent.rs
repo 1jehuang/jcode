@@ -733,8 +733,14 @@ impl Agent {
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
                     let messages = {
+                        // Refresh the live plan snapshot so the todo list
+                        // rides along after the compaction summary. The
+                        // summary alone is lossy: long sessions lost plan
+                        // state across compactions and redid finished work.
+                        let plan_context = crate::todo::format_plan_context(&self.session.id);
                         let all_messages = self.session.provider_messages();
                         if self.provider.uses_jcode_compaction() {
+                            manager.set_plan_context(plan_context);
                             let action =
                                 manager.ensure_context_fits(all_messages, self.provider.clone());
                             match action {
