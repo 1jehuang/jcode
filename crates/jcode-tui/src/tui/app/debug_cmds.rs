@@ -814,6 +814,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
+                tool_duration_ms: None,
             });
             format!("OK: injected {} message ({} chars)", role, content.len())
         } else if cmd == "scroll-test" || cmd.starts_with("scroll-test:") {

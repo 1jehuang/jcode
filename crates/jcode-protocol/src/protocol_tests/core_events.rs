@@ -470,6 +470,8 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
             content: "hello".to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }],
         images: Vec::new(),
         provider_name: Some("openai".to_string()),
@@ -565,6 +567,8 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
             content: "older response".to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }],
         images: Vec::new(),
         compacted_total: 128,
@@ -666,5 +670,59 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     assert_eq!(id, 7);
     assert_eq!(message, "oops");
     assert_eq!(retry_after_secs, None);
+    Ok(())
+}
+
+#[test]
+fn test_history_message_timestamp_roundtrip_and_legacy_default() -> Result<()> {
+    // #1454: a History payload carrying a stored timestamp survives the wire,
+    // and legacy payloads without the field still decode (serde default).
+    let event = ServerEvent::CompactedHistory {
+        id: 91,
+        session_id: "ses_ts_1454".to_string(),
+        messages: vec![HistoryMessage {
+            response_stats: None,
+            role: "tool".to_string(),
+            content: "ok".to_string(),
+            tool_calls: Some(vec!["bash".to_string()]),
+            tool_data: None,
+            timestamp: Some(
+                chrono::DateTime::parse_from_rfc3339("2026-09-23T20:23:35Z")
+                    .expect("parse stamp")
+                    .with_timezone(&chrono::Utc),
+            ),
+            tool_duration_ms: Some(48_300),
+        }],
+        images: Vec::new(),
+        compacted_total: 2,
+        compacted_visible: 1,
+        compacted_remaining: 1,
+        compacted_hidden_prompts: 0,
+    };
+    let json = encode_event(&event);
+    assert!(json.contains("\"timestamp\":"));
+    assert!(json.contains("2026-09-23T20:23:35"));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::CompactedHistory { messages, .. } = decoded else {
+        return Err(anyhow!("expected CompactedHistory event"));
+    };
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0]
+            .timestamp
+            .map(|ts| ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        Some("2026-09-23T20:23:35Z".to_string())
+    );
+    assert_eq!(messages[0].tool_duration_ms, Some(48_300));
+
+    // Legacy servers omit the field entirely; decode must not break.
+    let legacy_json = r#"{"type":"history_message_row_probe"}"#;
+    assert!(parse_event_json(legacy_json).is_err());
+
+    let legacy_history = serde_json::from_str::<HistoryMessage>(
+        r#"{"role":"tool","content":"ok"}"#,
+    )?;
+    assert_eq!(legacy_history.timestamp, None);
+    assert_eq!(legacy_history.tool_duration_ms, None);
     Ok(())
 }

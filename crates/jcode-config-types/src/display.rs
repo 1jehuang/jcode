@@ -87,6 +87,10 @@ pub struct DisplayConfig {
     /// always fall back to the technical detail.
     #[serde(default)]
     pub tool_call_details: bool,
+    /// Show a compact duration badge (" · 2m 3s") on completed tool rows,
+    /// colored by severity (issue #1453). Default: false.
+    #[serde(default)]
+    pub show_tool_duration: bool,
     /// Native terminal scrollbar configuration for scrollable panes
     pub native_scrollbars: NativeScrollbarConfig,
     /// Surface occasional "learn this keybinding" nudges when the user keeps
@@ -119,6 +123,16 @@ pub struct DisplayConfig {
     pub external_sessions: bool,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Show when each completed tool call ran: an opt-in " · HH:MM:SS"
+    /// stamp after the token count on tool transcript rows (default: false).
+    /// Has no effect unless `show_tool_timestamp` is enabled.
+    #[serde(default)]
+    pub show_tool_timestamp: bool,
+    /// Timezone for UI timestamps (tool row time stamps). "local" (default)
+    /// uses the machine's timezone; otherwise a fixed offset like "UTC+3",
+    /// "utc-5" or "UTC+05:30". Unknown values fall back to local.
+    #[serde(default)]
+    pub timestamp_tz: String,
     /// When to show the overscroll status line below the input
     /// (off/on/overscroll, default: on). "overscroll" is the elastic
     /// reveal when scrolling past the bottom, "on" keeps it always visible.
@@ -155,6 +169,7 @@ impl Default for DisplayConfig {
             show_agentgrep_output: false,
             show_bash_output: false,
             tool_call_details: false,
+            show_tool_duration: false,
             native_scrollbars: NativeScrollbarConfig::default(),
             keybinding_hints: true,
             theme: String::new(),
@@ -162,6 +177,8 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             usage_display: "left".to_string(),
+            show_tool_timestamp: false,
+            timestamp_tz: String::new(),
             overscroll_status: OverscrollStatusMode::default(),
         }
     }
@@ -211,6 +228,33 @@ impl DisplayConfig {
     pub fn usage_display_used(&self) -> bool {
         self.usage_display.eq_ignore_ascii_case("used")
     }
+
+    /// Fixed UTC offset (in seconds) for UI timestamps, when the user pinned
+    /// one via `display.timestamp_tz = "UTC+3"`. `None` = use local time.
+    /// Accepts "UTC+3", "utc-5", "UTC+0", "UTC+05:30" or a bare "3";
+    /// anything else falls back to local so a typo never breaks rendering.
+    pub fn timestamp_fixed_offset_secs(&self) -> Option<i32> {
+        let raw = self.timestamp_tz.trim().to_ascii_lowercase();
+        if raw.is_empty() || raw == "local" || raw == "system" {
+            return None;
+        }
+        let body = raw.strip_prefix("utc").map(str::trim).unwrap_or(&raw);
+        let body = body.strip_prefix(':').unwrap_or(body);
+        let (sign, digits) = match body.strip_prefix('-') {
+            Some(rest) => (-1i32, rest),
+            None => (1i32, body.strip_prefix('+').unwrap_or(body)),
+        };
+        let (hours, minutes) = match digits.split_once(':') {
+            Some((h, m)) => (h.trim(), m.trim()),
+            None => (digits, "0"),
+        };
+        let hours: i32 = hours.parse().ok()?;
+        let minutes: i32 = minutes.parse().ok()?;
+        if !(0..=14).contains(&hours) || !(0..=59).contains(&minutes) {
+            return None;
+        }
+        Some(sign * (hours * 3600 + minutes * 60))
+    }
 }
 
 #[cfg(test)]
@@ -248,5 +292,111 @@ mod tests {
         let used: DisplayConfig =
             serde_json::from_str(r#"{"usage_display":"used"}"#).expect("display config");
         assert!(used.usage_display_used());
+    }
+
+    /// Issue #1453: the tool duration badge is strictly opt-in. Missing key
+    /// means off; explicit true turns it on.
+    #[test]
+    fn tool_duration_badge_is_opt_in_and_defaults_off() {
+        assert!(!DisplayConfig::default().show_tool_duration);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(!missing.show_tool_duration);
+
+        let enabled: DisplayConfig =
+            serde_json::from_str(r#"{"show_tool_duration":true}"#).expect("display config");
+        assert!(enabled.show_tool_duration);
+    }
+
+    /// Issue #1454: the tool row time stamp is strictly opt-in. Missing key
+    /// means off; explicit true turns it on.
+    #[test]
+    fn show_tool_timestamp_is_opt_in() {
+        assert!(!DisplayConfig::default().show_tool_timestamp);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(!missing.show_tool_timestamp);
+
+        let enabled: DisplayConfig =
+            serde_json::from_str(r#"{"show_tool_timestamp":true}"#).expect("display config");
+        assert!(enabled.show_tool_timestamp);
+    }
+
+    #[test]
+    fn timestamp_tz_resolves_offsets_and_falls_back_to_local() {
+        let parse = |value: &str| -> DisplayConfig {
+            serde_json::from_str(&format!(r#"{{"timestamp_tz":"{value}"}}"#))
+                .expect("display config")
+        };
+
+        // Empty/default and explicit local: no fixed offset.
+        assert_eq!(DisplayConfig::default().timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("local").timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("system").timestamp_fixed_offset_secs(), None);
+
+        // Offsets in seconds.
+        assert_eq!(parse("UTC+3").timestamp_fixed_offset_secs(), Some(3 * 3600));
+        assert_eq!(
+            parse("utc-5").timestamp_fixed_offset_secs(),
+            Some(-5 * 3600)
+        );
+        assert_eq!(parse("UTC+0").timestamp_fixed_offset_secs(), Some(0));
+        assert_eq!(parse(" 3 ").timestamp_fixed_offset_secs(), Some(3 * 3600));
+        assert_eq!(
+            parse("UTC+05:30").timestamp_fixed_offset_secs(),
+            Some(5 * 3600 + 30 * 60)
+        );
+
+        // Garbage falls back to local instead of breaking rendering.
+        assert_eq!(parse("Moscow").timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("UTC+99").timestamp_fixed_offset_secs(), None);
+
+        // Boundary and malformed-offset handling: +14h is valid, +15h is not,
+        // minutes must stay under 60, and sign-only or empty digits fail.
+        assert_eq!(
+            parse("UTC+14").timestamp_fixed_offset_secs(),
+            Some(14 * 3600)
+        );
+        assert_eq!(
+            parse("utc-14").timestamp_fixed_offset_secs(),
+            Some(-14 * 3600)
+        );
+        assert_eq!(parse("UTC+15").timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("UTC+3:60").timestamp_fixed_offset_secs(), None);
+        assert_eq!(
+            parse("UTC+3:30").timestamp_fixed_offset_secs(),
+            Some(3 * 3600 + 30 * 60)
+        );
+        assert_eq!(parse("UTC-").timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("UTC+abc").timestamp_fixed_offset_secs(), None);
+    }
+}
+
+#[test]
+fn timestamp_fixed_offset_always_representable_by_chrono() {
+    // Every offset the parser accepts must map onto a real chrono
+    // FixedOffset and format HH:MM:SS without panicking: the render path
+    // does FixedOffset::east_opt(secs) with this exact value.
+    let parse = |value: &str| -> DisplayConfig {
+        serde_json::from_str(&format!(r#"{{"timestamp_tz":"{value}"}}"#)).expect("display config")
+    };
+    for tz in [
+        "UTC+0",
+        "UTC+3",
+        "utc-5",
+        "UTC+5:30",
+        "UTC+9:45",
+        "UTC+13:59",
+        "UTC-11:59",
+        "3",
+    ] {
+        let config = parse(tz);
+        let secs = config
+            .timestamp_fixed_offset_secs()
+            .unwrap_or_else(|| panic!("{tz} should parse to a fixed offset"));
+        let offset = chrono::FixedOffset::east_opt(secs)
+            .unwrap_or_else(|| panic!("{tz} -> {secs}s must be a valid FixedOffset"));
+        let formatted = chrono::Utc::now().with_timezone(&offset).format("%H:%M:%S");
+        assert_eq!(formatted.to_string().len(), 8, "{tz} must format HH:MM:SS");
     }
 }

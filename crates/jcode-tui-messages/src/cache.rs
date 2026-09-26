@@ -18,6 +18,9 @@ struct MessageCacheKey {
     show_agentgrep_output: bool,
     show_bash_output: bool,
     tool_call_details: bool,
+    show_tool_duration: bool,
+    show_tool_timestamp: bool,
+    timestamp_tz: String,
 }
 
 #[derive(Default)]
@@ -60,7 +63,7 @@ fn message_cache() -> &'static Mutex<MessageCacheState> {
 const MESSAGE_CACHE_LIMIT: usize = 2048;
 
 /// Runtime-sensitive inputs that affect message rendering but are not intrinsic to a message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MessageCacheContext {
     pub diagram_mode: DiagramDisplayMode,
     pub centered: bool,
@@ -69,6 +72,9 @@ pub struct MessageCacheContext {
     pub show_agentgrep_output: bool,
     pub show_bash_output: bool,
     pub tool_call_details: bool,
+    pub show_tool_duration: bool,
+    pub show_tool_timestamp: bool,
+    pub timestamp_tz: String,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -120,6 +126,9 @@ where
         show_agentgrep_output: context.show_agentgrep_output,
         show_bash_output: context.show_bash_output,
         tool_call_details: context.tool_call_details,
+        show_tool_duration: context.show_tool_duration,
+        show_tool_timestamp: context.show_tool_timestamp,
+        timestamp_tz: context.timestamp_tz.clone(),
     };
 
     let mut cache = match message_cache().lock() {
@@ -152,5 +161,31 @@ mod tests {
         left_pad_lines_for_centered_mode(&mut lines, 9);
         assert_eq!(lines[0].to_string(), "   abc");
         assert_eq!(lines[0].alignment, Some(Alignment::Left));
+    }
+
+    #[test]
+    fn message_cache_key_distinguishes_timestamp_config() {
+        // #1454: flipping `show_tool_timestamp` or `timestamp_tz` must not
+        // serve a cached tool row rendered under the previous config.
+        let base = MessageCacheContext {
+            diagram_mode: Default::default(),
+            centered: false,
+            mermaid_epoch: 0,
+            mermaid_aspect_bucket: None,
+            show_agentgrep_output: false,
+            show_bash_output: false,
+            tool_call_details: false,
+            show_tool_duration: false,
+            show_tool_timestamp: false,
+            timestamp_tz: String::new(),
+        };
+        let mut stamped = base.clone();
+        stamped.show_tool_timestamp = true;
+        assert_ne!(base, stamped);
+
+        let mut shifted = base.clone();
+        shifted.show_tool_timestamp = true;
+        shifted.timestamp_tz = "UTC+3".to_string();
+        assert_ne!(stamped, shifted);
     }
 }

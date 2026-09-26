@@ -38,6 +38,8 @@ fn measure() -> (
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         };
         let app = TestState {
             display_messages: vec![

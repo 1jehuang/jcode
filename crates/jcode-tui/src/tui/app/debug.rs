@@ -588,6 +588,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         app.set_status_notice("Visual debug: ON");
         return true;
@@ -603,6 +605,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         app.set_status_notice("Visual debug: OFF");
         return true;
@@ -627,6 +631,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
             Err(e) => {
@@ -637,6 +643,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
             }
         }
@@ -667,6 +675,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         return true;
     }
@@ -682,6 +692,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         return true;
     }
@@ -703,6 +715,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
+                tool_duration_ms: None,
             });
         }
         return true;
@@ -722,6 +736,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         return true;
     }
@@ -768,6 +784,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         return true;
     }
@@ -782,6 +800,8 @@ pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         return true;
     }

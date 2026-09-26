@@ -172,6 +172,45 @@ impl App {
         title: Option<String>,
         content: String,
     ) -> bool {
+        self.replace_latest_tool_display_message_with_timing(
+            tool_call_id,
+            title,
+            content,
+            None,
+            None,
+        )
+    }
+
+    /// Replace the latest row for `tool_call_id` and stamp the measured
+    /// duration (#1453) plus the completion timestamp (#1454) so completed
+    /// local tool rows show the same badges as rows completed through the
+    /// ToolDone event.
+    pub(super) fn replace_latest_tool_display_message_with_duration(
+        &mut self,
+        tool_call_id: &str,
+        title: Option<String>,
+        content: String,
+        tool_duration_ms: Option<u64>,
+    ) -> bool {
+        self.replace_latest_tool_display_message_with_timing(
+            tool_call_id,
+            title,
+            content,
+            tool_duration_ms,
+            Some(chrono::Utc::now()),
+        )
+    }
+
+    /// Timing-stamping variant: explicit timestamp for tests and callers that
+    /// already hold the completion time.
+    pub(super) fn replace_latest_tool_display_message_with_timing(
+        &mut self,
+        tool_call_id: &str,
+        title: Option<String>,
+        content: String,
+        tool_duration_ms: Option<u64>,
+        timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> bool {
         let Some(idx) = self.display_messages.iter().rposition(|message| {
             message.tool_data.as_ref().map(|tool| tool.id.as_str()) == Some(tool_call_id)
         }) else {
@@ -188,7 +227,23 @@ impl App {
             return true;
         }
 
-        self.replace_display_message_title_and_content(idx, title, content)
+        self.replace_display_message_title_and_content(idx, title, content);
+        let mut timing_changed = false;
+        if let Some(duration_ms) = tool_duration_ms {
+            self.display_messages[idx].tool_duration_ms = Some(duration_ms);
+            timing_changed = true;
+        }
+        if let Some(ts) = timestamp {
+            self.display_messages[idx].timestamp = Some(ts);
+            timing_changed = true;
+        }
+        if timing_changed {
+            // The cached row render includes the duration and timestamp
+            // badges, so a timing-only change (title and content identical)
+            // must still invalidate it.
+            self.bump_display_messages_version();
+        }
+        true
     }
 
     pub(super) fn background_task_rows_ref(&self) -> &[crate::tui::BackgroundTaskRow] {
@@ -792,6 +847,8 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: msg.tool_data,
+                timestamp: None,
+                tool_duration_ms: None,
             })
             .collect();
         self.apply_compacted_history_window(

@@ -1901,6 +1901,8 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         return true;
     }
@@ -1922,6 +1924,8 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                     duration_secs: None,
                     title: Some("KV cache stats".to_string()),
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 });
                 app.set_status_notice("Cache stats");
             }
@@ -2035,6 +2039,8 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         });
         return true;
     }

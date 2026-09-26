@@ -221,6 +221,8 @@ fn test_initial_history_bootstrap_skips_resubmit_when_prompt_already_in_history(
                     content: "continue implementing the fix".to_string(),
                     tool_calls: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 }],
                 images: vec![],
                 provider_name: Some("claude".to_string()),

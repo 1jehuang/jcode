@@ -2473,3 +2473,72 @@ fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
         assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
     }
 }
+
+#[test]
+fn get_history_carries_stored_timestamp_and_duration() {
+    // #1454/#1453: the history payload the remote client decodes must keep
+    // the stored wall-clock time and the measured duration so reloaded tool
+    // rows render the same badges the live transcript showed.
+    struct NoopProvider;
+    #[async_trait]
+    impl Provider for NoopProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<EventStream> {
+            let (_tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(1);
+            Ok(Box::pin(ReceiverStream::new(rx)))
+        }
+        fn name(&self) -> &str {
+            "history-stamp-test"
+        }
+        fn supports_compaction(&self) -> bool {
+            false
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(NoopProvider)
+        }
+    }
+
+    let registry = Registry::empty();
+    let mut agent = Agent::new(Arc::new(NoopProvider), registry);
+    let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:23:35Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    agent.session.append_stored_message(StoredMessage {
+        id: "msg-stamp-1".to_string(),
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: "prompt".to_string(),
+            cache_control: None,
+        }],
+        display_role: None,
+        timestamp: None,
+        tool_duration_ms: None,
+        token_usage: None,
+    });
+    agent.session.append_stored_message(StoredMessage {
+        id: "msg-stamp-2".to_string(),
+        role: Role::User,
+        // A tool result row: the render layer keeps both the stored timestamp
+        // and the measured duration only on this row kind.
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "tool-stamp-1".to_string(),
+            content: "ok".to_string(),
+            is_error: None,
+        }],
+        display_role: None,
+        timestamp: Some(stamp),
+        tool_duration_ms: Some(1234),
+        token_usage: None,
+    });
+
+    let history = agent.get_history();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].timestamp, None);
+    assert_eq!(history[1].timestamp, Some(stamp));
+    assert_eq!(history[1].tool_duration_ms, Some(1234));
+}

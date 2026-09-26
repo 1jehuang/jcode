@@ -345,6 +345,7 @@ pub(super) fn handle_run_subagent(
                     name: tool_name,
                     output: output_text,
                     error: None,
+                    duration_ms: Some(duration_ms),
                 });
                 let persist = {
                     let mut agent_guard = agent.lock().await;
@@ -367,6 +368,7 @@ pub(super) fn handle_run_subagent(
                     name: tool_name,
                     output: error_msg.clone(),
                     error: Some(error_msg.clone()),
+                    duration_ms: Some(duration_ms),
                 });
                 let persist = {
                     let mut agent_guard = agent.lock().await;

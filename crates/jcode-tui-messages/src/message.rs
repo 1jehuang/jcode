@@ -14,6 +14,12 @@ pub struct DisplayMessage {
     pub title: Option<String>,
     /// Full tool call data for role="tool" messages.
     pub tool_data: Option<ToolCall>,
+    /// Wall-clock time when the stored message was recorded. Tool rows
+    /// render it as the HH:MM:SS stamp of when the call ran (#1454).
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    /// Tool execution duration in milliseconds (from the stored tool
+    /// result). Tool rows render it as a compact duration badge (#1453).
+    pub tool_duration_ms: Option<u64>,
 }
 
 impl DisplayMessage {
@@ -26,6 +32,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -38,6 +46,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -50,6 +60,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -63,6 +75,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Usage".to_string()),
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -76,6 +90,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Overnight".to_string()),
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -91,6 +107,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Todos".to_string()),
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -103,6 +121,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -115,6 +135,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -127,6 +149,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -139,6 +163,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -151,6 +177,8 @@ impl DisplayMessage {
             duration_secs: Some(duration_secs),
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -163,6 +191,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: Some(tool_data),
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -175,6 +205,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -187,6 +219,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -202,6 +236,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -216,6 +252,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -228,6 +266,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: item.tool_data,
+            timestamp: item.timestamp,
+            tool_duration_ms: item.tool_duration_ms,
         }
     }
 
@@ -244,6 +284,8 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: Some(tool_data),
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -270,6 +312,11 @@ impl DisplayMessage {
             tool.name.hash(&mut hasher);
             hash_json_value(&tool.input, &mut hasher);
         }
+        // Timing badges (#1453/#1454) render from these fields, so a
+        // timing-only update (title and content unchanged) must change the
+        // message-cache key or the cached rows keep the badge-less render.
+        self.tool_duration_ms.hash(&mut hasher);
+        self.timestamp.hash(&mut hasher);
         hasher.finish()
     }
 }
@@ -427,6 +474,8 @@ mod tests {
                 intent: None,
                 thought_signature: None,
             }),
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -454,6 +503,8 @@ mod tests {
             content: "done".to_string(),
             tool_calls: vec!["read".to_string()],
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
             stored_index: None,
         };
 
@@ -462,6 +513,28 @@ mod tests {
         assert_eq!(display.content, "done");
         assert_eq!(display.tool_calls, ["read"]);
         assert!(display.tool_data.is_none());
+    }
+
+    #[test]
+    fn rendered_timestamps_convert_to_display_messages() {
+        // #1454: the RenderedMessage -> DisplayMessage hop must keep the
+        // stored wall-clock time so tool rows can stamp it.
+        let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:23:35Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rendered = RenderedMessage {
+            response_stats: None,
+            role: "tool".to_string(),
+            content: "ok".to_string(),
+            tool_calls: vec![],
+            tool_data: None,
+            timestamp: Some(stamp),
+            tool_duration_ms: Some(1234),
+            stored_index: None,
+        };
+        let display = DisplayMessage::from_rendered_message(rendered);
+        assert_eq!(display.timestamp, Some(stamp));
+        assert_eq!(display.tool_duration_ms, Some(1234));
     }
 
     #[test]

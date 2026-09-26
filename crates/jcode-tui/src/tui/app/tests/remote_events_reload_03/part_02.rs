@@ -113,6 +113,8 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
                 content: "server history replay".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                timestamp: None,
+                tool_duration_ms: None,
             }],
             images: vec![],
             provider_name: Some("claude".to_string()),
@@ -241,6 +243,8 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             duration_secs: None,
             title: None,
             tool_data: msg.tool_data,
+            timestamp: None,
+            tool_duration_ms: None,
         })
         .collect();
     app.replace_display_messages(rendered);
@@ -308,6 +312,8 @@ fn test_compacted_history_event_applies_expanded_window() {
                     content: "Earlier conversation compacted - 64 older historical messages hidden. Showing 64 of 128 compacted messages. Scroll to the top to load more.".to_string(),
                     tool_calls: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 },
                 crate::protocol::HistoryMessage {
                     response_stats: None,
@@ -315,6 +321,8 @@ fn test_compacted_history_event_applies_expanded_window() {
                     content: "older response".to_string(),
                     tool_calls: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 },
                 crate::protocol::HistoryMessage {
                     response_stats: None,
@@ -322,6 +330,8 @@ fn test_compacted_history_event_applies_expanded_window() {
                     content: "current prompt".to_string(),
                     tool_calls: None,
                     tool_data: None,
+                    timestamp: None,
+                    tool_duration_ms: None,
                 },
             ],
             images: vec![],
