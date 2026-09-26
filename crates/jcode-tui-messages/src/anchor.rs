@@ -39,7 +39,7 @@ pub fn message_row_ranges(frame: &PreparedChatFrame) -> Vec<(u64, usize, usize)>
     for section in &frame.sections {
         let mut prev = 0usize;
         for boundary in &section.prepared.message_boundaries {
-            let end = usize::from(boundary.wrapped_len);
+            let end = boundary.wrapped_len;
             ranges.push((
                 boundary.msg_hash,
                 section.line_start + prev,
