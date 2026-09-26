@@ -896,27 +896,48 @@ impl OpenRouterProvider {
         self.supports_provider_features || self.profile_id.is_none() || self.is_user_named_profile()
     }
 
-    /// Whether the fetched model catalog declares `image` as an accepted input
-    /// modality for this model.
+    /// Whether the model catalog declares `image` as an accepted input modality
+    /// for this model.
     ///
-    /// Returns false when the catalog is unavailable, still being refreshed, or
-    /// silent about this model, so a missing field stays missing instead of
-    /// being read as a capability the provider never claimed. `supports_image_input`
-    /// is a sync trait method, so this uses `try_read` rather than awaiting the
-    /// tokio lock; a busy lock simply falls back to the existing behaviour.
+    /// Memory decides whenever it holds an opinion about the model, so a freshly
+    /// fetched catalog is never overruled by a stale copy on disk. Only when
+    /// memory is silent does the persisted catalog answer, and that fallback is
+    /// what makes the first request after startup behave: the in-memory cache is
+    /// initialised empty while the catalog is normally already on disk from the
+    /// previous run, so memory alone would keep clamping images until the first
+    /// refresh completed.
+    ///
+    /// `supports_image_input` is a sync trait method, so the in-memory read uses
+    /// `try_read` rather than awaiting the tokio lock; a busy lock defers to the
+    /// disk copy instead of blocking.
     pub(crate) fn catalog_declares_image_input(&self, model_id: &str) -> bool {
         if !self.supports_model_catalog {
             return false;
         }
-        let Ok(cache) = self.models_cache.try_read() else {
-            return false;
-        };
-        cache.models.iter().any(|model| {
-            model.id.trim().to_ascii_lowercase() == model_id
-                && model
-                    .input
+        if let Ok(cache) = self.models_cache.try_read() {
+            if let Some(model) = cache
+                .models
+                .iter()
+                .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+            {
+                return declares_image_input(model);
+            }
+        }
+        self.load_usable_model_disk_cache_entry()
+            .is_some_and(|entry| {
+                entry
+                    .models
                     .iter()
-                    .any(|modality| modality.eq_ignore_ascii_case("image"))
-        })
+                    .find(|model| model.id.trim().eq_ignore_ascii_case(model_id))
+                    .is_some_and(declares_image_input)
+            })
     }
+}
+
+/// Whether one catalog entry declares `image` as an accepted input modality.
+fn declares_image_input(model: &jcode_provider_openrouter::ModelInfo) -> bool {
+    model
+        .input
+        .iter()
+        .any(|modality| modality.eq_ignore_ascii_case("image"))
 }

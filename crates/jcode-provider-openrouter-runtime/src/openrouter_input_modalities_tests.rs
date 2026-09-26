@@ -138,3 +138,71 @@ fn flat_input_modalities_are_parsed() {
         "a flat input_modalities key must be honoured"
     );
 }
+
+/// Cold start: the in-memory catalog is empty and the catalog is only on disk.
+///
+/// The in-memory cache is initialised empty and the catalog is normally already
+/// persisted from the previous run, so this is the state of the very first
+/// request after startup. An earlier version of the fix consulted memory only,
+/// which meant the first request still clamped images even though the disk
+/// catalog declared image input, and the defect only showed up after a refresh
+/// had populated memory.
+#[test]
+fn cold_start_uses_the_persisted_catalog_for_image_support() {
+    let _lock = ENV_LOCK.lock();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_str().expect("utf8 path"));
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _key = EnvVarGuard::set("TEST_COLD_START_KEY", "test-key");
+
+    let api_base = "https://coldstart.models.test/v1";
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: api_base.to_string(),
+        api_key_env: Some("TEST_COLD_START_KEY".to_string()),
+        model_catalog: true,
+        ..Default::default()
+    };
+    let provider = OpenRouterProvider::new_named_openai_compatible("coldstart", &profile)
+        .expect("named profile should initialize");
+
+    let cache_dir = temp.path().join("cache");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    // The persisted shape is the serialized ModelInfo, so the declared
+    // modalities live under `input` rather than the API's `architecture` wrapper.
+    let cache = serde_json::json!({
+        "cached_at": now,
+        "source_api_base": api_base,
+        "models": [{
+            "id": "vendor/cold-vision",
+            "name": "cold vision",
+            "context_length": null,
+            "input": ["text", "image"],
+        }],
+    });
+    std::fs::write(
+        cache_dir.join("coldstart_models.json"),
+        serde_json::to_string(&cache).expect("serialize cache"),
+    )
+    .expect("write cache");
+
+    assert!(
+        provider.load_usable_model_disk_cache_entry().is_some(),
+        "test setup: the disk cache must load, or this test would pass vacuously"
+    );
+    {
+        let memory = provider.models_cache.blocking_read();
+        assert!(
+            memory.models.is_empty(),
+            "test setup: the in-memory catalog must start cold"
+        );
+    }
+
+    assert!(
+        provider.catalog_declares_image_input("vendor/cold-vision"),
+        "a cold provider must still honour the persisted image declaration"
+    );
+}
