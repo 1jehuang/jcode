@@ -189,6 +189,8 @@ pub struct OpenAIUsageWindow {
     /// Utilization as a fraction in [0.0, 1.0].
     pub usage_ratio: f32,
     pub resets_at: Option<String>,
+    /// Window length reported by the provider, when it reports one.
+    pub window_seconds: Option<u64>,
 }
 
 /// Cached OpenAI/Codex usage snapshot for info widgets.

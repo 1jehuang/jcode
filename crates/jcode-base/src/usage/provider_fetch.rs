@@ -356,6 +356,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
                 name: "Credits".to_string(),
                 usage_percent: usage_pct,
                 resets_at: None,
+                window_seconds: None,
             });
         }
 
@@ -397,6 +398,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
                 name: "Key limit".to_string(),
                 usage_percent: pct,
                 resets_at: None,
+                window_seconds: None,
             });
             extra_info.push((
                 "Key limit".to_string(),
@@ -501,6 +503,7 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
             name,
             usage_percent: used_percent,
             resets_at: model.reset_time.clone(),
+            window_seconds: None,
         });
     }
 
@@ -675,6 +678,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
                             name: format!("{} (remote)", humanize_key(name)),
                             usage_percent: pct,
                             resets_at: reset_date.clone(),
+                            window_seconds: None,
                         });
                         extra_info.push((
                             humanize_key(name),
