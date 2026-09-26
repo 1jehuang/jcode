@@ -393,6 +393,17 @@ impl AmbientRunnerHandle {
         let session = Session::load(session_id)?;
         let cycle_provider = provider.fork();
         let registry = tool::Registry::new(cycle_provider.clone()).await;
+        // Direct-delivered scheduled items run through the same tool surface as
+        // interactive sessions: load MCP servers from the user/project config so
+        // guardians and other scheduled work can use tools like mcp__jev__*.
+        registry
+            .register_mcp_tools_for_dir(
+                None,
+                None,
+                Some(session_id.to_string()),
+                item.working_dir.clone().map(std::path::PathBuf::from),
+            )
+            .await;
         if session.is_canary {
             registry.register_selfdev_tools().await;
         }
@@ -470,6 +481,15 @@ impl AmbientRunnerHandle {
         let child_is_debug = child.is_debug;
         let cycle_provider = provider.fork();
         let registry = tool::Registry::new(cycle_provider.clone()).await;
+        // Spawned scheduled sessions get the same MCP surface as headless runs.
+        registry
+            .register_mcp_tools_for_dir(
+                None,
+                None,
+                Some(child_session_id.clone()),
+                item.working_dir.clone().map(std::path::PathBuf::from),
+            )
+            .await;
         if child_is_canary {
             registry.register_selfdev_tools().await;
         }
@@ -929,6 +949,10 @@ impl AmbientRunnerHandle {
         let cycle_provider = provider.fork();
         let registry = tool::Registry::new(cycle_provider.clone()).await;
         registry.register_ambient_tools().await;
+        // The cycle agent gets the ambient tools plus the user's MCP servers
+        // (schema cache first, so startup stays fast; connections happen on
+        // first use) so cycle work can use tools like mcp__jev__*.
+        registry.register_mcp_tools(None, None, None).await;
 
         let mut agent = Agent::new(cycle_provider.clone(), registry);
         agent.set_debug(true);
