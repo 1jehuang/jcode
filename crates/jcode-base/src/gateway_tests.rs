@@ -63,9 +63,18 @@ fn failed_pairing_guesses_revoke_pending_codes_at_the_cap() {
     let mut registry = DeviceRegistry::default();
     let code = registry.generate_pairing_code();
 
-    for _ in 0..registry::MAX_FAILED_PAIRING_ATTEMPTS {
-        assert!(!registry.validate_code(&wrong_code(&code)));
+    // The gateway reloads the registry from disk for every /pair request, so
+    // each simulated guess must too: the counter has to survive on disk.
+    for attempt in 1..=registry::MAX_FAILED_PAIRING_ATTEMPTS {
+        let mut per_request = DeviceRegistry::load();
+        assert!(!per_request.validate_code(&wrong_code(&code)));
+        let stored = DeviceRegistry::load();
+        if attempt < registry::MAX_FAILED_PAIRING_ATTEMPTS {
+            assert_eq!(stored.failed_pairing_attempts, attempt);
+            assert!(!stored.pending_codes.is_empty());
+        }
     }
+    let mut registry = DeviceRegistry::load();
     assert!(registry.pending_codes.is_empty());
     // The real code no longer works: enumeration cannot outlast the cap.
     assert!(!registry.validate_code(&code));
@@ -92,6 +101,35 @@ fn a_few_typos_still_allow_pairing() {
     let mut reloaded = DeviceRegistry::load();
     assert!(reloaded.validate_code(&code));
     assert_eq!(reloaded.failed_pairing_attempts, 0);
+}
+
+/// If `devices.json` is readable but not writable, the miss counter cannot
+/// persist across the gateway's per-request reloads. Pairing must then fail
+/// closed instead of letting a peer guess without limit.
+#[cfg(unix)]
+#[test]
+fn pairing_fails_closed_when_registry_cannot_be_saved() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _home = TempHome::new();
+    let mut registry = DeviceRegistry::default();
+    let code = registry.generate_pairing_code();
+    let path = crate::storage::jcode_dir().unwrap().join("devices.json");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+        // Running as root: permissions cannot make the file unwritable.
+        return;
+    }
+
+    for _ in 0..=registry::MAX_FAILED_PAIRING_ATTEMPTS {
+        assert!(!DeviceRegistry::load().validate_code(&wrong_code(&code)));
+    }
+    assert!(
+        !DeviceRegistry::load().validate_code(&code),
+        "a correct code must not pair when its consumption cannot be saved"
+    );
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 }
 
 #[test]

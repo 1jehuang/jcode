@@ -75,6 +75,12 @@ impl DeviceRegistry {
     ///
     /// Every miss counts toward [`MAX_FAILED_PAIRING_ATTEMPTS`]; at the cap all
     /// pending codes are revoked, so a correct guess after that still fails.
+    ///
+    /// Fails closed: the gateway reloads the registry on every request, so if
+    /// the consumed code or the miss counter cannot be persisted, the next
+    /// request would see the old state. A correct code is only accepted when
+    /// its consumption is saved, which makes guessing against an unwritable
+    /// registry useless.
     pub fn validate_code(&mut self, code: &str) -> bool {
         let now = chrono::Utc::now().to_rfc3339();
         if let Some(idx) = self
@@ -84,7 +90,12 @@ impl DeviceRegistry {
         {
             self.pending_codes.remove(idx);
             self.failed_pairing_attempts = 0;
-            let _ = self.save();
+            if let Err(error) = self.save() {
+                crate::logging::warn(&format!(
+                    "Gateway: refusing pairing because devices.json could not be saved: {error}"
+                ));
+                return false;
+            }
             true
         } else {
             if !self.pending_codes.is_empty() {
