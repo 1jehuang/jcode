@@ -163,6 +163,11 @@ pub struct Session {
     /// Memorable short name (e.g., "fox", "oak")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_name: Option<String>,
+    /// Hook event that spawned this session, if any (e.g. "session_end").
+    /// Set when JCODE_HOOK_EVENT is present at creation: hook runs are
+    /// automation, and the picker shows them under workers with a badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_trigger: Option<String>,
     /// Session exit status - why it ended (if not active)
     #[serde(default)]
     pub status: SessionStatus,
@@ -768,6 +773,9 @@ impl Session {
             testing_build: None,
             working_dir: current_working_dir_string(),
             short_name,
+            hook_trigger: std::env::var("JCODE_HOOK_EVENT")
+                .ok()
+                .filter(|v| !v.is_empty()),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),
@@ -824,6 +832,9 @@ impl Session {
             testing_build: None,
             working_dir: current_working_dir_string(),
             short_name: Some(short_name),
+            hook_trigger: std::env::var("JCODE_HOOK_EVENT")
+                .ok()
+                .filter(|v| !v.is_empty()),
             status: SessionStatus::Active,
             last_pid: Some(std::process::id()),
             last_active_at: Some(now),

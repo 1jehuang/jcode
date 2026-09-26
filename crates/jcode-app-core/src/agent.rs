@@ -401,7 +401,7 @@ impl Agent {
         Self::new_with_initial_ownership(provider, registry, working_dir, None, false)
     }
 
-    pub(crate) fn new_with_parent_and_initial_working_dir(
+    pub fn new_with_parent_and_initial_working_dir(
         provider: Arc<dyn Provider>,
         registry: Registry,
         working_dir: Option<&str>,

@@ -2493,6 +2493,7 @@ pub async fn run_single_message_command(
     message: &str,
     emit_json: bool,
     emit_ndjson: bool,
+    parent_session: Option<&str>,
 ) -> Result<()> {
     let provider = if emit_json || emit_ndjson {
         super::provider_init::init_provider_quiet(choice, model).await?
@@ -2519,7 +2520,12 @@ pub async fn run_single_message_command(
         // the agent runs. Warm runs skip this entirely and stay instant. (#390)
         wait_for_cold_cache_mcp_tools(&registry).await;
     }
-    let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+    let mut agent = crate::agent::Agent::new_with_parent_and_initial_working_dir(
+        provider.clone(),
+        registry,
+        None,
+        parent_session.map(str::to_string),
+    );
     if let Err(error) = restore_agent_session_if_requested(&mut agent, resume_session) {
         agent.mark_closed();
         return Err(error);
