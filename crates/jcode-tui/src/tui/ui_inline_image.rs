@@ -140,10 +140,23 @@ static PAYLOAD_RESTAGE_ALL: AtomicBool = AtomicBool::new(false);
 const PAYLOAD_RESTAGE_MAX: usize = 512;
 
 pub(crate) fn payload_for_copy(id: u64) -> Option<(String, String)> {
-    PAYLOAD_REGISTRY
+    let payload = PAYLOAD_REGISTRY
         .lock()
         .ok()
-        .and_then(|registry| registry.map.get(&id).cloned())
+        .and_then(|registry| registry.map.get(&id).cloned());
+    #[cfg(test)]
+    LAST_COPY_PAYLOAD_LOOKUP.with(|last| last.set(Some(payload.is_some())));
+    payload
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_COPY_PAYLOAD_LOOKUP: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_copy_payload_lookup_for_tests() -> Option<bool> {
+    LAST_COPY_PAYLOAD_LOOKUP.with(|last| last.take())
 }
 
 const PAYLOAD_REGISTRY_MAX: usize = 512;
@@ -256,6 +269,25 @@ pub(crate) fn register_payload(id: u64, media_type: &str, data_b64: &str) {
 fn release_payload(id: u64) {
     if let Ok(mut reg) = PAYLOAD_REGISTRY.lock() {
         reg.remove(id);
+    }
+}
+
+/// Test-only: forget every staged payload and pending restage request. These
+/// tables are process-global and every test renders the same fixture image
+/// (same id), so a prewarm worker left over from an earlier test could request
+/// a restage mid-test and turn a plain click into "click + copy".
+#[cfg(test)]
+pub(crate) fn reset_payload_staging_for_tests() {
+    if let Ok(mut reg) = PAYLOAD_REGISTRY.lock() {
+        reg.clear();
+    }
+    if let Ok(mut ids) = PAYLOAD_RESTAGE_IDS.lock() {
+        ids.clear();
+    }
+    PAYLOAD_RESTAGE_PENDING.store(false, Ordering::Release);
+    PAYLOAD_RESTAGE_ALL.store(false, Ordering::Release);
+    if let Ok(mut cache) = ANCHORED_CACHE.lock() {
+        cache.take();
     }
 }
 

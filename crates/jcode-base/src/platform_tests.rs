@@ -10,36 +10,28 @@ fn desired_nofile_soft_limit_only_raises_when_possible() {
 #[cfg(unix)]
 #[test]
 fn spawn_detached_creates_new_session() {
-    use tempfile::NamedTempFile;
-
-    let output = NamedTempFile::new().expect("temp file");
-    let output_path = output.path().to_string_lossy().to_string();
+    // Ask the kernel directly instead of `ps -o sid=`: macOS `ps` has no `sid`
+    // keyword and its `sess` column reads 0, so the old probe could never pass there.
     let parent_sid = unsafe { libc::getsid(0) };
 
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg("ps -o sid= -p $$ > \"$JCODE_TEST_OUTPUT\"")
-        .env("JCODE_TEST_OUTPUT", &output_path)
+    let mut cmd = std::process::Command::new("sleep");
+    cmd.arg("5")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
     let mut child = super::spawn_detached(&mut cmd).expect("spawn detached child");
-    let status = child.wait().expect("wait for child");
-    assert!(status.success(), "child should exit successfully");
+    let child_pid = child.id() as libc::pid_t;
+    let child_sid = unsafe { libc::getsid(child_pid) };
+    let _ = child.kill();
+    let _ = child.wait();
 
-    let child_sid = std::fs::read_to_string(&output_path)
-        .expect("read child sid")
-        .trim()
-        .parse::<u32>()
-        .expect("parse child sid");
-
+    assert!(child_sid > 0, "getsid(child) failed");
     assert_eq!(
-        child_sid,
-        child.id(),
+        child_sid, child_pid,
         "detached child should lead its own session"
     );
     assert_ne!(
-        child_sid as i32, parent_sid,
+        child_sid, parent_sid,
         "detached child should not share parent session"
     );
 }

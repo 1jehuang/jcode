@@ -1639,6 +1639,7 @@ fn clear_test_render_state_locked() {
     });
     set_visible_copy_targets(Vec::new());
     clear_copy_viewport_snapshot();
+    inline_image_ui::reset_payload_staging_for_tests();
 
     TEST_PROMPT_VIEWPORT_STATE.with(|state| {
         *state.borrow_mut() = PromptViewportState::default();

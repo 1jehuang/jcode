@@ -24,14 +24,29 @@ fn launches_after_third_do_not_show_generic_alignment_tip() {
     assert!(startup_hints_for_launch(&state).is_none());
 }
 
+#[test]
+fn hotkey_spawn_notice_is_suppressed_by_default() {
+    let state = SetupHintsState {
+        launch_count: 2,
+        hotkey_configured: true,
+        ..SetupHintsState::default()
+    };
+
+    assert!(state.startup_spawn_hint_dismissed);
+    assert!(startup_hints_for_launch(&state).is_none());
+}
+
 // Asserts the macOS-specific spawn notice text (`Cmd+;` etc.), so it only makes
 // sense on macOS. On other platforms the notice uses different chords/wording.
 #[cfg(target_os = "macos")]
 #[test]
 fn first_three_launches_can_include_hotkey_notice_too() {
+    // The spawn notice is opt-in since a402d2326 (default dismissed), so this
+    // exercises the path where the user has not dismissed it.
     let state = SetupHintsState {
         launch_count: 2,
         hotkey_configured: true,
+        startup_spawn_hint_dismissed: false,
         ..SetupHintsState::default()
     };
 

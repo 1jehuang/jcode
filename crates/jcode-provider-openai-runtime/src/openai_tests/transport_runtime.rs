@@ -509,10 +509,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         .expect("bind test websocket listener");
     let addr = listener.local_addr().expect("listener local addr");
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept websocket client");
-        let mut ws = tokio_tungstenite::accept_async(stream)
-            .await
-            .expect("accept websocket handshake");
+        let mut ws = accept_fixture_websocket(&listener).await;
         let request = ws
             .next()
             .await

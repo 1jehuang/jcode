@@ -634,7 +634,16 @@ async fn tool_descriptions_stay_under_token_cap() {
     // batch_tests::description_includes_parallel_tool_call_example).
     // browser carries the status-first and handoff-by-default routing policy
     // (e1576e9e3 and earlier), pinned by browser_tests.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm", "batch", "browser"];
+    // macos_computer_use drives the user's live Mac; its description carries the
+    // live-machine safety rule (only the requested task, background AX before
+    // click/type), which cannot fit the cap. Trimmed from ~159 to ~46 tokens.
+    const EXEMPT: &[&str] = &[
+        "integration_tools",
+        "swarm",
+        "batch",
+        "browser",
+        "macos_computer_use",
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;

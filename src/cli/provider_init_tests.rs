@@ -957,7 +957,10 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
     let _guard = lock_env();
     let _env_guard = crate::storage::lock_test_env();
     let dir = TempDir::new().expect("temp dir");
-    let saved: Vec<(String, Option<String>)> = [
+    // Every credential env var jcode can auto-detect, derived from the provider
+    // catalog. A hand-written list let a developer's real key (e.g. GROQ_API_KEY)
+    // satisfy auto init, so the test failed on any machine that had one.
+    let mut isolated: Vec<String> = [
         "JCODE_HOME",
         "JCODE_NON_INTERACTIVE",
         "JCODE_DEFERRED_AUTH_BOOTSTRAP",
@@ -972,22 +975,26 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
     ]
     .iter()
-    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .map(|k| (*k).to_string())
     .collect();
+    for profile in crate::provider_catalog::openai_compatible_profiles() {
+        if !isolated.iter().any(|k| k == profile.api_key_env) {
+            isolated.push(profile.api_key_env.to_string());
+        }
+    }
+    let saved: Vec<(String, Option<String>)> = isolated
+        .iter()
+        .map(|k| (k.clone(), std::env::var(k).ok()))
+        .collect();
 
     crate::env::set_var("JCODE_HOME", dir.path());
     crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
-    for key in [
-        "JCODE_DEFERRED_AUTH_BOOTSTRAP",
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "GITHUB_TOKEN",
-        "GEMINI_API_KEY",
-        "CURSOR_API_KEY",
-        "JCODE_ACTIVE_PROVIDER",
-        "JCODE_INITIAL_PROVIDER_EXPLICIT",
-    ] {
+    for key in isolated.iter().filter(|key| {
+        !matches!(
+            key.as_str(),
+            "JCODE_HOME" | "JCODE_NON_INTERACTIVE" | "JCODE_RUNTIME_PROVIDER"
+        )
+    }) {
         crate::env::remove_var(key);
     }
 
