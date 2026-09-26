@@ -302,6 +302,50 @@ fn swarm_spawn_mode_as_str_round_trips() {
 }
 
 #[test]
+fn test_env_override_memory_rrf_k() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_RRF_K");
+    crate::env::remove_var("JCODE_MEMORY_RRF_K");
+
+    crate::env::set_var("JCODE_MEMORY_RRF_K", "10");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_rrf_k, 10.0);
+
+    // Non-finite and garbage values leave the file value in place.
+    for bad in ["NaN", "inf", "-inf", "abc", ""] {
+        crate::env::set_var("JCODE_MEMORY_RRF_K", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_rrf_k = 25.0;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_rrf_k, 25.0, "env {bad} must not apply");
+    }
+
+    restore_env_var("JCODE_MEMORY_RRF_K", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_rrf_k_falls_back_on_nan_file_value() {
+    // TOML accepts `nan`, and f32::clamp preserves NaN: the helper must
+    // fall back to the default instead of poisoning every fused score.
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_rrf = std::env::var_os("JCODE_MEMORY_RRF_K");
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::remove_var("JCODE_MEMORY_RRF_K");
+    let mut cfg = Config::default();
+    cfg.agents.memory_rrf_k = f32::NAN;
+    cfg.save().unwrap();
+    Config::invalidate_cache();
+    assert_eq!(crate::memory::MemoryManager::rrf_k(), 60.0);
+    restore_env_var("JCODE_HOME", prev_home);
+    restore_env_var("JCODE_MEMORY_RRF_K", prev_rrf);
+    Config::invalidate_cache();
+}
+
+#[test]
 fn test_env_override_swarm_spawn_mode() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_SWARM_SPAWN_MODE");
