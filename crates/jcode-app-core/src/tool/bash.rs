@@ -785,12 +785,15 @@ mod utf8_truncation_tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn build_shell_command_uses_disk_backed_scratch_directory() {
+    #[test]
+    fn build_shell_command_uses_disk_backed_scratch_directory() {
+        // Keep JCODE_HOME stable until the final directory assertion. Running
+        // synchronously avoids holding the environment MutexGuard across await.
+        let _env_lock = crate::storage::lock_test_env();
         let expected = super::tool_scratch_dir().expect("jcode scratch directory");
         let output = build_shell_command("printf '%s\\n%s\\n' \"$TMPDIR\" \"$JCODE_SCRATCH_DIR\"")
+            .as_std_mut()
             .output()
-            .await
             .expect("run bash command");
         assert!(output.status.success(), "bash command should succeed");
         let stdout = String::from_utf8(output.stdout).expect("utf-8 scratch paths");
