@@ -40,60 +40,56 @@ pub(super) fn set_account_override_for_provider(provider: ActiveProvider, label:
 }
 
 pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
+    let prefix = match provider {
+        ActiveProvider::Claude => "claude",
+        ActiveProvider::OpenAI => "openai",
+        _ => return Vec::new(),
+    };
     let current_label = active_account_label_for_provider(provider);
-    let mut labels = Vec::new();
-
-    let mut push_unique = |label: String| {
-        if current_label.as_deref() == Some(label.as_str()) {
-            return;
-        }
-        if !labels.iter().any(|existing| existing == &label) {
+    let mut labels: Vec<String> = Vec::new();
+    let mut exhausted: Vec<String> = Vec::new();
+    let mut push_unique = |labels: &mut Vec<String>, label: String| {
+        if !labels.contains(&label) {
             labels.push(label);
         }
     };
 
     if let Some(probe) = account_usage_probe(provider) {
-        let mut preferred = probe
-            .accounts
-            .iter()
-            .filter(|account| account.label != probe.current_label)
-            .filter(|account| !account.exhausted && account.error.is_none())
-            .collect::<Vec<_>>();
-        preferred.sort_by(|a, b| {
-            let a_score = a
-                .five_hour_ratio
-                .unwrap_or(0.0)
-                .max(a.seven_day_ratio.unwrap_or(0.0));
-            let b_score = b
-                .five_hour_ratio
-                .unwrap_or(0.0)
-                .max(b.seven_day_ratio.unwrap_or(0.0));
-            a_score.total_cmp(&b_score)
-        });
-        for account in preferred {
-            push_unique(account.label.clone());
-        }
-
         for account in probe.accounts {
-            push_unique(account.label);
+            if account.exhausted || account.error.is_some() {
+                exhausted.push(account.label.clone());
+            }
+            push_unique(&mut labels, account.label);
         }
     }
-
-    match provider {
-        ActiveProvider::Claude => {
-            for account in crate::auth::claude::list_accounts().unwrap_or_default() {
-                push_unique(account.label);
-            }
-        }
-        ActiveProvider::OpenAI => {
-            for account in crate::auth::codex::list_accounts().unwrap_or_default() {
-                push_unique(account.label);
-            }
-        }
-        _ => {}
+    let stored: Vec<String> = match provider {
+        ActiveProvider::Claude => crate::auth::claude::list_accounts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|account| account.label)
+            .collect(),
+        ActiveProvider::OpenAI => crate::auth::codex::list_accounts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|account| account.label)
+            .collect(),
+        _ => Vec::new(),
+    };
+    for label in stored {
+        push_unique(&mut labels, label);
     }
 
-    labels
+    // Only auto-switch pool members rotate, cycling in the user's order from
+    // the account after the current one. Known-exhausted accounts go last.
+    let rotation = crate::auth::account_pool::AccountPool::load().rotation(
+        prefix,
+        current_label.as_deref(),
+        &labels,
+    );
+    let (ready, spent): (Vec<_>, Vec<_>) = rotation
+        .into_iter()
+        .partition(|label| !exhausted.contains(label));
+    ready.into_iter().chain(spent).collect()
 }
 
 pub(super) fn account_switch_guidance(provider: ActiveProvider) -> Option<String> {
