@@ -751,6 +751,8 @@ impl Agent {
         }
         let mut messages = messages;
         let cutoff = messages.len() - keep;
+        let mut cleared = 0usize;
+        let mut cleared_chars = 0usize;
         for message in messages.iter_mut().take(cutoff) {
             // Tool-returned images ride in the same message as the ToolResult
             // (tool_output_to_content_blocks) as base64, often 100KB-1MB each:
@@ -788,8 +790,16 @@ impl Agent {
                 {
                     let was = content.chars().count();
                     *content = format!("[cleared by retention: was {was} chars]");
+                    cleared += 1;
+                    cleared_chars += was;
                 }
             }
+        }
+        if cleared > 0 {
+            jcode_base::cache_invalidation::record(
+                "tool-result clearing",
+                format!("cleared {cleared} results ({cleared_chars} chars)"),
+            );
         }
         messages
     }
