@@ -842,7 +842,18 @@ mod helpers_tests;
 ///
 /// Returns `Some((media_type, base64_data))` if an image is available.
 /// Uses `wl-paste` on Wayland, `osascript` on macOS, falls back to `arboard::get_image()`.
+/// Read native clipboard image data without HTML fallback.
+/// Use this in Smart paste to avoid discarding text when HTML contains images.
+pub(super) fn clipboard_image_native() -> Option<(String, String)> {
+    clipboard_image_impl(false)
+}
+
+/// Read clipboard image data, including HTML fallback for image URLs.
 pub(super) fn clipboard_image() -> Option<(String, String)> {
+    clipboard_image_impl(true)
+}
+
+fn clipboard_image_impl(allow_html_fallback: bool) -> Option<(String, String)> {
     use base64::Engine;
 
     // Try wl-paste first (native Wayland - better image format support)
@@ -880,7 +891,9 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
         }
 
         // Fallback: check text/html for <img> tags (Discord copies HTML with image URLs)
-        if types.lines().any(|t| t.trim() == "text/html")
+        // Only use this when allow_html_fallback is true to avoid discarding text in Smart paste.
+        if allow_html_fallback
+            && types.lines().any(|t| t.trim() == "text/html")
             && let Ok(html_output) = std::process::Command::new("wl-paste")
                 .args(["--type", "text/html"])
                 .output()
