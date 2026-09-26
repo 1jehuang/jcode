@@ -96,6 +96,86 @@ ln -sfn "$version_dir/jcode" "$stable_dir/jcode"
 # Update stable-version marker
 printf '%s\n' "$hash" > "$builds_dir/stable-version"
 
+# Keep builds/manifest.json's "stable" field in sync with the marker and
+# symlink. Nothing else writes this field (the selfdev promote flow that did
+# was removed), so without this the manifest drifts stale and points at a
+# pruned version.
+#
+# The update runs under a cross-process lock (manifest.json.lock): a plain
+# lock file created with exclusive-create semantics. Today only the installers
+# take this lock (master's runtime BuildManifest::save is an unlocked write),
+# so this serializes concurrent installs; the holder format and prove-gone
+# recovery rule are kept compatible with the cross-runtime file-lock protocol
+# proposed for the jcode-storage side, so the runtime can adopt the same lock
+# later without changing the installers. Recovery never guesses from age
+# alone: holders record their PID in the lock, and a lock is broken only when
+# its recorded PID is provably gone; PID-less locks fall back to the 60s age
+# rule.
+manifest="$builds_dir/manifest.json"
+if [ -f "$manifest" ] && command -v jq >/dev/null 2>&1; then
+  lock="${manifest}.lock"
+  lock_acquired=0
+  lock_deadline=$(( $(date +%s) + 65 ))
+  while [ "$(date +%s)" -lt "$lock_deadline" ]; do
+    if (set -C; printf 'pid=%s\n' "$$" > "$lock") 2>/dev/null; then
+      lock_acquired=1
+      break
+    fi
+    if [ -f "$lock" ]; then
+      # Tolerant holder parse: accept "pid=<n> started=<marker>" / "pid=<n>
+      # acquired_at=..." (cross-runtime protocol holders) as well as bare
+      # "pid=<n>" (shell/legacy writers), so any future runtime holder is
+      # recognized by PID and never falls through to the age rule. pid=0 is
+      # rejected outright: kill(0) targets a whole process group, not a
+      # process.
+      holder_pid=$(sed -n 's/^pid=\(0*[1-9][0-9]*\).*/\1/p' "$lock" 2>/dev/null | head -1)
+      if [ -n "$holder_pid" ]; then
+        # Liveness probe mirroring the cross-runtime protocol: prove-gone
+        # only. kill -0 failure is ambiguous (ESRCH = gone, EPERM = exists but
+        # another user's), so confirm with ps (lists any user's process);
+        # without ps presume the holder lives: a lock is never broken on
+        # "cannot tell".
+        holder_alive=0
+        if kill -0 "$holder_pid" 2>/dev/null; then
+          holder_alive=1
+        elif ! command -v ps >/dev/null 2>&1; then
+          holder_alive=1
+        elif ps -p "$holder_pid" >/dev/null 2>&1; then
+          holder_alive=1
+        fi
+        if [ "$holder_alive" != 1 ]; then
+          rm -f "$lock"
+          continue
+        fi
+      else
+        # PID-less lock (legacy writer): fall back to the age rule.
+        # GNU stat comes first: its -f is filesystem mode, and "stat -f %m"
+        # fails (rc=1) while still printing filesystem status to stdout, which
+        # a $(...) would capture as non-numeric garbage and then blow up the
+        # age arithmetic below with a fatal error. BSD stat fails -c cleanly
+        # (empty stdout), so trying -c before -f works on both platforms.
+        lock_mtime=$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || echo 0)
+        lock_age=$(( $(date +%s) - lock_mtime ))
+        if [ "$lock_age" -ge 60 ]; then
+          rm -f "$lock"
+          continue
+        fi
+      fi
+    fi
+    # Fractional sleep when the platform supports it, else 1s granularity.
+    sleep 0.025 2>/dev/null || sleep 1
+  done
+  if [ "$lock_acquired" = 1 ]; then
+    if jq --arg s "$hash" '.stable = $s' "$manifest" > "$manifest.tmp" \
+      && jq -e . "$manifest.tmp" >/dev/null 2>&1; then
+      mv "$manifest.tmp" "$manifest"
+    else
+      rm -f "$manifest.tmp"
+    fi
+    rm -f "$lock"
+  fi
+fi
+
 # Update current symlink + marker
 current_dir="$builds_dir/current"
 mkdir -p "$current_dir"
