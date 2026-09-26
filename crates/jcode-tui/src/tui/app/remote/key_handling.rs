@@ -2332,10 +2332,10 @@ async fn handle_remote_key_internal(
                                 return Ok(());
                             };
 
-                            persist_remote_session_metadata(app, |session| {
-                                session.improve_mode =
-                                    Some(app_mod::commands::session_improve_mode_for(mode));
-                            })?;
+                            persist_improve_mode_or_warn(
+                                app,
+                                Some(app_mod::commands::session_improve_mode_for(mode)),
+                            );
                             app.improve_mode = Some(mode);
                             let prompt =
                                 app_mod::commands::build_improve_resume_prompt(mode, &incomplete);
@@ -2401,9 +2401,7 @@ async fn handle_remote_key_internal(
                                 return Ok(());
                             }
 
-                            persist_remote_session_metadata(app, |session| {
-                                session.improve_mode = None;
-                            })?;
+                            persist_improve_mode_or_warn(app, None);
                             app.improve_mode = None;
                             let stop_prompt = app_mod::commands::improve_stop_prompt();
                             if app.is_processing {
@@ -2432,10 +2430,10 @@ async fn handle_remote_key_internal(
                         }
                         Ok(app_mod::commands::ImproveCommand::Run { plan_only, focus }) => {
                             let mode = app_mod::commands::improve_mode_for(plan_only);
-                            persist_remote_session_metadata(app, |session| {
-                                session.improve_mode =
-                                    Some(app_mod::commands::session_improve_mode_for(mode));
-                            })?;
+                            persist_improve_mode_or_warn(
+                                app,
+                                Some(app_mod::commands::session_improve_mode_for(mode)),
+                            );
                             app.improve_mode = Some(mode);
                             let prompt = app_mod::commands::build_improve_prompt(
                                 plan_only,
@@ -2514,10 +2512,10 @@ async fn handle_remote_key_internal(
                                 return Ok(());
                             };
 
-                            persist_remote_session_metadata(app, |session| {
-                                session.improve_mode =
-                                    Some(app_mod::commands::session_improve_mode_for(mode));
-                            })?;
+                            persist_improve_mode_or_warn(
+                                app,
+                                Some(app_mod::commands::session_improve_mode_for(mode)),
+                            );
                             app.improve_mode = Some(mode);
                             let prompt =
                                 app_mod::commands::build_refactor_resume_prompt(mode, &incomplete);
@@ -2583,9 +2581,7 @@ async fn handle_remote_key_internal(
                                 return Ok(());
                             }
 
-                            persist_remote_session_metadata(app, |session| {
-                                session.improve_mode = None;
-                            })?;
+                            persist_improve_mode_or_warn(app, None);
                             app.improve_mode = None;
                             let stop_prompt = app_mod::commands::refactor_stop_prompt();
                             if app.is_processing {
@@ -2614,10 +2610,10 @@ async fn handle_remote_key_internal(
                         }
                         Ok(app_mod::commands::RefactorCommand::Run { plan_only, focus }) => {
                             let mode = app_mod::commands::refactor_mode_for(plan_only);
-                            persist_remote_session_metadata(app, |session| {
-                                session.improve_mode =
-                                    Some(app_mod::commands::session_improve_mode_for(mode));
-                            })?;
+                            persist_improve_mode_or_warn(
+                                app,
+                                Some(app_mod::commands::session_improve_mode_for(mode)),
+                            );
                             app.improve_mode = Some(mode);
                             let prompt = app_mod::commands::build_refactor_prompt(
                                 plan_only,

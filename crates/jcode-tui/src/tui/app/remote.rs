@@ -43,8 +43,8 @@ pub(super) use reconnect::{
 };
 use reconnect::{format_disconnect_reason, reconnect_status_message};
 use session_persistence::{
-    persist_remote_session_metadata, persist_replay_display_message, persist_swarm_plan_snapshot,
-    persist_swarm_status_snapshot,
+    persist_improve_mode_or_warn, persist_remote_session_metadata, persist_replay_display_message,
+    persist_swarm_plan_snapshot, persist_swarm_status_snapshot,
 };
 use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 
