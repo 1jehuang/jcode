@@ -1,35 +1,18 @@
 use super::*;
 use jcode_provider_openrouter::stream::OpenRouterStream;
 
-/// Whether the parsed host is exactly `localhost` or a loopback address. A
-/// prefix match would exempt remote hosts such as `localhost.example.com`.
-fn is_loopback_base(api_base: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(api_base) else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
-}
-
 /// Only the documented `=1` opts out; `0` or any other value keeps the check.
 fn pan_check_opted_out(value: Option<&str>) -> bool {
     value.is_some_and(|value| value.trim() == "1")
 }
 
-/// Fail closed before a payment card number leaves the machine. Loopback
-/// endpoints are exempt (the text never leaves), and `JCODE_DISABLE_PAN_CHECK=1`
-/// is the escape hatch for a false positive. The error names the message, never
-/// the value, and keeps the gateway's wording so the TUI stops auto-retry.
-fn pan_pre_send_block(api_base: &str, request: &Value) -> Option<anyhow::Error> {
-    if is_loopback_base(api_base)
-        || pan_check_opted_out(std::env::var("JCODE_DISABLE_PAN_CHECK").ok().as_deref())
-    {
+/// Fail closed before a payment card number leaves the machine. Loopback bases
+/// are checked too: a local proxy or a redirect can forward the body onward.
+/// `JCODE_DISABLE_PAN_CHECK=1` is the escape hatch for a false positive. The
+/// error names the message, never the value, and keeps the gateway's wording so
+/// the TUI stops auto-retry.
+fn pan_pre_send_block(request: &Value) -> Option<anyhow::Error> {
+    if pan_check_opted_out(std::env::var("JCODE_DISABLE_PAN_CHECK").ok().as_deref()) {
         return None;
     }
     let finding =
@@ -81,7 +64,7 @@ pub(super) async fn run_stream_with_retries(
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
 ) {
-    if let Some(blocked) = pan_pre_send_block(&api_base, &request) {
+    if let Some(blocked) = pan_pre_send_block(&request) {
         let _ = tx.send(Err(blocked)).await;
         return;
     }
@@ -435,14 +418,13 @@ mod tests {
     }
 
     #[test]
-    fn pan_pre_send_blocks_remote_and_spares_loopback() {
+    fn pan_pre_send_blocks_a_card_number_without_echoing_it() {
         let pan = "4242".repeat(4);
         let request = serde_json::json!({"messages": [
             {"role": "user", "content": "issues 1113 1114 1115 1116"},
             {"role": "assistant", "content": format!("card {pan}")},
         ]});
-        let blocked = pan_pre_send_block("https://openrouter.ai/api/v1", &request)
-            .expect("remote base must block a PAN");
+        let blocked = pan_pre_send_block(&request).expect("a PAN must block");
         let text = format!("{blocked:#}");
         assert!(text.contains("message #1 (role: assistant)"), "{text}");
         assert!(!text.contains(&pan), "the value must never be echoed");
@@ -451,16 +433,10 @@ mod tests {
             Some("[PAN]"),
             "the TUI fail-fast path must recognise the local block"
         );
-        assert!(pan_pre_send_block("http://127.0.0.1:1234/v1", &request).is_none());
-        assert!(pan_pre_send_block("http://localhost:11434/v1", &request).is_none());
-        assert!(pan_pre_send_block("http://[::1]:8080/v1", &request).is_none());
-        // A remote host that merely starts with a loopback name is remote.
-        assert!(pan_pre_send_block("https://localhost.example.com/v1", &request).is_some());
-        assert!(pan_pre_send_block("https://127.0.0.1.example.com/v1", &request).is_some());
         let clean = serde_json::json!({"messages": [
             {"role": "user", "content": "for n in 1113 1114 1115 1116; do gh issue view $n; done"},
         ]});
-        assert!(pan_pre_send_block("https://openrouter.ai/api/v1", &clean).is_none());
+        assert!(pan_pre_send_block(&clean).is_none());
     }
 
     #[test]
