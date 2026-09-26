@@ -416,6 +416,11 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
+    // A parent jcode session exports its named provider profile to child
+    // processes. Running the suite from inside one must not decide whether
+    // built-in OpenAI-compatible profiles count as configured.
+    let prev_named_profile = std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE");
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
@@ -434,6 +439,11 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
         crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(prev_named_profile) = prev_named_profile {
+        crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", prev_named_profile);
+    } else {
+        crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
     }
     // Drop any config loaded from the temp home so it cannot leak into the next
     // test, which is process-global state shared across this suite.
