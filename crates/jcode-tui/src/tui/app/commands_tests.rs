@@ -415,3 +415,54 @@ fn cache_extend_saves_preference_and_reset_survives_reload() {
     );
     assert_eq!(std::fs::read_to_string(path).unwrap(), "[broken");
 }
+
+mod session_picker_query_parsing {
+    use super::super::parse_session_picker_query;
+
+    #[test]
+    fn extracts_query_from_all_three_aliases() {
+        assert_eq!(
+            parse_session_picker_query("/sessions deploy bug"),
+            Some("deploy bug")
+        );
+        assert_eq!(
+            parse_session_picker_query("/session refactor"),
+            Some("refactor")
+        );
+        assert_eq!(parse_session_picker_query("/resume api"), Some("api"));
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace_from_query() {
+        assert_eq!(
+            parse_session_picker_query("/sessions   deploy  "),
+            Some("deploy")
+        );
+        assert_eq!(parse_session_picker_query("/session\ttabs"), Some("tabs"));
+    }
+
+    #[test]
+    fn bare_and_whitespace_only_commands_yield_no_query() {
+        assert_eq!(parse_session_picker_query("/sessions"), None);
+        assert_eq!(parse_session_picker_query("/session"), None);
+        assert_eq!(parse_session_picker_query("/resume"), None);
+        assert_eq!(parse_session_picker_query("/sessions   "), None);
+        assert_eq!(parse_session_picker_query("/session\t"), None);
+    }
+
+    #[test]
+    fn similar_longer_commands_do_not_match() {
+        assert_eq!(parse_session_picker_query("/resumeall"), None);
+        assert_eq!(parse_session_picker_query("/resume-all"), None);
+        assert_eq!(parse_session_picker_query("/sessions-all deploy"), None);
+        assert_eq!(parse_session_picker_query("/sessionship"), None);
+    }
+
+    #[test]
+    fn non_matching_input_yields_none() {
+        assert_eq!(parse_session_picker_query(""), None);
+        assert_eq!(parse_session_picker_query("/active"), None);
+        assert_eq!(parse_session_picker_query("sessions deploy"), None);
+        assert_eq!(parse_session_picker_query("/Save deploy"), None);
+    }
+}
