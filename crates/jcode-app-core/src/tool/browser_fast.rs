@@ -104,6 +104,8 @@ fn redact_credentials(value: &mut Value) -> bool {
                 false
             }
         }
+        // `|` instead of `||`: every item must be visited so the redaction runs
+        // for each one; `any(..)` would stop at the first hit and skip the rest.
         Value::Array(items) => {
             // Visit every item: redaction mutates in place, so do not short-circuit.
             let mut found = false;

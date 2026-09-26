@@ -276,6 +276,9 @@ struct PageRecordLocation<'a> {
     format: SidePanelPageFormat,
 }
 
+// Clippy 1.98 counts eight parameters here; the helper shape is load-bearing for
+// downstream merges, so the lint is allowed at this one site.
+#[allow(clippy::too_many_arguments)]
 fn upsert_page_record(
     state: &mut PersistedSidePanelState,
     page_id: &str,

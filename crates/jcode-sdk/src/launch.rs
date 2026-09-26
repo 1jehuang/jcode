@@ -700,7 +700,7 @@ fn home_dir() -> PathBuf {
 pub fn user_app_config_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        return home_dir().join("Library/Application Support/jcode");
+        home_dir().join("Library/Application Support/jcode")
     }
     #[cfg(target_os = "windows")]
     {
