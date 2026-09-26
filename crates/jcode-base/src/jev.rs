@@ -359,6 +359,11 @@ impl JevClient {
             .bearer_auth(&self.api_key)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
+        if self.provider == JevProvider::Jcode && self.purpose == JevPurpose::Browser {
+            // The gateway budgets browser handoffs separately so background
+            // memory recall cannot exhaust interactive browsing.
+            request = request.header("X-Jcode-Jev-Purpose", "browser");
+        }
         if self.provider == JevProvider::OpenRouter {
             request = request.header("HTTP-Referer", "https://jcode.sh").header(
                 "X-Title",
@@ -964,9 +969,10 @@ mod tests {
         );
         // Typesafe direct wins over resellers of the same model.
         assert_eq!(
-            resolve_with("auto", |env, _| (env != "JCODE_API_KEY").then(|| "k".into()))
-                .unwrap()
-                .0,
+            resolve_with("auto", |env, _| (env != "JCODE_API_KEY")
+                .then(|| "k".into()))
+            .unwrap()
+            .0,
             JevProvider::TypeSafe
         );
         // Deliberate BYOK remains available even when a Jcode login is present.
@@ -1219,6 +1225,12 @@ mod tests {
                     serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
                 assert_eq!(body["model"], "typesafe/jev-1.13");
                 assert!(body["state"].is_string());
+                assert!(
+                    !requests[1]
+                        .to_ascii_lowercase()
+                        .contains("x-jcode-jev-purpose"),
+                    "only browser decisions use the browser budget"
+                );
             } else {
                 let error = result.unwrap_err().to_string();
                 assert!(error.contains("voice"));
@@ -1598,6 +1610,12 @@ mod tests {
         assert!(requests[0].starts_with("GET /v1/me "));
         assert!(!requests[0].contains("private-page"));
         assert!(requests[1].starts_with("POST /v1/decisions "));
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("x-jcode-jev-purpose: browser\r\n"),
+            "browser decisions must use the gateway's separate browser budget"
+        );
         let body: Value =
             serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["questions"], Value::Object(browser_questions()));
