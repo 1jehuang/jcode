@@ -245,7 +245,7 @@ mod tests {
     use super::*;
 
     struct EnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: jcode_base::storage::TestEnvGuard,
         entries: Vec<(&'static str, Option<std::ffi::OsString>)>,
     }
 
