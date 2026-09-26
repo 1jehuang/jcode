@@ -1697,7 +1697,11 @@ async fn fetch_awaited_member_reports(
     members: &[AwaitedMemberStatus],
 ) -> HashMap<String, String> {
     let mut reports = HashMap::new();
-    for member in members.iter().filter(|member| member.done) {
+    // The await response already carries each member's retained completion
+    // report. Only fall back to conversation history when that field is absent;
+    // otherwise this transfers a full history over an extra socket round-trip
+    // only for the formatter to prefer the retained report anyway.
+    for member in members_needing_report_backfill(members) {
         let request = Request::CommReadContext {
             id: REQUEST_ID,
             session_id: ctx.session_id.clone(),
@@ -1718,6 +1722,14 @@ async fn fetch_awaited_member_reports(
         }
     }
     reports
+}
+
+fn members_needing_report_backfill(
+    members: &[AwaitedMemberStatus],
+) -> impl Iterator<Item = &AwaitedMemberStatus> {
+    members
+        .iter()
+        .filter(|member| member.done && member.completion_report.is_none())
 }
 
 fn default_await_target_statuses() -> Vec<String> {
