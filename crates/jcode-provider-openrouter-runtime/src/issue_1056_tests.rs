@@ -99,11 +99,7 @@ fn named_profile_headers_are_sent_on_the_wire() {
     std::thread::spawn(move || {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut bytes = vec![0; 32 * 1024];
-            let read = stream.read(&mut bytes).unwrap();
-            request_tx
-                .send(String::from_utf8_lossy(&bytes[..read]).into_owned())
-                .unwrap();
+            request_tx.send(read_request_head(&mut stream)).unwrap();
             let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
             write!(
                 stream,
@@ -147,4 +143,23 @@ fn named_profile_headers_are_sent_on_the_wire() {
         );
         assert!(!request.contains("bad header"));
     }
+}
+
+/// Read a request through the end of its headers, however many TCP reads the
+/// client needs to deliver them.
+fn read_request_head(stream: &mut std::net::TcpStream) -> String {
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).unwrap();
+        assert!(
+            read > 0,
+            "connection closed before the request headers ended"
+        );
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
