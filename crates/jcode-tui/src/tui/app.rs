@@ -1516,8 +1516,10 @@ pub struct App {
     dictation_target_session_id: Option<String>,
     // Keep the current chat viewport while typing instead of snapping to bottom.
     typing_scroll_lock: bool,
-    // Scroll bookmark: stashed scroll position for quick teleport back
-    scroll_bookmark: Option<usize>,
+    // Scroll bookmark: stashed reading position for quick teleport back. Stored
+    // in content coordinates, so a resize between setting and returning does not
+    // send the reader somewhere else (issue #1412).
+    scroll_bookmark: Option<jcode_tui_messages::Anchor>,
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)
