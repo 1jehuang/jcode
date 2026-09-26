@@ -641,11 +641,17 @@ bind_addr = "0.0.0.0"
 
 [power]
 # Prevent automatic system sleep while any jcode session is actively working.
-# Linux also blocks lid-switch suspend. Windows still respects explicit lid-close
-# and power-button actions from your active power plan. The display may sleep.
+# Linux also blocks lid-switch suspend. On Windows and macOS see block_lid_close.
+# The display may sleep.
 # The guard is held only for as long as work is in flight. (default: true)
 # Set JCODE_DISABLE_POWER_INHIBIT=1 to force-disable regardless of this setting.
 prevent_sleep_while_streaming = true
+# Also keep working when the lid closes on macOS and Windows while a session is
+# working. Windows temporarily sets the power plan's lid close action to "Do
+# nothing". macOS runs `sudo -n pmset -a disablesleep 1` and needs a passwordless
+# sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
+# saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
+block_lid_close = true
 
 [safety]
 # Notification settings for ambient mode events
