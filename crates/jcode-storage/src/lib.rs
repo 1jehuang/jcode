@@ -174,13 +174,70 @@ fn test_harness_home() -> Option<&'static Path> {
         if !is_test_harness_exe(&exe) {
             return None;
         }
-        // Same name as the TUI suites' `ensure_test_jcode_home_if_unset`.
-        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&path);
-        Some(path)
+        Some(create_private_test_home())
     })
     .as_deref()
 }
+
+/// Create a fresh, private test home that only this process can use.
+///
+/// `create_dir` (not `create_dir_all`) refuses any pre-existing entry,
+/// including a symlink planted by another local user in a shared temp dir,
+/// and the random suffix keeps a reused PID from inheriting an earlier run's
+/// sessions. The directory is `0o700` on Unix and removed at process exit.
+fn create_private_test_home() -> PathBuf {
+    let temp = std::env::temp_dir();
+    for _ in 0..16 {
+        let path = temp.join(format!(
+            "jcode-test-home-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&path) {
+            Ok(()) => {
+                register_test_home_cleanup(&path);
+                return path;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Falling back to the real `~/.jcode` is exactly what this guards
+            // against, so a test binary that cannot sandbox itself stops here.
+            Err(error) => panic!(
+                "cannot create private test home {}: {error}",
+                path.display()
+            ),
+        }
+    }
+    panic!(
+        "cannot create a unique private test home in {}",
+        temp.display()
+    );
+}
+
+#[cfg(unix)]
+fn register_test_home_cleanup(path: &Path) {
+    static CLEANUP_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    extern "C" fn remove_test_home() {
+        if let Some(path) = CLEANUP_PATH.get() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+    if CLEANUP_PATH.set(path.to_path_buf()).is_ok() {
+        // SAFETY: `remove_test_home` is a plain `extern "C"` fn with no
+        // arguments that only touches an initialised static.
+        unsafe {
+            libc::atexit(remove_test_home);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn register_test_home_cleanup(_path: &Path) {}
 
 fn is_test_harness_exe(exe: &Path) -> bool {
     // Match on the parent directory, not a `/target/` component, so a custom
@@ -830,6 +887,23 @@ mod test_harness_home_tests {
         if let Some(home) = dirs::home_dir() {
             assert_ne!(sandbox, home.join(".jcode"));
         }
+    }
+
+    #[test]
+    fn private_test_homes_are_unique_and_never_follow_existing_entries() {
+        let a = create_private_test_home();
+        let b = create_private_test_home();
+        assert_ne!(a, b, "a reused PID must not share an earlier home");
+        let meta = std::fs::symlink_metadata(&a).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+            assert_eq!(meta.uid(), unsafe { libc::geteuid() });
+        }
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }
 
