@@ -120,6 +120,7 @@ mod tests {
             tool_calls: vec![],
             tool_data: None,
             response_stats: None,
+            tool_duration_ms: None,
         }
     }
     fn tool_call(message: &mut StoredMessage) {

@@ -531,5 +531,8 @@ mod prepared_messages_tests;
 mod rendering;
 #[path = "swarm_buffer.rs"]
 mod swarm_buffer;
+#[cfg(test)]
+#[path = "tool_duration.rs"]
+mod tool_duration;
 #[path = "tools.rs"]
 mod tools;

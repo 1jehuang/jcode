@@ -18,6 +18,7 @@ struct MessageCacheKey {
     show_agentgrep_output: bool,
     show_bash_output: bool,
     tool_call_details: bool,
+    show_tool_duration: bool,
 }
 
 #[derive(Default)]
@@ -69,6 +70,7 @@ pub struct MessageCacheContext {
     pub show_agentgrep_output: bool,
     pub show_bash_output: bool,
     pub tool_call_details: bool,
+    pub show_tool_duration: bool,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -120,6 +122,7 @@ where
         show_agentgrep_output: context.show_agentgrep_output,
         show_bash_output: context.show_bash_output,
         tool_call_details: context.tool_call_details,
+        show_tool_duration: context.show_tool_duration,
     };
 
     let mut cache = match message_cache().lock() {

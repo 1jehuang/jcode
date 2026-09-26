@@ -83,6 +83,11 @@ pub struct RenderedMessage {
     /// transcript (issue #432).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_index: Option<usize>,
+    /// Tool execution duration in milliseconds, recorded by the agent loop
+    /// when the tool result was stored (#1453). Tool rows show it as a
+    /// compact duration badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

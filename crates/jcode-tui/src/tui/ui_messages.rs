@@ -4022,6 +4022,13 @@ pub(crate) fn render_tool_message(
     let base_prefix = format!("  {} {} ", icon, display_name);
     let token_suffix_width =
         UnicodeWidthStr::width(format!(" · {}", token_badge.label.as_str()).as_str());
+    // #1453: " · 2m 3s" (how long the call ran) rides with the token suffix
+    // when the stored tool result or the live event carries a duration.
+    let duration_suffix = tool_row_duration_suffix(msg);
+    let duration_suffix_width = duration_suffix
+        .as_ref()
+        .map(|(label, _)| UnicodeWidthStr::width(label.as_str()))
+        .unwrap_or(0);
     let edit_suffix_width = if is_edit_tool && has_diff_changes {
         UnicodeWidthStr::width(format!(" (+{} -{})", additions, deletions).as_str())
     } else {
@@ -4030,6 +4037,7 @@ pub(crate) fn render_tool_message(
     let reserved_summary_width = row_width
         .saturating_sub(UnicodeWidthStr::width(base_prefix.as_str()))
         .saturating_sub(token_suffix_width)
+        .saturating_sub(duration_suffix_width)
         .saturating_sub(edit_suffix_width);
 
     let intent = tc
@@ -4114,6 +4122,18 @@ pub(crate) fn render_tool_message(
         Span::styled(" · ", Style::default().fg(dim_color())),
         Span::styled(token_badge.label, Style::default().fg(token_badge.color)),
     ]);
+
+    // #1453: append the duration badge after the token count so each tool
+    // row answers "how long did this take". Color mirrors the token badge
+    // severity: >= 10s warns (amber), >= 60s alarms (red).
+    let token_suffix = if let Some((label, severity)) = duration_suffix.as_ref() {
+        let color = severity_badge_color(*severity, rgb(120, 130, 145));
+        let mut spans = token_suffix.spans;
+        spans.push(Span::styled(label.clone(), Style::default().fg(color)));
+        Line::from(spans)
+    } else {
+        token_suffix
+    };
 
     let rendered_tool_line = super::truncate_line_preserving_suffix_to_width(
         &Line::from(tool_line),
@@ -4460,6 +4480,56 @@ pub(crate) fn render_tool_message(
 struct ToolOutputTokenBadge {
     label: String,
     color: Color,
+}
+
+/// Shared severity-to-color mapping so the token and duration badges cannot
+/// drift apart. `normal_color` differs per badge (tokens: mid-grey, duration:
+/// blue-grey); Warning/Danger are shared amber/red.
+fn severity_badge_color(
+    severity: crate::util::ApproxTokenSeverity,
+    normal_color: ratatui::style::Color,
+) -> ratatui::style::Color {
+    match severity {
+        crate::util::ApproxTokenSeverity::Normal => normal_color,
+        crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),
+        crate::util::ApproxTokenSeverity::Danger => rgb(224, 118, 118),
+    }
+}
+
+/// #1453: duration badge for a tool row, rendered after the token count:
+/// " · 2m 3s" (how long the call took). Present only when the row carries a
+/// stored/live duration AND the user opted in via `display.show_tool_duration`
+/// (default off). Returns (label, severity) for coloring.
+fn tool_row_duration_suffix(
+    msg: &DisplayMessage,
+) -> Option<(String, crate::util::ApproxTokenSeverity)> {
+    if !tools_ui::show_tool_duration() {
+        return None;
+    }
+    let duration_ms = msg.tool_duration_ms.filter(|ms| *ms > 0)?;
+    Some((
+        format!(" · {}", format_tool_row_duration(duration_ms)),
+        crate::util::tool_duration_severity(duration_ms),
+    ))
+}
+
+/// #1453: compact tool duration: milliseconds under a second ("45ms" — a
+/// bare "0.0s" is noise), tenths of a second up to a minute ("42.3s"),
+/// minutes + seconds from a minute ("2m 3s"), hours + minutes from an hour
+/// ("1h 05m").
+fn format_tool_row_duration(ms: u64) -> String {
+    if ms < 1_000 {
+        return format!("{ms}ms");
+    }
+    if ms < 60_000 {
+        return format!("{}.{d}s", ms / 1000, d = (ms % 1000) / 100);
+    }
+    let secs = ms / 1000;
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m {}s", secs % 60);
+    }
+    format!("{}h {:02}m", mins / 60, mins % 60)
 }
 
 fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {

@@ -3211,16 +3211,23 @@ fn emit_ndjson_event(
             name,
             output,
             error,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
+            duration_ms,
+        } => {
+            // Omit the field when unmeasured so consumers keying on presence
+            // (not on null) keep their old contract; serde cannot express
+            // skip_serializing_if inside json!.
+            let mut event = serde_json::json!({
                 "type": "tool_done",
                 "id": id,
                 "name": name,
                 "output": output,
                 "error": error,
-            }),
-        ),
+            });
+            if let Some(duration_ms) = duration_ms {
+                event["duration_ms"] = serde_json::json!(duration_ms);
+            }
+            write_json_line(stdout, &event)
+        }
         ServerEvent::TokenUsage {
             input,
             output,
@@ -3493,9 +3500,7 @@ fn filter_cli_model_routes_for_choice(
     use super::provider_init::ProviderChoice;
 
     let keep = |route: &&crate::provider::ModelRoute| match choice {
-        ProviderChoice::Claude => {
-            route.api_method_kind().is_anthropic_credential_route()
-        }
+        ProviderChoice::Claude => route.api_method_kind().is_anthropic_credential_route(),
         ProviderChoice::Openai => {
             let method = route.api_method_kind();
             matches!(method, crate::provider::ModelRouteApiMethod::OpenAIOAuth)

@@ -75,6 +75,7 @@ fn test_patch_headers_preserve_line_counts_and_token_severity() {
                 duration_secs: None,
                 title: None,
                 tool_data: Some(tool.clone()),
+                tool_duration_ms: None,
             };
             let standalone =
                 messages::render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
@@ -139,6 +140,7 @@ fn test_token_badges_survive_full_terminal_draw() {
                     version += 1;
                     let state = TestState {
                         display_messages: vec![DisplayMessage {
+                            tool_duration_ms: None,
                             role: "tool".to_string(),
                             content,
                             tool_calls: Vec::new(),
@@ -295,6 +297,7 @@ fn test_parse_batch_sub_outputs_keeps_final_header_without_trailing_newline() {
 #[test]
 fn test_render_tool_message_batch_flat_subcall_params_include_read_details() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---\nok\n\n--- [2] read ---\nok\n\nCompleted: 2 succeeded, 0 failed"
             .to_string(),
@@ -340,6 +343,7 @@ fn test_render_tool_message_batch_flat_subcall_params_include_read_details() {
 #[test]
 fn test_render_tool_message_batch_subcalls_show_individual_token_badges() {
     let msg = DisplayMessage {
+            tool_duration_ms: None,
             role: "tool".to_string(),
             content:
                 "--- [1] read ---\n1234\n\n--- [2] grep ---\n12345678\n\nCompleted: 2 succeeded, 0 failed"
@@ -380,6 +384,7 @@ fn test_render_tool_message_batch_subcalls_show_individual_token_badges() {
 #[test]
 fn test_render_tool_message_batch_first_subcall_token_badge_with_timing_prefix() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "[tool timing: start=2026-05-14T14:10:08.525Z finish=2026-05-14T14:10:08.598Z duration=73ms] --- [1] bash ---\n12345678\n\n--- [2] bash ---\n12345678\n\nCompleted: 2 succeeded, 0 failed"
             .to_string(),
@@ -415,6 +420,7 @@ fn test_render_tool_message_batch_first_subcall_token_badge_with_timing_prefix()
 #[test]
 fn test_render_tool_message_batch_last_subcall_keeps_token_badge_without_trailing_newline() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---\n1234\n\n--- [2] grep ---".to_string(),
         tool_calls: vec![],
@@ -451,6 +457,7 @@ fn test_render_tool_message_batch_last_subcall_keeps_token_badge_without_trailin
 #[test]
 fn test_render_tool_message_batch_partial_failure_shows_all_subcalls() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---
 ok
@@ -511,6 +518,7 @@ Completed: 2 succeeded, 1 failed"
 #[test]
 fn test_render_tool_message_batch_all_failed_marks_all_children_failed() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] agentgrep ---\nError: missing field `mode`\n\n--- [2] agentgrep ---\nError: missing field `mode`\n\n--- [3] agentgrep ---\nError: missing field `mode`\n\nCompleted: 0 succeeded, 3 failed"
             .to_string(),
@@ -743,6 +751,7 @@ fn test_tool_summary_read_supports_start_line_end_line() {
 #[test]
 fn test_render_tool_message_batch_includes_start_end_read_details() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---\nok\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: vec![],
@@ -1251,6 +1260,7 @@ fn test_tool_summary_bg_infers_wait_from_intent_when_action_missing() {
 #[test]
 fn test_render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---\nok\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: vec![],
@@ -1289,6 +1299,7 @@ fn test_render_tool_message_batch_rows_do_not_soft_wrap_on_narrow_width() {
 #[test]
 fn test_render_tool_message_keeps_token_badge_when_intent_is_truncated() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "ok".to_string(),
         tool_calls: vec![],
@@ -1323,6 +1334,7 @@ fn test_render_tool_message_keeps_token_badge_when_intent_is_truncated() {
 #[test]
 fn test_render_tool_message_with_intent_never_adds_second_command_line() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "ok".to_string(),
         tool_calls: vec![],
@@ -1359,6 +1371,7 @@ fn test_render_tool_message_with_intent_never_adds_second_command_line() {
 #[test]
 fn test_render_tool_message_keeps_bash_command_visible_when_row_is_narrow() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "2\n".to_string(),
         tool_calls: vec![],
