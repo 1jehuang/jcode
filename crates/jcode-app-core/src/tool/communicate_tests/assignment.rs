@@ -5,10 +5,25 @@ async fn communicate_assign_task_can_spawn_fallback_agent() {
     let repo_dir = std::env::current_dir().expect("repo cwd");
     let socket_path = runtime_dir.path().join("jcode.sock");
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
+    // Stand in for a developer config that pins spawns to an unrelated model.
+    // The isolation guard below must hide it, or this test fails.
+    let outer_home = tempfile::TempDir::new().expect("outer home tempdir");
+    std::fs::write(
+        outer_home.path().join("config.toml"),
+        "[agents]\nswarm_model = \"openai-api:isolation-probe-model\"\n",
+    )
+    .expect("write conflicting outer config");
+    let _outer_home = EnvGuard::set("JCODE_HOME", outer_home.path());
     // Keep the developer's real config (agents.swarm_model, providers) out of spawns.
     let _home = EnvGuard::set("JCODE_HOME", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    crate::config::invalidate_config_cache();
+    assert_eq!(
+        crate::config::config().agents.swarm_model,
+        None,
+        "spawn config must come from the isolated JCODE_HOME"
+    );
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),
