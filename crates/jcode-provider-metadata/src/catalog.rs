@@ -1,6 +1,30 @@
 use super::{
     LoginProviderAuthKind, LoginProviderAuthStateKey, LoginProviderDescriptor,
-    LoginProviderSurfaceOrder, LoginProviderTarget, OpenAiCompatibleProfile,
+    LoginProviderSurfaceOrder, LoginProviderTarget, OPENAI_COMPATIBLE_CHAT_PROTOCOL,
+    OpenAiCompatibleModelProtocol, OpenAiCompatibleProfile, OpenAiCompatibleProtocol,
+    OpenAiCompatibleProtocolConfig,
+};
+
+const OPENCODE_GO_API_PROTOCOL: OpenAiCompatibleProtocolConfig = OpenAiCompatibleProtocolConfig {
+    default: OpenAiCompatibleProtocol::ChatCompletions,
+    model_overrides: &[
+        OpenAiCompatibleModelProtocol {
+            model: "grok-4.6",
+            protocol: OpenAiCompatibleProtocol::Responses,
+        },
+        OpenAiCompatibleModelProtocol {
+            model: "gpt-5.6-luna",
+            protocol: OpenAiCompatibleProtocol::Responses,
+        },
+        OpenAiCompatibleModelProtocol {
+            model: "muse-spark-1.3-contributor",
+            protocol: OpenAiCompatibleProtocol::Responses,
+        },
+        OpenAiCompatibleModelProtocol {
+            model: "muse-spark-1.2-contributor",
+            protocol: OpenAiCompatibleProtocol::Responses,
+        },
+    ],
 };
 
 pub const OPENCODE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -12,6 +36,7 @@ pub const OPENCODE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("minimax-m2.7"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -23,6 +48,7 @@ pub const OPENCODE_GO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
+    api_protocol: OPENCODE_GO_API_PROTOCOL,
 };
 
 pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -34,6 +60,7 @@ pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://docs.z.ai/devpack/quick-start",
     default_model: Some("glm-4.5"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const KIMI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -45,6 +72,7 @@ pub const KIMI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://www.kimi.com/coding/docs/en/more/third-party-agents.html",
     default_model: Some("kimi-for-coding"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const AI302_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -56,6 +84,7 @@ pub const AI302_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("qwen3-235b-a22b-instruct-2507"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const BASETEN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -67,6 +96,7 @@ pub const BASETEN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("zai-org/GLM-4.7"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const CONIFER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -78,6 +108,7 @@ pub const CONIFER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://www.conifer.build/docs/api/",
     default_model: None,
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const CORTECS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -89,6 +120,7 @@ pub const CORTECS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 // OpenRouter also has a dedicated provider implementation elsewhere, but it
@@ -105,6 +137,7 @@ pub const OPENROUTER_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiComp
     setup_url: "https://openrouter.ai/keys",
     default_model: None,
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -116,6 +149,7 @@ pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     setup_url: "https://www.orcarouter.ai",
     default_model: None,
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 // Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
@@ -135,6 +169,7 @@ pub const ANTHROPIC_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompa
     setup_url: "https://docs.anthropic.com/en/api/openai-sdk",
     default_model: None,
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const OPENAI_NATIVE_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -146,6 +181,7 @@ pub const OPENAI_NATIVE_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiC
     setup_url: "https://platform.openai.com/api-keys",
     default_model: None,
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const GEMINI_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -160,6 +196,7 @@ pub const GEMINI_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatib
     setup_url: "https://ai.google.dev/gemini-api/docs/openai",
     default_model: Some("gemini-2.5-flash"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const DEEPSEEK_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -171,6 +208,7 @@ pub const DEEPSEEK_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://api-docs.deepseek.com/",
     default_model: Some("deepseek-v4-flash"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const COMTEGRA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -182,6 +220,7 @@ pub const COMTEGRA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://docs.cgc.comtegra.cloud/llm-api",
     default_model: Some("glm-51-nvfp4"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const FPT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -193,6 +232,7 @@ pub const FPT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://ai-docs.fptcloud.com/api-reference/ai-marketplace/api-reference/api-integration-large-language-model-md",
     default_model: Some("GLM-5.1"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const FIRMWARE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -204,6 +244,7 @@ pub const FIRMWARE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const HUGGING_FACE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -215,6 +256,7 @@ pub const HUGGING_FACE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfil
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("zai-org/GLM-4.7"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const MOONSHOT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -226,6 +268,7 @@ pub const MOONSHOT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("kimi-k2.5"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const NEBIUS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -237,6 +280,7 @@ pub const NEBIUS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("openai/gpt-oss-120b"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const SCALEWAY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -248,6 +292,7 @@ pub const SCALEWAY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("qwen3-coder-30b-a3b-instruct"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const STACKIT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -259,6 +304,7 @@ pub const STACKIT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: Some("openai/gpt-oss-120b"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const GROQ_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -270,6 +316,7 @@ pub const GROQ_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://console.groq.com/docs/openai",
     default_model: Some("llama-3.1-8b-instant"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const MISTRAL_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -281,6 +328,7 @@ pub const MISTRAL_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://docs.mistral.ai/getting-started/models/",
     default_model: Some("devstral-medium-2507"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const PERPLEXITY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -292,6 +340,7 @@ pub const PERPLEXITY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     setup_url: "https://docs.perplexity.ai/docs/agent-api/openai-compatibility",
     default_model: Some("sonar"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const TOGETHER_AI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -303,6 +352,7 @@ pub const TOGETHER_AI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     setup_url: "https://docs.together.ai/docs/openai-api-compatibility",
     default_model: Some("moonshotai/Kimi-K2-Instruct"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const DEEPINFRA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -314,6 +364,7 @@ pub const DEEPINFRA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://deepinfra.com/docs/api-reference",
     default_model: Some("moonshotai/Kimi-K2-Instruct"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const FIREWORKS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -325,6 +376,7 @@ pub const FIREWORKS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://docs.fireworks.ai/tools-sdks/openai-compatibility",
     default_model: Some("accounts/fireworks/routers/kimi-k2p5-turbo"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const NOVITA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -336,6 +388,7 @@ pub const NOVITA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://novita.ai/settings/key-management",
     default_model: Some("zai-org/glm-5.3"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const MINIMAX_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -347,6 +400,7 @@ pub const MINIMAX_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://platform.minimax.io/docs/guides/text-generation",
     default_model: Some("MiniMax-M2.7"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const XAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -358,6 +412,7 @@ pub const XAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://docs.x.ai/developers/quickstart",
     default_model: Some("grok-code-fast-1"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const LMSTUDIO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -369,6 +424,7 @@ pub const LMSTUDIO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://lmstudio.ai/docs/app/api/endpoints/openai",
     default_model: None,
     requires_api_key: false,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const OLLAMA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -380,6 +436,7 @@ pub const OLLAMA_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://docs.ollama.com/api/openai-compatibility",
     default_model: None,
     requires_api_key: false,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const CHUTES_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -395,6 +452,7 @@ pub const CHUTES_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     // chat/completions time.
     default_model: None,
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const CEREBRAS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -406,6 +464,7 @@ pub const CEREBRAS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://inference-docs.cerebras.ai/introduction",
     default_model: Some("gpt-oss-120b"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const BELVEDIR_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -419,6 +478,7 @@ pub const BELVEDIR_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     // not expose the conventional OpenAI-compatible `/models` endpoint.
     default_model: Some("auto"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const ALIBABA_CODING_PLAN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -430,6 +490,7 @@ pub const ALIBABA_CODING_PLAN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibl
     setup_url: "https://www.alibabacloud.com/help/en/model-studio/coding-plan-quickstart",
     default_model: Some("qwen3-coder-plus"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const NVIDIA_NIM_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -441,6 +502,7 @@ pub const NVIDIA_NIM_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     setup_url: "https://build.nvidia.com/explore/discover",
     default_model: Some("nvidia/llama-3.1-nemotron-ultra-253b-v1"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const XIAOMI_MIMO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -452,6 +514,7 @@ pub const XIAOMI_MIMO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile
     setup_url: "https://platform.xiaomimimo.com",
     default_model: Some("mimo-v2.5"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const META_MUSE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -463,6 +526,7 @@ pub const META_MUSE_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://dev.meta.ai/",
     default_model: Some("muse-spark-1.2"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const CELERIS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -476,6 +540,7 @@ pub const CELERIS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://docs.celeris.ai/",
     default_model: Some("celeris-1"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 // Yolo-Auto is an OpenAI-compatible gateway. Its `/v1/models` listing is
@@ -491,6 +556,7 @@ pub const YOLO_AUTO_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     setup_url: "https://yolo-auto.com/docs",
     default_model: Some("yolo"),
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
@@ -502,6 +568,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     setup_url: "https://github.com/1jehuang/jcode#openai-compatible-providers",
     default_model: None,
     requires_api_key: true,
+    api_protocol: OPENAI_COMPATIBLE_CHAT_PROTOCOL,
 };
 
 pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [

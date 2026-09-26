@@ -42,6 +42,8 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
+        let responses_api = self.api_protocol.for_model(&model)
+            == jcode_base::provider_catalog::OpenAiCompatibleProtocol::Responses;
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
@@ -217,6 +219,29 @@ impl Provider for OpenRouterProvider {
             }
         }
 
+        // OpenCode Go exposes a small model-specific subset through the
+        // Responses API. Build that protocol after the generic chat request so
+        // provider-only fields cannot leak into `/responses`; configured extra
+        // body fields remain an intentional escape hatch and are merged last.
+        if responses_api {
+            request = super::opencode_go_responses::build_request(
+                &effective_messages,
+                tools,
+                system,
+                &model,
+                reasoning_effort.as_deref(),
+                self.max_tokens,
+                jcode_provider_openrouter::request::sanitize_tool_parameters_schema,
+            );
+            if let Some(extra) = self.extra_body.as_ref()
+                && let Some(request_obj) = request.as_object_mut()
+            {
+                for (key, value) in extra {
+                    request_obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
         let message_items = request
             .get("messages")
             .and_then(|value| value.as_array())
@@ -239,7 +264,11 @@ impl Provider for OpenRouterProvider {
                 "openai-compatible"
             },
             &model,
-            "chat_completions",
+            if responses_api {
+                "responses"
+            } else {
+                "chat_completions"
+            },
             &request,
             &message_items,
             system_value.as_ref(),
@@ -289,6 +318,7 @@ impl Provider for OpenRouterProvider {
                 tx,
                 provider_pin,
                 model_for_stream,
+                responses_api,
             )
             .await;
         });
@@ -779,6 +809,7 @@ impl Provider for OpenRouterProvider {
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
+            api_protocol: self.api_protocol,
             reasoning_effort_support: self.reasoning_effort_support,
             disable_reasoning_heuristics: self.disable_reasoning_heuristics,
             static_reasoning_config: self.static_reasoning_config.clone(),

@@ -1,5 +1,7 @@
 use super::*;
+use futures::Stream;
 use jcode_provider_openrouter::stream::OpenRouterStream;
+use std::pin::Pin;
 
 fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static str {
     let lower = api_base.to_ascii_lowercase();
@@ -37,6 +39,7 @@ pub(super) async fn run_stream_with_retries(
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
+    responses_api: bool,
 ) {
     let mut last_error = None;
     let mut next_retry_delay = None;
@@ -98,6 +101,7 @@ pub(super) async fn run_stream_with_retries(
             attempt_tx,
             Arc::clone(&provider_pin),
             model.clone(),
+            responses_api,
         )
         .await
         {
@@ -167,6 +171,7 @@ async fn stream_response(
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
+    responses_api: bool,
 ) -> Result<()> {
     use jcode_message_types::ConnectionPhase;
     let _ = tx
@@ -177,7 +182,11 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
 
-    let url = format!("{}/chat/completions", api_base);
+    let url = if responses_api {
+        format!("{}/responses", api_base)
+    } else {
+        format!("{}/chat/completions", api_base)
+    };
     let mut req = apply_kimi_coding_agent_headers(
         auth.apply(
             client
@@ -246,7 +255,17 @@ async fn stream_response(
         }))
         .await;
 
-    let mut stream = OpenRouterStream::new(response.bytes_stream(), model.clone(), provider_pin);
+    let mut stream: Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> = if responses_api {
+        Box::pin(super::opencode_go_responses::ResponsesStream::new(
+            response.bytes_stream(),
+        ))
+    } else {
+        Box::pin(OpenRouterStream::new(
+            response.bytes_stream(),
+            model.clone(),
+            provider_pin,
+        ))
+    };
 
     // Idle timeout between streamed chunks. Configurable so slow reasoning
     // models (e.g. DeepSeek) that think silently for minutes before emitting

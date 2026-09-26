@@ -1434,6 +1434,7 @@ fn make_provider() -> OpenRouterProvider {
         supports_provider_features: true,
         supports_model_catalog: true,
         profile_id: None,
+        api_protocol: jcode_base::provider_catalog::OPENAI_COMPATIBLE_CHAT_PROTOCOL,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -1466,6 +1467,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
+        api_protocol: jcode_base::provider_catalog::OPENAI_COMPATIBLE_CHAT_PROTOCOL,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -3192,6 +3194,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
             tx,
             Arc::new(Mutex::new(None)),
             "test-model".to_string(),
+            false,
         )
         .await;
 
@@ -3703,6 +3706,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
             tx,
             Arc::new(Mutex::new(None)),
             "m".to_string(),
+            false,
         )
         .await;
         while events.recv().await.is_some() {}

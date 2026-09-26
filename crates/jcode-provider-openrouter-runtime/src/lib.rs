@@ -949,6 +949,7 @@ pub struct OpenRouterProvider {
     supports_provider_features: bool,
     supports_model_catalog: bool,
     profile_id: Option<String>,
+    api_protocol: jcode_base::provider_catalog::OpenAiCompatibleProtocolConfig,
     /// Explicit `supports_reasoning_effort` override from named-profile config.
     /// `None` means auto-detect (deepseek profile id or DeepSeek-family model).
     reasoning_effort_support: Option<bool>,
@@ -1532,6 +1533,7 @@ impl OpenRouterProvider {
                     jcode_base::config::NamedProviderType::OpenRouter
                 ),
             profile_id: Some(profile_name.to_string()),
+            api_protocol: jcode_base::provider_catalog::OPENAI_COMPATIBLE_CHAT_PROTOCOL,
             reasoning_effort_support: profile.supports_reasoning_effort,
             disable_reasoning_heuristics: profile.disable_reasoning_heuristics,
             static_reasoning_config,
@@ -1732,6 +1734,11 @@ impl OpenRouterProvider {
         };
         let max_tokens = Self::configured_max_tokens(profile_id.as_deref());
         let extra_body = Self::resolve_extra_body(None, &configured_env_file_name());
+        let api_protocol = profile_id
+            .as_deref()
+            .and_then(openai_compatible_profile_by_id)
+            .map(|profile| profile.api_protocol)
+            .unwrap_or(jcode_base::provider_catalog::OPENAI_COMPATIBLE_CHAT_PROTOCOL);
 
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
@@ -1745,6 +1752,7 @@ impl OpenRouterProvider {
             supports_provider_features,
             supports_model_catalog,
             profile_id,
+            api_protocol,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -1799,6 +1807,7 @@ impl OpenRouterProvider {
             // curated list so `/model` works offline and before first request.
             supports_model_catalog: false,
             profile_id: Some("grok-build".to_string()),
+            api_protocol: jcode_base::provider_catalog::OPENAI_COMPATIBLE_CHAT_PROTOCOL,
             reasoning_effort_support: Some(false),
             disable_reasoning_heuristics: true,
             static_reasoning_config: HashMap::new(),
@@ -1843,6 +1852,7 @@ impl OpenRouterProvider {
             supports_provider_features: true,
             supports_model_catalog: true,
             profile_id: None,
+            api_protocol: jcode_base::provider_catalog::OPENAI_COMPATIBLE_CHAT_PROTOCOL,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -1915,6 +1925,7 @@ impl OpenRouterProvider {
             supports_provider_features: false,
             supports_model_catalog: true,
             profile_id: Some(resolved.id.clone()),
+            api_protocol: resolved.api_protocol,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -2121,6 +2132,7 @@ impl OpenRouterProvider {
                 supports_provider_features: true,
                 supports_model_catalog: true,
                 profile_id: None,
+                api_protocol: jcode_base::provider_catalog::OPENAI_COMPATIBLE_CHAT_PROTOCOL,
                 reasoning_effort_support: None,
                 disable_reasoning_heuristics: false,
                 static_reasoning_config: HashMap::new(),
@@ -2911,6 +2923,7 @@ impl OpenRouterProvider {
 
 mod models_catalog_parse;
 mod ollama_context;
+mod opencode_go_responses;
 #[path = "openrouter_provider_impl.rs"]
 mod openrouter_provider_impl;
 #[path = "openrouter_sse_stream.rs"]
