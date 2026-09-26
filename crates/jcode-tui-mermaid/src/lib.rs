@@ -152,10 +152,40 @@ static LOG_INFO_HOOK: OnceLock<fn(&str)> = OnceLock::new();
 static LOG_WARN_HOOK: OnceLock<fn(&str)> = OnceLock::new();
 static RENDER_COMPLETED_HOOK: OnceLock<fn()> = OnceLock::new();
 static MEMORY_SNAPSHOT_HOOK: OnceLock<fn() -> ProcessMemorySnapshot> = OnceLock::new();
+/// Direct writer for Kitty transmit payloads under grid multiplexers whose APC
+/// passthrough degrades when a huge transmit rides inside a single cell write
+/// (measured on luvus 0.14.2: the parser stalls partway through a giant
+/// in-cell APC string and the trailing placement then forwards at whatever
+/// cursor the multiplexer has reached, landing on its bottom chrome). When
+/// installed, the multiplexed real-placement path streams the transmit through
+/// this hook in paced chunk writes instead of embedding it in the anchor
+/// cell's symbol; the cell then carries only the small delete+placement pair.
+/// Without a hook the renderer keeps the in-cell embedding as a fallback.
+/// A Mutex (not OnceLock like the other hooks) so tests can swap/clear it
+/// while holding `IMAGE_TEST_LOCK`.
+static TRANSMIT_WRITER_HOOK: Mutex<Option<fn(&[u8])>> = Mutex::new(None);
 
 pub fn set_log_hooks(info: fn(&str), warn: fn(&str)) {
     let _ = LOG_INFO_HOOK.set(info);
     let _ = LOG_WARN_HOOK.set(warn);
+}
+
+/// Install the direct transmit writer (TUI only). Called once at startup.
+pub fn set_transmit_writer_hook(hook: fn(&[u8])) {
+    if let Ok(mut slot) = TRANSMIT_WRITER_HOOK.lock() {
+        *slot = Some(hook);
+    }
+}
+
+pub(crate) fn transmit_writer_hook() -> Option<fn(&[u8])> {
+    TRANSMIT_WRITER_HOOK.lock().ok().and_then(|guard| *guard)
+}
+
+#[cfg(test)]
+pub(crate) fn clear_transmit_writer_hook_for_tests() {
+    if let Ok(mut slot) = TRANSMIT_WRITER_HOOK.lock() {
+        *slot = None;
+    }
 }
 
 pub fn set_render_completed_hook(hook: fn()) {

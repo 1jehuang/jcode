@@ -677,6 +677,44 @@ fn render_kitty_virtual_viewport_for(
     true
 }
 
+/// Alternates the placement APC encoding between two semantically identical
+/// key orders so the anchor cell's symbol changes every frame. See
+/// `render_kitty_real_placement` for why the per-frame rewrite matters under a
+/// grid multiplexer.
+static PLACEMENT_EMISSION_PARITY: AtomicU64 = AtomicU64::new(0);
+
+/// Pacing between direct transmit chunk writes under a grid multiplexer.
+/// Measured against luvus 0.14.2 (2026-09-26): 2 ms per 4 KiB chunk still
+/// dropped payload segments, 5 ms per chunk forwarded a 1.4 MiB transmit
+/// fully intact, and a single unchunked giant write stalled the passthrough
+/// parser entirely.
+const TRANSMIT_CHUNK_PACE: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Stream a chunked Kitty transmit payload to the terminal through the direct
+/// writer hook, one APC chunk per write with a small pace between chunks so a
+/// grid multiplexer's passthrough parser can drain. Returns false when the
+/// payload is not raw APC (e.g. tmux DCS wrapping), in which case the caller
+/// falls back to embedding the transmit in the anchor cell's symbol; with no
+/// hook installed the caller never reaches this function.
+fn stream_transmit_direct(transmit: &str, mut write_chunk: impl FnMut(&[u8])) -> bool {
+    if !transmit.starts_with("\x1b_G") {
+        return false;
+    }
+    let mut rest = transmit;
+    while !rest.is_empty() {
+        let end = match rest.find("\x1b\\") {
+            Some(idx) => idx + "\x1b\\".len(),
+            None => rest.len(),
+        };
+        write_chunk(&rest.as_bytes()[..end]);
+        rest = &rest[end..];
+        if !rest.is_empty() {
+            std::thread::sleep(TRANSMIT_CHUNK_PACE);
+        }
+    }
+    true
+}
+
 /// Multiplexed-terminal display for an image whose pixels are already retained
 /// in the outer terminal: the `a=T,U=1` transmission above creates a virtual
 /// placement, which per the kitty graphics protocol is an invisible prototype
@@ -710,7 +748,7 @@ fn render_kitty_real_placement(
         Ok(cache) => cache,
         Err(_) => return false,
     };
-    let Some((unique_id, full_cols, full_rows, font_size, mut pending_transmit)) =
+    let Some((unique_id, full_cols, full_rows, font_size, pending_transmit)) =
         cache.take_pending_transmit_with_geometry(hash)
     else {
         return false;
@@ -718,9 +756,24 @@ fn render_kitty_real_placement(
     drop(cache);
     let mut pending_deletes = Some(take_kitty_delete_payloads());
 
-    if pending_transmit.is_none()
-        && let Ok(mut dbg) = MERMAID_DEBUG.lock()
-    {
+    // A fresh transmit is a hundreds-of-KB APC burst. Under a grid multiplexer
+    // it must NOT ride inside the anchor cell's symbol: one giant cell write
+    // stalls the passthrough parser, and the trailing placement then anchors
+    // wherever the multiplexer's cursor has drifted (e.g. its bottom chrome,
+    // on top of the user's input). Stream it through the direct writer
+    // instead, paced so the passthrough can drain; the cell below then
+    // carries only the small delete+placement pair. Without a writer hook
+    // (tests, non-TUI embedders) fall back to the in-cell embedding.
+    let fresh_transmit = pending_transmit.is_some();
+    let mut pending_transmit = match pending_transmit {
+        Some(transmit) => match crate::transmit_writer_hook() {
+            Some(write_chunk) if stream_transmit_direct(&transmit, write_chunk) => None,
+            _ => Some(transmit),
+        },
+        None => None,
+    };
+
+    if !fresh_transmit && let Ok(mut dbg) = MERMAID_DEBUG.lock() {
         dbg.stats.viewport_state_reuse_hits += 1;
     }
 
@@ -747,9 +800,24 @@ fn render_kitty_real_placement(
         width: visible_width,
         height: visible_height,
     });
-    let placement = format!(
-        "\x1b_Gq=2,C=1,a=p,i={unique_id},p={placement_id},c={visible_width},r={visible_height}{source_rect}\x1b\\"
-    );
+    // Alternate the key order on every emission: the two encodings are
+    // semantically identical for Kitty, but the changing bytes force the cell
+    // diff to rewrite the anchor cell every frame, so a grid multiplexer
+    // re-forwards the delete+placement pair at the correct anchor each frame.
+    // Without the alternation a stale or misforwarded placement (terminal-side
+    // state the multiplexer never repaints on its own) would never be
+    // corrected, because unchanged cell content is neither rewritten by the
+    // diff nor repainted by the multiplexer.
+    let parity = PLACEMENT_EMISSION_PARITY.fetch_add(1, Ordering::Relaxed) & 1;
+    let placement = if parity == 0 {
+        format!(
+            "\x1b_Gq=2,C=1,a=p,i={unique_id},p={placement_id},c={visible_width},r={visible_height}{source_rect}\x1b\\"
+        )
+    } else {
+        format!(
+            "\x1b_Gq=2,C=1,i={unique_id},a=p,p={placement_id},c={visible_width},r={visible_height}{source_rect}\x1b\\"
+        )
+    };
     // Delete this rectangle's previous placement (and only that one) before
     // re-placing: a crop change keeps the same rectangle and must replace its
     // copy, while another copy of the same image elsewhere on screen survives.
@@ -2250,6 +2318,13 @@ mod kitty_viewport_leak_tests {
             .unwrap_or_default()
     }
 
+    /// The placement APC alternates between two key orders on every emission
+    /// (see PLACEMENT_EMISSION_PARITY); assertions must accept both forms.
+    fn lead_has_placement(lead: &str, image_id: u32, placement_id: u32) -> bool {
+        lead.contains(&format!("a=p,i={image_id},p={placement_id}"))
+            || lead.contains(&format!("i={image_id},a=p,p={placement_id}"))
+    }
+
     #[test]
     fn multiplexed_render_uses_real_placement_without_placeholders() {
         let _guard = crate::IMAGE_TEST_LOCK
@@ -2276,12 +2351,18 @@ mod kitty_viewport_leak_tests {
             lead.contains("\x1b_Gtransmit"),
             "missing transmit: {lead:?}"
         );
+        let placement_id = kitty_placement_id_for_area(Rect {
+            x: image_area.left(),
+            y: image_area.top(),
+            width: 20,
+            height: 30,
+        });
         assert!(
-            lead.contains("a=p,i="),
+            lead_has_placement(&lead, 11189196, placement_id),
             "missing real placement APC: {lead:?}"
         );
         assert!(
-            lead.contains("\x1b_Gq=2,C=1,a=p,i="),
+            lead.contains("\x1b_Gq=2,C=1,a=p,") || lead.contains("\x1b_Gq=2,C=1,i=11189196,a=p,"),
             "placement must be quiet with stable cursor: {lead:?}"
         );
         // Fully visible: no source-rect crop keys.
@@ -2347,7 +2428,176 @@ mod kitty_viewport_leak_tests {
         assert!(ok);
         let lead = row_lead_symbol(&second, first_area.x, first_area.y);
         assert!(!lead.contains("\x1b_Gtransmit"), "unexpected retransmit");
-        assert!(lead.contains("a=p,i="), "missing steady-state placement");
+        let placement_id = kitty_placement_id_for_area(Rect {
+            x: first_area.left(),
+            y: first_area.top(),
+            width: 20,
+            height: 30,
+        });
+        assert!(
+            lead_has_placement(&lead, 11189196, placement_id),
+            "missing steady-state placement"
+        );
+    }
+
+    static CAPTURED_TRANSMITS: LazyLock<Mutex<Vec<Vec<u8>>>> =
+        LazyLock::new(|| Mutex::new(Vec::new()));
+
+    fn capturing_transmit_writer(bytes: &[u8]) {
+        if let Ok(mut captured) = CAPTURED_TRANSMITS.lock() {
+            captured.push(bytes.to_vec());
+        }
+    }
+
+    /// Clears the global writer hook on drop so a failing assert cannot leak
+    /// the direct-write path into tests that expect the in-cell fallback.
+    struct ClearTransmitWriterHook;
+
+    impl Drop for ClearTransmitWriterHook {
+        fn drop(&mut self) {
+            crate::clear_transmit_writer_hook_for_tests();
+        }
+    }
+
+    #[test]
+    fn stream_transmit_direct_rejects_non_apc_payloads() {
+        let written = std::cell::Cell::new(0usize);
+        // tmux DCS wrapping is not raw APC: must fall back.
+        assert!(!stream_transmit_direct(
+            "\x1bPtmux;\x1b\x1b_Gx\x1b\\",
+            |_| {
+                written.set(written.get() + 1);
+            }
+        ));
+        // Neither is a plain string.
+        assert!(!stream_transmit_direct("plain", |_| {
+            written.set(written.get() + 1);
+        }));
+        assert_eq!(written.get(), 0, "rejected payloads must not be written");
+    }
+
+    #[test]
+    fn stream_transmit_direct_writes_one_slice_per_apc_chunk() {
+        let transmit = "\x1b_Gq=2,i=1,a=T;m=1;AAAA\x1b\\\x1b_Gq=2,m=0;BBBB\x1b\\";
+        let mut slices: Vec<Vec<u8>> = Vec::new();
+        assert!(stream_transmit_direct(transmit, |bytes| {
+            slices.push(bytes.to_vec());
+        }));
+        assert_eq!(
+            slices,
+            vec![
+                b"\x1b_Gq=2,i=1,a=T;m=1;AAAA\x1b\\".to_vec(),
+                b"\x1b_Gq=2,m=0;BBBB\x1b\\".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn multiplexed_render_streams_transmit_through_hook_out_of_the_cell() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _clear = ClearTransmitWriterHook;
+        crate::set_transmit_writer_hook(capturing_transmit_writer);
+        if let Ok(mut captured) = CAPTURED_TRANSMITS.lock() {
+            captured.clear();
+        }
+
+        let hash = 0x5AFE_F011_u64;
+        seed_state(hash, 20, 30);
+        let area = Rect::new(1, 2, 20, 30);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 24, 34));
+        assert!(render_kitty_virtual_viewport_for(
+            hash, area, &mut buf, 0, 0, 20, 30, true
+        ));
+
+        let captured = CAPTURED_TRANSMITS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            captured.as_slice(),
+            &[b"\x1b_Gtransmit\x1b\\".to_vec()],
+            "fresh transmit must stream through the writer hook exactly once: {captured:?}"
+        );
+        drop(captured);
+
+        let lead = row_lead_symbol(&buf, area.x, area.y);
+        assert!(
+            !lead.contains("\x1b_Gtransmit"),
+            "transmit must not ride in the anchor cell: {lead:?}"
+        );
+        let placement_id = kitty_placement_id_for_area(Rect {
+            x: area.left(),
+            y: area.top(),
+            width: 20,
+            height: 30,
+        });
+        assert!(
+            lead_has_placement(&lead, 11189196, placement_id),
+            "anchor cell must carry the placement: {lead:?}"
+        );
+    }
+
+    #[test]
+    fn multiplexed_placement_encoding_alternates_between_emissions() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let hash = 0x5AFE_F012_u64;
+        seed_state(hash, 20, 30);
+        let area = Rect::new(1, 2, 20, 30);
+        let placement_id = kitty_placement_id_for_area(Rect {
+            x: area.left(),
+            y: area.top(),
+            width: 20,
+            height: 30,
+        });
+
+        // Consume the seeded transmit so the compared leads carry only the
+        // delete+placement pair; any byte difference below is then the
+        // encoding alternation itself, not the one-time transmit.
+        let mut warmup = Buffer::empty(Rect::new(0, 0, 24, 34));
+        assert!(render_kitty_virtual_viewport_for(
+            hash,
+            area,
+            &mut warmup,
+            0,
+            0,
+            20,
+            30,
+            true,
+        ));
+
+        let mut first = Buffer::empty(Rect::new(0, 0, 24, 34));
+        assert!(render_kitty_virtual_viewport_for(
+            hash, area, &mut first, 0, 0, 20, 30, true,
+        ));
+        let mut second = Buffer::empty(Rect::new(0, 0, 24, 34));
+        assert!(render_kitty_virtual_viewport_for(
+            hash,
+            area,
+            &mut second,
+            0,
+            0,
+            20,
+            30,
+            true,
+        ));
+
+        let lead_first = row_lead_symbol(&first, area.x, area.y);
+        let lead_second = row_lead_symbol(&second, area.x, area.y);
+        assert!(
+            lead_has_placement(&lead_first, 11189196, placement_id),
+            "first emission missing placement: {lead_first:?}"
+        );
+        assert!(
+            lead_has_placement(&lead_second, 11189196, placement_id),
+            "second emission missing placement: {lead_second:?}"
+        );
+        assert_ne!(
+            lead_first, lead_second,
+            "placement encoding must alternate so the cell diff rewrites the anchor every frame"
+        );
     }
 
     /// A real placement is terminal-side state, so each render must delete the
@@ -2379,6 +2629,7 @@ mod kitty_viewport_leak_tests {
             .unwrap_or_else(|| panic!("missing placement-scoped delete: {lead:?}"));
         let place = lead
             .find(&format!("a=p,i=11189196,p={placement_id}"))
+            .or_else(|| lead.find(&format!("i=11189196,a=p,p={placement_id}")))
             .unwrap_or_else(|| panic!("missing placement with a stable id: {lead:?}"));
         assert!(
             delete < place,
