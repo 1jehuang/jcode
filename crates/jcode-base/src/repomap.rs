@@ -1,0 +1,686 @@
+//! Opt-in structural repo map: definitions plus file-reference graph plus
+//! hand-rolled PageRank, rendered as token-budgeted symbol stubs.
+//!
+//! Boundary (per #1230): read-only provider, never core, never default-on.
+//! No tree-sitter, no petgraph. Symbol extraction is regex grammar sets over
+//! an explicit language list (Rust, TypeScript/JavaScript, Python); an
+//! unlisted extension yields no symbols, never a failure. The tool only
+//! registers when `repomap_token_budget > 0`. Cache lives under
+//! `.jcode/cache/repomap.json`, keyed per file by mtime plus size; a stale
+//! file rebuilds alone, never the whole map.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+/// Token budget default. 0 disables the map entirely (tool unregistered).
+pub const DEFAULT_REPOMAP_TOKEN_BUDGET: usize = 0;
+/// Damping factor for PageRank power iteration.
+const DAMPING: f64 = 0.85;
+/// Iterations cap; the graph is small and converges far earlier.
+const MAX_ITERATIONS: usize = 50;
+/// Directories never walked, however deep.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+/// Rough chars-per-token for budget truncation (stub text is ASCII dense).
+const CHARS_PER_TOKEN: usize = 4;
+/// Max symbols rendered per file block (long files truncate, rank decides).
+const MAX_SYMBOLS_PER_FILE: usize = 50;
+/// Max mapped files per commit admitted to co-change pairing. Bulk commits
+/// (vendored drops, renames, generated-code check-ins) touch hundreds of
+/// files: expanding their pairs is quadratic CPU/memory for pure noise, and
+/// a repo-controlled history could stall the tool. Skipped whole, not
+/// sampled — partial pairs from a bulk commit are still noise.
+const MAX_COCOMMIT_FILES: usize = 50;
+
+/// Max bytes read per source file. Bounds the text-read path (a symlinked
+/// /dev/zero or multi-GB dump must not exhaust memory); oversized files
+/// contribute no symbols. Generous: real sources fit comfortably.
+const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+struct Grammar {
+    extension: &'static str,
+    /// (regex, kind label). First capture group is the symbol name.
+    definitions: &'static [(&'static str, &'static str)],
+}
+
+const GRAMMARS: &[Grammar] = &[
+    Grammar {
+        extension: "rs",
+        definitions: &[
+            (
+                r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "fn",
+            ),
+            (
+                r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "struct",
+            ),
+            (
+                r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "enum",
+            ),
+            (
+                r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "trait",
+            ),
+            (
+                r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "mod",
+            ),
+            (
+                r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?type\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "type",
+            ),
+            (
+                r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "const",
+            ),
+        ],
+    },
+    Grammar {
+        extension: "ts",
+        definitions: &[
+            (
+                r"(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "fn",
+            ),
+            (
+                r"(?m)^\s*export\s+(?:default\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "class",
+            ),
+            (
+                r"(?m)^\s*export\s+interface\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "interface",
+            ),
+            (r"(?m)^\s*export\s+type\s+([A-Za-z_][A-Za-z0-9_]*)", "type"),
+            (r"(?m)^\s*export\s+enum\s+([A-Za-z_][A-Za-z0-9_]*)", "enum"),
+        ],
+    },
+    Grammar {
+        extension: "js",
+        definitions: &[
+            (
+                r"(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "fn",
+            ),
+            (
+                r"(?m)^\s*export\s+(?:default\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "class",
+            ),
+        ],
+    },
+    Grammar {
+        extension: "py",
+        definitions: &[
+            (
+                r"(?m)^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)",
+                "def",
+            ),
+            (r"(?m)^class\s+([A-Za-z_][A-Za-z0-9_]*)", "class"),
+        ],
+    },
+];
+
+struct CompiledGrammar {
+    extension: &'static str,
+    definitions: Vec<(regex::Regex, &'static str)>,
+}
+
+static COMPILED: LazyLock<Vec<CompiledGrammar>> = LazyLock::new(|| {
+    GRAMMARS
+        .iter()
+        .map(|g| CompiledGrammar {
+            extension: g.extension,
+            definitions: g
+                .definitions
+                .iter()
+                .filter_map(|(pattern, kind)| regex::Regex::new(pattern).ok().map(|re| (re, *kind)))
+                .collect(),
+        })
+        .collect()
+});
+
+static WORD_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").expect("word regex"));
+
+/// A single extracted symbol.
+#[derive(Debug, Clone)]
+pub struct Symbol {
+    pub name: String,
+    pub kind: String,
+    pub line: usize,
+    pub file: PathBuf,
+}
+
+/// Cached per-file parse: symbols plus the fingerprint they were built from.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CachedFile {
+    mtime_ms: u128,
+    size: u64,
+    symbols: Vec<CachedSymbol>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct CachedSymbol {
+    name: String,
+    kind: String,
+    line: usize,
+}
+
+fn grammar_for(path: &Path) -> Option<&'static CompiledGrammar> {
+    let ext = path.extension()?.to_str()?;
+    COMPILED.iter().find(|g| g.extension == ext)
+}
+
+fn extract_symbols(text: &str, grammar: &CompiledGrammar, file: &Path) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    for (re, kind) in &grammar.definitions {
+        for cap in re.captures_iter(text) {
+            let Some(name) = cap.get(1) else { continue };
+            let line = text[..name.start()].chars().filter(|&c| c == '\n').count() + 1;
+            out.push(Symbol {
+                name: name.as_str().to_string(),
+                kind: kind.to_string(),
+                line,
+                file: file.to_path_buf(),
+            });
+        }
+    }
+    out.sort_by_key(|s| s.line);
+    out
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Collect listed-extension files under `root`. Never follows symlinks
+/// (file or directory): a repo-controlled link pointing outside the tree
+/// must not pull external source into the map or reach unbounded devices.
+/// Every candidate is canonicalized and required to stay under the
+/// canonicalized root.
+fn walk_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(canonical_root) = root.canonicalize() else {
+        return;
+    };
+    let mut dirs = vec![canonical_root.clone()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_symlink(&path) {
+                continue;
+            }
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical.starts_with(&canonical_root) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if canonical.is_dir() {
+                if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) {
+                    dirs.push(canonical);
+                }
+            } else if grammar_for(&canonical).is_some() {
+                out.push(canonical);
+            }
+        }
+    }
+}
+
+fn file_fingerprint(path: &Path) -> Option<(u128, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((mtime, meta.len()))
+}
+
+/// Bounded text read: files over MAX_FILE_BYTES are skipped (no symbols).
+fn read_source_capped(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+fn cache_path(root: &Path) -> PathBuf {
+    root.join(".jcode").join("cache").join("repomap.json")
+}
+
+fn load_cache(root: &Path) -> HashMap<String, CachedFile> {
+    let Ok(bytes) = std::fs::read(cache_path(root)) else {
+        return HashMap::new();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn save_cache(root: &Path, cache: &HashMap<String, CachedFile>) {
+    let path = cache_path(root);
+    // A mapped repo can symlink `.jcode/cache` (or the file itself) outside
+    // the tree; following it would let the repo truncate and replace an
+    // arbitrary writable file. Refuse symlinked components and destination.
+    let mut cursor = root.to_path_buf();
+    for component in [".jcode", "cache", "repomap.json"] {
+        cursor = cursor.join(component);
+        if is_symlink(&cursor) {
+            return;
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if is_symlink(&path) {
+        return;
+    }
+    if let Ok(bytes) = serde_json::to_vec(cache) {
+        let _ = std::fs::write(&path, bytes);
+    }
+}
+
+/// Parse every listed file, reusing cache entries whose mtime plus size
+/// still match. Returns symbols keyed by repo-relative path string.
+fn parse_files(
+    root: &Path,
+    files: &[PathBuf],
+    cache: &mut HashMap<String, CachedFile>,
+) -> HashMap<String, Vec<Symbol>> {
+    let mut out = HashMap::new();
+    for file in files {
+        let rel = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .to_string();
+        let print_path = PathBuf::from(&rel);
+        let fingerprint = file_fingerprint(file);
+        let text = read_source_capped(file);
+        let grammar = grammar_for(file);
+        if let (Some((mtime, size)), Some(hit)) = (fingerprint, cache.get(&rel))
+            && hit.mtime_ms == mtime
+            && hit.size == size
+        {
+            out.insert(
+                rel.clone(),
+                hit.symbols
+                    .iter()
+                    .map(|s| Symbol {
+                        name: s.name.clone(),
+                        kind: s.kind.clone(),
+                        line: s.line,
+                        file: print_path.clone(),
+                    })
+                    .collect(),
+            );
+            continue;
+        }
+        let symbols = match (text, grammar) {
+            (Some(text), Some(grammar)) => extract_symbols(&text, grammar, &print_path),
+            _ => Vec::new(),
+        };
+        if let Some((mtime, size)) = fingerprint {
+            cache.insert(
+                rel.clone(),
+                CachedFile {
+                    mtime_ms: mtime,
+                    size,
+                    symbols: symbols
+                        .iter()
+                        .map(|s| CachedSymbol {
+                            name: s.name.clone(),
+                            kind: s.kind.clone(),
+                            line: s.line,
+                        })
+                        .collect(),
+                },
+            );
+        }
+        out.insert(rel, symbols);
+    }
+    out
+}
+
+/// Build the file-reference graph: file A links to file B when A mentions a
+/// symbol that is defined in exactly one file (B), excluding self-links.
+/// Ambiguous names (defined in several files) carry no edge. Returns
+/// adjacency (outgoing edges) over file indices plus the file list order.
+/// Recent-history co-change pairs: files committed together in >=2 of the
+/// last 200 commits reference each other (bidirectional edges). The
+/// standard fix for the base-module blind spot: dependents point AT the
+/// base, so forward-only reference edges never flow rank back to it.
+/// A single shared commit is ignored (bulk adds and renames commit
+/// everything once — that is noise, not signal). Fail-soft: outside a git
+/// repo, without git, or on any parse failure there are no co-change edges
+/// and the map is purely reference-ranked.
+fn cochange_pairs(root: &Path, files: &[String]) -> Vec<(usize, usize)> {
+    cochange_pairs_inner(root, files).unwrap_or_default()
+}
+
+fn cochange_pairs_inner(root: &Path, files: &[String]) -> Option<Vec<(usize, usize)>> {
+    let index: HashMap<&str, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.as_str(), i))
+        .collect();
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "log",
+            "-z",
+            "-n",
+            "200",
+            "--name-only",
+            "--pretty=format:COMMIT:%H",
+            "--",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    // Git reports paths relative to the repo toplevel, which may sit above
+    // the mapped root: rebase our root-relative names when they differ.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let toplevel = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let canonical_root = root.canonicalize().ok()?;
+    let prefix = toplevel
+        .and_then(|t| {
+            let canon_top = std::path::PathBuf::from(&t).canonicalize().ok()?;
+            canonical_root.strip_prefix(&canon_top).ok().map(|p| {
+                let mut s = p.to_string_lossy().into_owned();
+                if !s.is_empty() {
+                    s.push('/');
+                }
+                s
+            })
+        })
+        .unwrap_or_default();
+    // NUL-delimited (-z): git C-quotes special names (tabs, quotes,
+    // non-UTF8) in line mode, silently dropping those files from pairing.
+    // In NUL mode names arrive raw; records split on \0.
+    let mut commits: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut in_commit = false;
+    for record in text.split('\0') {
+        let mut record = record;
+        // Markers have the full hash-and-newline structure
+        // ("COMMIT:<40-hex>\n<file>"): a file literally named "COMMIT:..."
+        // must parse as a path, not flush the commit.
+        if let Some(after) = record.strip_prefix("COMMIT:")
+            && let Some((hash, rest)) = after.split_once('\n')
+            && matches!(hash.len(), 40 | 64)
+            && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            if in_commit && !current.is_empty() {
+                commits.push(std::mem::take(&mut current));
+            }
+            in_commit = true;
+            // The wire glues the first path to the COMMIT record:
+            // keep parsing the remainder as a path below.
+            record = rest;
+        }
+        if !in_commit || record.is_empty() {
+            continue;
+        }
+        let rel = format!("{prefix}{record}");
+        if let Some(&i) = index.get(rel.as_str())
+            && !current.contains(&i)
+        {
+            current.push(i);
+        }
+    }
+    if in_commit && !current.is_empty() {
+        commits.push(current);
+    }
+    // Bound the expansion: drop bulk commits before pairing.
+    commits.retain(|members| members.len() <= MAX_COCOMMIT_FILES);
+    let mut counts: HashMap<(usize, usize), usize> = HashMap::new();
+    for members in &commits {
+        for (x, &m) in members.iter().enumerate() {
+            for &n in &members[x + 1..] {
+                let pair = if m < n { (m, n) } else { (n, m) };
+                *counts.entry(pair).or_insert(0) += 1;
+            }
+        }
+    }
+    Some(
+        counts
+            .into_iter()
+            .filter(|(_, c)| *c >= 2)
+            .map(|(pair, _)| pair)
+            .collect(),
+    )
+}
+
+fn build_graph(
+    root: &Path,
+    files: &[String],
+    symbols: &HashMap<String, Vec<Symbol>>,
+    texts: &HashMap<String, String>,
+) -> Vec<Vec<usize>> {
+    let index: HashMap<&str, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.as_str(), i))
+        .collect();
+    let mut owners: HashMap<String, String> = HashMap::new();
+    let mut ambiguous: HashSet<String> = HashSet::new();
+    for (file, syms) in symbols {
+        for sym in syms {
+            if ambiguous.contains(&sym.name) {
+                continue;
+            }
+            match owners.get(&sym.name) {
+                None => {
+                    owners.insert(sym.name.clone(), file.clone());
+                }
+                Some(other) if other != file => {
+                    owners.remove(&sym.name);
+                    ambiguous.insert(sym.name.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut edges: Vec<HashSet<usize>> = vec![HashSet::new(); files.len()];
+    for (i, file) in files.iter().enumerate() {
+        let Some(text) = texts.get(file) else {
+            continue;
+        };
+        let mut seen_in_file = HashSet::new();
+        for mat in WORD_RE.find_iter(text) {
+            let name = mat.as_str();
+            if !seen_in_file.insert(name) {
+                continue;
+            }
+            if let Some(owner) = owners.get(name)
+                && let Some(&j) = index.get(owner.as_str())
+                && j != i
+            {
+                edges[i].insert(j);
+            }
+        }
+    }
+    // Co-change pairs flow both ways: dependents boost their base even
+    // though no reference edge points back at them.
+    for (a, b) in cochange_pairs(root, files) {
+        edges[a].insert(b);
+        edges[b].insert(a);
+    }
+    edges.into_iter().map(|s| s.into_iter().collect()).collect()
+}
+
+/// Hand-rolled PageRank power iteration. `seeds` personalizes the teleport
+/// vector toward the given file indices (files under discussion rank higher
+/// and rank flows outward to their dependencies).
+pub fn pagerank(adjacency: &[Vec<usize>], seeds: &[usize], iterations: usize) -> Vec<f64> {
+    let n = adjacency.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut teleport = vec![0.0; n];
+    if seeds.is_empty() {
+        teleport.fill(1.0 / n as f64);
+    } else {
+        for &s in seeds {
+            if s < n {
+                teleport[s] += 1.0;
+            }
+        }
+        let sum: f64 = teleport.iter().sum();
+        if sum > 0.0 {
+            for t in teleport.iter_mut() {
+                *t /= sum;
+            }
+        } else {
+            teleport.fill(1.0 / n as f64);
+        }
+    }
+    let mut rank = teleport.clone();
+    for _ in 0..iterations.max(1) {
+        let mut next: Vec<f64> = teleport.iter().map(|t| (1.0 - DAMPING) * t).collect();
+        for (i, outs) in adjacency.iter().enumerate() {
+            if outs.is_empty() {
+                let share = DAMPING * rank[i] / n as f64;
+                for nval in next.iter_mut() {
+                    *nval += share;
+                }
+            } else {
+                let share = DAMPING * rank[i] / outs.len() as f64;
+                for &j in outs {
+                    next[j] += share;
+                }
+            }
+        }
+        rank = next;
+    }
+    rank
+}
+
+/// Render ranked stubs (`path:` then `kind name:line`), highest rank first,
+/// truncated at `token_budget` estimated tokens. Budget 0 disables output.
+pub fn render_map(
+    files: &[String],
+    symbols: &HashMap<String, Vec<Symbol>>,
+    ranks: &[f64],
+    token_budget: usize,
+) -> Option<String> {
+    if token_budget == 0 {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    order.sort_by(|&a, &b| ranks[b].total_cmp(&ranks[a]));
+    let mut out = String::new();
+    let mut used = 0usize;
+    for i in order {
+        let file = &files[i];
+        let Some(syms) = symbols.get(file) else {
+            continue;
+        };
+        if syms.is_empty() {
+            continue;
+        }
+        let mut block = format!("{}:\n", file);
+        for sym in syms.iter().take(MAX_SYMBOLS_PER_FILE) {
+            block.push_str(&format!("  {} {}:{}\n", sym.kind, sym.name, sym.line));
+        }
+        let cost = block.len() / CHARS_PER_TOKEN + 1;
+        if used + cost > token_budget {
+            break;
+        }
+        used += cost;
+        out.push_str(&block);
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// Build the repo map for `root`. `seeds` are repo-relative path prefixes
+/// (files under discussion) or symbol names (identifiers under discussion),
+/// personalizing the rank. Reference edges plus recent-history co-change
+/// pairs feed the rank. Returns `None` when the budget is 0 or no symbols
+/// exist. Reads and refreshes the on-disk cache.
+pub fn build_map(root: &Path, seeds: &[&str], token_budget: usize) -> Option<String> {
+    if token_budget == 0 {
+        return None;
+    }
+    let mut files = Vec::new();
+    walk_files(root, &mut files);
+    files.sort();
+    let rels: Vec<String> = files
+        .iter()
+        .map(|f| {
+            f.strip_prefix(root)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    let mut cache = load_cache(root);
+    let symbols = parse_files(root, &files, &mut cache);
+    save_cache(root, &cache);
+    let mut texts = HashMap::new();
+    for (file, rel) in files.iter().zip(rels.iter()) {
+        if symbols.get(rel).map(|s| s.is_empty()).unwrap_or(true) {
+            continue;
+        }
+        if let Some(text) = read_source_capped(file) {
+            texts.insert(rel.clone(), text);
+        }
+    }
+    let adjacency = build_graph(root, &rels, &symbols, &texts);
+    // Seeds are path prefixes (files under discussion) or symbol names:
+    // naming an identifier personalizes toward the files defining it
+    // (multi-anchor personalization: chat files plus mentioned symbols).
+    let lowered: Vec<String> = seeds.iter().map(|s| s.to_lowercase()).collect();
+    let seed_idx: Vec<usize> = rels
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            seeds.iter().any(|s| f.starts_with(*s))
+                || symbols.get(*f).is_some_and(|syms| {
+                    syms.iter().any(|sym| {
+                        let name = sym.name.to_lowercase();
+                        lowered.iter().any(|s| name.contains(s as &str))
+                    })
+                })
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let ranks = pagerank(&adjacency, &seed_idx, MAX_ITERATIONS);
+    render_map(&rels, &symbols, &ranks, token_budget)
+}
+
+/// Config knob read: token budget for the map (0 disables). Default 2000.
+pub fn token_budget_from_config() -> usize {
+    crate::config::config().agents.repomap_token_budget
+}
+
+#[cfg(test)]
+#[path = "repomap_tests.rs"]
+mod tests;
