@@ -257,26 +257,13 @@ fn create_openrouter_spec_capture_test_app() -> (App, StdArc<StdMutex<Vec<String
 #[test]
 fn temp_home_restores_env_after_caught_panic() {
     const KEYS: [&str; 2] = ["JCODE_HOME", "JCODE_NAMED_PROVIDER_PROFILE"];
-    let original = {
-        let _guard = crate::storage::lock_test_env();
-        let original = KEYS.map(|key| (key, std::env::var_os(key)));
-        for key in KEYS {
-            crate::env::set_var(key, "panic-probe");
-        }
-        original
-    };
-    let caught = std::panic::catch_unwind(|| with_temp_jcode_home(|| panic!("probe")));
+    // Hold the env lock throughout and fabricate nothing, so no parallel test
+    // can observe a probe value. A leaked temp `JCODE_HOME` still differs.
     let _guard = crate::storage::lock_test_env();
-    let restored = KEYS.map(std::env::var_os);
-    for (key, value) in original {
-        match value {
-            Some(value) => crate::env::set_var(key, value),
-            None => crate::env::remove_var(key),
-        }
-    }
+    let before = KEYS.map(std::env::var_os);
+    let caught = std::panic::catch_unwind(|| with_temp_jcode_home_locked(|| panic!("probe")));
     assert!(caught.is_err());
-    let probe = Some(std::ffi::OsString::from("panic-probe"));
-    assert_eq!(restored, [probe.clone(), probe]);
+    assert_eq!(KEYS.map(std::env::var_os), before);
 }
 
 #[test]
@@ -437,6 +424,12 @@ fn clear_persisted_test_ui_state() {
 }
 
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = crate::storage::lock_test_env();
+    with_temp_jcode_home_locked(f)
+}
+
+/// Body of [`with_temp_jcode_home`] for callers already holding the env lock.
+fn with_temp_jcode_home_locked<T>(f: impl FnOnce() -> T) -> T {
     // Restores env and process-global caches on drop, so a caught panic in `f`
     // cannot leave `JCODE_HOME` pointing at the deleted temp dir.
     struct RestoreTestEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -458,7 +451,6 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
         }
     }
 
-    let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     // A parent jcode session exports its named provider profile to child
     // processes. Running the suite from inside one must not decide whether
