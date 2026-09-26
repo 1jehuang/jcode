@@ -296,6 +296,10 @@ impl Agent {
         Ok(self.session.display_title_or_name().to_string())
     }
 
+    pub fn session_display_title_or_name(&self) -> String {
+        self.session.display_title_or_name().to_string()
+    }
+
     pub fn autoreview_enabled(&self) -> Option<bool> {
         self.session.autoreview_enabled
     }

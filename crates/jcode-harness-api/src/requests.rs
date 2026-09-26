@@ -247,6 +247,15 @@ pub enum ApiRequest {
         title: Option<String>,
     },
 
+    /// Bookmark (`saved: true`) or unbookmark a session. A non-empty `label`
+    /// also becomes the session's title, announced with `SessionRenamed`.
+    SetSessionSaved {
+        session_id: String,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Restore the history that the last `Rewind` removed.
     ///
     /// `Rewind` is destructive, so without an undo a client cannot offer it

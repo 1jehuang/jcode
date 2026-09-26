@@ -67,10 +67,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetReasoningEffort", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
-    (
-        "SetSessionSaved",
-        Gap("clients can read a session's saved flag but cannot pin or unpin it"),
-    ),
+    ("SetSessionSaved", Covered),
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),

@@ -543,6 +543,75 @@ pub(super) async fn handle_set_feature(
     }
 }
 
+/// Bookmark or unbookmark the session. A save label is the name the user chose,
+/// so it doubles as the session title and is announced like a rename.
+pub(super) async fn handle_set_session_saved(
+    id: u64,
+    saved: bool,
+    label: Option<String>,
+    agent: &Arc<Mutex<Agent>>,
+    client_session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = agent.lock().await.set_session_saved(saved, label.clone());
+    if let Err(error) = result {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: crate::util::format_error_chain(&error),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    crate::session_list_cache::invalidate();
+    let label = label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    if saved && label.is_some() {
+        let (session_id, display_title) = {
+            let agent = agent.lock().await;
+            (
+                agent.session_id().to_string(),
+                agent.session_display_title_or_name(),
+            )
+        };
+        broadcast_session_renamed(
+            swarm_members,
+            client_session_id,
+            client_event_tx,
+            ServerEvent::SessionRenamed {
+                session_id,
+                title: label.map(ToOwned::to_owned),
+                display_title,
+            },
+        )
+        .await;
+    }
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+async fn broadcast_session_renamed(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_session_id: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event: ServerEvent,
+) -> usize {
+    let ServerEvent::SessionRenamed { session_id, .. } = &event else {
+        return 0;
+    };
+    let renamed_session_id = session_id.clone();
+    let mut delivered =
+        fanout_session_event(swarm_members, &renamed_session_id, event.clone()).await;
+    if renamed_session_id != client_session_id {
+        delivered += fanout_session_event(swarm_members, client_session_id, event.clone()).await;
+    }
+    if delivered == 0 {
+        let _ = client_event_tx.send(event);
+    }
+    delivered
+}
+
 pub(super) async fn handle_rename_session(
     id: u64,
     title: Option<String>,
@@ -604,14 +673,8 @@ pub(super) async fn handle_rename_session(
         title: normalized_title,
         display_title,
     };
-    let mut delivered =
-        fanout_session_event(swarm_members, &renamed_session_id, event.clone()).await;
-    if renamed_session_id != client_session_id {
-        delivered += fanout_session_event(swarm_members, client_session_id, event.clone()).await;
-    }
-    if delivered == 0 {
-        let _ = client_event_tx.send(event);
-    }
+    let delivered =
+        broadcast_session_renamed(swarm_members, client_session_id, client_event_tx, event).await;
     let _ = client_event_tx.send(ServerEvent::Done { id });
     crate::logging::event_info(
         "SESSION_LIFECYCLE",

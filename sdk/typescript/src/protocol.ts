@@ -186,6 +186,7 @@ export type ApiRequest =
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "compact"; session_id: string }
   | { req: "rename_session"; session_id: string; title?: string }
+  | { req: "set_session_saved"; session_id: string; saved: boolean; label?: string }
   | { req: "rewind_undo"; session_id: string }
   | { req: "cancel_soft_interrupts"; session_id: string }
   | { req: "ping" };
@@ -433,6 +434,7 @@ export const KNOWN_REQUEST_KINDS = [
   "set_reasoning_effort",
   "compact",
   "rename_session",
+  "set_session_saved",
   "rewind_undo",
   "cancel_soft_interrupts",
   "ping",

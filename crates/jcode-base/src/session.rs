@@ -854,11 +854,20 @@ impl Session {
         }
     }
 
-    /// Save/bookmark this session with an optional label
+    /// Save/bookmark this session with an optional label.
+    ///
+    /// A label is the name the user chose for the session, so it also becomes
+    /// the session's display title everywhere sessions are listed.
     pub fn mark_saved(&mut self, label: Option<String>) {
         self.saved = true;
-        if label.is_some() {
-            self.save_label = label;
+        let label = label.and_then(|label| {
+            let label = label.trim();
+            (!label.is_empty()).then(|| label.to_string())
+        });
+        if let Some(label) = label {
+            self.custom_title = Some(label.clone());
+            self.save_label = Some(label);
+            self.updated_at = Utc::now();
         }
     }
 
@@ -888,6 +897,12 @@ impl Session {
         }
 
         non_empty_trimmed(self.custom_title.as_deref())
+            .or_else(|| {
+                // Bookmarks labelled before labels doubled as titles.
+                self.saved
+                    .then(|| non_empty_trimmed(self.save_label.as_deref()))
+                    .flatten()
+            })
             .or_else(|| non_empty_trimmed(self.title.as_deref()))
     }
 

@@ -67,6 +67,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("set_reasoning_effort", "setReasoningEffort"),
     cap("compact", "compact"),
     cap("rename_session", "renameSession"),
+    cap("set_session_saved", "setSessionSaved"),
     cap("cancel_soft_interrupts", "cancelSoftInterrupts"),
     cap("ping", "ping"),
     cap("run", "run"),

@@ -1323,6 +1323,33 @@ fn a_scheduled_compaction_reports_its_status() {
     }
 }
 
+/// Saving forwards the flag and label so the daemon can title the session.
+#[test]
+fn set_session_saved_forwards_flag_and_label() {
+    let mut state = state_with_session();
+    let save = state.api_request_to_legacy(&json!({
+        "id": 7, "req": "set_session_saved", "saved": true, "label": "yc mcp",
+    }));
+    match &save[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["type"], "set_session_saved");
+            assert_eq!(value["saved"], true);
+            assert_eq!(value["label"], "yc mcp");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    let unsave = state.api_request_to_legacy(&json!({
+        "id": 8, "req": "set_session_saved", "saved": false,
+    }));
+    match &unsave[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["saved"], false);
+            assert!(value.get("label").is_none());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Clearing a title is distinct from setting an empty one, so an absent title
 /// must not be sent as `""`, which the daemon would store as a real title.
 #[test]
@@ -1696,12 +1723,19 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
     assert_eq!(newest.save_label.as_deref(), Some("investor catch up"));
     assert_eq!(newest.updated_at_ms, Some(99));
     assert_eq!(newest.last_active_at_ms, Some(99));
-    assert!(sessions.iter().all(|session| {
-        session
-            .title
-            .as_deref()
-            .is_some_and(|title| title.starts_with("Indexed goal "))
-    }));
+    // A save label is the name the user chose, so it outranks derived titles.
+    assert_eq!(newest.title.as_deref(), Some("investor catch up"));
+    assert!(
+        sessions
+            .iter()
+            .filter(|session| session.session_id != "indexed_099")
+            .all(|session| {
+                session
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.starts_with("Indexed goal "))
+            })
+    );
 }
 
 #[test]

@@ -1285,6 +1285,21 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Bookmark or unbookmark a session. A label also becomes its title.
+    pub fn set_session_saved(
+        &self,
+        session_id: &str,
+        saved: bool,
+        label: Option<String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetSessionSaved {
+            session_id: session_id.to_string(),
+            saved,
+            label,
+        })
+        .map(drop)
+    }
+
     /// Restore the history the last `rewind` removed.
     pub fn rewind_undo(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::RewindUndo {

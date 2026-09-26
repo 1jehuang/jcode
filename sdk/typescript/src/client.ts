@@ -864,6 +864,11 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "rename_session", session_id: sessionId, title });
   }
 
+  /** Bookmark or unbookmark a session. A label also becomes its title. */
+  async setSessionSaved(sessionId: string, saved: boolean, label?: string): Promise<void> {
+    await this.requestOk({ req: "set_session_saved", session_id: sessionId, saved, label });
+  }
+
   /** Restore the history the last `rewind` removed. */
   async rewindUndo(sessionId: string): Promise<void> {
     await this.requestOk({ req: "rewind_undo", session_id: sessionId });
