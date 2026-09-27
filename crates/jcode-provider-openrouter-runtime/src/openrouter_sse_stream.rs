@@ -22,7 +22,15 @@ fn attempt_transport_client(client: &Client, api_base: &str, attempt: u32) -> Re
         return Client::builder()
             .user_agent(jcode_provider_core::JCODE_USER_AGENT)
             .connect_timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    attempt.error("too many loopback redirects")
+                } else if is_loopback_base(attempt.url().as_str()) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .no_proxy()
             .build()
             .context("Failed to build direct loopback client");
@@ -459,6 +467,8 @@ mod tests {
 
     #[test]
     fn pan_pre_send_blocks_a_card_number_without_echoing_it() {
+        let _env = jcode_base::storage::lock_test_env();
+        let _opt_out = crate::tests::EnvVarGuard::remove("JCODE_DISABLE_PAN_CHECK");
         let pan = "4242".repeat(4);
         let request = serde_json::json!({"messages": [
             {"role": "user", "content": "issues 1113 1114 1115 1116"},
@@ -482,7 +492,7 @@ mod tests {
     #[test]
     fn loopback_pan_is_blocked_before_a_forwarder_can_receive_it() {
         let _env = jcode_base::storage::lock_test_env();
-        assert!(std::env::var("JCODE_DISABLE_PAN_CHECK").is_err());
+        let _opt_out = crate::tests::EnvVarGuard::remove("JCODE_DISABLE_PAN_CHECK");
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind endpoint");
         listener
             .set_nonblocking(true)
@@ -532,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_clean_request_bypasses_proxy() {
+    fn loopback_clean_request_bypasses_proxy_and_follows_local_redirects() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let _env = jcode_base::storage::lock_test_env();
         let proxy = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy");
@@ -555,12 +565,18 @@ mod tests {
             let local = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("local endpoint");
             let address = local.local_addr().expect("local address");
             let server = tokio::spawn(async move {
-                let (mut stream, _) = local.accept().await.expect("local connection");
-                let mut bytes = vec![0; 8192];
-                let size = stream.read(&mut bytes).await.expect("request");
-                assert!(String::from_utf8_lossy(&bytes[..size]).starts_with("POST /v1/chat/completions "));
-                let body = "data: [DONE]\n\n";
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.expect("response");
+                for (index, path) in ["/v1/chat/completions", "/redirect307", "/redirect308"].iter().enumerate() {
+                    let (mut stream, _) = local.accept().await.expect("local connection");
+                    let mut bytes = vec![0; 8192];
+                    let size = stream.read(&mut bytes).await.expect("request");
+                    assert!(String::from_utf8_lossy(&bytes[..size]).starts_with(&format!("POST {path} ")));
+                    let response = match index {
+                        0 => "HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirect307\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                        1 => "HTTP/1.1 308 Permanent Redirect\r\nLocation: /redirect308\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                        _ => { let body = "data: [DONE]\n\n"; format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()) },
+                    };
+                    stream.write_all(response.as_bytes()).await.expect("response");
+                }
             });
             let (tx, mut events) = mpsc::channel::<Result<StreamEvent>>(64);
             let sent = tokio::time::timeout(std::time::Duration::from_secs(2), run_stream_with_retries(
@@ -575,6 +591,14 @@ mod tests {
             sent.expect("local request must complete");
             while let Some(event) = events.recv().await { assert!(event.is_ok(), "local request failed"); }
         });
+    }
+
+    #[test]
+    fn explicit_opt_out_allows_local_card_test_data() {
+        let _env = jcode_base::storage::lock_test_env();
+        let _opt_out = crate::tests::EnvVarGuard::set("JCODE_DISABLE_PAN_CHECK", "1");
+        let request = serde_json::json!({"messages":[{"role":"user","content":"4242".repeat(4)}]});
+        assert!(pan_pre_send_block(&request).is_none());
     }
 
     #[test]
