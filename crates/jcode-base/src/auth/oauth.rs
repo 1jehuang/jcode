@@ -1203,7 +1203,9 @@ pub fn save_openai_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
 
 /// Refresh OpenAI/Codex OAuth tokens
 pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
-    match crate::auth::codex::active_account_label() {
+    match crate::auth::codex::account_label_for_refresh_token(refresh_token)
+        .or_else(crate::auth::codex::active_account_label)
+    {
         Some(label) => refresh_openai_tokens_for_account(refresh_token, &label).await,
         // External token (not stored in jcode auth): nothing on disk to
         // coordinate against, refresh directly.

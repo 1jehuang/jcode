@@ -203,6 +203,19 @@ pub fn active_account_label() -> Option<String> {
     )
 }
 
+/// Stored account label whose current refresh token matches `refresh_token`.
+///
+/// OpenAI rotates refresh tokens, so an exact match identifies which account
+/// the caller is actually using - even when that account is not the active
+/// one (for example after falling back to a healthy sibling account).
+pub fn account_label_for_refresh_token(refresh_token: &str) -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    auth.openai_accounts
+        .iter()
+        .find(|account| account.refresh_token == refresh_token)
+        .map(|account| account.label.clone())
+}
+
 pub fn set_active_account(label: &str) -> Result<()> {
     let mut auth = load_auth_file()?;
     crate::auth::account_store::set_active_account(
@@ -328,6 +341,53 @@ pub fn load_credentials() -> Result<CodexCredentials> {
     anyhow::bail!("No OpenAI tokens or API key found")
 }
 
+/// A stored token is usable when it has a future `expires_at`. Tokens without
+/// an expiry are assumed usable, matching the historical loader behavior.
+fn token_is_valid(expires_at: Option<i64>, now_ms: i64) -> bool {
+    expires_at
+        .map(|expires_at| expires_at > now_ms)
+        .unwrap_or(true)
+}
+
+/// Valid (unexpired) credentials for the active account, or the first other
+/// stored account whose token is still good.
+///
+/// One expired login must not break the whole provider when a healthy
+/// sibling account exists. The classic failure: the active account's refresh
+/// token was already consumed (OpenAI rotates them, and `refresh_token_reused`
+/// is terminal until `jcode login --provider openai`), while another stored
+/// account still has a perfectly good token.
+fn load_valid_jcode_account_credentials(now_ms: i64) -> Option<CodexCredentials> {
+    let auth = load_auth_file().ok()?;
+    if auth.openai_accounts.is_empty() {
+        return None;
+    }
+
+    let active_label = get_active_account_override()
+        .or(auth.active_openai_account.clone())
+        .unwrap_or_else(primary_account_label);
+
+    let mut ordered: Vec<&OpenAiAccount> = auth.openai_accounts.iter().collect();
+    // Stable sort: the active account (if present) goes first, the rest keep
+    // their stored order.
+    ordered.sort_by_key(|account| account.label != active_label);
+
+    for account in ordered {
+        let creds = credentials_from_account(account);
+        if token_is_valid(creds.expires_at, now_ms) {
+            if account.label != active_label {
+                crate::logging::info(&format!(
+                    "Active OpenAI account '{}' has an expired token; using stored account '{}' until re-login",
+                    active_label, account.label
+                ));
+            }
+            return Some(creds);
+        }
+    }
+
+    None
+}
+
 pub fn load_oauth_credentials() -> Result<CodexCredentials> {
     load_oauth_credentials_internal(true)
 }
@@ -337,14 +397,12 @@ fn load_oauth_credentials_internal(return_expired: bool) -> Result<CodexCredenti
     let mut expired_candidates: Vec<(&str, CodexCredentials)> = Vec::new();
     let legacy_allowed = legacy_auth_allowed();
 
+    if let Some(creds) = load_valid_jcode_account_credentials(now_ms) {
+        return Ok(creds);
+    }
+    // No stored account is valid; keep the active one as the (expired)
+    // candidate so `return_expired` still surfaces a re-login prompt.
     if let Ok(creds) = load_jcode_credentials() {
-        if creds
-            .expires_at
-            .map(|expires_at| expires_at > now_ms)
-            .unwrap_or(true)
-        {
-            return Ok(creds);
-        }
         expired_candidates.push(("jcode", creds));
     }
 

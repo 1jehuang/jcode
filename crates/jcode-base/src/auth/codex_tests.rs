@@ -199,9 +199,13 @@ fn multi_account_active_switch_works() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    // Guard against an OPENAI_API_KEY inherited from the developer's shell:
+    // both stored tokens below are expired, so the env key would win and the
+    // test would assert against the wrong credential source.
+    let _env_api_key = EnvVarGuard::set("OPENAI_API_KEY", "");
     set_active_account_override(None);
 
-    upsert_account(OpenAiAccount {
+    let first_label = upsert_account(OpenAiAccount {
         label: "personal".to_string(),
         access_token: "at_personal".to_string(),
         refresh_token: "rt_personal".to_string(),
@@ -211,7 +215,7 @@ fn multi_account_active_switch_works() {
         email: Some("personal@example.com".to_string()),
     })
     .unwrap();
-    upsert_account(OpenAiAccount {
+    let second_label = upsert_account(OpenAiAccount {
         label: "work".to_string(),
         access_token: "at_work".to_string(),
         refresh_token: "rt_work".to_string(),
@@ -222,13 +226,123 @@ fn multi_account_active_switch_works() {
     })
     .unwrap();
 
-    assert_eq!(active_account_label().as_deref(), Some("openai-otter"));
-    set_active_account("openai-fox").unwrap();
-    assert_eq!(active_account_label().as_deref(), Some("openai-fox"));
+    assert_eq!(active_account_label().as_deref(), Some(first_label.as_str()));
+    set_active_account(&second_label).unwrap();
+    assert_eq!(active_account_label().as_deref(), Some(second_label.as_str()));
 
     let creds = load_credentials().unwrap();
     assert_eq!(creds.access_token, "at_work");
     assert_eq!(creds.account_id.as_deref(), Some("acct_work"));
+}
+
+#[test]
+fn load_credentials_falls_back_to_valid_sibling_when_active_expired() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    set_active_account_override(None);
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // The active account's refresh token was consumed (`refresh_token_reused`)
+    // and its access token is long dead; re-login is the only recovery for it.
+    let _active_label = upsert_account(OpenAiAccount {
+        label: "openai-1".to_string(),
+        access_token: "at_active_expired".to_string(),
+        refresh_token: "rt_active_consumed".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms - 60_000),
+        email: None,
+    })
+    .unwrap();
+    // ... but a healthy sibling account still has a valid token.
+    upsert_account(OpenAiAccount {
+        label: "openai-2".to_string(),
+        access_token: "at_sibling_valid".to_string(),
+        refresh_token: "rt_sibling".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms + 3_600_000),
+        email: None,
+    })
+    .unwrap();
+
+    let creds = load_credentials().unwrap();
+    assert_eq!(creds.access_token, "at_sibling_valid");
+    assert_eq!(creds.refresh_token, "rt_sibling");
+}
+#[test]
+fn load_credentials_prefers_active_account_when_valid() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    set_active_account_override(None);
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let first_label = upsert_account(OpenAiAccount {
+        label: "openai-1".to_string(),
+        access_token: "at_first".to_string(),
+        refresh_token: "rt_first".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms + 3_600_000),
+        email: None,
+    })
+    .unwrap();
+    let second_label = upsert_account(OpenAiAccount {
+        label: "openai-2".to_string(),
+        access_token: "at_second".to_string(),
+        refresh_token: "rt_second".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms + 3_600_000),
+        email: None,
+    })
+    .unwrap();
+
+    set_active_account(&second_label).unwrap();
+    let creds = load_credentials().unwrap();
+    assert_eq!(creds.access_token, "at_second");
+}
+
+#[test]
+fn account_label_for_refresh_token_identifies_sibling_account() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    set_active_account_override(None);
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let active_label = upsert_account(OpenAiAccount {
+        label: "openai-1".to_string(),
+        access_token: "at_active".to_string(),
+        refresh_token: "rt_active".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms - 60_000),
+        email: None,
+    })
+    .unwrap();
+    let sibling_label = upsert_account(OpenAiAccount {
+        label: "openai-2".to_string(),
+        access_token: "at_sibling".to_string(),
+        refresh_token: "rt_sibling".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms + 3_600_000),
+        email: None,
+    })
+    .unwrap();
+
+    assert_eq!(
+        account_label_for_refresh_token("rt_sibling").as_deref(),
+        Some(sibling_label.as_str())
+    );
+    assert_eq!(
+        account_label_for_refresh_token("rt_active").as_deref(),
+        Some(active_label.as_str())
+    );
+    assert_eq!(account_label_for_refresh_token("rt_unknown"), None);
 }
 
 #[test]
@@ -292,6 +406,11 @@ fn load_credentials_ignores_legacy_oauth_without_consent() {
         }"#,
     )
     .unwrap();
+
+    // Clear any inherited OPENAI_API_KEY: this test asserts the no-credential
+    // error, and a key exported in the developer's shell would leak through
+    // `load_env_api_key` and make the test flaky.
+    let _env_api_key = EnvVarGuard::set("OPENAI_API_KEY", "");
 
     let err = load_credentials().unwrap_err();
     assert!(
