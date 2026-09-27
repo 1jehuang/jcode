@@ -224,15 +224,32 @@ fn full_and_fast_auth_status_document_cursor_vscdb_exception() {
     // therefore the one case where full and fast legitimately disagree.
     // `user_home_path` sandboxes external auth files under
     // `$JCODE_HOME/external/`, so the mock vscdb must live there for the
-    // probe to find it.
-    let vscdb_dir = jcode_home
-        .join("external")
-        .join(".config")
-        .join("Cursor")
-        .join("User")
-        .join("globalStorage");
-    std::fs::create_dir_all(&vscdb_dir).expect("create vscdb dir");
-    let vscdb_path = vscdb_dir.join("state.vscdb");
+    // probe to find it. The candidate paths are platform-specific (macOS
+    // probes `Library/Application Support/Cursor/...`), so ask the cursor
+    // module where the probe will look instead of hardcoding the Linux
+    // layout, and pin the fixture to the expected platform layout.
+    let vscdb_path = crate::auth::cursor::cursor_vscdb_paths()
+        .into_iter()
+        .next()
+        .expect("platform cursor vscdb candidate");
+    let expected_relative = if cfg!(target_os = "macos") {
+        std::path::PathBuf::from(
+            "Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+        )
+    } else if cfg!(windows) {
+        std::path::PathBuf::from("AppData/Roaming/Cursor/User/globalStorage/state.vscdb")
+    } else {
+        std::path::PathBuf::from(".config/Cursor/User/globalStorage/state.vscdb")
+    };
+    assert!(
+        vscdb_path.ends_with(&expected_relative),
+        "fixture must match the platform vscdb layout: got {}, expected suffix {}",
+        vscdb_path.display(),
+        expected_relative.display()
+    );
+    if let Some(vscdb_dir) = vscdb_path.parent() {
+        std::fs::create_dir_all(vscdb_dir).expect("create vscdb dir");
+    }
     {
         let connection = rusqlite::Connection::open(&vscdb_path).expect("open mock vscdb");
         connection

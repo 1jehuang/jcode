@@ -208,7 +208,7 @@ fn find_cursor_vscdb() -> Result<PathBuf> {
 }
 
 /// Platform-specific candidate paths for Cursor's state.vscdb.
-fn cursor_vscdb_paths() -> Vec<PathBuf> {
+pub(crate) fn cursor_vscdb_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "linux")]
     let relatives = [
         ".config/Cursor/User/globalStorage/state.vscdb",
