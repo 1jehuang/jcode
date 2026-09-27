@@ -37,9 +37,9 @@ pub(super) fn copy_point_from_snapshot(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct RawSelectionPoint {
-    raw_line: usize,
-    column: usize,
+pub(super) struct RawSelectionPoint {
+    pub(super) raw_line: usize,
+    pub(super) column: usize,
 }
 
 pub(super) fn copy_selection_text_from_raw_lines(
@@ -245,7 +245,7 @@ pub(super) fn link_target_from_snapshot(
     link_target_for_display_column(raw_text, raw_point.column)
 }
 
-fn raw_selection_point(
+pub(super) fn raw_selection_point(
     snapshot: &CopyViewportSnapshot,
     point: crate::tui::CopySelectionPoint,
 ) -> Option<RawSelectionPoint> {
@@ -264,6 +264,38 @@ fn raw_selection_point(
                 .saturating_sub(display_copy_start)
                 .min(segment_width),
     })
+}
+
+/// Inverse of [`raw_selection_point`]: the wrapped selection point that lands on
+/// `raw_line`/`raw_col` in the snapshot's frame.
+///
+/// Used to re-base an endpoint captured in raw coordinates onto a frame laid
+/// out at a new width. A raw line can be split across several wrapped rows, so
+/// the row whose raw column range contains `raw_col` wins.
+pub(super) fn selection_point_from_raw(
+    snapshot: &CopyViewportSnapshot,
+    raw_line: usize,
+    raw_col: usize,
+) -> Option<crate::tui::CopySelectionPoint> {
+    for abs_line in 0..snapshot.wrapped_plain_line_count() {
+        let Some(map) = snapshot.wrapped_line_map(abs_line) else {
+            continue;
+        };
+        if map.raw_line != raw_line || raw_col < map.start_col || raw_col > map.end_col {
+            continue;
+        }
+        let text = snapshot.wrapped_plain_line(abs_line)?;
+        let display_copy_start = snapshot
+            .wrapped_copy_offset(abs_line)
+            .unwrap_or(0)
+            .min(text.width());
+        return Some(crate::tui::CopySelectionPoint {
+            pane: snapshot.pane,
+            abs_line,
+            column: display_copy_start + raw_col.saturating_sub(map.start_col),
+        });
+    }
+    None
 }
 
 #[cfg(test)]

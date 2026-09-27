@@ -8,12 +8,12 @@ fn test_prompt_jump_ctrl_digit_is_recency_rank_in_app() {
 
     let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
     app.handle_key(prompt_up_code, prompt_up_mods).unwrap();
-    assert!(app.scroll_offset > 0);
+    assert!(app.chat_top_row() > 0);
 
     // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
     app.handle_key(KeyCode::Char('5'), KeyModifiers::CONTROL)
         .unwrap();
-    assert!(app.scroll_offset > 0);
+    assert!(app.chat_top_row() > 0);
 }
 
 #[test]
@@ -28,12 +28,12 @@ fn test_scroll_cmd_j_k_fallback_in_app() {
     let (down_code, down_mods) = scroll_down_fallback_key(&app);
 
     app.handle_key(up_code, up_mods).unwrap();
-    assert!(app.auto_scroll_paused);
-    assert!(app.scroll_offset > 0);
-    let after_up = app.scroll_offset;
+    assert!(app.follow.is_some());
+    assert!(app.chat_top_row() > 0);
+    let after_up = app.chat_top_row();
 
     app.handle_key(down_code, down_mods).unwrap();
-    assert!(app.scroll_offset <= after_up);
+    assert!(app.chat_top_row() >= after_up);
 }
 
 /// Terminal-style Ctrl+L: after the clear the rendered messages area shows no
@@ -75,11 +75,11 @@ fn test_ctrl_l_renders_clear_screen_with_history_in_scrollback() {
 #[test]
 fn test_empty_prompt_up_down_browses_previous_prompts() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("first prompt"),
         DisplayMessage::assistant("first response"),
         DisplayMessage::user("second prompt"),
-    ];
+    ]);
     app.bump_display_messages_version();
 
     app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
@@ -105,11 +105,11 @@ fn test_empty_prompt_up_down_browses_previous_prompts() {
 #[test]
 fn test_ctrl_up_browses_history_when_no_pending_message() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("first prompt"),
         DisplayMessage::assistant("first response"),
         DisplayMessage::user("second prompt"),
-    ];
+    ]);
     app.bump_display_messages_version();
 
     app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
@@ -122,7 +122,7 @@ fn test_ctrl_up_browses_history_when_no_pending_message() {
 #[test]
 fn test_prompt_history_up_does_not_replace_unmatched_draft() {
     let mut app = create_test_app();
-    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.display_messages.replace(vec![DisplayMessage::user("previous prompt")]);
     app.input = "draft".to_string();
     app.cursor_pos = app.input.len();
 
@@ -153,11 +153,11 @@ fn test_multiline_prompt_up_down_moves_cursor_within_input() {
 #[test]
 fn test_multiline_history_prompt_prioritizes_cursor_until_boundary() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("older prompt"),
         DisplayMessage::assistant("older response"),
         DisplayMessage::user("line one\nline two"),
-    ];
+    ]);
     app.input = "line one\nline two".to_string();
     app.cursor_pos = app.input.len();
 
@@ -173,11 +173,11 @@ fn test_multiline_history_prompt_prioritizes_cursor_until_boundary() {
 #[test]
 fn test_ctrl_up_down_always_browses_prompt_history() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("older prompt"),
         DisplayMessage::assistant("older response"),
         DisplayMessage::user("line one\nline two"),
-    ];
+    ]);
     app.input = "line one\nline two".to_string();
     app.cursor_pos = app.input.len();
 
@@ -198,11 +198,11 @@ fn test_ctrl_up_down_always_browses_prompt_history() {
 #[test]
 fn test_ctrl_up_from_draft_restores_it_walking_back_down() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("older prompt"),
         DisplayMessage::assistant("older response"),
         DisplayMessage::user("newer prompt"),
-    ];
+    ]);
     app.input = "draft line one\ndraft line two".to_string();
     app.cursor_pos = "draft line".len();
 
@@ -233,7 +233,7 @@ fn test_ctrl_up_from_draft_restores_it_walking_back_down() {
 #[test]
 fn test_ctrl_up_from_draft_can_be_undone() {
     let mut app = create_test_app();
-    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.display_messages.replace(vec![DisplayMessage::user("previous prompt")]);
     app.input = "draft".to_string();
     app.cursor_pos = 2;
 
@@ -249,11 +249,11 @@ fn test_ctrl_up_from_draft_can_be_undone() {
 #[test]
 fn test_undo_after_ctrl_up_drops_stale_history_draft() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("older prompt"),
         DisplayMessage::assistant("older response"),
         DisplayMessage::user("newer prompt"),
-    ];
+    ]);
     app.input = "v1".to_string();
     app.cursor_pos = app.input.len();
 
@@ -288,11 +288,11 @@ fn test_remote_empty_prompt_up_down_browses_previous_prompts() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("first remote prompt"),
         DisplayMessage::assistant("first response"),
         DisplayMessage::user("second remote prompt"),
-    ];
+    ]);
 
     rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote))
         .unwrap();
@@ -317,7 +317,7 @@ fn test_remote_ctrl_up_retrieves_pending_queue_before_prompt_history() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.display_messages = vec![DisplayMessage::user("previous remote prompt")];
+    app.display_messages.replace(vec![DisplayMessage::user("previous remote prompt")]);
     app.queued_messages.push("queued followup".to_string());
     app.pending_queued_dispatch = true;
 
@@ -340,18 +340,17 @@ fn test_remote_prompt_jump_ctrl_brackets() {
     // Seed max scroll estimates before key handling.
     render_and_snap(&app, &mut terminal);
 
-    assert_eq!(app.scroll_offset, 0);
-    assert!(!app.auto_scroll_paused);
+    assert!(!app.follow.is_some());
 
     rt.block_on(app.handle_remote_key(KeyCode::Char('['), KeyModifiers::CONTROL, &mut remote))
         .unwrap();
-    assert!(app.auto_scroll_paused);
-    assert!(app.scroll_offset > 0);
+    assert!(app.follow.is_some());
+    assert!(app.chat_top_row() > 0);
 
-    let after_up = app.scroll_offset;
+    let after_up = app.chat_top_row();
     rt.block_on(app.handle_remote_key(KeyCode::Char(']'), KeyModifiers::CONTROL, &mut remote))
         .unwrap();
-    assert!(app.scroll_offset <= after_up);
+    assert!(app.chat_top_row() >= after_up);
 }
 
 #[cfg(target_os = "macos")]
@@ -366,11 +365,11 @@ fn test_remote_prompt_jump_ctrl_esc_fallback_on_macos() {
     // Seed max scroll estimates before key handling.
     render_and_snap(&app, &mut terminal);
 
-    assert_eq!(app.scroll_offset, 0);
+    assert_eq!(app.chat_top_row(), 0);
     rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::CONTROL, &mut remote))
         .unwrap();
-    assert!(app.auto_scroll_paused);
-    assert!(app.scroll_offset > 0);
+    assert!(app.follow.is_some());
+    assert!(app.chat_top_row() > 0);
 }
 
 #[test]
@@ -435,12 +434,12 @@ fn test_remote_prompt_jump_ctrl_digit_is_recency_rank() {
     let (prompt_up_code, prompt_up_mods) = prompt_up_key(&app);
     rt.block_on(app.handle_remote_key(prompt_up_code, prompt_up_mods, &mut remote))
         .unwrap();
-    assert!(app.scroll_offset > 0);
+    assert!(app.chat_top_row() > 0);
 
     // Ctrl+5 now means "5th most-recent prompt" (clamped to oldest).
     rt.block_on(app.handle_remote_key(KeyCode::Char('5'), KeyModifiers::CONTROL, &mut remote))
         .unwrap();
-    assert!(app.scroll_offset > 0);
+    assert!(app.chat_top_row() > 0);
 }
 
 #[test]
@@ -564,10 +563,10 @@ fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
                 .join("\n"),
         ));
     }
-    app.display_messages = messages;
+    app.display_messages.replace(messages);
     app.bump_display_messages_version();
-    app.scroll_offset = 0;
-    app.auto_scroll_paused = false;
+    app.anchor_chat_at_row(0);
+    app.follow_chat_tail();
 
     let backend = ratatui::backend::TestBackend::new(80, 25);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");

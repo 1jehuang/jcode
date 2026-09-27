@@ -1,3 +1,4 @@
+use self::transcript::Transcript;
 use super::DisplayMessageRoleExt;
 use super::keybind::{
     CenteredToggleKeys, ModelSwitchKeys, OptionalBinding, ScrollKeys, WorkspaceNavigationKeys,
@@ -112,6 +113,7 @@ mod terminal_liveness;
 mod terminal_setup_command;
 mod terminal_title;
 mod todos_view;
+mod transcript;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
@@ -623,43 +625,18 @@ pub(super) struct CompactedHistoryLazyState {
     pub pending_request_visible: Option<usize>,
 }
 
-/// Pending viewport anchor used to keep the chat stable when older compacted
-/// history is loaded in. Older messages are prepended above the current view,
-/// which would otherwise teleport the reader to the new absolute top. We instead
-/// remember the reader's distance from the bottom (which is invariant under a
-/// top-side prepend) and let the next render resolve it into an absolute offset.
+/// A transcript selection captured against the pre-resize geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct HistoryScrollAnchor {
-    /// Wrapped lines between the top of the viewport and the bottom of the
-    /// transcript at the moment the load was requested. Invariant across the
-    /// prepend, so `new_total - lines_from_bottom` reproduces the same view.
-    pub lines_from_bottom: usize,
-    /// Total wrapped line count of the frame this anchor was captured from. Used
-    /// to detect when a frame with the newly-loaded content has rendered (its
-    /// total differs), so the anchor can be reconciled into `scroll_offset`.
-    pub base_total: usize,
-}
-
-/// Resize anchor captured against the pre-resize geometry.
-///
-/// The stored `scroll_offset` is a wrapped line index, which only means
-/// something for the width that produced it. When a resize rewraps the
-/// transcript while the reader is paused in history, the reading position is
-/// captured in content coordinates instead, and the next frame resolves it
-/// against the new geometry so the same message stays under the reader
-/// (issue #1412, persistent half).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PendingResizeAnchor {
-    /// Where the reader was, in content coordinates. A message, or a row in a
-    /// section with no message boundaries (live streaming output, retained
-    /// reasoning, the header).
-    pub target: jcode_tui_messages::ContentPos,
-    /// Viewport width the anchor was captured at; the frame that resolves it
-    /// is laid out at a different one.
+pub(super) struct PendingSelectionRebase {
+    /// Endpoints in the frame's raw (unwrapped) coordinates: `(raw line, raw
+    /// column)`. Raw text is width-independent and is the space the copy path
+    /// extracts through, so resolving against a rewrapped frame lands on the
+    /// same characters the reader dragged over.
+    pub anchor_raw: (usize, usize),
+    pub cursor_raw: (usize, usize),
+    /// Viewport width at capture; the frame that resolves these is laid out at
+    /// a different one.
     pub captured_width: u16,
-    /// Resolved row the screen was showing when the anchor was captured, used
-    /// to tell the stale published value from the post-resize one.
-    pub captured_scroll: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -872,23 +849,13 @@ pub struct App {
     mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,
-    display_messages: Vec<DisplayMessage>,
+    display_messages: Transcript,
     display_messages_version: u64,
     display_user_message_count: usize,
     display_edit_tool_message_count: usize,
     display_edit_line_counts: (usize, usize),
     terminal_title: RefCell<terminal_title::TerminalTitleState>,
     compacted_history_lazy: CompactedHistoryLazyState,
-    /// When older compacted history has just been loaded, this anchors the
-    /// viewport to the content the reader was looking at so the prepend does not
-    /// visibly jump. Resolved into `scroll_offset` by the next render frame.
-    pending_history_anchor: Option<HistoryScrollAnchor>,
-    /// Set when a resize rewraps the transcript while the reader is paused in
-    /// history. Holds the reading position in content coordinates (which
-    /// message, which row inside it) captured against the pre-resize geometry,
-    /// and is resolved against each new frame until the renderer reports that
-    /// it applied it. See `jcode_tui_messages::anchor`.
-    pending_resize_anchor: Option<PendingResizeAnchor>,
     input: String,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
     /// Per-input memo for `command_suggestions()`; see
@@ -898,9 +865,10 @@ pub struct App {
     /// `command_suggestions_cache` to a single frame.
     command_suggestions_epoch: std::cell::Cell<u64>,
     cursor_pos: usize,
-    scroll_offset: usize,
-    /// Pauses auto-scroll when user scrolls up during streaming
-    auto_scroll_paused: bool,
+    /// Where the chat viewport follows. `None` follows the live tail (bottom);
+    /// `Some(pos)` anchors the top row to a content position, which survives a
+    /// reflow, a prepend and a compaction because it names an item id.
+    follow: Option<jcode_tui_messages::ContentPos>,
     active_skill: Option<String>,
     is_processing: bool,
     // Live streaming/turn progress (text, per-turn tokens, TPS tracking).
@@ -1186,6 +1154,10 @@ pub struct App {
     copy_selection_mode: bool,
     copy_selection_anchor: Option<crate::tui::CopySelectionPoint>,
     copy_selection_cursor: Option<crate::tui::CopySelectionPoint>,
+    /// Transcript selection endpoints captured in content coordinates across a
+    /// resize, so the reader's selection still covers the text they dragged
+    /// over instead of being reinterpreted as a new wrapped line index.
+    pending_selection_rebase: Option<PendingSelectionRebase>,
     copy_selection_pending_anchor: Option<crate::tui::CopySelectionPoint>,
     copy_selection_dragging: bool,
     copy_selection_goal_column: Option<usize>,
@@ -1523,8 +1495,10 @@ pub struct App {
     dictation_target_session_id: Option<String>,
     // Keep the current chat viewport while typing instead of snapping to bottom.
     typing_scroll_lock: bool,
-    // Scroll bookmark: stashed scroll position for quick teleport back
-    scroll_bookmark: Option<usize>,
+    // Scroll bookmark: stashed reading position for quick teleport back. Stored
+    // in content coordinates, so a resize between setting and returning does not
+    // send the reader somewhere else (issue #1412).
+    scroll_bookmark: Option<jcode_tui_messages::Anchor>,
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)

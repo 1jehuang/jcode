@@ -977,12 +977,12 @@ fn assert_prepared_equivalent(a: &PreparedMessages, b: &PreparedMessages, ctx: &
     let a_b: Vec<_> = a
         .message_boundaries
         .iter()
-        .map(|b| (b.msg_hash, b.wrapped_len, b.raw_len, b.user_prompt_len))
+        .map(|b| (b.item_id, b.wrapped_len, b.raw_len, b.user_prompt_len))
         .collect();
     let b_b: Vec<_> = b
         .message_boundaries
         .iter()
-        .map(|b| (b.msg_hash, b.wrapped_len, b.raw_len, b.user_prompt_len))
+        .map(|b| (b.item_id, b.wrapped_len, b.raw_len, b.user_prompt_len))
         .collect();
     assert_eq!(a_b, b_b, "{ctx}: message_boundaries differ");
 }
@@ -1021,7 +1021,7 @@ fn test_prefix_reuse_tail_edit_matches_full_build() {
 
     let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
     let k =
-        super::prepare::matching_prefix_len(base.as_ref(), &edited_state.display_messages);
+        super::prepare::matching_prefix_len(base.as_ref(), edited_state.display_messages.len(), |i| super::prepare::display_item_key(&edited_state, i));
     assert_eq!(k, 3, "only the last message changed");
 
     let mut reuse = base;
@@ -1055,7 +1055,7 @@ fn test_prefix_reuse_append_matches_full_build() {
     };
 
     let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
-    let k = super::prepare::matching_prefix_len(base.as_ref(), &grown_state.display_messages);
+    let k = super::prepare::matching_prefix_len(base.as_ref(), grown_state.display_messages.len(), |i| super::prepare::display_item_key(&grown_state, i));
     assert_eq!(k, 2);
     let reuse = super::prepare::prepare_body_incremental(&grown_state, width, base, k);
     let full = super::prepare::prepare_body(&grown_state, width, false);
@@ -1087,7 +1087,7 @@ fn test_prefix_reuse_truncation_matches_full_build() {
     };
 
     let base = Arc::new(super::prepare::prepare_body(&long_state, width, false));
-    let k = super::prepare::matching_prefix_len(base.as_ref(), &short_state.display_messages);
+    let k = super::prepare::matching_prefix_len(base.as_ref(), short_state.display_messages.len(), |i| super::prepare::display_item_key(&short_state, i));
     assert_eq!(k, 2);
     let mut reuse = base;
     super::prepare::truncate_prepared_to_boundary(Arc::make_mut(&mut reuse), k);

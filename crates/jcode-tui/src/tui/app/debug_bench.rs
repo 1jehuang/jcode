@@ -125,7 +125,7 @@ impl App {
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
         crate::tui::visual_debug::enable();
 
-        self.display_messages = vec![
+        self.display_messages.replace(vec![
             DisplayMessage {
                 role: "user".to_string(),
                 content: "Headless side-panel latency benchmark".to_string(),
@@ -142,7 +142,7 @@ impl App {
                 title: None,
                 tool_data: None,
             },
-        ];
+        ]);
         self.bump_display_messages_version();
         self.side_panel = Self::build_side_panel_latency_snapshot(diagrams, padding);
         self.diff_mode = crate::config::DiffDisplayMode::Off;
@@ -365,7 +365,7 @@ impl App {
         crate::tui::visual_debug::enable();
         crate::tui::mermaid::init_picker();
 
-        self.display_messages = vec![
+        self.display_messages.replace(vec![
             DisplayMessage {
                 role: "user".to_string(),
                 content: "Live Mermaid UI benchmark".to_string(),
@@ -383,7 +383,7 @@ impl App {
                 title: None,
                 tool_data: None,
             },
-        ];
+        ]);
         self.bump_display_messages_version();
         self.side_panel = Self::build_side_panel_latency_snapshot(diagrams, padding);
         self.diff_mode = crate::config::DiffDisplayMode::Off;
@@ -562,8 +562,12 @@ impl App {
         include_frames: bool,
         expectations: &ScrollTestExpectations,
     ) -> Result<serde_json::Value, String> {
-        self.scroll_offset = scroll_offset;
-        self.auto_scroll_paused = mode == "paused";
+        let paused = mode == "paused";
+        if paused {
+            self.anchor_chat_at_row(scroll_offset);
+        } else {
+            self.follow_chat_tail();
+        }
         let draw_start = std::time::Instant::now();
         if let Err(e) = terminal.draw(|f| crate::tui::ui::draw(f, self)) {
             return Err(format!("draw error ({}): {}", label, e));
@@ -589,7 +593,7 @@ impl App {
         };
 
         let user_scroll = scroll_offset.min(max_scroll);
-        let scroll_top = if self.auto_scroll_paused && user_scroll > 0 {
+        let scroll_top = if paused && user_scroll > 0 {
             user_scroll
         } else {
             max_scroll
@@ -790,7 +794,7 @@ impl App {
         crate::tui::markdown::set_diagram_mode_override(Some(diagram_mode));
 
         let test_content = Self::build_scroll_test_content(diagrams, padding, diagram_override);
-        self.display_messages = vec![
+        self.display_messages.replace(vec![
             DisplayMessage {
                 role: "user".to_string(),
                 content: "Scroll test: render mermaid + text".to_string(),
@@ -807,7 +811,7 @@ impl App {
                 title: None,
                 tool_data: None,
             },
-        ];
+        ]);
         self.bump_display_messages_version();
         self.follow_chat_bottom();
         self.is_processing = false;
@@ -1196,12 +1200,10 @@ impl App {
         // travel (how much widgets move *relative to the text* they sit beside).
         let mut scroll_tops_abs: Vec<i64> = Vec::new();
         let mut frame_payloads: Vec<serde_json::Value> = Vec::new();
-        self.auto_scroll_paused = true;
-
         let mut scroll_top = 0usize;
         while scroll_top <= max_scroll && frames.len() < max_frames {
             let offset = max_scroll.saturating_sub(scroll_top);
-            self.scroll_offset = offset;
+            self.anchor_chat_at_row(offset);
             if let Err(e) = terminal.draw(|f| crate::tui::ui::draw(f, self)) {
                 errors.push(format!("draw error at scroll_top {}: {}", scroll_top, e));
                 break;

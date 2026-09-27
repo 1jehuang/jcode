@@ -18,8 +18,8 @@ fn resize_snaps_tail_follow_to_new_bottom_without_animating() {
     crate::perf::pin_full_profile_for_tests();
 
     let (mut app, mut wide_terminal) = create_scroll_test_app(100, 30, 0, 60);
-    app.auto_scroll_paused = false;
-    app.scroll_offset = 0;
+    app.follow_chat_tail();
+    app.anchor_chat_at_row(0);
 
     // Establish the resolved position while following the tail at 100 columns.
     render_and_snap(&app, &mut wide_terminal);
@@ -87,7 +87,7 @@ fn debounced_resize_burst_arms_the_snap_on_its_trailing_frame() {
     crate::perf::pin_full_profile_for_tests();
 
     let (mut app, mut wide_terminal) = create_scroll_test_app(100, 30, 0, 60);
-    app.auto_scroll_paused = false;
+    app.follow_chat_tail();
     render_and_snap(&app, &mut wide_terminal);
 
     let _ = crate::tui::ui::take_tail_follow_snap_request();
@@ -123,7 +123,7 @@ fn resize_while_paused_in_history_does_not_snap_to_bottom() {
     crate::perf::pin_full_profile_for_tests();
 
     let (mut app, mut wide_terminal) = create_scroll_test_app(100, 30, 0, 60);
-    app.auto_scroll_paused = false;
+    app.follow_chat_tail();
     render_and_snap(&app, &mut wide_terminal);
     app.scroll_up(20);
     render_and_snap(&app, &mut wide_terminal);
@@ -161,9 +161,9 @@ fn resize_without_overflow_stays_at_the_top() {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
-    app.display_messages = vec![DisplayMessage::assistant("short response")];
+    app.display_messages.replace(vec![DisplayMessage::assistant("short response")]);
     app.bump_display_messages_version();
-    app.auto_scroll_paused = false;
+    app.follow_chat_tail();
     app.status = ProcessingStatus::Idle;
 
     let mut wide_terminal =

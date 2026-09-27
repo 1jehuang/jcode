@@ -126,16 +126,6 @@ impl App {
             self.stream_buffer.reset_jitter();
             return "OK: stream jitter stats reset".to_string();
         }
-        if cmd == "smoothness" {
-            // Anchor-stability report: jarring transcript motion (repositions,
-            // insertions above, big pops, blinks, mass reflows) per rendered
-            // frame, with expected motion (scroll/resize/tail-follow) excluded.
-            return crate::tui::ui::smoothness_report_json();
-        }
-        if cmd == "smoothness:reset" {
-            crate::tui::ui::smoothness_reset();
-            return "OK: smoothness stats reset".to_string();
-        }
         if cmd == "overlay" || cmd == "overlay:status" {
             let overlay = crate::tui::visual_debug::overlay_enabled();
             return serde_json::json!({
@@ -195,7 +185,7 @@ impl App {
                 "display_messages": self.display_messages.len(),
                 "input": self.input,
                 "cursor_pos": self.cursor_pos,
-                "scroll_offset": self.scroll_offset,
+                "scroll_offset": self.chat_top_row(),
                 "queued_messages": self.queued_messages.len(),
                 "provider_session_id": self.provider_session_id,
                 "model": self.provider.name(),
@@ -295,7 +285,7 @@ impl App {
             let new_string = (0..24)
                 .map(|idx| format!("new fixture line {idx}\n"))
                 .collect::<String>();
-            self.display_messages = vec![
+            self.display_messages.replace(vec![
                 DisplayMessage::user("please edit demo.txt"),
                 DisplayMessage::tool(
                     "Edited demo.txt".to_string(),
@@ -311,11 +301,10 @@ impl App {
                         thought_signature: None,
                     },
                 ),
-            ];
+            ]);
             self.bump_display_messages_version();
             self.diff_mode = crate::config::DiffDisplayMode::Inline;
-            self.scroll_offset = 0;
-            self.auto_scroll_paused = false;
+            self.follow_chat_tail();
             self.input.clear();
             self.cursor_pos = 0;
             self.set_status_notice("Debug expand badge fixture ready");
@@ -337,7 +326,7 @@ impl App {
             })
             .to_string()
         } else if cmd == "gmail-draft-fixture" {
-            self.display_messages = vec![
+            self.display_messages.replace(vec![
                 DisplayMessage::user("Draft a launch update for the team"),
                 DisplayMessage::tool(
                     "Draft created successfully.\nDraft ID: draft_visual_123\nTo: team@example.com\nSubject: Launch update\nAttachments: 1"
@@ -357,10 +346,9 @@ impl App {
                         thought_signature: None,
                     },
                 ),
-            ];
+            ]);
             self.bump_display_messages_version();
-            self.scroll_offset = 0;
-            self.auto_scroll_paused = false;
+            self.follow_chat_tail();
             self.input.clear();
             self.cursor_pos = 0;
             self.set_status_notice("Debug Gmail draft fixture ready");
@@ -847,11 +835,11 @@ impl App {
             match dir {
                 "up" => {
                     self.debug_scroll_up(5);
-                    format!("scroll: up to {}", self.scroll_offset)
+                    format!("scroll: up to {}", self.chat_top_row())
                 }
                 "down" => {
                     self.debug_scroll_down(5);
-                    format!("scroll: down to {}", self.scroll_offset)
+                    format!("scroll: down to {}", self.chat_top_row())
                 }
                 "top" => {
                     self.debug_scroll_top();

@@ -84,11 +84,8 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
-    // Adopt the resolved scroll position once a frame containing newly loaded
-    // older history has rendered, so manual scrolling resumes seamlessly.
-    needs_redraw |= app.reconcile_history_anchor();
-    // Same for a resize: adopt the resolved row once the rewrap has rendered.
-    needs_redraw |= app.reconcile_resize_anchor();
+    // Re-base a transcript selection captured before the rewrap.
+    needs_redraw |= app.rebase_selection_after_resize();
     if app.submit_input_on_startup && !app.is_processing {
         app.submit_input_on_startup = false;
         app.submit_input();

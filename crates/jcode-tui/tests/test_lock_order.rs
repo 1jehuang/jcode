@@ -32,18 +32,6 @@ fn inline_images_persistence_locks_env_before_render() {
 }
 
 #[test]
-fn smoothness_benchmark_locks_env_before_render() {
-    let body = test_body(
-        include_str!("../src/tui/app/tests/smoothness_benchmark.rs"),
-        "smoothness_benchmark_simulated_streaming_turn_stays_within_budget",
-    );
-    assert!(
-        env_precedes_render(body, "with_reasoning_current_home(|| {"),
-        "benchmark must acquire render inside the env-taking home helper (#1201)"
-    );
-}
-
-#[test]
 fn ordering_check_rejects_both_original_inversions() {
     for env_call in [
         "let _env_guard = crate::storage::lock_test_env();",

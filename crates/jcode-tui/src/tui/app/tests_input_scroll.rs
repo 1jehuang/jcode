@@ -262,13 +262,13 @@ fn test_remote_scroll_cmd_j_k_fallback() {
 
     rt.block_on(app.handle_remote_key(up_code, up_mods, &mut remote))
         .unwrap();
-    assert!(app.auto_scroll_paused);
-    assert!(app.scroll_offset > 0);
-    let after_up = app.scroll_offset;
+    assert!(app.follow.is_some());
+    assert!(app.chat_top_row() > 0);
+    let after_up = app.chat_top_row();
 
     rt.block_on(app.handle_remote_key(down_code, down_mods, &mut remote))
         .unwrap();
-    assert!(app.scroll_offset <= after_up);
+    assert!(app.chat_top_row() >= after_up);
 }
 
 #[test]

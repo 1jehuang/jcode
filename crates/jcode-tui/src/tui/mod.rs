@@ -395,6 +395,12 @@ pub(crate) fn hash_rendered_image_signature_fields(
 pub trait TuiState {
     // ---- Transcript ----
     fn display_messages(&self) -> &[DisplayMessage];
+    /// Stable identity of the message at `idx`, or `None` for states that do
+    /// not track identity (test harnesses, synthetic frames). Callers fall back
+    /// to the content hash in that case.
+    fn display_message_item_id(&self, _idx: usize) -> Option<jcode_tui_messages::ItemId> {
+        None
+    }
     fn display_user_message_count(&self) -> usize;
     /// Number of user prompts hidden before the first visible message because of
     /// compacted-history truncation. Used to keep prompt numbers absolute.
@@ -445,8 +451,17 @@ pub trait TuiState {
     fn pending_soft_interrupts(&self) -> &[String];
 
     // ---- Scroll ----
+    /// Where the chat viewport follows: `None` follows the live tail, `Some`
+    /// anchors the top row to a content position that survives a reflow, a
+    /// prepend and a compaction.
+    fn follow(&self) -> Option<jcode_tui_messages::ContentPos> {
+        None
+    }
+    /// Row the chat viewport top currently resolves to, read from the last
+    /// drawn frame. While following the tail that is the bottom row.
     fn scroll_offset(&self) -> usize;
-    /// Whether auto-scroll to bottom is paused (user scrolled up during streaming)
+    /// Whether the view is parked in history rather than following the tail
+    /// (user scrolled up during streaming).
     fn auto_scroll_paused(&self) -> bool;
     /// Whether the screen is currently in the terminal-style cleared state
     /// produced by Ctrl+L / Cmd+L: the transcript ends in a blank spacer, the
@@ -457,19 +472,6 @@ pub trait TuiState {
     /// a screenful of blanks.
     fn terminal_clear_collapsed(&self) -> bool {
         false
-    }
-    /// Content-coordinate reading position captured before a resize rewrapped
-    /// the transcript. The renderer resolves it against the frame it is drawing
-    /// so the anchored message stays under the reader.
-    fn pending_resize_anchor(&self) -> Option<jcode_tui_messages::ContentPos> {
-        None
-    }
-    /// When older compacted history is being loaded in, this is the reader's
-    /// captured distance (in wrapped lines) from the bottom of the transcript.
-    /// The renderer uses it to keep the viewport anchored to the same content as
-    /// older messages are prepended above, instead of snapping to the new top.
-    fn pending_history_anchor_lines_from_bottom(&self) -> Option<usize> {
-        None
     }
     /// Whether the elastic overscroll status line (revealed by scrolling past
     /// the bottom of the transcript) is currently shown.

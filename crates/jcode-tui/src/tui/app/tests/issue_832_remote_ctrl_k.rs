@@ -15,7 +15,7 @@ fn issue_832_remote_ctrl_k_kills_draft_but_ctrl_shift_k_scrolls() {
 
     assert_eq!(app.input(), "hello world ");
     assert_eq!(app.cursor_pos(), "hello world ".len());
-    assert_eq!(app.scroll_offset, 0, "plain Ctrl+K must not jump prompts");
+    assert!(!app.follow.is_some(), "plain Ctrl+K must not jump prompts");
 
     app.set_input_for_test("hello world again");
     app.cursor_pos = "hello world ".len();
@@ -28,7 +28,7 @@ fn issue_832_remote_ctrl_k_kills_draft_but_ctrl_shift_k_scrolls() {
 
     assert_eq!(app.input(), "hello world again");
     assert_eq!(app.cursor_pos(), "hello world ".len());
-    assert!(app.scroll_offset > 0, "Ctrl+Shift+K must still scroll up");
+    assert!(app.chat_top_row() > 0, "Ctrl+Shift+K must still scroll up");
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn issue_832_disconnected_ctrl_k_kills_draft_but_ctrl_shift_k_scrolls() {
 
     assert_eq!(app.input(), "hello world ");
     assert_eq!(app.cursor_pos(), "hello world ".len());
-    assert_eq!(app.scroll_offset, 0, "plain Ctrl+K must not jump prompts");
+    assert!(!app.follow.is_some(), "plain Ctrl+K must not jump prompts");
 
     app.set_input_for_test("hello world again");
     app.cursor_pos = "hello world ".len();
@@ -62,5 +62,5 @@ fn issue_832_disconnected_ctrl_k_kills_draft_but_ctrl_shift_k_scrolls() {
 
     assert_eq!(app.input(), "hello world again");
     assert_eq!(app.cursor_pos(), "hello world ".len());
-    assert!(app.scroll_offset > 0, "Ctrl+Shift+K must still scroll up");
+    assert!(app.chat_top_row() > 0, "Ctrl+Shift+K must still scroll up");
 }

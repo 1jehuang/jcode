@@ -1251,14 +1251,13 @@ fn test_disconnected_ctrl_l_only_adds_spacer_and_touches_nothing() {
     let _stale_hash = seed_rendered_plan_graph(&mut app, &mut remote);
     app.queued_messages.push("queued".to_string());
     let messages_before = app.display_messages().len();
-    app.scroll_offset = 10;
-    app.auto_scroll_paused = true;
+    app.anchor_chat_at_row(10);
 
     super::remote::handle_disconnected_key(&mut app, KeyCode::Char('l'), KeyModifiers::CONTROL)
         .expect("disconnected Ctrl+L should succeed");
 
-    assert_eq!(app.scroll_offset, 0, "Ctrl+L snaps to the bottom");
-    assert!(!app.auto_scroll_paused, "Ctrl+L resumes tail-follow");
+    assert_eq!(app.chat_top_row(), 0, "Ctrl+L snaps to the bottom");
+    assert!(!app.follow.is_some(), "Ctrl+L resumes tail-follow");
     assert!(
         app.display_messages().len() >= messages_before,
         "transcript content is untouched (a spacer may be appended)"
@@ -1551,7 +1550,7 @@ fn test_margin_mode_session_switch_keeps_orphaned_diagram_in_info_widget() {
 // that bypass `clear_display_messages` entirely.
 //
 //   A. `apply_compacted_history_window` (state_ui_messages.rs:404) assigns
-//      `self.display_messages = messages` wholesale. The window is built from
+//      `self.display_messages.replace(messages` wholesale. The window is built from
 //      server-side session storage, which never contains the client-only
 //      "Plan graph · vN" message, so the coalesced diagram message is DROPPED
 //      from the transcript while ACTIVE_DIAGRAMS and the swarm_plan_* snapshot
@@ -1566,7 +1565,7 @@ fn test_margin_mode_session_switch_keeps_orphaned_diagram_in_info_widget() {
 //   C. Local (non-remote) session picker `/resume` current-terminal switch:
 //      `handle_session_picker_current_terminal_selection`
 //      (inline_interactive.rs:2128) only queues the target on
-//      `workspace_client.queue_resume_session`; the queued resume is consumed
+//      `workspace_client.queue_resume_session`); the queued resume is consumed
 //      exclusively by remote::handle_tick (app/remote.rs:136). local::handle_tick
 //      (app/local.rs:63-118) never takes it, so in local mode the switch is a
 //      silent no-op: no transcript clear ever happens and the plan graph,

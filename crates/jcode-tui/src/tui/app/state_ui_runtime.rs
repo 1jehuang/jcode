@@ -58,7 +58,7 @@ impl App {
     }
 
     pub fn scroll_offset(&self) -> usize {
-        self.scroll_offset
+        self.chat_top_row()
     }
 
     pub fn is_processing(&self) -> bool {
@@ -374,19 +374,16 @@ impl App {
             return;
         }
         // An explicit jump should win over a still-settling anchor.
-        self.pending_history_anchor = None;
-        self.pending_resize_anchor = None;
 
-        let current = self.scroll_offset;
+        let current = self.chat_top_row();
 
         // positions are in document order (top to bottom).
         // Find the last position that is strictly less than current (i.e. earlier/above).
         // If we're at the bottom (!auto_scroll_paused), treat current as past-the-end.
-        if !self.auto_scroll_paused {
+        if self.follow.is_none() {
             // Jump to the most recent (last) prompt
             if let Some(&pos) = positions.last() {
-                self.scroll_offset = pos;
-                self.auto_scroll_paused = true;
+                self.anchor_chat_at_row(pos);
             }
             return;
         }
@@ -400,14 +397,13 @@ impl App {
         }
 
         if let Some(pos) = target {
-            self.scroll_offset = pos;
+            self.anchor_chat_at_row(pos);
         } else {
             // No earlier prompt is loaded. If older compacted history exists,
             // pull it in (anchored) and jump to the very top so the next press
             // continues into the freshly loaded prompts instead of stalling.
             if self.compacted_history_has_remaining() {
-                self.scroll_offset = 0;
-                self.auto_scroll_paused = true;
+                self.anchor_chat_at_row(0);
                 self.maybe_queue_compacted_history_load();
             }
         }
@@ -416,18 +412,16 @@ impl App {
     /// Scroll to the next user prompt (scroll down - later in conversation)
     pub fn scroll_to_next_prompt(&mut self) {
         let positions = self.prompt_row_starts();
-        if positions.is_empty() || !self.auto_scroll_paused {
+        if positions.is_empty() || self.follow.is_none() {
             return;
         }
-        self.pending_history_anchor = None;
-        self.pending_resize_anchor = None;
 
-        let current = self.scroll_offset;
+        let current = self.chat_top_row();
 
         // Find the first position strictly greater than current (i.e. later/below).
         for &pos in &positions {
             if pos > current {
-                self.scroll_offset = pos;
+                self.anchor_chat_at_row(pos);
                 return;
             }
         }
@@ -447,8 +441,6 @@ impl App {
         if positions.is_empty() {
             return;
         }
-        self.pending_history_anchor = None;
-        self.pending_resize_anchor = None;
 
         // positions are in document order (top to bottom), we want most-recent first
         let target_idx = positions.len().saturating_sub(rank);
@@ -461,8 +453,7 @@ impl App {
             target_line,
             max_scroll
         ));
-        self.scroll_offset = target_line;
-        self.auto_scroll_paused = true;
+        self.anchor_chat_at_row(target_line);
     }
 
     pub(super) fn toggle_input_stash(&mut self) {
