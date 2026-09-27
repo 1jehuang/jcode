@@ -88,6 +88,10 @@ fn save_openai_tokens_uses_jcode_home_sandbox() -> Result<()> {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    // The sandbox token below is expired, so an OPENAI_API_KEY inherited from
+    // the developer's shell would win the credential race and the test would
+    // assert against the wrong source.
+    let _env_api_key = EnvVarGuard::set_value("OPENAI_API_KEY", "");
 
     let tokens = OAuthTokens {
         access_token: "at_sandbox".to_string(),
@@ -116,7 +120,9 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
-    crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+    // Upsert may canonicalize the label (animal scheme), so use the returned
+    // label for the follow-up save and lookup instead of the requested one.
+    let label = crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
         label: "claude-1".to_string(),
         access: "old_access".to_string(),
         refresh: "old_refresh".to_string(),
@@ -125,7 +131,6 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
         subscription_type: Some("pro".to_string()),
         scopes: vec!["user:inference".to_string()],
     })?;
-
     let refreshed = OAuthTokens {
         access_token: "new_access".to_string(),
         refresh_token: "new_refresh".to_string(),
@@ -133,11 +138,11 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
         id_token: None,
         scopes: Vec::new(),
     };
-    save_claude_tokens_for_account(&refreshed, "claude-otter")?;
+    save_claude_tokens_for_account(&refreshed, &label)?;
 
     let account = crate::auth::claude::list_accounts()?
         .into_iter()
-        .find(|account| account.label == "claude-otter")
+        .find(|account| account.label == label)
         .expect("claude account should exist");
     assert_eq!(account.access, "new_access");
     assert_eq!(account.refresh, "new_refresh");

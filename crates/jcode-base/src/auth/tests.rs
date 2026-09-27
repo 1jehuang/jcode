@@ -188,7 +188,7 @@ fn full_and_fast_auth_status_match_for_shared_probe_fields() {
 
 #[cfg(unix)]
 #[test]
-fn full_and_fast_auth_status_document_cursor_cli_exception() {
+fn full_and_fast_auth_status_document_cursor_vscdb_exception() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("create temp dir");
     let home = temp.path().join("home");
@@ -207,31 +207,63 @@ fn full_and_fast_auth_status_document_cursor_cli_exception() {
     .into_iter()
     .map(|key| (key, std::env::var_os(key)))
     .collect::<Vec<_>>();
-    let mock_cli = write_mock_cursor_agent(
-        temp.path(),
-        "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo \"Authenticated\\nAccount: test@example.com\"\n  exit 0\nfi\nexit 1\n",
-    );
-
-    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    // Sandbox the environment BEFORE writing the consent entry: the trusted
+    // path entry is persisted into the (sandboxed) jcode config, so saving it
+    // against the real config location would both pollute the user's config
+    // and make the in-test load miss it.
+    let jcode_home = temp.path().join("jcode-home");
+    crate::env::set_var("JCODE_HOME", &jcode_home);
     crate::env::set_var("XDG_CONFIG_HOME", &xdg);
     crate::env::set_var("HOME", &home);
     crate::env::remove_var("CURSOR_API_KEY");
     crate::env::remove_var("CURSOR_ACCESS_TOKEN");
     crate::env::remove_var("CURSOR_REFRESH_TOKEN");
-    crate::env::set_var("JCODE_CURSOR_CLI_PATH", &mock_cli);
+
+    // Full auth probes Cursor's state.vscdb (after explicit consent); fast
+    // auth intentionally skips the vscdb probe. A trusted vscdb token is
+    // therefore the one case where full and fast legitimately disagree.
+    // `user_home_path` sandboxes external auth files under
+    // `$JCODE_HOME/external/`, so the mock vscdb must live there for the
+    // probe to find it.
+    let vscdb_dir = jcode_home
+        .join("external")
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&vscdb_dir).expect("create vscdb dir");
+    let vscdb_path = vscdb_dir.join("state.vscdb");
+    {
+        let connection = rusqlite::Connection::open(&vscdb_path).expect("open mock vscdb");
+        connection
+            .execute(
+                "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)",
+                [],
+            )
+            .expect("create ItemTable");
+        connection
+            .execute(
+                "INSERT INTO ItemTable (key, value) VALUES ('cursorAuth/accessToken', 'tok_vscdb')",
+                [],
+            )
+            .expect("insert access token");
+    }
+    crate::config::Config::allow_external_auth_source_for_path(
+        crate::auth::cursor::CURSOR_VSCDB_SOURCE_ID,
+        &vscdb_path,
+    )
+    .expect("trust vscdb source");
+
     AuthStatus::invalidate_cache();
 
     let (full, _) = build_auth_status_uncached(AuthProbeMode::Full);
     let (fast, _) = build_auth_status_uncached(AuthProbeMode::Fast);
 
-    // Since 203c5cc95 (native Cursor auth), neither full nor fast auth treats an
-    // authenticated cursor-agent CLI session as usable credentials.
-    assert_eq!(full.cursor, AuthState::NotConfigured);
+    // Full auth probes Cursor's state.vscdb (after explicit consent); fast
+    // auth intentionally skips the vscdb probe. A trusted vscdb token is
+    // therefore the one case where full and fast legitimately disagree.
+    assert_eq!(full.cursor, AuthState::Available);
     assert_eq!(fast.cursor, AuthState::NotConfigured);
-    assert_eq!(
-        full.cursor, fast.cursor,
-        "cursor-agent CLI sessions are no longer probed by full or fast auth"
-    );
 
     for (key, value) in saved {
         restore_env_var(key, value);
@@ -751,17 +783,39 @@ fn cursor_status_is_available_for_native_auth_without_cli() {
 
 #[cfg(unix)]
 #[test]
-fn cursor_status_is_available_for_authenticated_cli_session() {
+fn cursor_status_ignores_cli_only_sessions() {
     let _lock = crate::storage::lock_test_env();
-    let prev_api_key = std::env::var_os("CURSOR_API_KEY");
-    let prev_cli_path = std::env::var_os("JCODE_CURSOR_CLI_PATH");
     let temp = tempfile::TempDir::new().expect("create temp dir");
+    let home = temp.path().join("home");
+    let xdg = temp.path().join("xdg");
+    std::fs::create_dir_all(&home).expect("create temp home");
+    std::fs::create_dir_all(&xdg).expect("create temp xdg config");
+    let saved = [
+        "JCODE_HOME",
+        "XDG_CONFIG_HOME",
+        "HOME",
+        "CURSOR_API_KEY",
+        "CURSOR_ACCESS_TOKEN",
+        "CURSOR_REFRESH_TOKEN",
+        "JCODE_CURSOR_CLI_PATH",
+    ]
+    .into_iter()
+    .map(|key| (key, std::env::var_os(key)))
+    .collect::<Vec<_>>();
+    // An authenticated cursor-agent CLI on disk must not, by itself, flip the
+    // auth status: the probe only trusts native auth (env/file/vscdb) or an
+    // API key. `JCODE_CURSOR_CLI_PATH` is no longer consulted by the probe.
     let mock_cli = write_mock_cursor_agent(
-        temp.path(),
+        &home,
         "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then\n  echo \"Authenticated\\nAccount: test@example.com\"\n  exit 0\nfi\nexit 1\n",
     );
 
+    crate::env::set_var("JCODE_HOME", temp.path().join("jcode-home"));
+    crate::env::set_var("XDG_CONFIG_HOME", &xdg);
+    crate::env::set_var("HOME", &home);
     crate::env::remove_var("CURSOR_API_KEY");
+    crate::env::remove_var("CURSOR_ACCESS_TOKEN");
+    crate::env::remove_var("CURSOR_REFRESH_TOKEN");
     crate::env::set_var("JCODE_CURSOR_CLI_PATH", &mock_cli);
     AuthStatus::invalidate_cache();
 
@@ -770,8 +824,9 @@ fn cursor_status_is_available_for_authenticated_cli_session() {
     let status = AuthStatus::check();
     assert_eq!(status.cursor, AuthState::NotConfigured);
 
-    restore_env_var("CURSOR_API_KEY", prev_api_key);
-    restore_env_var("JCODE_CURSOR_CLI_PATH", prev_cli_path);
+    for (key, value) in saved {
+        restore_env_var(key, value);
+    }
     AuthStatus::invalidate_cache();
 }
 

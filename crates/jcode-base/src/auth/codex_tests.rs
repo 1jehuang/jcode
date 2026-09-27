@@ -226,9 +226,15 @@ fn multi_account_active_switch_works() {
     })
     .unwrap();
 
-    assert_eq!(active_account_label().as_deref(), Some(first_label.as_str()));
+    assert_eq!(
+        active_account_label().as_deref(),
+        Some(first_label.as_str())
+    );
     set_active_account(&second_label).unwrap();
-    assert_eq!(active_account_label().as_deref(), Some(second_label.as_str()));
+    assert_eq!(
+        active_account_label().as_deref(),
+        Some(second_label.as_str())
+    );
 
     let creds = load_credentials().unwrap();
     assert_eq!(creds.access_token, "at_work");
@@ -300,6 +306,11 @@ fn load_credentials_prefers_active_account_when_valid() {
     })
     .unwrap();
 
+    // The first upsert becomes the default active account.
+    assert_eq!(
+        active_account_label().as_deref(),
+        Some(first_label.as_str())
+    );
     set_active_account(&second_label).unwrap();
     let creds = load_credentials().unwrap();
     assert_eq!(creds.access_token, "at_second");
