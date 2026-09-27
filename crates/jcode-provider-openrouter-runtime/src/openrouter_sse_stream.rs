@@ -1,6 +1,39 @@
 use super::*;
 use jcode_provider_openrouter::stream::OpenRouterStream;
 
+/// Loopback transport is direct, but is never exempt from the PAN check.
+fn is_loopback_base(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn attempt_transport_client(client: &Client, api_base: &str, attempt: u32) -> Result<Client> {
+    if is_loopback_base(api_base) {
+        return Client::builder()
+            .user_agent(jcode_provider_core::JCODE_USER_AGENT)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .context("Failed to build direct loopback client");
+    }
+    Ok(if attempt == 0 {
+        client.clone()
+    } else {
+        jcode_provider_core::fresh_transport_client()
+    })
+}
+
 /// Only the documented `=1` opts out; `0` or any other value keeps the check.
 fn pan_check_opted_out(value: Option<&str>) -> bool {
     value.is_some_and(|value| value.trim() == "1")
@@ -113,10 +146,16 @@ pub(super) async fn run_stream_with_retries(
         // poisoned other idle pooled connections opened through the same path,
         // so reusing the shared pool can fail identically. A fresh client
         // guarantees a brand-new TCP+TLS connection.
-        let attempt_client = if attempt == 0 {
-            client.clone()
-        } else {
-            jcode_provider_core::fresh_transport_client()
+        let attempt_client = match attempt_transport_client(&client, &api_base, attempt) {
+            Ok(client) => client,
+            Err(error) => {
+                if tx.send(Err(error)).await.is_err() {
+                    jcode_base::logging::info(
+                        "transport error not delivered: stream receiver dropped",
+                    );
+                }
+                return;
+            }
         };
 
         match stream_response(
@@ -480,6 +519,61 @@ mod tests {
             let error = events.recv().await.expect("block event").expect_err("PAN must block");
             assert!(error.to_string().contains("[PAN]"));
             assert!(events.recv().await.is_none());
+        });
+    }
+
+    #[test]
+    fn loopback_base_is_parsed_not_prefix_matched() {
+        assert!(is_loopback_base("http://127.0.0.1:1234/v1"));
+        assert!(is_loopback_base("http://localhost:11434/v1"));
+        assert!(is_loopback_base("http://[::1]:8080/v1"));
+        assert!(!is_loopback_base("https://localhost.example.com/v1"));
+        assert!(!is_loopback_base("https://openrouter.ai/api/v1"));
+    }
+
+    #[test]
+    fn loopback_clean_request_bypasses_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _env = jcode_base::storage::lock_test_env();
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy");
+        proxy.set_nonblocking(true).expect("nonblocking proxy");
+        let client = Client::builder()
+            .proxy(
+                reqwest::Proxy::all(format!(
+                    "http://{}",
+                    proxy.local_addr().expect("proxy address")
+                ))
+                .expect("proxy config"),
+            )
+            .build()
+            .expect("client");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let local = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("local endpoint");
+            let address = local.local_addr().expect("local address");
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = local.accept().await.expect("local connection");
+                let mut bytes = vec![0; 8192];
+                let size = stream.read(&mut bytes).await.expect("request");
+                assert!(String::from_utf8_lossy(&bytes[..size]).starts_with("POST /v1/chat/completions "));
+                let body = "data: [DONE]\n\n";
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.expect("response");
+            });
+            let (tx, mut events) = mpsc::channel::<Result<StreamEvent>>(64);
+            let sent = tokio::time::timeout(std::time::Duration::from_secs(2), run_stream_with_retries(
+                client, format!("http://{address}/v1"),
+                ProviderAuth::None { label: "test".to_string() }, false,
+                "conv-direct-loopback".to_string(),
+                serde_json::json!({"model":"m","stream":true,"messages":[{"role":"user","content":"hello"}]}),
+                tx, Arc::new(Mutex::new(None)), "m".to_string(),
+            )).await;
+            server.abort();
+            assert!(matches!(proxy.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock), "loopback traffic reached the proxy");
+            sent.expect("local request must complete");
+            while let Some(event) = events.recv().await { assert!(event.is_ok(), "local request failed"); }
         });
     }
 
