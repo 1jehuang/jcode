@@ -1203,13 +1203,26 @@ pub fn save_openai_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
 
 /// Refresh OpenAI/Codex OAuth tokens
 pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
-    match crate::auth::codex::account_label_for_refresh_token(refresh_token)
-        .or_else(crate::auth::codex::active_account_label)
-    {
-        Some(label) => refresh_openai_tokens_for_account(refresh_token, &label).await,
-        // External token (not stored in jcode auth): nothing on disk to
-        // coordinate against, refresh directly.
-        None => refresh_openai_tokens_inner(refresh_token, None).await,
+    refresh_openai_tokens_at_url(openai::TOKEN_URL, refresh_token).await
+}
+
+/// [`refresh_openai_tokens`] against an explicit token endpoint (tests).
+async fn refresh_openai_tokens_at_url(
+    token_url: &str,
+    refresh_token: &str,
+) -> Result<OAuthTokens> {
+    match crate::auth::codex::account_label_for_refresh_token(refresh_token) {
+        Some(label) => {
+            refresh_openai_tokens_for_account_at_url(token_url, refresh_token, &label).await
+        }
+        // Unmatched token: external (not stored in jcode auth) or a stale
+        // observation of a token that already rotated on disk. Nothing on
+        // disk belongs to it, so refresh directly and store nothing. In
+        // particular, do not fall back to the active account here: that
+        // would refresh and rotate the active account's stored token and
+        // persist the rotation under the active account, clobbering an
+        // account the caller never named.
+        None => refresh_openai_tokens_inner_at_url(token_url, refresh_token, None).await,
     }
 }
 
@@ -1234,6 +1247,16 @@ fn stored_openai_tokens(label: &str) -> Option<OAuthTokens> {
 /// refresh tokens, so two concurrent refreshes can otherwise persist a dead
 /// refresh token and break the account.
 pub async fn refresh_openai_tokens_for_account(
+    refresh_token: &str,
+    label: &str,
+) -> Result<OAuthTokens> {
+    refresh_openai_tokens_for_account_at_url(openai::TOKEN_URL, refresh_token, label).await
+}
+
+/// [`refresh_openai_tokens_for_account`] against an explicit token endpoint
+/// (tests).
+async fn refresh_openai_tokens_for_account_at_url(
+    token_url: &str,
     refresh_token: &str,
     label: &str,
 ) -> Result<OAuthTokens> {
@@ -1267,20 +1290,24 @@ pub async fn refresh_openai_tokens_for_account(
                 .map(|tokens| tokens.refresh_token)
                 .filter(|token| !token.is_empty())
                 .unwrap_or(observed_refresh);
-            refresh_openai_tokens_inner(&token, Some(&label)).await
+            refresh_openai_tokens_inner_at_url(token_url, &token, Some(&label)).await
         },
     )
     .await
 }
 
-async fn refresh_openai_tokens_inner(
+/// Exchange `refresh_token` at `token_url`. When `label` is set, persist the
+/// rotation under that stored account; otherwise (external or stale tokens)
+/// store nothing.
+async fn refresh_openai_tokens_inner_at_url(
+    token_url: &str,
     refresh_token: &str,
     label: Option<&str>,
 ) -> Result<OAuthTokens> {
     let result: Result<OAuthTokens> = async {
         let client = crate::provider::shared_http_client();
         let resp = client
-            .post(openai::TOKEN_URL)
+            .post(token_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(format!(
                 "grant_type=refresh_token&client_id={}&refresh_token={}",

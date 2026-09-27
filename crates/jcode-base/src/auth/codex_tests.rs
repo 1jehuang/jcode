@@ -277,6 +277,62 @@ fn load_credentials_falls_back_to_valid_sibling_when_active_expired() {
     assert_eq!(creds.access_token, "at_sibling_valid");
     assert_eq!(creds.refresh_token, "rt_sibling");
 }
+
+#[test]
+fn explicit_switch_to_expired_account_does_not_fall_back_to_sibling() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    // An inherited OPENAI_API_KEY would win the credential race once the
+    // selected account's expired token surfaces (see `load_credentials`)
+    // and mask the exact identity this test asserts on.
+    let _env_api_key = EnvVarGuard::set("OPENAI_API_KEY", "");
+    set_active_account_override(None);
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let expired_label = upsert_account(OpenAiAccount {
+        label: "openai-1".to_string(),
+        access_token: "at_active_expired".to_string(),
+        refresh_token: "rt_active_consumed".to_string(),
+        id_token: None,
+        account_id: Some("acct_expired".to_string()),
+        expires_at: Some(now_ms - 60_000),
+        email: None,
+    })
+    .unwrap();
+    let sibling_label = upsert_account(OpenAiAccount {
+        label: "openai-2".to_string(),
+        access_token: "at_sibling_valid".to_string(),
+        refresh_token: "rt_sibling".to_string(),
+        id_token: None,
+        account_id: Some("acct_sibling".to_string()),
+        expires_at: Some(now_ms + 3_600_000),
+        email: None,
+    })
+    .unwrap();
+    assert_ne!(expired_label, sibling_label);
+
+    // Ambient use (no explicit selection): the valid sibling keeps the
+    // provider working even though the active account is dead.
+    let creds = load_credentials().unwrap();
+    assert_eq!(creds.access_token, "at_sibling_valid");
+
+    // An explicit switch pins the identity: requests must carry the
+    // selected account's credentials even though its token is expired,
+    // instead of silently borrowing the sibling's.
+    set_active_account(&expired_label).unwrap();
+    let creds = load_credentials().unwrap();
+    assert_eq!(creds.access_token, "at_active_expired");
+    assert_eq!(creds.refresh_token, "rt_active_consumed");
+    assert_eq!(creds.account_id.as_deref(), Some("acct_expired"));
+
+    // Switching back to the valid sibling restores it immediately.
+    set_active_account(&sibling_label).unwrap();
+    let creds = load_credentials().unwrap();
+    assert_eq!(creds.access_token, "at_sibling_valid");
+    assert_eq!(creds.account_id.as_deref(), Some("acct_sibling"));
+}
+
 #[test]
 fn load_credentials_prefers_active_account_when_valid() {
     let _lock = crate::storage::lock_test_env();

@@ -363,9 +363,30 @@ fn load_valid_jcode_account_credentials(now_ms: i64) -> Option<CodexCredentials>
         return None;
     }
 
-    let active_label = get_active_account_override()
+    let override_label = get_active_account_override();
+    let active_label = override_label
+        .clone()
         .or(auth.active_openai_account.clone())
         .unwrap_or_else(primary_account_label);
+
+    // An explicit selection (`set_active_account` / `/account switch`) pins
+    // the account identity: requests must carry the selected account's
+    // credentials even when its token is expired. Never silently substitute
+    // a sibling - surface the expiry instead so the user gets a re-login
+    // prompt for the account they chose.
+    if let Some(selected) = &override_label
+        && let Some(account) = auth.openai_accounts.iter().find(|a| a.label == *selected)
+    {
+        let creds = credentials_from_account(account);
+        if token_is_valid(creds.expires_at, now_ms) {
+            return Some(creds);
+        }
+        crate::logging::info(&format!(
+            "Selected OpenAI account '{}' has an expired token; keeping the explicit selection instead of falling back to a sibling account",
+            selected
+        ));
+        return None;
+    }
 
     let mut ordered: Vec<&OpenAiAccount> = auth.openai_accounts.iter().collect();
     // Stable sort: the active account (if present) goes first, the rest keep
