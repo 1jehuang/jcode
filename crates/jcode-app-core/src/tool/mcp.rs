@@ -929,6 +929,52 @@ impl McpManagementTool {
         let all_tools = manager.all_tools().await;
         drop(manager);
 
+        // Sync the on-disk schema cache from the live re-fetch so future
+        // spawns advertise current descriptions/schemas. Without this,
+        // description-only server updates never reach new sessions:
+        // fingerprint_config covers connection config only (command/args/
+        // env/url/headers), so the spawn path's tools_for() happily serves
+        // stale tool text forever. Mirrors the #206 Phase 2 block in
+        // register_mcp_tools_for_dir.
+        {
+            let mut grouped: std::collections::BTreeMap<
+                String,
+                Vec<crate::mcp::McpToolDef>,
+            > = std::collections::BTreeMap::new();
+            for (server, def) in &all_tools {
+                grouped.entry(server.clone()).or_default().push(def.clone());
+            }
+            let config_snapshot: Vec<(String, crate::mcp::McpServerConfig)> = {
+                let manager = self.manager.read().await;
+                manager
+                    .config()
+                    .servers
+                    .iter()
+                    .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                    .collect()
+            };
+            let mut cache = crate::mcp::McpSchemaCache::load();
+            let mut dirty = false;
+            for (server, cfg) in &config_snapshot {
+                if let Some(defs) = grouped.get(server) {
+                    if cache.update(server, cfg, defs.clone()) {
+                        dirty = true;
+                    }
+                }
+            }
+            let configured_names: Vec<String> =
+                config_snapshot.iter().map(|(n, _)| n.clone()).collect();
+            if cache.retain_servers(&configured_names) {
+                dirty = true;
+            }
+            if dirty {
+                cache.save();
+                crate::logging::info(
+                    "MCP: updated on-disk tool-schema cache during reload",
+                );
+            }
+        }
+
         // Re-register tools from fresh connections
         if let Some(registry) = self
             .registry
