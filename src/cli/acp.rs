@@ -992,6 +992,7 @@ impl AcpRuntime {
                     output,
                     cache_read_input,
                     cache_creation_input,
+                    ..
                 } => {
                     turn_usage.add(input, output, cache_read_input, cache_creation_input);
                     let (provider_name, context_limit) = {

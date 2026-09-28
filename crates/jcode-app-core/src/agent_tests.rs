@@ -731,6 +731,145 @@ async fn run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch() {
     );
 }
 
+/// Like [`MidStreamModelSwitchProvider`], but the stream also reports token
+/// usage so the server-side cost path runs. Used to check that F6 prices the
+/// call with the model that actually served it, not the one requested.
+struct MidStreamSwitchWithUsageProvider {
+    model: std::sync::Mutex<String>,
+    switch_to: String,
+}
+
+#[async_trait]
+impl Provider for MidStreamSwitchWithUsageProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        // Emulate the provider switching its own model state during the request.
+        *self.model.lock().unwrap() = self.switch_to.clone();
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Ok(StreamEvent::TextDelta("hello".to_string())))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::TokenUsage {
+                    input_tokens: Some(1_000_000),
+                    output_tokens: Some(0),
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                }))
+                .await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            model: std::sync::Mutex::new(self.model.lock().unwrap().clone()),
+            switch_to: self.switch_to.clone(),
+        })
+    }
+}
+
+/// F6: when a provider transparently falls back mid-stream, the cost reported
+/// on `TokenUsage` must be computed from the model that actually served the
+/// call. The server prices under `model_at_request_start` today, so the fallback
+/// is billed at the requested (retired) model's rate instead of the served one.
+#[tokio::test]
+async fn run_turn_streaming_mpsc_prices_the_served_model_after_a_midstream_switch() {
+    let _guard = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    // Two cards for the same route: the requested model's rate ($1/Mtok) is
+    // deliberately different from the served model's ($10/Mtok) so the assertion
+    // can tell which one priced the call.
+    std::fs::write(
+        home.path().join("config.toml"),
+        r#"
+[pricing.providers."claude:api-key".models."claude-fable-5".cost]
+input = 1.0
+output = 1.0
+
+[pricing.providers."claude:api-key".models."claude-opus-4-8".cost]
+input = 10.0
+output = 10.0
+"#,
+    )
+    .expect("write config.toml");
+    crate::config::Config::invalidate_cache();
+
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamSwitchWithUsageProvider {
+        model: std::sync::Mutex::new("claude-fable-5".to_string()),
+        switch_to: "claude-opus-4-8".to_string(),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move { agent.run_turn_streaming_mpsc(tx).await });
+
+    let mut usage_cost = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            Ok(Some(ServerEvent::TokenUsage { cost, .. })) => {
+                usage_cost = Some(cost);
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {
+                if task.is_finished() {
+                    break;
+                }
+            }
+        }
+    }
+
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        usage_cost,
+        Some(Some(10.0)),
+        "the call must be priced with the served model's $10/Mtok card, not the requested model's $1/Mtok"
+    );
+}
+
 #[tokio::test]
 async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);

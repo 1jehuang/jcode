@@ -412,7 +412,7 @@ impl App {
         // next provider usage report arrives (issue #441). The raw counters
         // are kept intact for turn footers and cost accounting.
         self.streaming.streaming_context_stale = true;
-        self.streaming.streaming_usage_call_reset_pending = true;
+        self.begin_api_call_accounting();
         self.bump_context_revision();
     }
 

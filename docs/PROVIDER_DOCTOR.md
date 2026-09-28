@@ -10,7 +10,7 @@ yourself, with clear pass/fail output and a "what to try next" hint on the first
 failure.
 
 It works with **OpenAI-compatible providers** (cerebras, fpt, nvidia-nim,
-comtegra, deepseek, groq, openrouter, and other `openai-compatible` profiles).
+comtegra, groq, openrouter, and other `openai-compatible` profiles).
 
 ## Quick start
 

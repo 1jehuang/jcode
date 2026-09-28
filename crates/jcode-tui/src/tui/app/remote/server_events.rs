@@ -783,6 +783,8 @@ pub(in crate::tui::app) fn handle_server_event(
             output,
             cache_read_input,
             cache_creation_input,
+            cost,
+            currency,
         } => {
             let previous_input = app.streaming.streaming_input_tokens;
             let previous_output = app.streaming.streaming_output_tokens;
@@ -808,15 +810,44 @@ pub(in crate::tui::app) fn handle_server_event(
                     .token_accounting
                     .total_output_tokens
                     .saturating_add(output);
-                // The server only reports tokens, never a dollar cost, so the
-                // remote client prices each completed call itself. This is the
-                // first usage snapshot for this call, so bill the full counts.
-                app.accrue_remote_call_cost(
-                    input,
-                    output,
-                    app.streaming.streaming_cache_read_tokens.unwrap_or(0),
-                    app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
-                );
+                // The server resolves the call's dollar cost itself when it can
+                // (same `model_pricing` path, at the call's own start, under the
+                // provider/model it actually used) and reports it here. Prefer
+                // that value, so clients with different cards/currency/vendor
+                // files/schedules cannot bill the same call differently
+                // (Greptile P1/P2). This is the first usage snapshot for this
+                // call, so it bills the full counts; later deltas of the same
+                // call reuse the card pinned here (F16).
+                match (cost, currency.as_deref()) {
+                    (Some(amount), Some(code)) => {
+                        let currency = jcode_provider_core::Currency::new(code);
+                        app.accrue_server_resolved_call_cost(amount, &currency);
+                        // Remember the call's cumulative server figure so later
+                        // delta snapshots bill only the growth since here (F3).
+                        app.cost.server_call_cost = Some((amount, currency));
+                    }
+                    // Older server, or a call no layer could price: the local
+                    // path is the compatibility fallback. Price at the call's
+                    // start instant (F15), not this snapshot's arrival, so a call
+                    // that crosses a peak/off-peak boundary keeps the tariff it
+                    // started in.
+                    //
+                    // `call_started_at` is recorded by
+                    // `begin_api_call_accounting_at` when the call starts; the
+                    // `now()` below is an explicit fallback for the rare path
+                    // where no start was recorded.
+                    _ => {
+                        app.accrue_remote_call_cost(
+                            input,
+                            output,
+                            app.streaming.streaming_cache_read_tokens.unwrap_or(0),
+                            app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+                            app.cost
+                                .call_started_at
+                                .unwrap_or_else(std::time::SystemTime::now),
+                        );
+                    }
+                }
                 app.last_api_completed = Some(Instant::now());
                 app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
                 app.last_api_completed_model = Some(<App as TuiState>::provider_model(app));
@@ -842,18 +873,52 @@ pub(in crate::tui::app) fn handle_server_event(
                 // Bill only the new tokens since the previous snapshot for this
                 // same call, so a call that reports usage multiple times while
                 // streaming is billed exactly once overall.
-                app.accrue_remote_call_cost(
-                    input.saturating_sub(previous_input),
-                    output.saturating_sub(previous_output),
-                    app.streaming
-                        .streaming_cache_read_tokens
-                        .unwrap_or(0)
-                        .saturating_sub(previous_cache_read.unwrap_or(0)),
-                    app.streaming
-                        .streaming_cache_creation_tokens
-                        .unwrap_or(0)
-                        .saturating_sub(previous_cache_creation.unwrap_or(0)),
-                );
+                //
+                // F3: when this delta snapshot carries a server cost, that
+                // figure is the call's *cumulative* total, not an increment, so
+                // bill the growth since the baseline the first snapshot set and
+                // move the baseline forward. That keeps the session total equal
+                // to the server's authoritative figure no matter how the
+                // client's own card/currency differs. Without a usable baseline
+                // (an older server, or a currency switch mid-call) fall back to
+                // the local pinned-card delta path for continuity (F16).
+                let server_delta = match (cost, currency.as_deref()) {
+                    (Some(amount), Some(code)) => app
+                        .cost
+                        .server_call_cost
+                        .clone()
+                        .filter(|(_, baseline_currency)| baseline_currency.as_str() == code)
+                        .map(|(baseline, baseline_currency)| {
+                            app.cost.server_call_cost =
+                                Some((amount, jcode_provider_core::Currency::new(code)));
+                            (amount - baseline, baseline_currency)
+                        }),
+                    _ => None,
+                };
+                match server_delta {
+                    Some((delta, currency)) if delta > 0.0 => {
+                        app.accrue_server_resolved_call_cost(delta, &currency);
+                    }
+                    Some(_) => {
+                        // A repeated or revised-down snapshot adds nothing; the
+                        // baseline still moved above.
+                    }
+                    None => app.accrue_remote_call_cost(
+                        input.saturating_sub(previous_input),
+                        output.saturating_sub(previous_output),
+                        app.streaming
+                            .streaming_cache_read_tokens
+                            .unwrap_or(0)
+                            .saturating_sub(previous_cache_read.unwrap_or(0)),
+                        app.streaming
+                            .streaming_cache_creation_tokens
+                            .unwrap_or(0)
+                            .saturating_sub(previous_cache_creation.unwrap_or(0)),
+                        // Ignored: this call's card was pinned by its first
+                        // snapshot.
+                        std::time::SystemTime::now(),
+                    ),
+                }
 
                 let had_cache_telemetry =
                     previous_cache_read.is_some() || previous_cache_creation.is_some();
@@ -1813,8 +1878,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 // Token totals are restored from history above, but the dollar
                 // cost was never reconstructed, so resumed sessions showed `$0`
                 // in the cost widget until a new call happened. Price the
-                // restored totals once to seed the displayed cost.
-                app.seed_cost_from_history_totals(&totals);
+                // restored totals once to seed the displayed cost, at the
+                // instant the snapshot arrives: history carries no per-call
+                // instant of its own (F15).
+                app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
             }
             if let Some(totals) = token_usage_totals {
                 crate::logging::info(&format!(

@@ -1231,6 +1231,58 @@ fn format_swarm_model_list_renders_routes_and_default() {
 }
 
 #[test]
+fn format_swarm_model_list_prints_the_estimate_currency_it_carries() {
+    // A `[pricing.providers]` card denominated in CNY produces a CNY estimate
+    // (`RouteCheapnessEstimate::currency`), so the swarm model list must not
+    // print that amount behind a `$`: 4 CNY/Mtok and 2 CNY/Mtok on the 25k/5k
+    // reference request is CNY 0.11, which is nowhere near $0.11.
+    let cny = jcode_provider_core::RouteCheapnessEstimate::metered(
+        jcode_provider_core::RouteCostSource::ConfigPriceSheet,
+        jcode_provider_core::RouteCostConfidence::Exact,
+        4_000_000,
+        2_000_000,
+        None,
+        "config card".to_string(),
+    )
+    .with_currency(jcode_provider_core::Currency::new("CNY"));
+    let usd = jcode_provider_core::RouteCheapnessEstimate::metered(
+        jcode_provider_core::RouteCostSource::ConfigPriceSheet,
+        jcode_provider_core::RouteCostConfidence::Exact,
+        4_000_000,
+        2_000_000,
+        None,
+        "config card".to_string(),
+    );
+    let route = |model: &str, estimate: jcode_provider_core::RouteCheapnessEstimate| {
+        jcode_provider_core::ModelRoute {
+            model: model.to_string(),
+            provider: "DeepSeek".to_string(),
+            api_method: "openai-compatible-api-key".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: Some(estimate),
+        }
+    };
+    let routes = vec![route("cny-model", cny), route("usd-model", usd)];
+    let output = format_swarm_model_list(None, None, &routes);
+
+    assert!(
+        output.contains("cny-model via DeepSeek [openai-compatible-api-key] ~CNY 0.11/ref-task"),
+        "a CNY estimate keeps its currency: {output}"
+    );
+    assert!(
+        output.contains("usd-model via DeepSeek [openai-compatible-api-key] ~$0.11/ref-task"),
+        "a USD estimate keeps the pre-existing rendering: {output}"
+    );
+    assert_eq!(
+        output.matches('$').count(),
+        1,
+        "only the USD route may carry a dollar sign: {output}"
+    );
+}
+
+#[test]
 fn format_swarm_model_list_handles_empty_catalog() {
     let output = format_swarm_model_list(None, None, &[]);
     assert!(output.contains("Current coordinator model: unknown"));

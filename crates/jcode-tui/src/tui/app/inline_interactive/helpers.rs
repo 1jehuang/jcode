@@ -88,19 +88,33 @@ pub(super) fn save_agent_model_override(
     target: AgentModelTarget,
     model: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut cfg = crate::config::Config::load();
     let value = model
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    match target {
+    // A cleared override is deletion by omission: `None` is not serialized, so
+    // the save has to be told to drop the file's key instead of keeping it.
+    let dotted = match target {
+        AgentModelTarget::Swarm => "agents.swarm_model",
+        AgentModelTarget::Review => "autoreview.model",
+        AgentModelTarget::Judge => "autojudge.model",
+        AgentModelTarget::Memory => "agents.memory_model",
+        AgentModelTarget::Ambient => "ambient.model",
+    };
+    let removals: &[&str] = if value.is_none() {
+        std::slice::from_ref(&dotted)
+    } else {
+        &[]
+    };
+    // Reload-then-patch: a config that cannot be parsed must be reported rather
+    // than replaced by in-memory defaults, which would drop every other setting.
+    crate::config::Config::update_removing(removals, |cfg| match target {
         AgentModelTarget::Swarm => cfg.agents.swarm_model = value,
         AgentModelTarget::Review => cfg.autoreview.model = value,
         AgentModelTarget::Judge => cfg.autojudge.model = value,
         AgentModelTarget::Memory => cfg.agents.memory_model = value,
         AgentModelTarget::Ambient => cfg.ambient.model = value,
-    }
-    cfg.save()
+    })
 }
 
 pub(super) fn model_entry_base_name(entry: &PickerEntry) -> String {
@@ -298,7 +312,87 @@ mod tests {
             available: true,
             detail: String::new(),
             estimated_reference_cost_micros: None,
+            comparable_reference_cost_micros: None,
         }
+    }
+
+    /// A malformed config must survive an agent-model override.
+    ///
+    /// The override reloads before patching, so a config we cannot parse has to
+    /// be reported rather than replaced by in-memory defaults - that write would
+    /// drop every setting in the file, not just the model being changed.
+    #[test]
+    fn a_malformed_config_is_not_overwritten_by_an_agent_model_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let broken = "[agents\nswarm_model = \"x\"\n";
+        std::fs::write(&path, broken).expect("write config");
+
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::config::Config::invalidate_cache();
+
+        let result = save_agent_model_override(AgentModelTarget::Swarm, Some("gpt-5.5"));
+
+        let written = std::fs::read_to_string(&path).expect("read config");
+
+        match &previous {
+            Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::Config::invalidate_cache();
+
+        assert!(
+            result.is_err(),
+            "a config that cannot be parsed must not be silently rewritten"
+        );
+        assert_eq!(
+            written, broken,
+            "the unparseable config must survive byte-for-byte"
+        );
+    }
+
+    /// The cheapness component of the sort key, which is what orders routes of
+    /// the same model by price.
+    fn cheapness_key(option: &PickerOption) -> u64 {
+        crate::tui::app::inline_interactive::route_sort_key(option).2
+    }
+
+    /// Ordering must use the converted cost, never the raw estimate.
+    ///
+    /// Both routes share an api method on purpose, so the method component of the
+    /// key cannot decide the order and the cost has to.
+    #[test]
+    fn route_sort_key_orders_by_the_converted_cost() {
+        // Raw micros put the USD route first (1_500 < 7_200), but 7_200 CNY is
+        // 1_000 USD micros, so the CNY card is the cheaper route.
+        let mut cny = route("DeepSeek", "openai-compatible");
+        cny.estimated_reference_cost_micros = Some(7_200);
+        cny.comparable_reference_cost_micros = Some(1_000);
+        let mut usd = route("OpenAI", "openai-compatible");
+        usd.estimated_reference_cost_micros = Some(1_500);
+        usd.comparable_reference_cost_micros = Some(1_500);
+
+        assert!(
+            cny.estimated_reference_cost_micros > usd.estimated_reference_cost_micros,
+            "the raw estimates must disagree with the converted ones for this test to mean anything"
+        );
+        assert!(
+            cheapness_key(&cny) < cheapness_key(&usd),
+            "the CNY card is the cheaper route once both are in one currency"
+        );
+
+        // A currency with no configured rate cannot be compared, so the route
+        // sorts below every priced one even though its raw estimate is the
+        // smallest of the three.
+        let mut unconvertible = route("Local", "openai-compatible");
+        unconvertible.estimated_reference_cost_micros = Some(1);
+        unconvertible.comparable_reference_cost_micros = None;
+        assert!(
+            cheapness_key(&cny) < cheapness_key(&unconvertible)
+                && cheapness_key(&usd) < cheapness_key(&unconvertible),
+            "an unconvertible route must not be ordered as if the units matched"
+        );
     }
 
     #[test]
