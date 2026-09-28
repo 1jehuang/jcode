@@ -30,10 +30,11 @@ pub use jcode_tui_mermaid::{
     render_pending_terminal_image_cleanup, reset_debug_stats, restore_active_diagrams,
     result_to_content, result_to_lines, set_log_hooks, set_memory_snapshot_hook,
     set_mermaid_inline_expand_level, set_render_completed_hook, set_streaming_preview_diagram,
-    set_video_export_mode, snapshot_active_diagrams, take_terminal_image_cleanup_payload,
-    text_image_fallback_note_line, transcript_preferred_aspect_ratio,
-    transcript_preferred_aspect_ratio_with_font, uses_text_image_fallback,
-    with_image_protocol_override, with_preferred_aspect_ratio, write_video_export_marker,
+    set_transmit_writer_hook, set_video_export_mode, snapshot_active_diagrams,
+    take_terminal_image_cleanup_payload, text_image_fallback_note_line,
+    transcript_preferred_aspect_ratio, transcript_preferred_aspect_ratio_with_font,
+    uses_text_image_fallback, with_image_protocol_override, with_preferred_aspect_ratio,
+    write_video_export_marker,
 };
 pub use jcode_tui_mermaid::{ImageScrollBenchmark, cache_stat_syscalls};
 
@@ -42,6 +43,15 @@ pub use jcode_tui_mermaid::terminal_theme;
 
 pub fn install_jcode_mermaid_hooks() {
     jcode_tui_mermaid::set_log_hooks(crate::logging::info, crate::logging::warn);
+    jcode_tui_mermaid::set_transmit_writer_hook(|bytes| {
+        // Direct Kitty transmit writes happen between frame flushes (the
+        // render closure runs before the backend flush), so writing to stdout
+        // here cannot interleave with a crossterm frame write.
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(bytes);
+        let _ = stdout.flush();
+    });
     jcode_tui_mermaid::set_render_completed_hook(|| {
         crate::bus::Bus::global().publish(crate::bus::BusEvent::MermaidRenderCompleted);
     });

@@ -22,6 +22,13 @@ pub(super) enum Multiplexer {
     /// `HERDR_ENV=1` in every pane, hiding the outer terminal. Recent versions
     /// can pass kitty graphics through to a capable outer terminal.
     Herdr,
+    /// luvus agent multiplexer. Sets `LUVUS_ENV=1` in every pane and passes
+    /// kitty graphics APCs through to the outer terminal, but re-parses pane
+    /// output into its own cell grid — so kitty unicode placeholders lose the
+    /// image id (it travels in a fg-color escape that fires in luvus's parser)
+    /// and alias to earlier images. Multiplexed panes must display through
+    /// real placements instead of placeholders.
+    Luvus,
 }
 
 impl Multiplexer {
@@ -32,6 +39,7 @@ impl Multiplexer {
             Multiplexer::Screen => "screen",
             Multiplexer::Zellij => "zellij",
             Multiplexer::Herdr => "herdr",
+            Multiplexer::Luvus => "luvus",
         }
     }
 }
@@ -48,11 +56,19 @@ pub(super) fn detect_multiplexer(
     sty: Option<&str>,
     zellij: Option<&str>,
     herdr_env: Option<&str>,
+    luvus_env: Option<&str>,
 ) -> Multiplexer {
     // Herdr wins first: it rewrites TERM to a bland value but always exports
     // HERDR_ENV=1, so it is the most specific signal.
     if env_is_set(herdr_env) {
         return Multiplexer::Herdr;
+    }
+    // Luvus exports LUVUS_ENV=1 in every pane. Unlike herdr it rewrites
+    // TERM_PROGRAM to the outer terminal's value (it passes kitty APCs
+    // through), but its cell grid still breaks unicode placeholders, which is
+    // what the image renderer keys on.
+    if env_is_set(luvus_env) {
+        return Multiplexer::Luvus;
     }
     if env_is_set(zellij) {
         return Multiplexer::Zellij;
@@ -77,7 +93,15 @@ fn detect_multiplexer_from_env() -> Multiplexer {
         std::env::var("STY").ok().as_deref(),
         std::env::var("ZELLIJ").ok().as_deref(),
         std::env::var("HERDR_ENV").ok().as_deref(),
+        std::env::var("LUVUS_ENV").ok().as_deref(),
     )
+}
+
+/// The multiplexer as seen by this process. Read per call: `std::env::var` is
+/// a short linear scan over a small environ, the value cannot change within a
+/// process lifetime, and an uncached read keeps the branch testable.
+pub(super) fn detected_multiplexer() -> Multiplexer {
+    detect_multiplexer_from_env()
 }
 
 fn tmux_reports_native_sixel(sixel_support: &str, client_termfeatures: &str) -> bool {
@@ -808,17 +832,25 @@ mod tests {
     #[test]
     fn detect_multiplexer_identifies_each() {
         assert_eq!(
-            detect_multiplexer(Some("xterm-256color"), None, None, None, Some("1")),
+            detect_multiplexer(Some("xterm-256color"), None, None, None, Some("1"), None),
             Multiplexer::Herdr
         );
         assert_eq!(
-            detect_multiplexer(Some("xterm-256color"), None, None, Some("0.40.1"), None),
+            detect_multiplexer(
+                Some("xterm-256color"),
+                None,
+                None,
+                Some("0.40.1"),
+                None,
+                None
+            ),
             Multiplexer::Zellij
         );
         assert_eq!(
             detect_multiplexer(
                 Some("tmux-256color"),
                 Some("/tmp/tmux-1000/default,1,0"),
+                None,
                 None,
                 None,
                 None
@@ -831,21 +863,32 @@ mod tests {
                 None,
                 Some("1234.pts-0.host"),
                 None,
+                None,
                 None
             ),
             Multiplexer::Screen
         );
         // TERM prefix alone is enough for screen/tmux even without TMUX/STY.
         assert_eq!(
-            detect_multiplexer(Some("screen-256color"), None, None, None, None),
+            detect_multiplexer(Some("screen-256color"), None, None, None, None, None),
             Multiplexer::Screen
         );
         assert_eq!(
-            detect_multiplexer(Some("tmux-256color"), None, None, None, None),
+            detect_multiplexer(Some("tmux-256color"), None, None, None, None, None),
             Multiplexer::Tmux
         );
         assert_eq!(
-            detect_multiplexer(Some("xterm-kitty"), None, None, None, None),
+            detect_multiplexer(Some("xterm-kitty"), None, None, None, None, None),
+            Multiplexer::None
+        );
+        // Luvus wins over TERM-prefix guesses; a plain terminal with a stale
+        // LUVUS_ENV still reports Luvus because the signal is authoritative.
+        assert_eq!(
+            detect_multiplexer(Some("xterm-256color"), None, None, None, None, Some("1")),
+            Multiplexer::Luvus
+        );
+        assert_eq!(
+            detect_multiplexer(Some("xterm-256color"), None, None, None, None, None),
             Multiplexer::None
         );
     }
@@ -859,6 +902,24 @@ mod tests {
                 Some("/tmp/tmux"),
                 None,
                 None,
+                Some("1"),
+                None
+            ),
+            Multiplexer::Herdr
+        );
+    }
+
+    #[test]
+    fn detect_multiplexer_herdr_wins_over_luvus() {
+        // Herdr is checked first: a herdr pane hosted inside luvus is still a
+        // herdr pane for detection purposes.
+        assert_eq!(
+            detect_multiplexer(
+                Some("xterm-256color"),
+                None,
+                None,
+                None,
+                Some("1"),
                 Some("1")
             ),
             Multiplexer::Herdr
