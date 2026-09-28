@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.88.0"
+version = "0.89.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -43,6 +43,7 @@ members = [
     "crates/jcode-setup-hints",
     "crates/jcode-storage",
     "crates/jcode-side-panel-types",
+    "crates/jcode-applet-types",
     "crates/jcode-azure-auth",
     "crates/jcode-notify-email",
     "crates/jcode-provider-metadata",

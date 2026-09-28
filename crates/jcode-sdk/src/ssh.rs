@@ -159,6 +159,73 @@ impl SshConnectOptions {
     }
 
     fn command_with_control(&self, control: Option<(&std::path::Path, bool)>) -> Result<Command> {
+        let remote = format!(
+            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
+            shell_quote(&self.remote_binary)
+        );
+        self.command_for(control, &remote)
+    }
+
+    /// Run a POSIX shell script on the host with the same authentication,
+    /// host-key pinning and hardening as the API connection.
+    ///
+    /// The script travels on stdin (`sh -s`), never in argv, so it may carry
+    /// secrets. `$JCODE_BIN` names the configured remote binary. The process is
+    /// killed when `timeout` elapses. Output is returned even on a non-zero exit.
+    pub fn run_script(&self, script: &[u8], timeout: Duration) -> Result<std::process::Output> {
+        let remote = format!(
+            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; JCODE_BIN={}; export JCODE_BIN; exec sh -s",
+            shell_quote(&self.remote_binary)
+        );
+        let mut command = self.command_for(None, &remote)?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| Error::new(ErrorKind::Transport, format!("could not start ssh: {e}")))?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let script = script.to_vec();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&script);
+        });
+        let read = |mut pipe: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.by_ref().take(1024 * 1024).read_to_end(&mut bytes);
+                bytes
+            })
+        };
+        let stdout = read(Box::new(child.stdout.take().expect("piped stdout")));
+        let stderr = read(Box::new(child.stderr.take().expect("piped stderr")));
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| {
+                Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}"))
+            })? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::new(ErrorKind::Timeout, "remote script timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let _ = writer.join();
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
+    }
+
+    fn command_for(
+        &self,
+        control: Option<(&std::path::Path, bool)>,
+        remote: &str,
+    ) -> Result<Command> {
         self.validate()?;
         let mut command = Command::new("ssh");
         if self.isolated_config {
@@ -238,12 +305,8 @@ impl SshConnectOptions {
         if let Some(user) = &self.user {
             command.arg("-l").arg(user);
         }
-        // SSH joins remote arguments into shell source. Supply exactly one,
-        // quoting the executable as a literal POSIX shell word.
-        let remote = format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
-            shell_quote(&self.remote_binary)
-        );
+        // SSH joins remote arguments into shell source. Supply exactly one;
+        // callers quote the executable as a literal POSIX shell word.
         command.arg("--").arg(&self.host);
         if !control.is_some_and(|(_, master)| master) {
             command.arg(remote);

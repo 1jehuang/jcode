@@ -210,6 +210,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
                 provider: Some("anthropic".to_string()),
                 model: Some("claude".to_string()),
                 reasoning_effort: Some("high".to_string()),
+                auth_method: Some("oauth".to_string()),
                 routes: reply_routes.clone(),
             },
             ApiRequest::SetApiKey { provider, .. } => ApiEvent::CredentialUpdated {
@@ -723,6 +724,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 provider: Some("openai-api".into()),
                 model: Some("new-model".into()),
                 reasoning_effort: None,
+                auth_method: None,
             },
             writer,
         );
@@ -733,6 +735,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 provider: Some("openai-api".into()),
                 model: Some("new-model".into()),
                 reasoning_effort: None,
+                auth_method: None,
                 routes: vec![ModelRouteInfo {
                     usage: None,
                     model: "new-model".into(),

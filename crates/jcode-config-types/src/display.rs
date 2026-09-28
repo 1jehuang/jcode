@@ -2,7 +2,7 @@
 
 use crate::{
     DiagramDisplayMode, DiffDisplayMode, LatexRenderingMode, MarkdownSpacingMode,
-    NativeScrollbarConfig, OverscrollStatusMode, ReasoningDisplayMode, default_true,
+    NativeScrollbarConfig, ReasoningDisplayMode, default_true,
 };
 use serde::{Deserialize, Serialize};
 
@@ -133,11 +133,6 @@ pub struct DisplayConfig {
     /// "utc-5" or "UTC+05:30". Unknown values fall back to local.
     #[serde(default)]
     pub timestamp_tz: String,
-    /// When to show the overscroll status line below the input
-    /// (off/on/overscroll, default: on). "overscroll" is the elastic
-    /// reveal when scrolling past the bottom, "on" keeps it always visible.
-    #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
-    pub overscroll_status: OverscrollStatusMode,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -179,7 +174,6 @@ impl Default for DisplayConfig {
             usage_display: "left".to_string(),
             show_tool_timestamp: false,
             timestamp_tz: String::new(),
-            overscroll_status: OverscrollStatusMode::default(),
         }
     }
 }

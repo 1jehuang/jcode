@@ -321,6 +321,12 @@ pub struct SidePanelUpdated {
     pub snapshot: SidePanelSnapshot,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppletsUpdated {
+    pub session_id: String,
+    pub snapshot: jcode_applet_types::AgentApplets,
+}
+
 #[derive(Clone, Debug)]
 pub enum UpdateStatus {
     Checking,
@@ -449,6 +455,9 @@ pub enum BusEvent {
         session_id: Option<String>,
         message: String,
     },
+    /// Built-in voice input has new state (meter level, partial transcript,
+    /// or a final result). The owning client polls its recording on receipt.
+    VoiceInputWake,
     /// Background compaction task finished (check_and_apply should be called)
     CompactionFinished,
     /// Provider's available models list may have changed
@@ -469,6 +478,7 @@ pub enum BusEvent {
     },
     /// Side panel pages were updated for a session
     SidePanelUpdated(SidePanelUpdated),
+    AppletsUpdated(AppletsUpdated),
     /// Deferred Mermaid rendering completed and cached content may now be visible
     MermaidRenderCompleted,
     /// Productivity report finished generating off the UI thread

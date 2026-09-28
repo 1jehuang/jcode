@@ -271,6 +271,24 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
         }
     }
 
+    // Built-in alternate-enter chords (not configurable). Terminals commonly
+    // claim them (Ghostty binds `super+enter` to toggle_fullscreen), which
+    // silently disables the queue/interleave shortcut, so enumerate them too.
+    for raw in ["ctrl+enter", "cmd+enter"] {
+        if let Some(chord) = KeyChord::parse(raw) {
+            if out.iter().any(|b| b.chord == chord) {
+                continue;
+            }
+            out.push(JcodeBinding {
+                field: "alternate_enter (built-in)".to_string(),
+                action: "Alternate send: queue or interleave, opposite of Enter (built-in)"
+                    .to_string(),
+                raw: raw.to_string(),
+                chord,
+            });
+        }
+    }
+
     out
 }
 
@@ -428,6 +446,17 @@ mod tests {
                 .all(|c| c.jcode.field.contains("built-in fallback")),
             "prompt-jump fallback fields should be flagged"
         );
+    }
+
+    #[test]
+    fn detects_terminal_claiming_alternate_enter() {
+        // Issue #1500: Ghostty's default `super+enter=toggle_fullscreen`
+        // swallows the built-in Cmd+Enter alternate-send chord.
+        let cfg = KeybindingsConfig::default();
+        let snapshot = snapshot_with(vec![term_binding("super+enter", "toggle_fullscreen")]);
+        let conflicts = detect_conflicts(&cfg, &snapshot);
+        assert_eq!(conflicts.len(), 1, "conflicts: {conflicts:?}");
+        assert!(conflicts[0].jcode.field.contains("alternate_enter"));
     }
 
     #[test]

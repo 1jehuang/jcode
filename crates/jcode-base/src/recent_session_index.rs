@@ -29,6 +29,12 @@ impl RecentSessionMetadata {
         self.custom_title
             .as_deref()
             .and_then(non_empty)
+            .or_else(|| {
+                // Bookmarks labelled before labels doubled as titles.
+                self.saved
+                    .then(|| self.save_label.as_deref().and_then(non_empty))
+                    .flatten()
+            })
             .or_else(|| self.todo_title.as_deref().and_then(non_empty))
             .or_else(|| self.generated_title.as_deref().and_then(non_empty))
     }
@@ -180,5 +186,26 @@ mod tests {
         assert_eq!(entry.display_title(), Some("Todo goal"));
         entry.custom_title = Some("Renamed".into());
         assert_eq!(entry.display_title(), Some("Renamed"));
+    }
+
+    #[test]
+    fn display_title_prefers_save_label_over_derived_titles() {
+        let mut entry = RecentSessionMetadata {
+            session_id: "session_test".into(),
+            working_dir: None,
+            generated_title: Some("Generated".into()),
+            custom_title: None,
+            todo_title: Some("Todo goal".into()),
+            saved: true,
+            save_label: Some("yc mcp".into()),
+            updated_at_ms: 1,
+            last_active_at_ms: None,
+        };
+        assert_eq!(entry.display_title(), Some("yc mcp"));
+        entry.custom_title = Some("Renamed".into());
+        assert_eq!(entry.display_title(), Some("Renamed"));
+        entry.custom_title = None;
+        entry.saved = false;
+        assert_eq!(entry.display_title(), Some("Todo goal"));
     }
 }

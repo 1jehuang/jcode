@@ -11,6 +11,70 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[test]
+fn server_reload_report_preserves_json_fields_and_exit_status_contract() {
+    let cases = [
+        (false, false, false, false),
+        (true, true, true, false),
+        (true, false, true, false),
+        (true, false, false, true),
+    ];
+
+    for (had_listener, already_current, handoff_ready, should_fail) in cases {
+        let report = ServerReloadReport {
+            socket: "/tmp/jcode.sock".to_string(),
+            had_listener,
+            forced: false,
+            reloaded: had_listener && !already_current,
+            already_current,
+            handoff_ready,
+            detail: "test reload outcome".to_string(),
+        };
+
+        let json = serde_json::to_value(&report).expect("serialize reload report");
+        assert_eq!(json["had_listener"], had_listener);
+        assert_eq!(json["already_current"], already_current);
+        assert_eq!(json["handoff_ready"], handoff_ready);
+
+        let result = validate_server_reload_report(&report);
+        assert_eq!(result.is_err(), should_fail, "report: {json}");
+        if should_fail {
+            assert!(
+                result
+                    .expect_err("not-ready handoff must fail")
+                    .to_string()
+                    .contains("never became ready")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn server_reload_without_listener_is_a_successful_json_noop() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_SOCKET"]);
+    let home = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_SOCKET", home.path().join("isolated.sock"));
+
+    let mut output = Vec::new();
+    let result = run_server_reload_command_to(false, true, &mut output).await;
+
+    result.expect("reload without a listener must be a successful no-op");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output).expect("reload --json must emit one JSON report");
+    assert_eq!(report["had_listener"], false);
+    assert_eq!(report["already_current"], false);
+    assert_eq!(report["handoff_ready"], false);
+    assert_eq!(report["reloaded"], false);
+    assert_eq!(report["forced"], false);
+    assert!(
+        report["detail"]
+            .as_str()
+            .is_some_and(|detail| { detail.contains("No running jcode server found") })
+    );
+}
+
 #[tokio::test]
 async fn memory_cli_project_import_uses_explicit_directory_and_persists() {
     let _guard = crate::storage::lock_test_env();

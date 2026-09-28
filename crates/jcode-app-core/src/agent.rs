@@ -124,6 +124,87 @@ fn kv_cache_request_event(
     }
 }
 
+impl Agent {
+    /// Provider identity used for cache retention lookups. Generic OpenAI is
+    /// only refined when the credential mode is explicitly pinned.
+    fn kv_cache_provider_identity(&self) -> String {
+        let name = self.provider.name().to_string();
+        if !name.eq_ignore_ascii_case("openai") {
+            return name;
+        }
+        match self.provider.active_explicit_credential() {
+            Some(jcode_provider_core::ResolvedCredential::ApiKey) => "openai-api".into(),
+            Some(jcode_provider_core::ResolvedCredential::Oauth) => "openai-oauth".into(),
+            None => name,
+        }
+    }
+
+    fn begin_kv_cache_monitor_request(&mut self, event: &ServerEvent, model: &str) {
+        let ServerEvent::KvCacheRequest {
+            system_static_hash,
+            tools_hash,
+            messages_hash,
+            message_hashes,
+            message_count,
+            tool_count,
+            ..
+        } = event
+        else {
+            return;
+        };
+        let provider = self.kv_cache_provider_identity();
+        let route = crate::kv_cache_monitor::RequestRoute {
+            cache_ttl_secs: crate::provider::cache_ttl_for_provider_model(&provider, Some(model)),
+            ttl_is_estimate: crate::provider::cache_ttl_is_estimate(&provider),
+            provider,
+            model: model.to_string(),
+            upstream_provider: self.last_upstream_provider.clone(),
+        };
+        let signature = crate::kv_cache_monitor::RequestSignature {
+            system_static_hash: *system_static_hash,
+            tools_hash: *tools_hash,
+            tool_count: *tool_count,
+            messages_hash: *messages_hash,
+            message_hashes: message_hashes.clone(),
+            message_count: *message_count,
+        };
+        self.kv_cache_monitor.begin_request(route, signature);
+    }
+
+    /// Classify the completed request's usage. Returns the event to send when
+    /// the request missed the KV cache.
+    fn finish_kv_cache_monitor_request(
+        &mut self,
+        input: u64,
+        cache_read: Option<u64>,
+        cache_creation: Option<u64>,
+    ) -> Option<ServerEvent> {
+        let effective = self.effective_context_tokens_from_usage(input, cache_read, cache_creation);
+        let miss = self
+            .kv_cache_monitor
+            .finish_request(effective, cache_read)?;
+        logging::warn(&format!(
+            "KV_CACHE_MISS session={} reason={} harness_caused={} missed={} expected={} read={} documented={:?}",
+            self.session.id,
+            miss.reason.id(),
+            miss.reason.harness_caused(),
+            miss.missed_tokens,
+            miss.expected_tokens,
+            miss.read_tokens,
+            miss.documented_cause,
+        ));
+        Some(ServerEvent::KvCacheMiss {
+            reason: miss.reason.id().to_string(),
+            harness_caused: miss.reason.harness_caused(),
+            missed_tokens: miss.missed_tokens,
+            expected_tokens: miss.expected_tokens,
+            read_tokens: miss.read_tokens,
+            message: miss.message(),
+            documented_cause: miss.documented_cause,
+        })
+    }
+}
+
 fn log_agent_provider_stream_lifecycle(
     level: logging::LogLevel,
     agent: &Agent,
@@ -192,8 +273,6 @@ pub struct Agent {
     _tool_policy_registration: crate::tool::SessionToolPolicyRegistration,
     /// MCP top-level definition exposure policy captured when the session starts.
     mcp_tools_mode: crate::config::McpToolsMode,
-    /// Auto-mode token estimate above which MCP definitions are deferred.
-    mcp_tools_token_threshold: usize,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
     /// Last upstream provider (OpenRouter) observed for this session
@@ -222,6 +301,8 @@ pub struct Agent {
     graceful_shutdown: InterruptSignal,
     /// Client-side cache tracking for detecting append-only violations
     cache_tracker: CacheTracker,
+    /// Classifies provider-reported KV cache misses for every client.
+    kv_cache_monitor: crate::kv_cache_monitor::KvCacheMonitor,
     /// Last token usage from API request (for debug socket queries)
     last_usage: TokenUsage,
     /// Locked tool list: once the first API request is sent, freeze the tool list
@@ -239,6 +320,17 @@ pub struct Agent {
     /// MCP tools to wait for), this is set so the per-turn registry scan stops.
     /// Reset whenever the tool list is intentionally unlocked.
     mcp_late_register_resolved: bool,
+    /// Whether `locked_tools` was built for provider-native deferred MCP
+    /// loading. A mid-session model/provider switch can change that
+    /// capability; the snapshot must then be rebuilt, or the new provider
+    /// would get a surface built for the other path (for example
+    /// `mcp_search` without `mcp_call` or any MCP tools).
+    locked_tools_native_deferred: bool,
+    /// MCP tools already described to the model, either in the locked tool
+    /// snapshot or by a late-tool transcript announcement.
+    announced_mcp_tools: HashSet<String>,
+    /// Transcript index already scanned for MCP tools described there.
+    announced_mcp_scan_index: usize,
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
@@ -313,7 +405,6 @@ impl Agent {
             disabled_tools,
             _tool_policy_registration: tool_policy_registration,
             mcp_tools_mode: tool_config.mcp_tools,
-            mcp_tools_token_threshold: tool_config.mcp_tools_token_threshold,
             provider_session_id: None,
             last_upstream_provider: None,
             last_connection_type: None,
@@ -327,9 +418,13 @@ impl Agent {
             background_tool_signal: InterruptSignal::new(),
             graceful_shutdown: InterruptSignal::new(),
             cache_tracker: CacheTracker::new(),
+            kv_cache_monitor: Default::default(),
             last_usage: TokenUsage::default(),
             locked_tools: None,
             mcp_late_register_resolved: false,
+            locked_tools_native_deferred: false,
+            announced_mcp_tools: HashSet::new(),
+            announced_mcp_scan_index: 0,
             agents_md_snapshot,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
@@ -637,6 +732,7 @@ impl Agent {
         self.background_tool_signal.reset();
         self.graceful_shutdown.reset();
         self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
         self.last_usage = TokenUsage::default();
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
@@ -709,6 +805,7 @@ impl Agent {
         }
 
         self.cache_tracker.reset();
+        self.kv_cache_monitor.reset();
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
         self.provider_session_id = None;
@@ -941,6 +1038,7 @@ impl Agent {
         if repaired > 0 {
             self.persist_session_best_effort("missing tool-output repair");
             self.cache_tracker.reset();
+            self.kv_cache_monitor.reset();
             self.locked_tools = None;
             self.mcp_late_register_resolved = false;
         }
@@ -1149,6 +1247,7 @@ impl Agent {
                     ContentBlock::OpenAICompaction { .. } => {
                         md.push_str("[OpenAI native compaction]\n\n");
                     }
+                    ContentBlock::ToolReference { .. } => {}
                 }
             }
         }

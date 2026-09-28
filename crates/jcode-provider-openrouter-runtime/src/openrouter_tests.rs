@@ -3862,6 +3862,7 @@ fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
             name: "bash".to_string(),
             description: "run".to_string(),
             input_schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string"}}}),
+            defer_loading: false,
         }];
         let mut stream = provider
             .complete(&[Message::user("hello")], &tools, "sys", None)

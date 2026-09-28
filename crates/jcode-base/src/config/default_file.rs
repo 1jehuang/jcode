@@ -100,6 +100,11 @@ swarm_panel_focus = "alt+n"
 # Default: Cmd+B on macOS, Alt+R on Windows/Linux. Set "" to disable.
 # open_resume = "cmd+b"
 
+# Built-in voice input: press to record, press again to send the transcript.
+# Esc cancels. Needs a Nari API key (NARI_API_KEY or ~/.config/jcode/nari.env).
+# Default: Ctrl+Space. Set "" to disable.
+# voice_input = "ctrl+space"
+
 # /resume picker Enter behavior. Options: "current-terminal" or "new-terminal".
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
 session_picker_enter = "current-terminal"
@@ -126,6 +131,11 @@ timeout_secs = 90
 # Extra names or terms to help built-in voice transcription recognize them.
 # Jcode's own product names are always included.
 # vocabulary = ["Kubernetes", "Alice Zhang"]
+
+# Microphone recorder for built-in voice input (keybindings.voice_input).
+# Empty auto-detects pw-record, parecord, arecord, rec (SoX), or ffmpeg.
+# A custom command must print raw mono 16 kHz signed 16-bit little-endian PCM.
+# recorder = "arecord -q -t raw -f S16_LE -r 16000 -c 1 -"
 
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
@@ -219,12 +229,6 @@ prompt_entry_animation = true
 # Cursor) in the session picker so they can be resumed or imported
 # (default: true). Set false to list only jcode's own sessions.
 # external_sessions = true
-
-# Overscroll status line (model/provider/context info below the input):
-#   "on"         - always visible (default)
-#   "overscroll" - elastic reveal when scrolling past the bottom
-#   "off"        - never shown
-# overscroll_status = "on"
 
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
@@ -329,10 +333,15 @@ profile = "full"
 # disabled = ["browser", "gmail", "swarm"]
 # Disable all built-in tools unless enabled is set.
 disable_base_tools = false
-# MCP tool exposure: "eager" sends every server tool definition, "deferred"
-# sends only fixed mcp_search/mcp_call tools, and "auto" switches to deferred
-# when the filtered MCP definitions exceed the token threshold below.
-# Env overrides: JCODE_MCP_TOOLS, JCODE_MCP_TOOLS_TOKEN_THRESHOLD.
+# MCP tool exposure. "auto" never changes the cached tool list when MCP
+# servers connect, reconnect, or register late, so the provider prompt cache
+# survives: Claude and OpenAI (gpt-5.4+) load MCP tools natively as deferred
+# definitions; other providers use fixed mcp_search/mcp_call tools and learn
+# new tools' schemas from the transcript. "deferred" behaves like "auto".
+# "eager" sends every server tool definition in the tool list; adding a
+# server mid-session then invalidates the whole prompt cache.
+# Env overrides: JCODE_MCP_TOOLS. mcp_tools_token_threshold is ignored and
+# kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
 
@@ -641,11 +650,17 @@ bind_addr = "0.0.0.0"
 
 [power]
 # Prevent automatic system sleep while any jcode session is actively working.
-# Linux also blocks lid-switch suspend. Windows still respects explicit lid-close
-# and power-button actions from your active power plan. The display may sleep.
+# Linux also blocks lid-switch suspend. On Windows and macOS see block_lid_close.
+# The display may sleep.
 # The guard is held only for as long as work is in flight. (default: true)
 # Set JCODE_DISABLE_POWER_INHIBIT=1 to force-disable regardless of this setting.
 prevent_sleep_while_streaming = true
+# Also keep working when the lid closes on macOS and Windows while a session is
+# working. Windows temporarily sets the power plan's lid close action to "Do
+# nothing". macOS runs `sudo -n pmset -a disablesleep 1` and needs a passwordless
+# sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
+# saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
+block_lid_close = true
 
 [safety]
 # Notification settings for ambient mode events

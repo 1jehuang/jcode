@@ -266,7 +266,7 @@ impl JevClient {
                         self.purpose.name()
                     )
                 })?;
-            let me = read_response(response, MAX_ME_BYTES).await?;
+            let me = read_response(response, MAX_ME_BYTES, self.provider).await?;
             ensure!(
                 me["capabilities"]
                     .get(self.purpose.capability())
@@ -337,7 +337,15 @@ impl JevClient {
         loop {
             let response = self.send_once(client, endpoint, body.clone()).await?;
             let status = response.status().as_u16();
-            if attempt < TRANSIENT_RETRY_DELAYS.len() && is_transient_status(status) {
+            // A long Retry-After means a plan quota (hours), not overload.
+            // Retrying cannot succeed, so surface the upgrade prompt at once.
+            let long_wait = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .is_some_and(|secs| Duration::from_secs(secs) > MAX_RETRY_AFTER);
+            if attempt < TRANSIENT_RETRY_DELAYS.len() && is_transient_status(status) && !long_wait {
                 let delay = retry_after(&response).unwrap_or(TRANSIENT_RETRY_DELAYS[attempt]);
                 attempt += 1;
                 crate::logging::info(&format!(
@@ -349,7 +357,7 @@ impl JevClient {
                 tokio::time::sleep(delay).await;
                 continue;
             }
-            return read_response(response, MAX_RESPONSE_BYTES).await;
+            return read_response(response, MAX_RESPONSE_BYTES, self.provider).await;
         }
     }
 
@@ -359,6 +367,11 @@ impl JevClient {
             .bearer_auth(&self.api_key)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
+        if self.provider == JevProvider::Jcode && self.purpose == JevPurpose::Browser {
+            // The gateway budgets browser handoffs separately so background
+            // memory recall cannot exhaust interactive browsing.
+            request = request.header("X-Jcode-Jev-Purpose", "browser");
+        }
         if self.provider == JevProvider::OpenRouter {
             request = request.header("HTTP-Referer", "https://jcode.sh").header(
                 "X-Title",
@@ -607,9 +620,55 @@ fn request_body_for(
     Ok(body)
 }
 
-async fn read_response(mut response: Response, limit: usize) -> Result<Value> {
+/// Parse the gateway's plan-quota body. Only trusted, bounded fields are kept,
+/// and the upgrade link must be an https jcode.sh URL so a compromised or
+/// misconfigured gateway cannot inject an arbitrary link into the UI.
+async fn read_quota_exceeded(
+    response: Response,
+) -> Option<crate::subscription_notice::QuotaExceeded> {
+    let bytes = response.bytes().await.ok()?;
+    if bytes.len() > 4096 {
+        return None;
+    }
+    let body: Value = serde_json::from_slice(&bytes).ok()?;
+    let error = body.get("error")?;
+    if error.get("code")?.as_str()? != "quota_exceeded" {
+        return None;
+    }
+    let text = |key: &str| {
+        error
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|value| value.chars().take(300).collect::<String>())
+    };
+    let upgrade_url = text("upgrade_url").filter(|url| {
+        url.starts_with("https://jcode.sh/") || url.starts_with("https://www.jcode.sh/")
+    });
+    Some(crate::subscription_notice::QuotaExceeded {
+        feature: text("purpose").unwrap_or_else(|| "decision".into()),
+        tier: text("tier"),
+        upgrade_tier: text("upgrade_tier"),
+        upgrade_url,
+        resets_at: text("resets_at"),
+    })
+}
+
+async fn read_response(
+    mut response: Response,
+    limit: usize,
+    provider: JevProvider,
+) -> Result<Value> {
     let status = response.status();
     if !status.is_success() {
+        if provider == JevProvider::Jcode && status.as_u16() == 429 {
+            if let Some(quota) = read_quota_exceeded(response).await {
+                crate::subscription_notice::record(quota.clone());
+                return Err(quota.into());
+            }
+            bail!(
+                "Jev returned HTTP 429: selected provider is rate limited or overloaded; try again later"
+            );
+        }
         let hint = match status.as_u16() {
             401 => "selected provider credential is invalid or revoked",
             403 => "selected provider denied access or the account is not entitled",
@@ -964,9 +1023,10 @@ mod tests {
         );
         // Typesafe direct wins over resellers of the same model.
         assert_eq!(
-            resolve_with("auto", |env, _| (env != "JCODE_API_KEY").then(|| "k".into()))
-                .unwrap()
-                .0,
+            resolve_with("auto", |env, _| (env != "JCODE_API_KEY")
+                .then(|| "k".into()))
+            .unwrap()
+            .0,
             JevProvider::TypeSafe
         );
         // Deliberate BYOK remains available even when a Jcode login is present.
@@ -1219,6 +1279,12 @@ mod tests {
                     serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
                 assert_eq!(body["model"], "typesafe/jev-1.13");
                 assert!(body["state"].is_string());
+                assert!(
+                    !requests[1]
+                        .to_ascii_lowercase()
+                        .contains("x-jcode-jev-purpose"),
+                    "only browser decisions use the browser budget"
+                );
             } else {
                 let error = result.unwrap_err().to_string();
                 assert!(error.contains("voice"));
@@ -1598,6 +1664,12 @@ mod tests {
         assert!(requests[0].starts_with("GET /v1/me "));
         assert!(!requests[0].contains("private-page"));
         assert!(requests[1].starts_with("POST /v1/decisions "));
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("x-jcode-jev-purpose: browser\r\n"),
+            "browser decisions must use the gateway's separate browser budget"
+        );
         let body: Value =
             serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["questions"], Value::Object(browser_questions()));
@@ -1741,6 +1813,64 @@ mod tests {
                     .all(|r| r.starts_with("POST /v1/decisions "))
             );
         }
+    }
+
+    #[tokio::test]
+    async fn gateway_plan_quota_is_not_retried_and_becomes_upgrade_prompt() {
+        let quota = json!({"error": {
+            "code": "quota_exceeded", "message": "server text", "purpose": "browser", "scope": "day",
+            "limit": 2000, "tier": "plus", "upgrade_tier": "pro",
+            "upgrade_url": "https://jcode.sh/pricing", "resets_at": "2026-09-27T00:00:00.000Z"
+        }});
+        let (base, worker) = mock_server(vec![
+            (
+                200,
+                json!({"capabilities": {"browser_jev": true}}).to_string(),
+                vec![],
+            ),
+            (
+                429,
+                quota.to_string(),
+                vec![("Retry-After".into(), "80000".into())],
+            ),
+        ]);
+        let mut client = mock_client(&base, JevProvider::Jcode);
+        client.purpose = JevPurpose::Browser;
+        let error = client
+            .evaluate(json!({"page": "p"}), browser_questions())
+            .await
+            .unwrap_err();
+        let notice = crate::subscription_notice::from_error(&error).expect("typed quota notice");
+        assert_eq!(notice.feature, "browser");
+        assert_eq!(notice.upgrade_tier.as_deref(), Some("pro"));
+        assert!(error.to_string().contains("Upgrade to Pro"));
+        assert!(error.to_string().contains("https://jcode.sh/pricing"));
+        // One /me preflight and exactly one decision: plan quotas are never retried.
+        assert_eq!(worker.join().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn gateway_quota_rejects_non_jcode_upgrade_links() {
+        let quota = json!({"error": {"code": "quota_exceeded", "purpose": "memory", "tier": "plus",
+            "upgrade_tier": "pro", "upgrade_url": "https://evil.example/pay"}});
+        let (base, worker) = mock_server(vec![
+            (
+                200,
+                json!({"capabilities": {"memory_jev": true}}).to_string(),
+                vec![],
+            ),
+            (
+                429,
+                quota.to_string(),
+                vec![("Retry-After".into(), "80000".into())],
+            ),
+        ]);
+        let client = mock_client(&base, JevProvider::Jcode);
+        let error = client.evaluate(json!("s"), questions()).await.unwrap_err();
+        let notice = crate::subscription_notice::from_error(&error).unwrap();
+        assert_eq!(notice.upgrade_url, None);
+        assert!(!error.to_string().contains("evil.example"));
+        worker.join().unwrap();
     }
 
     #[tokio::test]

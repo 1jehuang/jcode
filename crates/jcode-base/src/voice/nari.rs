@@ -50,6 +50,8 @@ pub enum NariEvent {
 const NAME_CONTEXT: &str = "The user often addresses Jev, a voice assistant. \
 Jev is spelled J-E-V and sounds like Jeff. Write it as Jev. \
 Examples: \"Hey Jev, open settings.\" \"Okay Jev.\" \"Thanks Jev.\" \"Ask Jev.\" \
+The user also talks about Jcode, a coding app pronounced jay-code, and Jcode Desktop. \
+Jcode and Jev are different names: write \"Jcode Desktop\", never \"Jev Desktop\". \
 Other names: ";
 
 /// Names Qwen3-ASR otherwise mishears. Keep proper casing: it is copied as-is.
@@ -68,17 +70,52 @@ const BUILTIN_VOCABULARY: &[&str] = &[
     "swarm",
     "hot reload",
     "Claude",
+    "Claude Code",
     "Codex",
     "OpenAI",
     "Anthropic",
+    "Gemini",
+    "Cursor",
+    "Opus",
+    "Sonnet",
+    "GPT",
+    "Qwen",
+    "Ollama",
+    // Coding agent vocabulary.
+    "MCP",
+    "LLM",
+    "API",
+    "SDK",
+    "CLI",
+    "TUI",
+    "subagent",
+    "system prompt",
+    "context window",
+    "tool call",
+    "GitHub",
+    "PR",
+    "repo",
+    "Rust",
+    "Cargo",
+    "TypeScript",
+    "JSON",
+    "YAML",
+    "OAuth",
+    "tmux",
+    "Neovim",
 ];
 /// Mishearings the recognition prompt cannot fix, because the audio is
 /// genuinely ambiguous ("Jev" is pronounced like "Jeff"). Applied to every
 /// transcript revision as whole-word, case-insensitive replacements.
+/// Order matters: "Jeff Desktop" becomes "Jev Desktop", then "Jcode Desktop".
 const BUILTIN_CORRECTIONS: &[(&str, &str)] = &[
     (r"jeff", "Jev"),
     (r"j[\s.-]?code", "Jcode"),
     (r"jay[\s-]?code", "Jcode"),
+    (r"(?:jade|jake)[\s-]?code", "Jcode"),
+    // No product is called "Jev Desktop". The speaker meant Jcode Desktop.
+    (r"jev[\s-]?desktop", "Jcode Desktop"),
+    (r"jcode[\s-]?desktop", "Jcode Desktop"),
 ];
 
 fn corrections() -> &'static [(regex::Regex, &'static str)] {
@@ -98,13 +135,101 @@ fn corrections() -> &'static [(regex::Regex, &'static str)] {
     })
 }
 
-/// Apply product-name corrections to a transcript.
+/// Apply product-name corrections to a transcript. A transcript that only
+/// repeats the recognition prompt's example addresses is a prompt leak, which
+/// Qwen3-ASR produces on silence, so it becomes empty.
 pub fn correct_transcript(text: &str) -> String {
-    corrections()
+    let text = corrections()
         .iter()
         .fold(text.to_owned(), |text, (pattern, fixed)| {
             pattern.replace_all(&text, *fixed).into_owned()
-        })
+        });
+    if is_prompt_leak(&text) || is_prompt_echo(&text) {
+        String::new()
+    } else {
+        text
+    }
+}
+
+/// Example addresses from `NAME_CONTEXT`, as lowercase words.
+const PROMPT_EXAMPLES: &[&[&str]] = &[
+    &["hey", "jev", "open", "settings"],
+    &["okay", "jev"],
+    &["ok", "jev"],
+    &["thanks", "jev"],
+    &["thank", "you", "jev"],
+    &["ask", "jev"],
+];
+
+/// True when the transcript is two or more prompt examples and nothing else.
+/// One genuine "Okay Jev" is kept. A garbled tail word is tolerated after
+/// three examples ("Thanks Jev, asked up").
+fn is_prompt_leak(text: &str) -> bool {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let (mut at, mut matched) = (0, 0);
+    'outer: while at < words.len() {
+        for example in PROMPT_EXAMPLES {
+            let end = at + example.len();
+            if end <= words.len() && words[at..end].iter().zip(*example).all(|(w, e)| w == e) {
+                at = end;
+                matched += 1;
+                continue 'outer;
+            }
+        }
+        break;
+    }
+    let rest = words.len() - at;
+    matched >= 2 && (rest == 0 || (matched >= 3 && rest <= 2))
+}
+
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Run length that counts as copied prompt text. Five words avoids flagging a
+/// genuine "Hey Jev, open settings" while catching any real echo.
+const ECHO_NGRAM: usize = 5;
+
+fn prompt_ngrams() -> &'static HashSet<Vec<String>> {
+    static NGRAMS: std::sync::OnceLock<HashSet<Vec<String>>> = std::sync::OnceLock::new();
+    NGRAMS.get_or_init(|| {
+        // Compare in corrected form, since transcripts are corrected first.
+        let prompt = corrections()
+            .iter()
+            .fold(build_prompt(&[]), |text, (pattern, fixed)| {
+                pattern.replace_all(&text, *fixed).into_owned()
+            });
+        words(&prompt)
+            .windows(ECHO_NGRAM)
+            .map(<[String]>::to_vec)
+            .collect()
+    })
+}
+
+/// True when most of the transcript is copied from the recognition prompt.
+/// Qwen3-ASR recites its whole context on silent audio ("The user often
+/// addresses Jev, a voice assistant..."), which the example check misses.
+fn is_prompt_echo(text: &str) -> bool {
+    let words = words(text);
+    if words.len() < ECHO_NGRAM {
+        return false;
+    }
+    let ngrams = prompt_ngrams();
+    let mut covered = vec![false; words.len()];
+    for (start, window) in words.windows(ECHO_NGRAM).enumerate() {
+        if ngrams.contains(window) {
+            covered[start..start + ECHO_NGRAM].fill(true);
+        }
+    }
+    let covered = covered.iter().filter(|c| **c).count();
+    covered * 5 >= words.len() * 3
 }
 
 /// Conservative bound on the recognition context sent per session.
@@ -159,7 +284,6 @@ pub fn nari_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) 
 
 /// Microphone-owned channel. Holds 100 ms chunks for longer than the setup
 /// timeout so audio captured during the handshake is buffered, never dropped.
-#[cfg(feature = "voice-capture")]
 pub(super) fn capture_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) {
     mpsc::channel((IO_TIMEOUT.as_secs() as usize + 5) * 10)
 }
@@ -292,6 +416,7 @@ impl NariSession {
                 .await?;
             }
             sender_stopping.store(true, Ordering::SeqCst);
+            super::timing::mark("pcm eof, sending final commit");
             send(
                 &mut sink,
                 json!({"type":"input_audio_buffer.commit", "event_id":END}),
@@ -315,6 +440,9 @@ impl NariSession {
                 }
                 incoming = receive(&mut source) => {
                     let incoming = incoming?;
+                    if stopping.load(Ordering::SeqCst) {
+                        super::timing::mark(incoming["type"].as_str().unwrap_or("?"));
+                    }
                     if state.apply(&incoming, stopping.load(Ordering::SeqCst))? {
                         if !first_text { first_text = true; super::timing::mark("first transcript revision"); }
                         event(NariEvent::Transcript(state.text()));
@@ -462,10 +590,40 @@ impl TranscriptState {
 mod tests {
     use super::*;
     #[test]
+    fn silent_prompt_leaks_are_dropped_but_real_speech_is_kept() {
+        for leak in [
+            "Hey Jev, open settings. Okay Jev. Thanks Jev. Ask Jev.",
+            "Hey, Jeff, open settings. Okay, Jeff, thanks, Jeff, asked up.",
+            "Okay Jev. Thanks Jev.",
+            // Full prompt recital on silence, as observed.
+            "The user often addresses Jev, a voice assistant. Jev is spelled J- E- V and \
+             sounds like Jev. Write it as Jev. Examples: \"Hey Jev, open settings.\" \
+             \"Okay Jev.\" \"Thanks Jev.\" \"Ask Jev.\" The user also talks about Jcode, a \
+             coding app pronounced jay- code, and Jcode Desktop. Jcode and Jev are \
+             different names: write \"Jcode Desktop\", never \"Jcode Desktop\". Other \
+             names: Jcode, Jcode Desktop, Handterm, Nari, TypeSafe, GPUI, Wayland, niri, \
+             Copilot, swarm, hot reload, Claude, Codex, OpenAI, Anthropic.",
+            "Other names: Jcode, Jcode Desktop, Handterm, Nari, TypeSafe, GPUI, Wayland.",
+            "The user also talks about Jcode, a coding app.",
+        ] {
+            assert_eq!(correct_transcript(leak), "", "{leak}");
+        }
+        for real in [
+            "Okay Jev.",
+            "Hey Jev, open settings.",
+            "Okay Jev, thanks Jev, now fix the build.",
+            "Hey Jev, open settings and switch the theme.",
+            "Tell the user about Jcode Desktop and Handterm today.",
+            "Can you ask Codex, Claude and OpenAI models to review the swarm hot reload code?",
+        ] {
+            assert_eq!(correct_transcript(real), real, "{real}");
+        }
+    }
+    #[test]
     fn product_name_mishearings_are_corrected() {
         assert_eq!(
             correct_transcript("Hey, Jeff. Open the JCode desktop and ask jeff's route."),
-            "Hey, Jev. Open the Jcode desktop and ask Jev's route."
+            "Hey, Jev. Open the Jcode Desktop and ask Jev's route."
         );
         assert_eq!(
             correct_transcript("J code, j-code, Jay code"),
@@ -474,6 +632,22 @@ mod tests {
         // Whole words only.
         assert_eq!(correct_transcript("Jefferson jcoder"), "Jefferson jcoder");
         assert_eq!(correct_transcript("Jev and Jcode"), "Jev and Jcode");
+        // Jev Desktop is always a mishearing of Jcode Desktop.
+        assert_eq!(
+            correct_transcript(
+                "Can you fix the resume menu of Jev Desktop? jeff desktop, jcode desktop"
+            ),
+            "Can you fix the resume menu of Jcode Desktop? Jcode Desktop, Jcode Desktop"
+        );
+        assert_eq!(
+            correct_transcript("Jade code and jake-code"),
+            "Jcode and Jcode"
+        );
+        // Jev alone stays Jev.
+        assert_eq!(
+            correct_transcript("Hey Jev, open desktops"),
+            "Hey Jev, open desktops"
+        );
     }
 
     #[test]
