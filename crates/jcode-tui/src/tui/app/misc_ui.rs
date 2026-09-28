@@ -531,6 +531,9 @@ impl App {
     pub(super) fn begin_call_pricing(&mut self, at: SystemTime) {
         self.cost.call_started_at = Some(at);
         self.cost.pinned_call_pricing = None;
+        // A new call resets the server-cost baseline too: the previous call's
+        // cumulative figure must never be subtracted from this call's reports.
+        self.cost.server_call_cost = None;
     }
 
     /// Everything that has to happen when a new API call starts.

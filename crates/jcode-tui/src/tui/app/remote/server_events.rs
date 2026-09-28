@@ -820,10 +820,11 @@ pub(in crate::tui::app) fn handle_server_event(
                 // call reuse the card pinned here (F16).
                 match (cost, currency.as_deref()) {
                     (Some(amount), Some(code)) => {
-                        app.accrue_server_resolved_call_cost(
-                            amount,
-                            &jcode_provider_core::Currency::new(code),
-                        );
+                        let currency = jcode_provider_core::Currency::new(code);
+                        app.accrue_server_resolved_call_cost(amount, &currency);
+                        // Remember the call's cumulative server figure so later
+                        // delta snapshots bill only the growth since here (F3).
+                        app.cost.server_call_cost = Some((amount, currency));
                     }
                     // Older server, or a call no layer could price: the local
                     // path is the compatibility fallback. Price at the call's
@@ -872,20 +873,52 @@ pub(in crate::tui::app) fn handle_server_event(
                 // Bill only the new tokens since the previous snapshot for this
                 // same call, so a call that reports usage multiple times while
                 // streaming is billed exactly once overall.
-                app.accrue_remote_call_cost(
-                    input.saturating_sub(previous_input),
-                    output.saturating_sub(previous_output),
-                    app.streaming
-                        .streaming_cache_read_tokens
-                        .unwrap_or(0)
-                        .saturating_sub(previous_cache_read.unwrap_or(0)),
-                    app.streaming
-                        .streaming_cache_creation_tokens
-                        .unwrap_or(0)
-                        .saturating_sub(previous_cache_creation.unwrap_or(0)),
-                    // Ignored: this call's card was pinned by its first snapshot.
-                    std::time::SystemTime::now(),
-                );
+                //
+                // F3: when this delta snapshot carries a server cost, that
+                // figure is the call's *cumulative* total, not an increment, so
+                // bill the growth since the baseline the first snapshot set and
+                // move the baseline forward. That keeps the session total equal
+                // to the server's authoritative figure no matter how the
+                // client's own card/currency differs. Without a usable baseline
+                // (an older server, or a currency switch mid-call) fall back to
+                // the local pinned-card delta path for continuity (F16).
+                let server_delta = match (cost, currency.as_deref()) {
+                    (Some(amount), Some(code)) => app
+                        .cost
+                        .server_call_cost
+                        .clone()
+                        .filter(|(_, baseline_currency)| baseline_currency.as_str() == code)
+                        .map(|(baseline, baseline_currency)| {
+                            app.cost.server_call_cost =
+                                Some((amount, jcode_provider_core::Currency::new(code)));
+                            (amount - baseline, baseline_currency)
+                        }),
+                    _ => None,
+                };
+                match server_delta {
+                    Some((delta, currency)) if delta > 0.0 => {
+                        app.accrue_server_resolved_call_cost(delta, &currency);
+                    }
+                    Some(_) => {
+                        // A repeated or revised-down snapshot adds nothing; the
+                        // baseline still moved above.
+                    }
+                    None => app.accrue_remote_call_cost(
+                        input.saturating_sub(previous_input),
+                        output.saturating_sub(previous_output),
+                        app.streaming
+                            .streaming_cache_read_tokens
+                            .unwrap_or(0)
+                            .saturating_sub(previous_cache_read.unwrap_or(0)),
+                        app.streaming
+                            .streaming_cache_creation_tokens
+                            .unwrap_or(0)
+                            .saturating_sub(previous_cache_creation.unwrap_or(0)),
+                        // Ignored: this call's card was pinned by its first
+                        // snapshot.
+                        std::time::SystemTime::now(),
+                    ),
+                }
 
                 let had_cache_telemetry =
                     previous_cache_read.is_some() || previous_cache_creation.is_some();

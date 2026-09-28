@@ -919,3 +919,121 @@ fn server_resolved_cost_wins_over_the_clients_local_card() {
         );
     });
 }
+
+/// Send one remote `TokenUsage` snapshot to `app`.
+fn send_remote_usage(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+    input: u64,
+    output: u64,
+    cost: Option<f64>,
+    currency: Option<&str>,
+) {
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input,
+            output,
+            cache_read_input: None,
+            cache_creation_input: None,
+            cost,
+            currency: currency.map(str::to_string),
+        },
+        remote,
+    );
+}
+
+/// F3: the server reports the call's *cumulative* cost on every usage event, so
+/// a later delta snapshot of the same call must bill the growth since the
+/// previous report, not re-price its token delta from the client's card. With a
+/// client card wildly unlike the server's, only the server's cumulative figure
+/// can produce the right total.
+#[test]
+fn server_cost_deltas_are_billed_across_snapshots_of_one_call() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        write_pricing_config(CLIENT_EXPENSIVE_CARD_CONFIG);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_deepseek_app();
+
+        // Snapshot 1: the server's cumulative figure for the call is $3.00.
+        send_remote_usage(&mut app, &mut remote, 1_000_000, 0, Some(3.0), Some("USD"));
+        assert!(
+            (session_cost_usd(&app) - 3.0).abs() < 1e-4,
+            "the first server figure is billed whole, got ${:.4}",
+            session_cost_usd(&app)
+        );
+
+        // Snapshot 2: cumulative $5.00, so only the $2.00 growth is billed. The
+        // delta re-priced from the client's $99 card would add $99.00.
+        send_remote_usage(&mut app, &mut remote, 2_000_000, 0, Some(5.0), Some("USD"));
+        assert!(
+            (session_cost_usd(&app) - 5.0).abs() < 1e-4,
+            "only the server's growth ($2.00) may be added, got ${:.4}",
+            session_cost_usd(&app)
+        );
+
+        // Snapshot 3: the same cumulative figure again (a repeated or revised
+        // report) adds nothing and does not double-bill.
+        send_remote_usage(&mut app, &mut remote, 2_000_000, 0, Some(5.0), Some("USD"));
+        assert!(
+            (session_cost_usd(&app) - 5.0).abs() < 1e-4,
+            "a repeated server figure must not be billed again, got ${:.4}",
+            session_cost_usd(&app)
+        );
+    });
+}
+
+/// F3 fallback: with no server baseline for the call (its first snapshot
+/// carried no cost), a later snapshot that does carry one falls back to the
+/// local pinned-card delta path rather than subtracting a baseline it never saw.
+#[test]
+fn a_server_cost_without_a_baseline_stays_on_the_local_delta_path() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        write_pricing_config(CLIENT_EXPENSIVE_CARD_CONFIG);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_deepseek_app();
+
+        // First snapshot has no server cost: the client prices 1M input at $99.
+        send_remote_usage(&mut app, &mut remote, 1_000_000, 0, None, None);
+        assert!((session_cost_usd(&app) - 99.0).abs() < 1e-3);
+
+        // A later snapshot carries a server cost, but there is no baseline to
+        // difference it against, so the local card still prices the 1M delta.
+        send_remote_usage(&mut app, &mut remote, 2_000_000, 0, Some(5.0), Some("USD"));
+        assert!(
+            (session_cost_usd(&app) - 198.0).abs() < 1e-3,
+            "without a baseline the local $99/Mtok card prices the delta, got ${:.4}",
+            session_cost_usd(&app)
+        );
+    });
+}
+
+/// F3 fallback: a currency switch mid-call makes the server's new figure
+/// incomparable with the accrued baseline, so the local path prices the delta
+/// instead of adding a figure to the wrong bucket.
+#[test]
+fn a_server_cost_in_a_new_currency_does_not_cross_buckets() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        write_pricing_config(CLIENT_EXPENSIVE_CARD_CONFIG);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_deepseek_app();
+
+        send_remote_usage(&mut app, &mut remote, 1_000_000, 0, Some(3.0), Some("USD"));
+        assert!((session_cost_usd(&app) - 3.0).abs() < 1e-4);
+
+        // The server now reports EUR: it cannot be differenced against the USD
+        // baseline, so the $99 USD local card prices the 1M delta and no EUR is
+        // added to the USD bucket.
+        send_remote_usage(&mut app, &mut remote, 2_000_000, 0, Some(5.0), Some("EUR"));
+        assert!(
+            (session_cost_usd(&app) - 102.0).abs() < 1e-3,
+            "a mismatched currency must keep the local delta path, got ${:.4}",
+            session_cost_usd(&app)
+        );
+    });
+}

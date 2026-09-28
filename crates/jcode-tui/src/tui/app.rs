@@ -874,6 +874,18 @@ struct CostState {
     /// Instant the API call currently being accounted for started (F15). The
     /// local billing path prices its call at this instant.
     call_started_at: Option<SystemTime>,
+    /// The *cumulative* cost the server reported for the call currently being
+    /// accounted for, `(amount, currency)`, once one of its snapshots carried
+    /// one.
+    ///
+    /// A newer server prices each call itself and reports the call's running
+    /// total on every usage event, so a later delta snapshot must bill
+    /// `reported - baseline` instead of re-pricing its token delta from the
+    /// client's card (which may use a different card or currency, Greptile
+    /// P1/P2). Reset by `begin_call_pricing` for each new call. `None` means no
+    /// server figure has been seen for this call yet (an older server, or a
+    /// snapshot that carried none), so the local pinned-card delta path applies.
+    server_call_cost: Option<(f64, Currency)>,
     /// Rate card pinned to the current API call (F16). It is resolved once, at
     /// the call's own instant, so a call that straddles a peak/off-peak
     /// boundary keeps the tier it started in. `None` until that call is first
