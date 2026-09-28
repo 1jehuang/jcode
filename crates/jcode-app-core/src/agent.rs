@@ -1093,8 +1093,12 @@ impl Agent {
     }
 
     /// Fire a session lifecycle observer hook (`session_start`/`session_end`).
-    /// No-op when the hook is not configured.
-    pub(crate) fn fire_session_lifecycle_hook(&self, event_name: &'static str, source: &str) {
+    /// No-op when the hook is not configured. For `session_start`, the
+    /// synchronous `session_start_context` commands run first.
+    pub(crate) fn fire_session_lifecycle_hook(&mut self, event_name: &'static str, source: &str) {
+        if event_name == "session_start" {
+            self.add_session_start_context(source);
+        }
         if !crate::hooks::hook_configured(event_name) {
             return;
         }
@@ -1106,6 +1110,21 @@ impl Agent {
             event = event.cwd(cwd);
         }
         crate::hooks::dispatch_observer(event);
+    }
+
+    /// Run `session_start_context` commands and add their output to the
+    /// session's initial context. No-op when none is configured.
+    fn add_session_start_context(&mut self, source: &str) {
+        let mut event = crate::hooks::HookEvent::new("session_start")
+            .session_id(self.session.id.clone())
+            .field("SOURCE", source)
+            .field("MODEL", self.provider_model());
+        if let Some(cwd) = self.working_dir() {
+            event = event.cwd(cwd);
+        }
+        if let Some(text) = crate::hooks::run_session_start_context(&event) {
+            self.session.add_session_start_context(&text);
+        }
     }
 
     pub fn mark_crashed(&mut self, message: Option<String>) {

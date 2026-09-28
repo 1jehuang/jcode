@@ -2815,3 +2815,48 @@ fn first_visible_user_prompt_becomes_the_generated_title() {
     session.rename_title(Some("Custom".into()));
     assert_eq!(session.display_title(), Some("Custom"));
 }
+
+#[test]
+fn session_start_context_is_added_once_before_the_first_turn_only() {
+    let mut session = Session::create_with_id("ssc_test".to_string(), None, None);
+    assert!(session.ensure_initial_session_context_message());
+    assert!(
+        !session.add_session_start_context("   \n "),
+        "whitespace adds nothing"
+    );
+    assert_eq!(session.messages.len(), 1);
+
+    assert!(session.add_session_start_context("Project notes: run the suite before committing."));
+    assert_eq!(session.messages.len(), 2);
+    let added = session.messages[1].content_preview();
+    assert!(
+        added.contains("[session_start_context]")
+            && added.contains("run the suite before committing.")
+    );
+    assert_eq!(
+        session.messages[1].display_role,
+        Some(StoredDisplayRole::System)
+    );
+
+    // a second start before any turn (attach after create) replaces, never stacks
+    assert!(session.add_session_start_context("newer"));
+    assert_eq!(session.messages.len(), 2);
+    assert!(session.messages[1].content_preview().contains("newer"));
+    assert!(
+        !session.messages[1]
+            .content_preview()
+            .contains("run the suite")
+    );
+
+    // once the conversation has begun (a resumed session), nothing is added or rewritten
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    );
+    assert!(!session.add_session_start_context("late"));
+    assert_eq!(session.messages.len(), 3);
+    assert!(session.messages[1].content_preview().contains("newer"));
+}

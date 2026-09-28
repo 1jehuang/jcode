@@ -326,6 +326,128 @@ fn build_hook_process(
     Ok(cmd)
 }
 
+/// Hard cap on a session_start_context provider's wait, whatever the config says.
+pub const SESSION_START_CONTEXT_MAX_MS: u64 = 3000;
+/// Maximum chars of context one provider may add.
+const SESSION_START_CONTEXT_LIMIT: usize = 8000;
+
+/// The text a session_start_context provider printed: the Claude Code shape
+/// `{"hookSpecificOutput":{"additionalContext":"..."}}` (also `{"additionalContext":"..."}`),
+/// or plain non-JSON text. A JSON value without that field, and whitespace, is
+/// no context. Capped at SESSION_START_CONTEXT_LIMIT chars.
+pub fn session_start_context_text(stdout: &str) -> Option<String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let text = match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => value
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("additionalContext"))
+            .or_else(|| value.get("additionalContext"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)?,
+        Err(_) => trimmed.to_owned(),
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(SESSION_START_CONTEXT_LIMIT).collect())
+}
+
+/// Run every configured `session_start_context` provider for `event`
+/// synchronously, each under `session_start_context_timeout_ms` (capped at
+/// SESSION_START_CONTEXT_MAX_MS), and return what they add, in declaration
+/// order, joined by blank lines. Fails open: a provider that cannot start,
+/// exits non-zero, times out (it is killed) or prints nothing adds nothing.
+/// None when nothing was added or no provider is configured.
+pub fn run_session_start_context(event: &HookEvent) -> Option<String> {
+    if hooks_suppressed() {
+        return None;
+    }
+    let hooks = &crate::config::config().hooks;
+    let commands: Vec<String> = hooks
+        .session_start_context
+        .iter()
+        .flat_map(|commands| commands.iter())
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if commands.is_empty() {
+        return None;
+    }
+    let timeout = std::time::Duration::from_millis(
+        hooks
+            .session_start_context_timeout_ms
+            .clamp(1, SESSION_START_CONTEXT_MAX_MS),
+    );
+    let mut parts = Vec::new();
+    for command_line in commands {
+        match run_context_command(&command_line, event, timeout) {
+            Ok(Some(text)) => parts.push(text),
+            Ok(None) => {}
+            Err(error) => crate::logging::warn(&format!(
+                "session_start_context '{command_line}': {error} (no context added)"
+            )),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+fn run_context_command(
+    command_line: &str,
+    event: &HookEvent,
+    timeout: std::time::Duration,
+) -> anyhow::Result<Option<String>> {
+    use std::io::Read;
+    let mut cmd = build_hook_process(command_line, event)?;
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn()?;
+    // Read stdout on its own thread so a provider that fills the pipe cannot
+    // stall the wait below. A grandchild may keep the pipe open after the
+    // provider exits or is killed, so the result is awaited with a bound, never
+    // joined: past it the reader is left to finish on its own.
+    let mut stdout = child.stdout.take().expect("stdout piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout
+            .by_ref()
+            .take((SESSION_START_CONTEXT_LIMIT * 4 + 1024) as u64)
+            .read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let Some(status) = status else {
+        anyhow::bail!("timed out after {} ms", timeout.as_millis());
+    };
+    if !status.success() {
+        anyhow::bail!("exited with {status}");
+    }
+    let left = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .max(std::time::Duration::from_millis(50));
+    match rx.recv_timeout(left) {
+        Ok(bytes) => Ok(session_start_context_text(&String::from_utf8_lossy(&bytes))),
+        Err(_) => anyhow::bail!("its output did not close within {} ms", timeout.as_millis()),
+    }
+}
+
 /// Fire an observer hook for `event` if one is configured.
 ///
 /// Detached and fire-and-forget: failures are logged, never propagated, and
@@ -748,6 +870,144 @@ mod tests {
             std::fs::read_to_string(final_marker).expect("later policies should still execute"),
             "ran"
         );
+    }
+
+    #[test]
+    fn session_start_context_text_reads_each_output_shape() {
+        let cases: &[(&str, Option<&str>)] = &[
+            (
+                r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"lesson A"}}"#,
+                Some("lesson A"),
+            ),
+            (r#"{"additionalContext":"  lesson B \n"}"#, Some("lesson B")),
+            ("plain text lesson ü\n", Some("plain text lesson ü")),
+            (r#"{"hookSpecificOutput":{"additionalContext":""}}"#, None),
+            (r#"{"hookSpecificOutput":{"additionalContext":42}}"#, None),
+            (r#"{"continue":true}"#, None),
+            ("[]", None),
+            ("   \n\t", None),
+            ("", None),
+        ];
+        for (stdout, want) in cases {
+            assert_eq!(
+                session_start_context_text(stdout).as_deref(),
+                *want,
+                "stdout: {stdout:?}"
+            );
+        }
+        let long = "x".repeat(SESSION_START_CONTEXT_LIMIT + 500);
+        assert_eq!(
+            session_start_context_text(&long).map(|t| t.chars().count()),
+            Some(SESSION_START_CONTEXT_LIMIT)
+        );
+    }
+
+    #[cfg(unix)]
+    fn context_test_config(hook: &str, timeout_ms: u64) -> impl Drop + use<> {
+        struct EnvReset(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                for (key, previous) in self.0.drain(..) {
+                    match previous {
+                        Some(value) => crate::env::set_var(key, value),
+                        None => crate::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let keys = [
+            "JCODE_HOOK_SESSION_START_CONTEXT",
+            "JCODE_HOOK_SESSION_START_CONTEXT_TIMEOUT_MS",
+        ];
+        let reset = EnvReset(keys.iter().map(|k| (*k, std::env::var_os(k))).collect());
+        crate::env::set_var(keys[0], hook);
+        crate::env::set_var(keys[1], timeout_ms.to_string());
+        crate::config::invalidate_config_cache();
+        reset
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_start_context_runs_providers_and_fails_open() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let ok = write_executable_script(
+            temp.path(),
+            "ok.sh",
+            "#!/bin/sh\nprintf '{\"hookSpecificOutput\":{\"additionalContext\":\"from %s in %s\"}}' \"$JCODE_HOOK_EVENT\" \"$JCODE_HOOK_SOURCE\"\n",
+        );
+        let event = HookEvent::new("session_start")
+            .session_id("s1")
+            .field("SOURCE", "create");
+        {
+            let _cfg = context_test_config(ok.to_str().unwrap(), 3000);
+            assert_eq!(
+                run_session_start_context(&event).as_deref(),
+                Some("from session_start in create")
+            );
+        }
+        // each failing provider adds nothing and never blocks past its bound
+        let failing: &[(&str, &str)] = &[
+            ("exit1.sh", "#!/bin/sh\necho 'never shown'\nexit 1\n"),
+            ("empty.sh", "#!/bin/sh\nexit 0\n"),
+            ("hang.sh", "#!/bin/sh\nsleep 30\n"),
+            (
+                "grandchild.sh",
+                "#!/bin/sh\n(sleep 30) &\nprintf 'x'\nexit 0\n",
+            ),
+        ];
+        for (name, body) in failing {
+            let script = write_executable_script(temp.path(), name, body);
+            let _cfg = context_test_config(script.to_str().unwrap(), 300);
+            let started = std::time::Instant::now();
+            let got = run_session_start_context(&event);
+            let took = started.elapsed();
+            assert!(
+                took < std::time::Duration::from_millis(1500),
+                "{name} took {took:?}"
+            );
+            // grandchild.sh exits 0 but a grandchild holds the pipe: bounded, nothing added
+            assert_eq!(got, None, "{name}");
+        }
+        // a missing binary fails open
+        {
+            let _cfg = context_test_config("/nonexistent/provider --x", 300);
+            assert_eq!(run_session_start_context(&event), None);
+        }
+        // the configured timeout is capped at SESSION_START_CONTEXT_MAX_MS
+        {
+            let hang = write_executable_script(temp.path(), "hang2.sh", "#!/bin/sh\nsleep 30\n");
+            let _cfg = context_test_config(hang.to_str().unwrap(), 600_000);
+            let started = std::time::Instant::now();
+            assert_eq!(run_session_start_context(&event), None);
+            let took = started.elapsed();
+            assert!(
+                took < std::time::Duration::from_millis(SESSION_START_CONTEXT_MAX_MS + 1500),
+                "capped: {took:?}"
+            );
+        }
+        // two providers: both outputs, in order; a failing one between them is skipped
+        {
+            let a = write_executable_script(temp.path(), "a.sh", "#!/bin/sh\necho alpha\n");
+            let b = write_executable_script(temp.path(), "b.sh", "#!/bin/sh\necho beta\n");
+            let bad = write_executable_script(temp.path(), "bad.sh", "#!/bin/sh\nexit 3\n");
+            let list = format!(
+                "[{:?}, {:?}, {:?}]",
+                a.to_str().unwrap(),
+                bad.to_str().unwrap(),
+                b.to_str().unwrap()
+            );
+            let _cfg = context_test_config(&list, 3000);
+            assert_eq!(
+                run_session_start_context(&event).as_deref(),
+                Some("alpha\n\nbeta")
+            );
+        }
+        // nothing configured: None, no process
+        {
+            let _cfg = context_test_config("", 3000);
+            assert_eq!(run_session_start_context(&event), None);
+        }
     }
 
     #[cfg(unix)]

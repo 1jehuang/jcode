@@ -928,6 +928,41 @@ impl Session {
         }
     }
 
+    /// Add the text `session_start_context` providers returned as one
+    /// system-reminder before the first turn. Only while no visible
+    /// conversation message exists: a resumed or attached conversation keeps
+    /// its transcript as it was. A later call before the first turn replaces the
+    /// earlier provider message rather than stacking a second one.
+    pub fn add_session_start_context(&mut self, text: &str) -> bool {
+        const PREFIX: &str = "<system-reminder>\n[session_start_context]\n";
+        let text = text.trim();
+        if text.is_empty() || self.messages.iter().any(is_visible_conversation_message) {
+            return false;
+        }
+        let wrapped = format!("{PREFIX}{text}\n</system-reminder>");
+        if let Some(message) = self.messages.iter_mut().find(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text, .. } if text.starts_with(PREFIX)))
+        }) {
+            message.content = vec![ContentBlock::Text {
+                text: wrapped,
+                cache_control: None,
+            }];
+            self.mark_messages_full_dirty();
+            return true;
+        }
+        self.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: wrapped,
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::System),
+        );
+        true
+    }
+
     pub fn has_session_context_message(&self) -> bool {
         self.messages.iter().any(|message| {
             message.content.iter().any(|block| match block {
