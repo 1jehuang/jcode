@@ -198,7 +198,9 @@ fn sane_rate(value: Option<f64>) -> Option<f64> {
 /// Merge what the card leaves out with the layers below it, honoring F1.
 ///
 /// * A card already in USD (the next layer's currency) merges field by field,
-///   so "only `input` written" keeps models.dev's output price.
+///   so "only `input` written" keeps the next layer's output price. The next
+///   layer is the whole derived chain (curated tables, OpenRouter caches,
+///   models.dev), not models.dev alone.
 /// * A card in any other currency never inherits USD numbers, because a USD
 ///   figure would be relabelled as, say, CNY. If such a card cannot price the
 ///   model on its own, the next layer wins outright.
@@ -217,19 +219,26 @@ pub(super) fn resolve_card(
     at: SystemTime,
     input_tokens: Option<u64>,
 ) -> ResolvedCard {
-    let models_dev = crate::model_pricing::lookup(provider, model);
+    // The layers this card sits above, in the billing chain's own order
+    // (curated static tables, then OpenRouter's caches, then models.dev). This
+    // is the completion source for a partial card, so a card the curated tables
+    // can complete is not refused just because models.dev has no cache entry
+    // (F4). The vendor-file layer is deliberately not here: `resolve_card`
+    // itself completes vendor-file rules, so consulting that layer would
+    // recurse.
+    let derived = crate::provider::pricing::derived_card_for_source_at_size(provider, model, at);
     let mut owns_price = true;
     // What the `[pricing]` card states for cache writes *on its own*, asked
     // before the merge below can fill the field from the next layer. Only a rate
     // the user wrote may replace the billing premium (see
-    // `CallRateCard::cache_write_per_mtok`); a figure that arrived from
-    // models.dev belongs to that layer and must keep the pre-feature behaviour.
+    // `CallRateCard::cache_write_per_mtok`); a figure that arrived from a lower
+    // layer belongs to that layer and must keep the pre-feature behaviour.
     let declared_cache_write = declared_cache_write(&entry, at, input_tokens);
 
     if currency.is_usd() {
         // Same currency as the next layer, so missing fields merge per field.
-        if let Some(fallback) = models_dev {
-            merge_same_currency(&mut entry, &fallback);
+        if let Some((fallback, _)) = &derived {
+            merge_same_currency(&mut entry, fallback);
         }
         // A rate that survived validation could still be non-finite if it
         // arrived from a layer that did not go through `validate`; drop it here
@@ -242,13 +251,13 @@ pub(super) fn resolve_card(
         };
     } else if entry.cost.input.is_some() && entry.cost.output.is_some() {
         // A complete foreign-currency card stands on its own.
-    } else if let Some(fallback) = models_dev {
+    } else if let Some((fallback, fallback_currency)) = &derived {
         crate::logging::warn(&format!(
             "pricing rule for {provider}/{model} is incomplete and denominated in {currency}; \
-             using models.dev values (USD) instead of relabelling them"
+             using the derived pricing layers ({fallback_currency}) instead of relabelling them"
         ));
-        entry = ModelPricingEntry::from_model_cost(fallback);
-        currency = Currency::usd();
+        entry = ModelPricingEntry::from_model_cost(fallback.clone());
+        currency = fallback_currency.clone();
         owns_price = false;
     } else {
         // Non-USD, incomplete, and nothing underneath it: neither direction may

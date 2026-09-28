@@ -2,7 +2,7 @@ use super::{ALL_OPENAI_MODELS, openrouter};
 use crate::auth;
 use crate::provider::models::provider_for_model;
 use jcode_provider_core::pricing as core_pricing;
-use jcode_provider_core::{RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource};
+use jcode_provider_core::{Currency, RouteCheapnessEstimate, RouteCostConfidence, RouteCostSource};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -393,37 +393,159 @@ pub fn derived_pricing_for_source_at_size(
         return Some(estimate);
     }
 
-    // 2. Curated static tables.
+    // 2-4. The layers below the vendor files: curated static tables, then
+    // OpenRouter's caches, then models.dev. The order lives once, in
+    // `derived_layer_for_source_at_size`, so the card resolver and this
+    // estimate resolver can never disagree about which layer wins.
+    derived_layer_estimate(derived_layer_for_source_at_size(
+        source_key,
+        model,
+        service_tier,
+        at,
+        input_tokens,
+    )?)
+}
+
+/// Which derived layer answers for `(source_key, model)`, below the vendor-file
+/// layer.
+///
+/// This is the single implementation of the derived layer order:
+/// [`derived_pricing_for_source_at_size`]'s steps 2-4 (curated static tables,
+/// then OpenRouter's own caches for its own route, then models.dev). The
+/// estimate resolver and the card resolver both project this one answer, so a
+/// partial card completed from the derived chain is priced by the same layer a
+/// call with no card would be.
+#[allow(clippy::large_enum_variant)]
+enum DerivedLayer {
+    /// A curated first-party static table (exact, hand-reviewed).
+    Curated(RouteCheapnessEstimate),
+    /// OpenRouter's own endpoint/catalog disk caches, for the OpenRouter route.
+    OpenRouter(RouteCheapnessEstimate),
+    /// The live models.dev catalog card, with the long-context tier selected for
+    /// the requested `input_tokens` already applied.
+    ModelsDev(crate::model_pricing::ModelPricingEntry, Currency),
+}
+
+fn derived_layer_for_source_at_size(
+    source_key: &str,
+    model: &str,
+    service_tier: Option<&str>,
+    at: std::time::SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<DerivedLayer> {
+    // Curated static tables.
     let static_estimate = match source_key {
         "claude:api-key" => core_pricing::anthropic_api_pricing_with_tier(model, service_tier),
         "openai:api-key" => core_pricing::openai_api_pricing_with_tier(model, service_tier),
         _ => None,
     };
-    if static_estimate.is_some() {
-        return static_estimate;
+    if let Some(estimate) = static_estimate {
+        return Some(DerivedLayer::Curated(estimate));
     }
 
-    // 3. OpenRouter's own caches carry per-endpoint pricing, which is more
-    // precise than any catalog average for the route actually used.
+    // OpenRouter's own caches carry per-endpoint pricing, which is more precise
+    // than any catalog average for the route actually used.
     if source_key == "openrouter"
         && let Some(estimate) = openrouter_route_pricing(model, "auto")
     {
-        return Some(estimate);
+        return Some(DerivedLayer::OpenRouter(estimate));
     }
 
-    // 4. Live models.dev catalog (disk cache; refreshes in the background).
-    let (card, _currency) =
+    // Live models.dev catalog (disk cache; refreshes in the background).
+    let (card, currency) =
         crate::model_pricing::models_dev_card_at_size(source_key, model, at, input_tokens)?;
-    let input = card.cost.input?;
-    let output = card.cost.output?;
-    Some(RouteCheapnessEstimate::metered(
-        RouteCostSource::ModelsDevCatalog,
-        RouteCostConfidence::High,
-        rate_to_micros(input),
-        rate_to_micros(output),
-        card.cost.cache_read.map(rate_to_micros),
-        Some("models.dev pricing catalog".to_string()),
-    ))
+    Some(DerivedLayer::ModelsDev(card, currency))
+}
+
+/// Project a derived layer into the route-catalog estimate shape.
+fn derived_layer_estimate(layer: DerivedLayer) -> Option<RouteCheapnessEstimate> {
+    match layer {
+        DerivedLayer::Curated(estimate) | DerivedLayer::OpenRouter(estimate) => Some(estimate),
+        DerivedLayer::ModelsDev(card, _currency) => {
+            let input = card.cost.input?;
+            let output = card.cost.output?;
+            Some(RouteCheapnessEstimate::metered(
+                RouteCostSource::ModelsDevCatalog,
+                RouteCostConfidence::High,
+                rate_to_micros(input),
+                rate_to_micros(output),
+                card.cost.cache_read.map(rate_to_micros),
+                Some("models.dev pricing catalog".to_string()),
+            ))
+        }
+    }
+}
+
+/// The derived-layer card for `(source_key, model)` at `at`, flattened to
+/// [`crate::model_pricing::ModelCost`] plus the currency of the supplying layer.
+///
+/// This is the completion source for a partial config card (spec 4.4): instead
+/// of consulting models.dev alone, the resolver fills unset fields from the
+/// same derived chain a call with no card would fall through to. `at` only
+/// gates the layers below; the models.dev long-context tier is deliberately not
+/// selected here, because a hand-written card's own tiers are the ones that
+/// apply and models.dev's are never merged into it.
+pub(crate) fn derived_card_for_source_at_size(
+    source_key: &str,
+    model: &str,
+    at: std::time::SystemTime,
+) -> Option<(crate::model_pricing::ModelCost, Currency)> {
+    derived_layer_card(derived_layer_for_source_at_size(
+        source_key, model, None, at, None,
+    )?)
+}
+
+fn derived_layer_card(layer: DerivedLayer) -> Option<(crate::model_pricing::ModelCost, Currency)> {
+    match layer {
+        DerivedLayer::Curated(estimate) | DerivedLayer::OpenRouter(estimate) => {
+            let currency = estimate.currency.clone();
+            Some((
+                crate::model_pricing::ModelCost {
+                    input_usd_per_mtok: micros_to_rate(estimate.input_price_per_mtok_micros?),
+                    output_usd_per_mtok: micros_to_rate(estimate.output_price_per_mtok_micros?),
+                    cache_read_usd_per_mtok: estimate
+                        .cache_read_price_per_mtok_micros
+                        .map(micros_to_rate),
+                    cache_write_usd_per_mtok: None,
+                },
+                currency,
+            ))
+        }
+        DerivedLayer::ModelsDev(entry, currency) => {
+            entry.to_model_cost().map(|cost| (cost, currency))
+        }
+    }
+}
+
+/// The derived-layer card for `(source_key, model)` as a full
+/// [`crate::model_pricing::ModelPricingEntry`], so models.dev's long-context
+/// tier survives for `effective_entry_at_size`.
+///
+/// Curated tables and OpenRouter caches state no extension fields, so their
+/// entries carry only the base rates their estimate reports.
+pub(crate) fn derived_entry_for_source_at_size(
+    source_key: &str,
+    model: &str,
+    service_tier: Option<&str>,
+    at: std::time::SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<(crate::model_pricing::ModelPricingEntry, Currency)> {
+    match derived_layer_for_source_at_size(source_key, model, service_tier, at, input_tokens)? {
+        DerivedLayer::ModelsDev(entry, currency) => Some((entry, currency)),
+        layer => {
+            let (cost, currency) = derived_layer_card(layer)?;
+            Some((
+                crate::model_pricing::ModelPricingEntry::from_model_cost(cost),
+                currency,
+            ))
+        }
+    }
+}
+
+/// Micros-per-Mtok back to a per-Mtok rate, exact for the values
+/// [`rate_to_micros`] produced.
+fn micros_to_rate(micros: u64) -> f64 {
+    micros as f64 / 1_000_000.0
 }
 
 /// Estimated USD for one request's reported token usage on a per-token route.

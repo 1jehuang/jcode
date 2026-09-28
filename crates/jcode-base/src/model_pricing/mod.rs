@@ -215,20 +215,51 @@ pub fn effective_entry_at_size(
         sources::ConfigPrice::Hit { entry, currency } => {
             let resolved =
                 sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
-            Some((resolved.entry, resolved.currency))
+            if resolved.owns_price {
+                return Some((resolved.entry, resolved.currency));
+            }
+            // The card claims the pair but cannot price it on its own (F1: a
+            // foreign-currency card never inherits the next layer's numbers), so
+            // it does not return the next layer's card *as if it had* priced the
+            // call. Resolve from below exactly as an absent card would, so the
+            // two arms agree on which layer answers.
+            below_config_card_at_size(provider, model, at, input_tokens)
         }
         // A rule that is out of effect is not this layer's answer either: the
         // next layer prices the model, exactly as if the rule had not been
         // written for this instant (the expiry itself is reported by
         // `config_call_rates`, which is the side that has to label it).
         sources::ConfigPrice::OutOfEffect(_) | sources::ConfigPrice::Absent => {
-            // A `[pricing.providers.<vendor>].file` rule sits strictly between
-            // the hand-written cards and models.dev (spec 4.4).
-            match vendor_file_card_at_size(provider, model, at, input_tokens) {
-                Some(card) => Some((card.entry, card.currency)),
-                None => models_dev_card_at_size(provider, model, at, input_tokens),
-            }
+            below_config_card_at_size(provider, model, at, input_tokens)
         }
+    }
+}
+
+/// The layers strictly below the hand-written `[pricing.providers]` cards: the
+/// `[pricing.providers.<vendor>].file` files first, then the derived chain
+/// (curated static tables, OpenRouter caches, models.dev).
+///
+/// This is the one ladder both the `Hit`-but-unpriced and `Absent`/`OutOfEffect`
+/// arms of [`effective_entry_at_size`] fall through, so a card that cannot price
+/// the call and a card that does not claim it cannot disagree about what prices
+/// the model instead.
+fn below_config_card_at_size(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<(ModelPricingEntry, Currency)> {
+    // A `[pricing.providers.<vendor>].file` rule sits strictly between the
+    // hand-written cards and the derived chain (spec 4.4).
+    match vendor_file_card_at_size(provider, model, at, input_tokens) {
+        Some(card) => Some((card.entry, card.currency)),
+        None => crate::provider::pricing::derived_entry_for_source_at_size(
+            provider,
+            model,
+            None,
+            at,
+            input_tokens,
+        ),
     }
 }
 
@@ -1016,6 +1047,67 @@ input = 1.5
         });
     }
 
+    /// F4: a USD card missing a field is completed by the whole derived chain,
+    /// not models.dev alone. Here there is no models.dev cache at all, but the
+    /// curated static table can price the model, so the card is priced instead
+    /// of being reported as configured-without-price.
+    #[test]
+    fn partial_usd_card_is_completed_by_the_curated_table_without_models_dev() {
+        let config = r#"
+[pricing.providers."claude:api-key".models."claude-sonnet-4-6".cost]
+input = 1.5
+"#;
+        with_pricing_env(Some(config), &[], || {
+            let at = SystemTime::now();
+            let ConfigCallRates::Priced(card) =
+                config_call_rates("claude:api-key", "claude-sonnet-4-6", at, None)
+            else {
+                panic!("the curated table must complete the partial USD card");
+            };
+            assert_eq!(card.input_per_mtok, 1.5, "the written field wins");
+            assert!(
+                card.output_per_mtok > 0.0 && card.output_per_mtok != 1.5,
+                "the missing output rate must come from the curated table, got {}",
+                card.output_per_mtok
+            );
+            assert!(card.currency.is_usd());
+        });
+    }
+
+    /// F4 for the foreign-currency fallback: with no models.dev cache the
+    /// curated table still prices the call, in USD, and the CNY card's own
+    /// numbers are not reused. The card does not own the price, so the entry
+    /// comes from the derived layer.
+    #[test]
+    fn an_incomplete_foreign_card_is_completed_by_the_curated_table() {
+        let config = r#"
+[pricing.providers.claude]
+currency = "CNY"
+
+[pricing.providers.claude.models."claude-sonnet-4-6".cost]
+input = 4.5
+"#;
+        with_pricing_env(Some(config), &[], || {
+            let at = SystemTime::now();
+            let (entry, currency) = effective_entry("claude:api-key", "claude-sonnet-4-6", at)
+                .expect("the curated table prices the call");
+            assert!(
+                currency.is_usd(),
+                "the CNY card must not relabel the derived USD price"
+            );
+            assert_eq!(
+                entry.cost.input,
+                Some(3.0),
+                "the curated table's rate, not the card's CNY 4.5"
+            );
+            assert!(entry.cost.output.is_some(), "the derived card is complete");
+            assert!(matches!(
+                config_call_rates("claude:api-key", "claude-sonnet-4-6", at, None),
+                ConfigCallRates::Absent
+            ));
+        });
+    }
+
     /// Config provider keys follow the same identity rules as `scope`
     /// (spec 4.2.1): a bare models.dev id also matches compatible profiles.
     #[test]
@@ -1320,12 +1412,14 @@ on_rule_expiry = "no_price"
         });
     }
 
-    /// The route/picker path refuses a card that cannot price the call even when
-    /// a *derived* layer (here the curated tables, since there is no models.dev
-    /// cache) could; the `!owns_price`/incomplete-card case is the same refusal
-    /// as `no_price`.
+    /// F4: an incomplete foreign-currency card no longer suppresses a derived
+    /// layer that can complete it. The curated table (there is no models.dev
+    /// cache here) prices the call in USD, and the card's own CNY numbers are
+    /// never reused. The card still does not *own* the price, so
+    /// `config_call_rates` reports the pair as absent and lets the derived
+    /// layers price it - the same fall-through the models.dev case always had.
     #[test]
-    fn an_incomplete_card_suppresses_the_route_estimate_even_when_a_catalog_could_price_it() {
+    fn an_incomplete_foreign_card_falls_through_to_the_derived_layer() {
         let config = r#"
 [pricing.providers.claude]
 currency = "CNY"
@@ -1337,12 +1431,53 @@ input = 4.5
             let at = SystemTime::now();
             assert!(matches!(
                 config_call_rates("claude:api-key", "claude-sonnet-4-6", at, None),
+                ConfigCallRates::Absent
+            ));
+            let estimate = crate::provider::pricing::metered_pricing_for_source_at(
+                "claude:api-key",
+                "claude-sonnet-4-6",
+                None,
+                at,
+            )
+            .expect("the curated derived table prices the call");
+            assert_eq!(
+                estimate.source,
+                jcode_provider_core::RouteCostSource::PublicApiPricing
+            );
+            assert!(
+                estimate.currency.is_usd(),
+                "the CNY card must not relabel the derived USD price"
+            );
+            assert_ne!(
+                estimate.input_price_per_mtok_micros,
+                Some(4_500_000),
+                "the user's CNY input rate must not be reused as a USD rate"
+            );
+        });
+    }
+
+    /// The CNY suppression still holds when *no* layer can price the call: a
+    /// one-sided configured card must read as "unknown", not as free or as a
+    /// $15/$60 default (spec 4.4).
+    #[test]
+    fn an_incomplete_card_with_no_layer_below_suppresses_the_route_estimate() {
+        let config = r#"
+[pricing.providers.claude]
+currency = "CNY"
+
+[pricing.providers.claude.models."claude-made-up-unknown".cost]
+input = 4.5
+"#;
+        with_pricing_env(Some(config), &[], || {
+            let at = SystemTime::now();
+            assert!(matches!(
+                config_call_rates("claude:api-key", "claude-made-up-unknown", at, None),
                 ConfigCallRates::ConfiguredWithoutPrice
             ));
             assert!(
                 crate::provider::pricing::metered_pricing_for_source_at(
                     "claude:api-key",
-                    "claude-sonnet-4-6",
+                    "claude-made-up-unknown",
                     None,
                     at,
                 )

@@ -787,3 +787,53 @@ fn a_route_skipped_rule_is_not_labelled_out_of_effect() {
         "a rule skipped for its route must not be labelled out of effect"
     );
 }
+
+/// F2: a foreign-currency inline card that cannot price the call on its own
+/// loses to the vendor-file layer, not straight to models.dev. The card's
+/// `!owns_price` result must run the same ladder an absent card does (vendor
+/// file first, then the derived chain), otherwise a file that would price the
+/// call is silently skipped and a catalog number is used instead.
+#[test]
+fn an_incomplete_foreign_card_falls_to_the_vendor_file_before_models_dev() {
+    let env = Env::new();
+    env.save_models_dev();
+    let path = env.vendor_path("prices.json", &vendor_body("deepseek-v4-pro", 5.0, 10.0));
+    // A CNY card with only `input`: it can never complete itself from USD
+    // numbers (F1), so it does not own the price.
+    env.write_config(&format!(
+        "[pricing.providers.deepseek]\n\
+         file = \"{path}\"\n\
+         currency = \"CNY\"\n\n\
+         [pricing.providers.deepseek.models.\"deepseek-v4-pro\".cost]\n\
+         input = 4.5\n"
+    ));
+
+    let at = SystemTime::now();
+    let (entry, currency) =
+        crate::model_pricing::effective_entry("deepseek", "deepseek-v4-pro", at)
+            .expect("the vendor file prices the call the inline card cannot");
+    assert_eq!(
+        entry.cost.input,
+        Some(5.0),
+        "the file's own rate must win, got {entry:?}"
+    );
+    assert_eq!(entry.cost.output, Some(10.0));
+    assert_eq!(
+        currency.as_str(),
+        "CNY",
+        "the file's own section currency follows its price"
+    );
+
+    // Without the file, the same card falls back to the derived chain
+    // (models.dev) exactly as before.
+    env.write_config(
+        "[pricing.providers.deepseek]\ncurrency = \"CNY\"\n\n\
+         [pricing.providers.deepseek.models.\"deepseek-v4-pro\".cost]\ninput = 4.5\n",
+    );
+    let (entry, currency) =
+        crate::model_pricing::effective_entry("deepseek", "deepseek-v4-pro", at)
+            .expect("models.dev prices the call when no file does");
+    assert_eq!(entry.cost.input, Some(0.66));
+    assert_eq!(entry.cost.output, Some(1.98));
+    assert!(currency.is_usd());
+}
