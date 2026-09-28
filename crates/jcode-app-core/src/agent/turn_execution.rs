@@ -25,7 +25,11 @@ impl Agent {
     /// workers see hook-emitted context (e.g. alert banners) exactly like the
     /// streaming entry point. Hook failure never blocks the turn.
     fn fire_turn_start_hook_into_reminder(&mut self) {
-        if let Some(text) = crate::hooks::run_turn_start_collecting() {
+        if let Some(text) = crate::hooks::run_turn_start_collecting(
+            Some(self.session.id.as_str()),
+            self.working_dir(),
+            "run_once",
+        ) {
             let banner = format!("[HOOK TURN_START]\n{}", text);
             self.current_turn_system_reminder = Some(match self.current_turn_system_reminder.take() {
                 Some(existing) if !existing.trim().is_empty() => {
@@ -158,7 +162,11 @@ impl Agent {
         // collected), then fold any hook stdout into this turn's system
         // reminder so hook-emitted context (e.g. alert markers) is visible to
         // the model. Hook failure never blocks the turn.
-        let hook_output = crate::hooks::run_turn_start_collecting();
+        let hook_output = crate::hooks::run_turn_start_collecting(
+            Some(self.session.id.as_str()),
+            self.working_dir(),
+            "chat",
+        );
         if let Some(text) = hook_output {
             let banner = format!("[HOOK TURN_START]\n{}", text);
             reminder = Some(match reminder {
@@ -174,7 +182,10 @@ impl Agent {
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
-        self.fire_turn_start_hook("chat");
+        // NOTE: no fire_turn_start_hook here. The collecting dispatch above is
+        // the single turn_start dispatch; the legacy stock fire-and-forget
+        // observer ran the hook a SECOND time per turn (side effects executed
+        // twice: double stamp advances, double ntfy pushes). Removed 2026-09-28.
         let result = self.run_turn_streaming_mpsc(event_tx).await;
         self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
@@ -218,26 +229,6 @@ impl Agent {
             self.begin_model_usage_turn(&input_id);
         }
         self.session.save()
-    }
-
-    /// Fire the `turn_start` observer hook when a turn begins, before the model
-    /// starts generating (and before the first `pre_tool`). This lets external
-    /// integrations (terminal multiplexers, status bars) detect that the agent
-    /// is actively working during the otherwise-invisible window between prompt
-    /// submission and the first tool call. No-op (without building the payload)
-    /// when the hook is not configured.
-    fn fire_turn_start_hook(&self, source: &str) {
-        if !crate::hooks::hook_configured("turn_start") {
-            return;
-        }
-        let mut event = crate::hooks::HookEvent::new("turn_start")
-            .session_id(self.session.id.clone())
-            .field("MODEL", self.provider_model())
-            .field("SOURCE", source.to_string());
-        if let Some(cwd) = self.working_dir() {
-            event = event.cwd(cwd);
-        }
-        crate::hooks::dispatch_observer(event);
     }
 
     /// Fire the `turn_end` observer hook with turn outcome metadata.

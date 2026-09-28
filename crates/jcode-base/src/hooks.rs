@@ -370,14 +370,25 @@ pub fn dispatch_observer(event: HookEvent) {
 /// this returns up to [`TURN_START_OUTPUT_LIMIT`] chars of stdout so the turn
 /// can surface hook output (e.g. alert markers) in its system reminder.
 /// Never fails the turn: any error yields `None`.
-pub fn run_turn_start_collecting() -> Option<String> {
+pub fn run_turn_start_collecting(
+    session_id: Option<&str>,
+    cwd: Option<&str>,
+    source: &str,
+) -> Option<String> {
     let command_lines = hook_commands("turn_start");
     if command_lines.is_empty() {
         return None;
     }
     let mut collected: Vec<String> = Vec::new();
     for command_line in command_lines {
-        let event = HookEvent::new("turn_start");
+        let mut event = HookEvent::new("turn_start")
+            .field("SOURCE", source);
+        if let Some(sid) = session_id {
+            event = event.session_id(sid);
+        }
+        if let Some(dir) = cwd {
+            event = event.cwd(dir);
+        }
         match build_hook_process(&command_line, &event) {
             Ok(mut cmd) => {
                 cmd.stdin(std::process::Stdio::null())
