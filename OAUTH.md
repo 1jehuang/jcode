@@ -118,19 +118,10 @@ Notes:
   to the version named in the error. Only a dotted numeric version is accepted;
   anything else falls back to the built-in default.
 
-### Deprecated Claude CLI transport
-The old Claude CLI shell-out path is deprecated and should only be used for
-legacy compatibility.
-
-You can still force it temporarily with:
-- `JCODE_USE_CLAUDE_CLI=1`
-- or `--provider claude-subprocess` (deprecated hidden compatibility value)
-
-These environment variables control the deprecated Claude Code CLI transport:
-- `JCODE_CLAUDE_CLI_PATH` (default: `claude`)
-- `JCODE_CLAUDE_CLI_MODEL` (default: `claude-opus-4-5-20251101`)
-- `JCODE_CLAUDE_CLI_PERMISSION_MODE` (default: `bypassPermissions`)
-- `JCODE_CLAUDE_CLI_PARTIAL` (set to `0` to disable partial streaming)
+### Removed Claude CLI transport
+The old Claude Code CLI shell-out transport has been removed. Jcode always talks
+to the Anthropic API directly. `--provider claude-subprocess` is accepted as an
+alias for `--provider claude`, and `JCODE_USE_CLAUDE_CLI` is ignored.
 
 ## OpenAI / Codex OAuth
 

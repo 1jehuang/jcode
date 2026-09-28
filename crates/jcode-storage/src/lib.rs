@@ -81,10 +81,10 @@ static SECRET_HARDEN_STATE: LazyLock<Mutex<SecretHardenState>> =
 mod active_pids;
 pub use active_pids::{
     SessionCounts, SessionPresence, StreamingGuard, active_pids_dir, active_session_ids,
-    find_active_session_id_by_pid, internal_pids_dir, mark_streaming, register_active_pid,
-    session_counts, session_is_internal, session_presence, set_session_internal,
-    streaming_pids_dir, streaming_session_ids, unmark_streaming, unregister_active_pid,
-    user_session_counts, user_session_presence,
+    find_active_session_id_by_pid, internal_pids_dir, mark_streaming, prune_active_pids_owned_by,
+    register_active_pid, session_counts, session_is_internal, session_presence,
+    set_session_internal, streaming_pids_dir, streaming_session_ids, unmark_streaming,
+    unregister_active_pid, user_session_counts, user_session_presence,
 };
 
 /// Platform-aware runtime directory for sockets and ephemeral state.

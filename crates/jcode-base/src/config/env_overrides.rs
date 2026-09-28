@@ -90,6 +90,12 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_NEW_TERMINAL_KEY") {
             self.keybindings.new_terminal = v;
         }
+        if let Ok(v) = std::env::var("JCODE_VOICE_INPUT_KEY") {
+            self.keybindings.voice_input = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_DICTATION_RECORDER") {
+            self.dictation.recorder = v;
+        }
 
         // Dictation
         if let Ok(v) = std::env::var("JCODE_DICTATION_COMMAND") {
@@ -503,6 +509,15 @@ impl Config {
         hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
         hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");
         hook_env_override(&mut self.hooks.pre_tool, "JCODE_HOOK_PRE_TOOL");
+        hook_env_override(
+            &mut self.hooks.pre_tool_transform,
+            "JCODE_HOOK_PRE_TOOL_TRANSFORM",
+        );
+        if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.hooks.pre_tool_transform_timeout_ms = parsed;
+        }
         hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
         if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
@@ -737,6 +752,11 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_WHILE_STREAMING") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.power.prevent_sleep_while_streaming = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_BLOCK_LID_CLOSE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.power.block_lid_close = parsed;
             }
         }
 

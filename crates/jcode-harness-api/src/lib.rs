@@ -28,6 +28,7 @@ mod swarm_metadata;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
+pub use jcode_applet_types;
 pub use jcode_session_types::TurnStopReason;
 pub use jcode_side_panel_types::{
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,

@@ -340,7 +340,7 @@ impl io::Write for SyncStream {
 
 pub fn is_socket_path(path: &Path) -> bool {
     let pipe_name = path_to_pipe_name(path);
-    match ClientOptions::new().open(&pipe_name) {
+    match probe_pipe(&pipe_name) {
         Ok(_) => true,
         Err(error)
             if error.raw_os_error()
@@ -357,12 +357,28 @@ pub fn is_socket_path(path: &Path) -> bool {
 
 pub fn remove_socket(path: &Path) {
     let pipe_name = path_to_pipe_name(path);
-    if ClientOptions::new().open(&pipe_name).is_ok() {
+    if probe_pipe(&pipe_name).is_ok() {
         eprintln!(
             "[windows] Named pipe {} still open, will be replaced by new server",
             pipe_name
         );
     }
+}
+
+/// Probe whether a named pipe is currently reachable, without a tokio reactor.
+///
+/// `ClientOptions::open` registers the pipe handle with the ambient tokio
+/// reactor, so it panics with "there is no reactor running" when called from a
+/// thread that has no runtime context. The two probes above are synchronous by
+/// contract and are reachable from plain `std::thread` callers, so they must
+/// not touch the tokio client API. `SyncStream::connect` already opens pipes
+/// with `std::fs`, which is the same approach.
+fn probe_pipe(pipe_name: &str) -> io::Result<()> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(pipe_name)
+        .map(|_handle| ())
 }
 
 pub fn stream_pair() -> io::Result<(Stream, Stream)> {
@@ -377,6 +393,59 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     static BUSY_PIPE_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Jcode Desktop drives the SDK from plain `std::thread`s, where tokio's
+    /// named-pipe client panics with "there is no reactor running". The two
+    /// synchronous probes must therefore stay off the tokio client API.
+    ///
+    /// The pipe has to be a real, bound one: an absent pipe makes the open fail
+    /// before tokio reaches the reactor registration, so probing a missing
+    /// endpoint would pass with or without the fix and prove nothing.
+    ///
+    /// The test itself is a `#[tokio::test]` so that `Listener::bind` has a
+    /// runtime, while the `std::thread` doing the probe deliberately has none.
+    /// That split is the situation this bug is about: the server owns a runtime,
+    /// the synchronous probes are called from plain threads that do not.
+    #[tokio::test]
+    async fn sync_pipe_probes_do_not_panic_without_a_tokio_reactor() {
+        let path = std::env::temp_dir().join(format!(
+            "jcode-plain-thread-probe-{}-{}.sock",
+            std::process::id(),
+            BUSY_PIPE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _listener = Listener::bind(&path).expect("bind named pipe");
+
+        // A second, separately bound pipe for `remove_socket`. Probing consumes
+        // the only available instance of a pipe, so reusing `path` would let the
+        // second probe return ERROR_PIPE_BUSY and never reach the code under
+        // test, which is exactly the coverage a single shared pipe left out.
+        let remove_path = std::env::temp_dir().join(format!(
+            "jcode-plain-thread-remove-{}-{}.sock",
+            std::process::id(),
+            BUSY_PIPE_TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _remove_listener = Listener::bind(&remove_path).expect("bind second named pipe");
+
+        let probe = path.clone();
+        let remove_probe = remove_path.clone();
+        let joined = std::thread::spawn(move || {
+            let reachable = is_socket_path(&probe);
+            remove_socket(&remove_probe);
+            reachable
+        })
+        .join();
+
+        assert!(
+            joined.is_ok(),
+            "probing a live pipe on a plain thread panicked: {:?}",
+            joined.err()
+        );
+        assert_eq!(
+            joined.expect("thread joined"),
+            true,
+            "a bound named pipe must be reported as a live endpoint"
+        );
+    }
 
     /// The TypeScript SDK derives this name independently, so the two must
     /// agree exactly or a Windows client dials a pipe nobody is listening on.

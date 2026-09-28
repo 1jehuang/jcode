@@ -373,26 +373,19 @@ async fn apply_auth_route_to_agent(
     }
 }
 
-fn model_switching_unavailable_current(agent: &Agent) -> Option<String> {
-    if agent.available_models_for_switching().is_empty() {
-        Some(agent.provider_model())
-    } else {
-        None
-    }
-}
-
 fn send_model_changed_result(
     id: u64,
     result: anyhow::Result<(
         String,
         String,
         Option<jcode_provider_core::ResolvedCredential>,
+        Option<String>,
     )>,
     fallback_model: String,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
-        Ok((updated, provider_name, resolved_credential)) => {
+        Ok((updated, provider_name, resolved_credential, reasoning_effort)) => {
             crate::telemetry::record_model_switch();
             crate::logging::event_info(
                 "server_model_changed",
@@ -408,6 +401,7 @@ fn send_model_changed_result(
                 provider_name: Some(provider_name),
                 error: None,
                 resolved_credential,
+                reasoning_effort,
             });
         }
         Err(error) => {
@@ -425,6 +419,7 @@ fn send_model_changed_result(
                 provider_name: None,
                 error: Some(error.to_string()),
                 resolved_credential: None,
+                reasoning_effort: None,
             });
         }
     }
@@ -444,6 +439,7 @@ fn apply_cycle_model(
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
             resolved_credential: None,
+            reasoning_effort: None,
         });
         return;
     }
@@ -477,6 +473,7 @@ fn apply_cycle_model(
                 agent.provider_model(),
                 agent.provider_name(),
                 agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
             )
         })
     };
@@ -573,25 +570,6 @@ fn apply_set_model(
         ],
     );
 
-    if let Some(current) = model_switching_unavailable_current(agent) {
-        crate::logging::event_warn(
-            "server_set_model_unavailable",
-            vec![
-                ("id", id.to_string()),
-                ("requested_model", model.clone()),
-                ("current_model", current.clone()),
-            ],
-        );
-        let _ = client_event_tx.send(ServerEvent::ModelChanged {
-            id,
-            model: current,
-            provider_name: None,
-            error: Some("Model switching is not available for this provider.".to_string()),
-            resolved_credential: None,
-        });
-        return;
-    }
-
     let current = agent.provider_model();
     let result = {
         let result = agent.set_model(&model);
@@ -603,6 +581,7 @@ fn apply_set_model(
                 agent.provider_model(),
                 agent.provider_name(),
                 agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
             )
         })
     };
@@ -627,26 +606,6 @@ fn apply_set_route(
         ],
     );
 
-    if let Some(current) = model_switching_unavailable_current(agent) {
-        crate::logging::event_warn(
-            "server_set_route_unavailable",
-            vec![
-                ("id", id.to_string()),
-                ("requested_model", selection.model.clone()),
-                ("requested_provider", selection.provider_label.clone()),
-                ("current_model", current.clone()),
-            ],
-        );
-        let _ = client_event_tx.send(ServerEvent::ModelChanged {
-            id,
-            model: current,
-            provider_name: None,
-            error: Some("Model switching is not available for this provider.".to_string()),
-            resolved_credential: None,
-        });
-        return;
-    }
-
     let current = agent.provider_model();
     let result = {
         let result = agent.set_route_selection(&selection);
@@ -658,6 +617,7 @@ fn apply_set_route(
                 agent.provider_model(),
                 agent.provider_name(),
                 agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
             )
         })
     };
@@ -1331,6 +1291,16 @@ pub(super) async fn handle_invalidate_openai_usage(
     // cannot spend another reset. Acknowledge after invalidation so a following
     // prompt cannot be rejected by the pre-reset quota cooldown.
     crate::usage::invalidate_openai_usage_reset_state(account_label.as_deref()).await;
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+pub(super) async fn handle_invalidate_anthropic_usage(
+    id: u64,
+    account_label: Option<String>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Local cache and cooldown state only, so retries cannot spend a reset.
+    crate::usage::invalidate_anthropic_usage_reset_state(account_label.as_deref());
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 

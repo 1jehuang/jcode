@@ -99,6 +99,27 @@ impl PendingOpenAiUsageReset {
         self.account_label.as_deref()
     }
 
+    /// Human-readable account identity, safe to display.
+    pub fn account_display(&self) -> &str {
+        &self.account_display
+    }
+
+    /// Review lines for graphical clients: the same facts as
+    /// [`Self::confirmation_message`] without the TUI command hints.
+    pub fn confirmation_details(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("{} banked reset(s) available", self.available_count),
+            format!("Selected: {}", self.title),
+        ];
+        if let Some(description) = &self.description {
+            lines.push(display_text(description));
+        }
+        if let Some(expiry) = &self.expires_at {
+            lines.push(format!("Selected reset expires: {}", display_text(expiry)));
+        }
+        lines
+    }
+
     pub fn confirmation_message(&self) -> String {
         let mut message = format!(
             "OpenAI account: {}\n{} banked usage reset(s) available.\nSelected: {}",
@@ -225,7 +246,15 @@ async fn decode_response<T: serde::de::DeserializeOwned>(response: reqwest::Resp
 
 /// Read banked reset availability for the active OpenAI OAuth account. Never POSTs.
 pub async fn prepare_openai_usage_reset() -> Result<Option<PendingOpenAiUsageReset>> {
-    let account_label = auth::codex::active_account_label();
+    prepare_openai_usage_reset_for_account(auth::codex::active_account_label()).await
+}
+
+/// Read banked reset availability for one OpenAI OAuth login. `None` is the
+/// default (unlabelled) login. Never POSTs, and never falls back to another
+/// account, so a confirmation always spends a reset from the named login.
+pub async fn prepare_openai_usage_reset_for_account(
+    account_label: Option<String>,
+) -> Result<Option<PendingOpenAiUsageReset>> {
     // An explicit account must never silently fall back to another login or an API key.
     let mut credentials = match account_label.as_deref() {
         Some(label) => auth::codex::load_credentials_for_account(label),

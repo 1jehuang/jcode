@@ -669,6 +669,7 @@ fn startup_history(session_id: &str) -> ServerEvent {
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        applets: Default::default(),
     }
 }
 
@@ -1221,6 +1222,73 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
         !app.pending_turn,
         "remote submissions must never park on the local-only pending_turn flag"
     );
+}
+
+#[test]
+fn remote_embedded_known_slash_commands_are_sent_as_prompt_text() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+
+    let prompt = "Explain the literal strings \"/help\", `/test`, and /tmp/shot.png.";
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: prompt.to_string(),
+            expanded: prompt.to_string(),
+            images: vec![],
+        },
+    ))
+    .expect("embedded command-looking text should use the remote prompt path");
+
+    assert!(
+        app.is_processing,
+        "remote prompt should start a remote turn"
+    );
+    assert!(
+        !app.pending_turn,
+        "remote prompts must not use local pending_turn"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| { message.role == "user" && message.content == prompt })
+    );
+}
+
+#[test]
+fn remote_multiple_known_slash_commands_use_the_local_command_boundary() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: "/help compact /test help".to_string(),
+            expanded: "/help compact /test help".to_string(),
+            images: vec![],
+        },
+    ))
+    .expect("known built-in slash commands should stay local");
+
+    let messages = app.display_messages();
+    assert_eq!(messages.len(), 2);
+    assert!(messages[0].content.contains("/compact"));
+    assert!(messages[1].content.contains("Usage: /test"));
+    assert!(!app.pending_turn);
+    assert!(!app.is_processing);
 }
 
 #[test]

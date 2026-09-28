@@ -16,6 +16,7 @@
 // Tests hold the std env/home serialization lock across awaits on purpose.
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+pub mod allocator;
 pub mod background_progress;
 pub mod translate;
 
@@ -36,6 +37,18 @@ use jcode_transport::{Listener, Stream};
 // resolve different directories (they once did, and the desktop app could not
 // connect as a result).
 pub use jcode_harness_api::{api_socket_path, legacy_socket_path};
+
+/// Frames above this size are transient (history, transcripts, file reads).
+/// Their buffers are released instead of pinning that capacity for the rest
+/// of the connection, and the allocator is asked to return the pages.
+const LARGE_FRAME_BYTES: usize = 256 * 1024;
+
+fn release_large_frame(buffer: &mut Vec<u8>) {
+    if buffer.capacity() > LARGE_FRAME_BYTES {
+        *buffer = Vec::new();
+        allocator::trim();
+    }
+}
 
 /// Probe only an old, universally supported control request on a disposable
 /// connection. Older daemons close that connection after ping, and may close
@@ -221,6 +234,8 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
             if let Err(error) = handle_api_client(stream, legacy).await {
                 eprintln!("harness API bridge: client ended: {error:#}");
             }
+            // A closed client drops its translation state and buffers.
+            allocator::trim();
         });
     }
 }
@@ -319,6 +334,7 @@ where
                 "runtime_info",
                 "api_key_provisioning",
                 "auth_changed_notification",
+                "usage_invalidation",
                 "session_archive",
                 "session_retention",
                 "session_files",
@@ -371,6 +387,7 @@ where
                 }
                 let parsed = serde_json::from_slice(&api_frame);
                 api_frame.clear();
+                release_large_frame(&mut api_frame);
                 let request: Value = match parsed {
                     Ok(value) => value,
                     Err(error) => {
@@ -390,6 +407,8 @@ where
                 let outbound = tokio::task::block_in_place(|| {
                     state.api_request_to_legacy(&request)
                 });
+                let heavy = allocator::request_is_heavy(&request);
+                drop(request);
                 for out in outbound {
                     match out {
                         translate::Outbound::Legacy(value) => {
@@ -399,6 +418,9 @@ where
                             write_json_line(&mut write_half, &frame).await?;
                         }
                     }
+                }
+                if heavy {
+                    allocator::trim();
                 }
             }
             n = read_frame_bytes(&mut legacy_reader, &mut legacy_frame) => {
@@ -415,16 +437,31 @@ where
                     continue;
                 }
                 let parsed = serde_json::from_slice(&legacy_frame);
+                let large = legacy_frame.capacity() > LARGE_FRAME_BYTES;
                 legacy_frame.clear();
                 let event: Value = match parsed {
                     Ok(value) => value,
-                    Err(_) => continue,
+                    Err(_) => {
+                        release_large_frame(&mut legacy_frame);
+                        continue;
+                    }
                 };
-                let frames = tokio::task::block_in_place(|| {
+                // Only a few replies read persisted session files. Streaming
+                // deltas are pure translation, and routing each one through
+                // block_in_place handed the worker core to a fresh blocking
+                // thread per event: a busy session grew the bridge to 69 idle
+                // threads, each pinning its own allocator arena.
+                let frames = if translate::legacy_event_may_block(&event) {
+                    tokio::task::block_in_place(|| state.legacy_event_to_api(&event))
+                } else {
                     state.legacy_event_to_api(&event)
-                });
+                };
+                drop(event);
                 for frame in frames {
                     write_json_line(&mut write_half, &frame).await?;
+                }
+                if large {
+                    release_large_frame(&mut legacy_frame);
                 }
             }
         }

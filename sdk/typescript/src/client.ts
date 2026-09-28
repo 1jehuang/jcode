@@ -21,6 +21,7 @@ import {
 } from "./structured.js";
 import {
   API_VERSION_MAJOR,
+  type AppletAction,
   type AnyApiEvent,
   type ApiEvent,
   type ApiRequest,
@@ -769,6 +770,19 @@ export class JcodeClient extends EventEmitter {
     await this.expectReply({ req: "notify_auth_changed", provider }, "ok");
   }
 
+  /**
+   * Tell the daemon a banked usage reset was redeemed for one subscription
+   * login (`claude` or `openai`) so it refetches quota. Carries no credentials.
+   */
+  async invalidateUsage(provider: string, accountLabel?: string): Promise<void> {
+    await this.expectReply(
+      accountLabel === undefined
+        ? { req: "invalidate_usage", provider }
+        : { req: "invalidate_usage", provider, account_label: accountLabel },
+      "ok",
+    );
+  }
+
   async readFile(sessionId: string, path: string, maxBytes?: number): Promise<FileContent> {
     const frame = await this.expectReply(
       { req: "read_file", session_id: sessionId, path, max_bytes: maxBytes },
@@ -849,6 +863,34 @@ export class JcodeClient extends EventEmitter {
   /** Set a session's title. Omit `title` to restore the generated one. */
   async renameSession(sessionId: string, title?: string): Promise<void> {
     await this.requestOk({ req: "rename_session", session_id: sessionId, title });
+  }
+
+  /** Bookmark or unbookmark a session. A label also becomes its title. */
+  async setSessionSaved(sessionId: string, saved: boolean, label?: string): Promise<void> {
+    await this.requestOk({ req: "set_session_saved", session_id: sessionId, saved, label });
+  }
+
+  /** Report a user action in an agent applet instance. */
+  async appletAction(
+    sessionId: string,
+    instance: string,
+    action: AppletAction,
+    state: Record<string, unknown> = {},
+    sourceKey?: string,
+  ): Promise<void> {
+    await this.requestOk({
+      req: "applet_action",
+      session_id: sessionId,
+      instance,
+      action,
+      state,
+      source_key: sourceKey,
+    });
+  }
+
+  /** Close an agent applet instance. The agent is not woken. */
+  async closeApplet(sessionId: string, instance: string): Promise<void> {
+    await this.requestOk({ req: "close_applet", session_id: sessionId, instance });
   }
 
   /** Restore the history the last `rewind` removed. */

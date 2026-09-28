@@ -196,6 +196,93 @@ fn test_ctrl_up_down_always_browses_prompt_history() {
 }
 
 #[test]
+fn test_ctrl_up_from_draft_restores_it_walking_back_down() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("newer prompt"),
+    ];
+    app.input = "draft line one\ndraft line two".to_string();
+    app.cursor_pos = "draft line".len();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "newer prompt");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "older prompt");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "newer prompt");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "draft line one\ndraft line two");
+    assert_eq!(app.cursor_pos, "draft line".len());
+
+    // The draft is handed back once; walking off the end again clears.
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    app.input = "newer prompt".to_string();
+    app.history_draft = None;
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.input.is_empty());
+}
+
+#[test]
+fn test_ctrl_up_from_draft_can_be_undone() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.input = "draft".to_string();
+    app.cursor_pos = 2;
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "previous prompt");
+
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.cursor_pos, 2);
+}
+
+#[test]
+fn test_undo_after_ctrl_up_drops_stale_history_draft() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("newer prompt"),
+    ];
+    app.input = "v1".to_string();
+    app.cursor_pos = app.input.len();
+
+    // Ctrl+Up stashes the draft; Ctrl+Z brings it back.
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "v1");
+
+    // The user keeps editing, then accepts a match through Ctrl+R.
+    app.input = "v2".to_string();
+    app.cursor_pos = app.input.len();
+    app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        .unwrap();
+    for c in "newer".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "newer prompt");
+
+    // The stale draft from before the edit must not come back.
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_ne!(app.input, "v1");
+}
+
+#[test]
 fn test_remote_empty_prompt_up_down_browses_previous_prompts() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

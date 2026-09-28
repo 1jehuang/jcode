@@ -611,6 +611,23 @@ pub fn load_new_terminal_key() -> OptionalBinding {
     }
 }
 
+/// Optional binding that starts/stops built-in voice input.
+/// Default: Ctrl+Space. Set "" to disable.
+pub fn load_voice_input_key() -> OptionalBinding {
+    let cfg = config();
+    let raw = cfg.keybindings.voice_input.trim();
+    if raw.is_empty() || is_disabled(raw) {
+        return OptionalBinding::default();
+    }
+    match parse_keybinding(raw) {
+        Some(binding) => OptionalBinding {
+            label: Some(format_binding(&binding)),
+            binding: Some(binding),
+        },
+        None => OptionalBinding::default(),
+    }
+}
+
 /// Optional binding that opens the `/resume` session picker.
 /// Default: Cmd+B on macOS, Alt+R elsewhere. Set "" to disable.
 pub fn load_open_resume_key() -> OptionalBinding {
@@ -653,7 +670,13 @@ mod tests {
         assert!(binding.matches(KeyCode::Enter, KeyModifiers::ALT));
         assert!(!binding.matches(KeyCode::Enter, KeyModifiers::empty()));
         assert!(!binding.matches(KeyCode::Enter, KeyModifiers::SHIFT));
-        assert_eq!(format_binding(&binding), "Alt+Enter");
+        // format_binding renders the platform Alt label (Option symbol on
+        // macOS, "Alt" elsewhere), so compare against alt_chord instead of a
+        // hardcoded "Alt+Enter" that fails on macOS builds.
+        assert_eq!(
+            format_binding(&binding),
+            jcode_tui_core::keybind::alt_chord("Enter")
+        );
     }
 
     #[test]

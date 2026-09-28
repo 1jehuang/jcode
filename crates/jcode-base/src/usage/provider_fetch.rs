@@ -46,8 +46,32 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token, cache_key).await {
-        Ok(data) => provider_report_from_usage_data(display_name, &data),
+    match fetch_anthropic_usage_data(access_token.clone(), cache_key).await {
+        Ok(data) => {
+            let mut report = provider_report_from_usage_data(display_name, &data);
+            // Availability can be inspected before reaching the five-hour wall.
+            // Looking it up is read-only and does not imply a reset can be spent.
+            if report.error.is_none() {
+                // External Claude Code logins report as "default" but are not
+                // stored accounts. Pin those to the default scope instead.
+                let stored = auth::claude::list_accounts()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|account| account.label == account_label);
+                let (offer, ineligible) = super::anthropic_reset::fetch_limit_reset_offer(
+                    &access_token,
+                    stored.then_some(account_label.as_str()),
+                )
+                .await;
+                report.anthropic_limit_reset = offer;
+                if ineligible {
+                    report
+                        .extra_info
+                        .push(("Session resets".into(), "Not eligible".into()));
+                }
+            }
+            report
+        }
         Err(e) => ProviderUsage {
             provider_name: display_name,
             error: Some(e.to_string()),
@@ -286,6 +310,7 @@ pub(super) async fn fetch_openai_usage_for_account(
                 ordinary_usage_allowed: parsed.ordinary_usage_allowed,
             }
         }),
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     };
@@ -396,6 +421,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -494,6 +520,7 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -535,6 +562,7 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
         extra_info: vec![("Key status".to_string(), status)],
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -598,6 +626,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -720,7 +749,76 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
+}
+
+/// Jcode subscription: included daily feature allowances plus an upgrade hint
+/// when an allowance is running low, so users see the limit before a feature
+/// stops working rather than after.
+pub(super) async fn fetch_jcode_usage_report() -> Option<ProviderUsage> {
+    match crate::subscription_api::fetch_subscription_me().await {
+        Ok(me) => Some(jcode_usage_report(&me)),
+        Err(error) => Some(ProviderUsage {
+            provider_name: "Jcode subscription".to_string(),
+            error: Some(format!("{error:#}")),
+            ..Default::default()
+        }),
+    }
+}
+
+/// Share of a daily allowance at which Jcode starts suggesting an upgrade.
+pub(crate) const JCODE_UPGRADE_HINT_PERCENT: f32 = 80.0;
+
+pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -> ProviderUsage {
+    let mut limits = Vec::new();
+    let mut extra_info = vec![(
+        "Plan".to_string(),
+        crate::subscription_catalog::JcodeTier::parse(&me.tier)
+            .map(|tier| tier.display_name().to_string())
+            .unwrap_or_else(|| me.tier.clone()),
+    )];
+    let mut hard_limit_reached = false;
+    if let Some(jev) = &me.jev_usage {
+        let mut worst = 0.0f32;
+        for (label, feature) in [
+            ("Memory recall (daily)", &jev.memory),
+            ("Browser automation (daily)", &jev.browser),
+        ] {
+            if feature.limit == 0 {
+                continue;
+            }
+            let percent = usage_percent_from_used_limit(feature.used as f64, feature.limit as f64);
+            worst = worst.max(percent);
+            hard_limit_reached |= feature.used >= feature.limit;
+            limits.push(UsageLimit {
+                name: label.to_string(),
+                usage_percent: percent,
+                resets_at: jev.resets_at.clone(),
+            });
+        }
+        let upgrade_link = jev.upgrade_url.as_deref().filter(|url| {
+            url.starts_with("https://jcode.sh/") || url.starts_with("https://www.jcode.sh/")
+        });
+        if worst >= JCODE_UPGRADE_HINT_PERCENT
+            && let (Some(tier), Some(url)) = (jev.upgrade_tier.as_deref(), upgrade_link)
+        {
+            let name = crate::subscription_catalog::JcodeTier::parse(tier)
+                .map(|tier| tier.display_name().to_string())
+                .unwrap_or_else(|| tier.to_string());
+            extra_info.push((
+                "Upgrade".to_string(),
+                format!("{name} raises daily limits: {url}"),
+            ));
+        }
+    }
+    ProviderUsage {
+        provider_name: "Jcode subscription".to_string(),
+        limits,
+        extra_info,
+        hard_limit_reached,
+        ..Default::default()
+    }
 }

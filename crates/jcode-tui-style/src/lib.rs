@@ -13,6 +13,12 @@ pub use theme_mode::{
     is_light_theme, set_theme_mode, theme_mode,
 };
 
+/// The active palette and theme mode are process-global. One lock serializes
+/// every test that reads or mutates them, wherever the test lives (palette and
+/// theme-mode tests used to carry separate locks and could interleave).
+#[cfg(test)]
+pub(crate) static STYLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Restore the terminal, logging any failure instead of printing it.
 ///
 /// `ratatui::restore()` reports failures with `eprintln!`. On a dead terminal

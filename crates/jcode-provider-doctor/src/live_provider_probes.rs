@@ -1058,6 +1058,7 @@ pub async fn run_live_claude_native_tool_smoke(
             "required": ["file_path"],
             "additionalProperties": false
         }),
+        defer_loading: false,
     }];
     let system = "You are a live provider tool smoke test. When asked to read a file, you MUST \
                   call the read tool with the given path. Do not answer in text first.";
@@ -1688,6 +1689,7 @@ pub async fn run_live_native_provider_tool_smoke(
             "required": ["file_path"],
             "additionalProperties": false
         }),
+        defer_loading: false,
     }];
     let system = "You are a live provider tool smoke test. When asked to read a file, you MUST \
                   call the read tool with the given path. Do not answer in text first.";

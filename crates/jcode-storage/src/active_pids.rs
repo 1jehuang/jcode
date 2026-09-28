@@ -74,6 +74,53 @@ pub fn unregister_active_pid(session_id: &str) {
     set_session_internal(session_id, false);
 }
 
+/// Remove every active-PID marker owned by `pid`, returning
+/// `(removed, failed)`.
+///
+/// Used at server startup after an exec-based reload. `exec` preserves the
+/// daemon PID, so markers written by the previous process image still look live
+/// to [`session_presence`]'s liveness check, yet the fresh image owns no
+/// sessions until clients reconnect and re-register via `mark_active`. Reaping
+/// them here keeps presence counts honest. Crash-restart is unaffected: a
+/// genuinely new process has a different PID, so its markers are left for crash
+/// recovery.
+///
+/// `failed` is non-zero when a marker could not be unlinked.
+pub fn prune_active_pids_owned_by(pid: u32) -> (usize, usize) {
+    let Some(dir) = active_pids_dir() else {
+        return (0, 0);
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return (0, 0);
+    };
+
+    let owned: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok())
+                == Some(pid)
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+
+    let mut removed = 0;
+    let mut failed = 0;
+    for session_id in &owned {
+        unregister_active_pid(session_id);
+        // `unregister_active_pid` discards filesystem errors, so confirm the
+        // marker is actually gone. A failed unlink leaves it live; count it as
+        // failed rather than reporting a prune that did not happen.
+        if dir.join(session_id).exists() {
+            failed += 1;
+        } else {
+            removed += 1;
+        }
+    }
+    (removed, failed)
+}
+
 /// Mark a session as actively streaming a model response.
 pub fn mark_streaming(session_id: &str) {
     if let Some(dir) = streaming_pids_dir() {
@@ -428,6 +475,76 @@ mod tests {
         set_session_internal("session_worker", true);
         unregister_active_pid("session_worker");
         assert!(!session_is_internal("session_worker"));
+
+        jcode_core::env::remove_var("JCODE_HOME");
+    }
+
+    /// Regression for stale markers left by an exec-based reload: markers that
+    /// claim our own PID are reaped, others are left for crash recovery, and
+    /// companion streaming/internal markers go with the pruned session.
+    #[test]
+    fn prune_active_pids_owned_by_removes_only_that_pid_and_companions() {
+        let _guard = lock_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let me = std::process::id();
+        let other = 999_999u32;
+        register_active_pid("session_mine", me);
+        register_active_pid("session_theirs", other);
+        mark_streaming("session_mine");
+        set_session_internal("session_mine", true);
+
+        assert_eq!(
+            prune_active_pids_owned_by(me),
+            (1, 0),
+            "only our own marker"
+        );
+        let ids = active_session_ids();
+        assert!(!ids.contains(&"session_mine".to_string()));
+        assert!(ids.contains(&"session_theirs".to_string()));
+
+        // Pruning a session clears its companion markers too.
+        assert!(!session_is_internal("session_mine"));
+        if let Some(dir) = streaming_pids_dir() {
+            assert!(!dir.join("session_mine").exists());
+        }
+
+        // Idempotent: nothing left to prune on a second pass.
+        assert_eq!(prune_active_pids_owned_by(me), (0, 0));
+
+        jcode_core::env::remove_var("JCODE_HOME");
+    }
+
+    /// A marker that cannot be unlinked must not be reported as pruned, since
+    /// `unregister_active_pid` swallows filesystem errors.
+    #[cfg(unix)]
+    #[test]
+    fn prune_counts_only_successful_deletions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_env();
+        // Root ignores the directory write bit, so unlink would succeed anyway.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let me = std::process::id();
+        register_active_pid("session_mine", me);
+
+        let dir = active_pids_dir().expect("active_pids dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make markers undeletable");
+
+        // A failed unlink is reported as failed, not as a prune.
+        assert_eq!(prune_active_pids_owned_by(me), (0, 1));
+        assert!(active_session_ids().contains(&"session_mine".to_string()));
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore write access");
+        assert_eq!(prune_active_pids_owned_by(me), (1, 0));
 
         jcode_core::env::remove_var("JCODE_HOME");
     }

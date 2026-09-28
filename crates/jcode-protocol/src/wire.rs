@@ -255,6 +255,29 @@ pub enum Request {
         message: String,
     },
 
+    /// The user pressed something in an agent-mounted applet instance. The
+    /// server stores `state`, then wakes the agent (or resolves a waiting
+    /// `applet` tool call).
+    #[serde(rename = "applet_action")]
+    AppletAction {
+        id: u64,
+        session_id: String,
+        instance: String,
+        action: jcode_applet_types::Action,
+        #[serde(default)]
+        state: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_key: Option<String>,
+    },
+
+    /// The user closed an agent-mounted applet instance. No agent wake.
+    #[serde(rename = "close_applet")]
+    CloseApplet {
+        id: u64,
+        session_id: String,
+        instance: String,
+    },
+
     /// Inject externally transcribed text into a live TUI session.
     #[serde(rename = "transcript")]
     Transcript {
@@ -432,6 +455,15 @@ pub enum Request {
         account_label: Option<String>,
     },
 
+    /// Invalidate daemon-local usage and quota cooldown state after a Claude
+    /// session-limit reset. Like the OpenAI variant it never claims a reset.
+    /// `None` pins the default account scope.
+    #[serde(rename = "invalidate_anthropic_usage")]
+    InvalidateAnthropicUsage {
+        id: u64,
+        account_label: Option<String>,
+    },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {
@@ -511,6 +543,26 @@ pub enum Request {
         /// message bodies collapsed to this with an expand control.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tldr: Option<String>,
+        /// Cross-swarm target: a swarm label or swarm id other than the
+        /// sender's own. When set, the message is a cross-swarm DM delivered
+        /// to `to_session` inside that swarm, or to its coordinator when
+        /// `to_session` is omitted. Channels and broadcasts never cross swarms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_swarm: Option<String>,
+    },
+
+    /// List every live swarm (id, label, coordinator, member count) so agents
+    /// can discover cross-swarm DM targets.
+    #[serde(rename = "comm_list_swarms")]
+    CommListSwarms { id: u64, session_id: String },
+
+    /// Set (or clear, with an empty label) the human-readable label of the
+    /// caller's swarm. Labels are unique across swarms.
+    #[serde(rename = "comm_set_swarm_label")]
+    CommSetSwarmLabel {
+        id: u64,
+        session_id: String,
+        label: String,
     },
 
     /// List agents and their activity
@@ -959,6 +1011,24 @@ pub enum ServerEvent {
         ephemeral_message_count: usize,
     },
 
+    /// Daemon-classified KV (prompt) cache miss for the request that just
+    /// completed. Emitted after `tokens`. `reason` is a stable snake_case id
+    /// (e.g. `prefix_changed`, `tools_changed`, `expired`, `model_switch`).
+    #[serde(rename = "kv_cache_miss")]
+    KvCacheMiss {
+        reason: String,
+        /// True when the harness itself changed the cached prefix.
+        harness_caused: bool,
+        missed_tokens: u64,
+        expected_tokens: u64,
+        read_tokens: u64,
+        /// Documented intentional invalidation that explains the miss.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        documented_cause: Option<String>,
+        /// Ready-to-display one-line summary.
+        message: String,
+    },
+
     /// Active transport/connection type for the current stream
     #[serde(rename = "connection_type")]
     ConnectionType { connection: String },
@@ -1297,6 +1367,9 @@ pub enum ServerEvent {
         /// Session-scoped side panel pages and active focus state
         #[serde(default, skip_serializing_if = "snapshot_is_empty")]
         side_panel: SidePanelSnapshot,
+        /// Session-scoped agent applet instances.
+        #[serde(default, skip_serializing_if = "applets_is_empty")]
+        applets: jcode_applet_types::AgentApplets,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).
@@ -1317,6 +1390,13 @@ pub enum ServerEvent {
     /// Side panel state changed for the active session
     #[serde(rename = "side_panel_state")]
     SidePanelState { snapshot: SidePanelSnapshot },
+
+    /// Agent applet instances changed for the active session (full snapshot).
+    #[serde(rename = "applet_state")]
+    AppletState {
+        session_id: String,
+        snapshot: jcode_applet_types::AgentApplets,
+    },
 
     /// Server is reloading (clients should reconnect)
     #[serde(rename = "reloading")]
@@ -1354,6 +1434,12 @@ pub enum ServerEvent {
         /// key). Lets clients update the auth badge on an OAuth<->API switch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+        /// Effort the switched-to model runs with. A switch can clear an
+        /// effort the new model does not advertise, so clients must not keep
+        /// showing the old one. Always serialized (`null` = no effort) so a
+        /// client can tell "cleared" from an older server that omits it.
+        #[serde(default)]
+        reasoning_effort: Option<String>,
     },
 
     /// Reasoning effort changed (response to set_reasoning_effort)
@@ -1446,6 +1532,10 @@ pub enum ServerEvent {
     /// Response to comm_list request
     #[serde(rename = "comm_members")]
     CommMembers { id: u64, members: Vec<AgentInfo> },
+
+    /// Response to comm_list_swarms and comm_set_swarm_label requests
+    #[serde(rename = "comm_swarms")]
+    CommSwarms { id: u64, swarms: Vec<SwarmInfo> },
 
     /// Response to comm_list_channels request
     #[serde(rename = "comm_channels")]

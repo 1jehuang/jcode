@@ -556,7 +556,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         pending_prompt_image_indices.push(images.len() - 1);
                     }
                 }
-                ContentBlock::OpenAICompaction { .. } => {}
+                ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
             }
         }
 

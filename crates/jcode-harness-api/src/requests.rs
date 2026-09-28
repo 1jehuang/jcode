@@ -182,6 +182,16 @@ pub enum ApiRequest {
     /// No tokens or callback input travel in this request.
     NotifyAuthChanged { provider: String },
 
+    /// Drop the daemon's cached quota and quota cooldown for one subscription
+    /// login after the client redeemed a banked usage reset out of band.
+    /// `provider` is `claude` or `openai`. `account_label: None` is the default
+    /// login. This never redeems a reset and carries no credentials.
+    InvalidateUsage {
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
+    },
+
     /// Read one UTF-8 file under the session working directory.
     ReadFile {
         session_id: String,
@@ -235,6 +245,33 @@ pub enum ApiRequest {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+    },
+
+    /// Bookmark (`saved: true`) or unbookmark a session. A non-empty `label`
+    /// also becomes the session's title, announced with `SessionRenamed`.
+    SetSessionSaved {
+        session_id: String,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
+    /// The user pressed something in an agent applet instance. The server
+    /// stores `state` into the instance, then delivers the action to the agent.
+    AppletAction {
+        session_id: String,
+        instance: String,
+        action: jcode_applet_types::Action,
+        #[serde(default)]
+        state: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_key: Option<String>,
+    },
+
+    /// The user closed an agent applet instance. The agent is not woken.
+    CloseApplet {
+        session_id: String,
+        instance: String,
     },
 
     /// Restore the history that the last `Rewind` removed.

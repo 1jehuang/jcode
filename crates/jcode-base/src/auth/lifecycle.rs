@@ -228,7 +228,19 @@ pub fn provider_model_to_select_after_auth_with_configured_default(
     let configured_model = configured_model
         .map(str::trim)
         .filter(|model| !model.is_empty());
-    if let Some(configured) = configured_model
+    // `config.provider.default_model` is persisted by the model picker as a
+    // full model spec that may carry an explicit provider/credential prefix
+    // (e.g. `claude-oauth:claude-sonnet-5`, issue: default model reverts to
+    // Opus after /login or /refresh-model-list). `route.model` is always the
+    // bare id, so compare against the prefix-stripped form or this branch
+    // never matches and silently falls through to the flagship-first
+    // fallback below.
+    let configured_bare = configured_model.map(|model| {
+        jcode_provider_core::selection::explicit_model_provider_prefix(model)
+            .map(|(_, _, bare)| bare)
+            .unwrap_or(model)
+    });
+    if let Some(configured) = configured_bare
         && routes.iter().any(|route| {
             route.available
                 && route.model == configured
@@ -1948,6 +1960,43 @@ mod tests {
     }
 
     #[test]
+    fn post_auth_model_selection_preserves_provider_prefixed_configured_default() {
+        // Regression: config.provider.default_model is persisted by the model
+        // picker as a full spec with an explicit provider prefix (e.g.
+        // `claude-oauth:claude-sonnet-5`). Comparing that raw string against
+        // route.model (always bare) must not silently miss and fall through
+        // to the flagship-first pick (Opus) on every /login or
+        // /refresh-model-list.
+        let activation = AuthActivationResult {
+            provider_id: Some("claude".to_string()),
+            provider_label: Some("Anthropic".to_string()),
+            activated_model: None,
+            expected_runtime: None,
+            expected_catalog_namespace: None,
+        };
+        let routes = vec![
+            route(
+                jcode_provider_core::DEFAULT_CLAUDE_MODEL,
+                "Anthropic",
+                "claude-oauth",
+                true,
+            ),
+            route("claude-sonnet-5", "Anthropic", "claude-oauth", true),
+        ];
+
+        assert_eq!(
+            provider_model_to_select_after_auth_with_configured_default(
+                &activation,
+                Some("claude-oauth:claude-sonnet-5"),
+                Some(jcode_provider_core::DEFAULT_CLAUDE_MODEL),
+                &routes,
+            )
+            .as_deref(),
+            Some("claude-sonnet-5")
+        );
+    }
+
+    #[test]
     fn post_auth_model_selection_prefers_claude_oauth_flagship() {
         let activation = AuthActivationResult {
             provider_id: Some("claude".to_string()),
@@ -2133,6 +2182,7 @@ mod tests {
                     context_length: None,
                     pricing: Default::default(),
                     created: Some(1_700_000_000),
+                    ..Default::default()
                 },
                 jcode_provider_openrouter::ModelInfo {
                     id: "qwen-3-235b-a22b-instruct-2507".to_string(),
@@ -2140,6 +2190,7 @@ mod tests {
                     context_length: None,
                     pricing: Default::default(),
                     created: Some(1_800_000_000),
+                    ..Default::default()
                 },
             ],
             Some("https://api.cerebras.ai/v1"),

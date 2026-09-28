@@ -77,7 +77,35 @@ pub(crate) fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
         }),
         pricing: parse_model_pricing(object.get("pricing")),
         created: object.get("created").and_then(value_as_u64),
+        input: parse_input_modalities(object),
     })
+}
+
+/// Read the modalities a catalog entry declares for its input.
+///
+/// OpenRouter nests them under `architecture.input_modalities`; other
+/// gateways that speak `/v1/models` use a flat `input_modalities` or `input`
+/// key. Anything else yields an empty list, which callers treat as "not
+/// declared" so a missing field never becomes a capability claim.
+pub(crate) fn parse_input_modalities(object: &serde_json::Map<String, Value>) -> Vec<String> {
+    let declared = object
+        .get("architecture")
+        .and_then(Value::as_object)
+        .and_then(|architecture| architecture.get("input_modalities"))
+        .or_else(|| object.get("input_modalities"))
+        .or_else(|| object.get("input"));
+
+    let Some(Value::Array(items)) = declared else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|modality| !modality.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 pub(crate) fn first_u64_field(

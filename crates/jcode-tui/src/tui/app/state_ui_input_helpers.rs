@@ -138,6 +138,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/refactor", "Run a safe refactor loop"),
     RegisteredCommand::public("/compact", "Compact context"),
     RegisteredCommand::public("/fix", "Recover when the model cannot continue"),
+    RegisteredCommand::public("/voice", "Voice input: speak, then send (Ctrl+Space)"),
     RegisteredCommand::public("/dictate", "Run configured external dictation command"),
     RegisteredCommand::public("/dictation", "Alias for /dictate"),
     RegisteredCommand::public("/memory", "Toggle memory feature"),
@@ -241,6 +242,10 @@ pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str
         .iter()
         .filter(|command| !command.hidden)
         .map(|command| (command.name, command.help))
+}
+
+pub(crate) fn registered_command_names() -> impl Iterator<Item = &'static str> {
+    REGISTERED_COMMANDS.iter().map(|command| command.name)
 }
 
 impl App {
@@ -513,6 +518,13 @@ impl App {
 
     /// Get command suggestions based on current input (or base input for cycling)
     pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
+        let cursor = if input == self.input {
+            self.cursor_pos.min(input.len())
+        } else {
+            input.len()
+        };
+        let input = super::slash_command_parser::active_token_before_cursor(input, cursor)
+            .map_or(input, |(start, end)| &input[start..end]);
         let input = input.trim_start();
 
         if crate::tui::is_ssh_remote() {
@@ -1575,6 +1587,13 @@ impl App {
 
     /// Autocomplete current input - cycles through suggestions on repeated Tab
     pub fn autocomplete(&mut self) -> bool {
+        if let Some(range) =
+            super::slash_command_parser::active_token_before_cursor(&self.input, self.cursor_pos)
+        {
+            let suggestions = self.get_suggestions_for(&self.input);
+            return self.autocomplete_active_slash_token(range, suggestions);
+        }
+
         // Get suggestions for current input
         let current_suggestions = self.get_suggestions_for(&self.input);
 
@@ -1634,6 +1653,67 @@ impl App {
         true
     }
 
+    fn autocomplete_active_slash_token(
+        &mut self,
+        range: (usize, usize),
+        current_suggestions: Vec<(String, &'static str)>,
+    ) -> bool {
+        let current_token = self.input[range.0..range.1].to_string();
+
+        if let Some((ref base, idx)) = self.tab_completion_state.clone()
+            && super::slash_command_parser::active_token_before_cursor(base, base.len()).is_some()
+        {
+            let base_suggestions = self.get_suggestions_for(base);
+            if base_suggestions.len() > 1
+                && base_suggestions
+                    .iter()
+                    .any(|(command, _)| command == &current_token)
+            {
+                let next_index = (idx + 1) % base_suggestions.len();
+                let (command, _) = &base_suggestions[next_index];
+                self.remember_input_undo_state();
+                self.input.replace_range(range.0..range.1, command.as_str());
+                self.cursor_pos = range.0 + command.len();
+                self.tab_completion_state = Some((base.clone(), next_index));
+                return true;
+            }
+        }
+
+        if current_suggestions.is_empty() {
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        if current_suggestions.len() == 1 && current_suggestions[0].0 == current_token {
+            if Self::command_accepts_args(&current_token) {
+                self.remember_input_undo_state();
+                self.input
+                    .replace_range(range.0..range.1, &format!("{} ", current_token));
+                self.cursor_pos = range.1 + 1;
+                return true;
+            }
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        let selected = self
+            .command_suggestion_selected
+            .min(current_suggestions.len().saturating_sub(1));
+        let (command, _) = &current_suggestions[selected];
+        let base = self.input.clone();
+        let mut replacement = command.clone();
+        if current_suggestions.len() == 1 && Self::command_accepts_args(command) {
+            replacement.push(' ');
+        }
+        self.remember_input_undo_state();
+        self.input
+            .replace_range(range.0..range.1, replacement.as_str());
+        self.cursor_pos = range.0 + replacement.len();
+        self.tab_completion_state = Some((base, selected));
+        self.command_suggestion_selected = 0;
+        true
+    }
+
     /// Reset tab completion state (call when user types/modifies input)
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
@@ -1653,10 +1733,14 @@ impl App {
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+            // The composer now holds a restored draft, so the copy stashed by a
+            // history jump is stale: a later Down must not resurrect it.
+            self.history_draft = None;
             self.input = input;
             self.cursor_pos = cursor_pos.min(self.input.len());
             self.reset_tab_completion();

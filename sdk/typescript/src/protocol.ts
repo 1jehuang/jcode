@@ -176,6 +176,7 @@ export type ApiRequest =
   | { req: "get_runtime_info"; session_id: string }
   | { req: "set_api_key"; provider: string; api_key: string }
   | { req: "notify_auth_changed"; provider: string }
+  | { req: "invalidate_usage"; provider: string; account_label?: string }
   | { req: "clear_api_key"; provider: string }
   | { req: "read_file"; session_id: string; path: string; max_bytes?: number }
   | { req: "find_files"; session_id: string; query: string; limit?: number }
@@ -185,6 +186,16 @@ export type ApiRequest =
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "compact"; session_id: string }
   | { req: "rename_session"; session_id: string; title?: string }
+  | { req: "set_session_saved"; session_id: string; saved: boolean; label?: string }
+  | {
+      req: "applet_action";
+      session_id: string;
+      instance: string;
+      action: AppletAction;
+      state?: Record<string, unknown>;
+      source_key?: string;
+    }
+  | { req: "close_applet"; session_id: string; instance: string }
   | { req: "rewind_undo"; session_id: string }
   | { req: "cancel_soft_interrupts"; session_id: string }
   | { req: "ping" };
@@ -203,6 +214,33 @@ export interface SidePanelPage {
   pdf_data?: string;
   updated_at_ms: number;
 }
+/** A user intent from an applet node (`jcode.applet/1`). */
+export interface AppletAction {
+  action: string;
+  args?: unknown;
+}
+
+/** One mounted applet instance. `document` follows the `jcode.applet/1` schema. */
+export interface AppletInstance {
+  id: string;
+  applet: string;
+  placement: { kind: string; [key: string]: unknown };
+  scope?: { kind: string; [key: string]: unknown };
+  lifetime?: "ephemeral" | "session" | "persistent";
+  document: {
+    revision: number;
+    title: string;
+    view: { type: string; [key: string]: unknown };
+    state?: Record<string, unknown>;
+    assets?: unknown[];
+  };
+}
+
+/** All agent-mounted applet instances for one session, in mount order. */
+export interface AgentApplets {
+  instances: AppletInstance[];
+}
+
 export interface SidePanelSnapshot {
   /** Monotonic explicit-focus intent. Absent on older servers. */
   focus_revision?: number;
@@ -239,6 +277,7 @@ export type ApiEvent =
       error?: string;
     }
   | { ev: "side_panel_state"; session_id: string; snapshot: SidePanelSnapshot }
+  | { ev: "applet_state"; session_id: string; snapshot: AgentApplets }
   | { ev: "side_pane_images"; session_id: string; images: RenderedImage[] }
   | {
       ev: "token_usage";
@@ -247,6 +286,17 @@ export type ApiEvent =
       output: number;
       cache_read_input?: number;
       cache_creation_input?: number;
+    }
+  | {
+      ev: "kv_cache_miss";
+      session_id: string;
+      reason: string;
+      harness_caused: boolean;
+      missed_tokens: number;
+      expected_tokens: number;
+      read_tokens: number;
+      documented_cause?: string;
+      message: string;
     }
   | { ev: "turn_stopped"; session_id: string; reason: TurnStopReason; message: string; provider_stop_reason?: string }
   | { ev: "turn_done"; session_id: string }
@@ -283,6 +333,7 @@ export type ApiEvent =
       provider?: string;
       model?: string;
       reasoning_effort?: string;
+      auth_method?: string;
     }
   | { ev: "models"; session_id: string; models: string[]; current?: string }
   | {
@@ -291,6 +342,7 @@ export type ApiEvent =
       provider?: string;
       model?: string;
       reasoning_effort?: string;
+      auth_method?: string;
       routes: ModelRouteInfo[];
     }
   | { ev: "credential_updated"; provider: string; configured: boolean }
@@ -362,6 +414,7 @@ export const KNOWN_EVENT_KINDS = [
   "history",
   "side_pane_images",
   "side_panel_state",
+  "applet_state",
   "pong",
   "text_delta",
   "text_done",
@@ -375,6 +428,7 @@ export const KNOWN_EVENT_KINDS = [
   "tool_exec",
   "tool_done",
   "token_usage",
+  "kv_cache_miss",
   "turn_done",
   "turn_stopped",
   "wake_requested",
@@ -423,6 +477,7 @@ export const KNOWN_REQUEST_KINDS = [
   "set_api_key",
   "clear_api_key",
   "notify_auth_changed",
+  "invalidate_usage",
   "read_file",
   "find_files",
   "search_text",
@@ -431,6 +486,9 @@ export const KNOWN_REQUEST_KINDS = [
   "set_reasoning_effort",
   "compact",
   "rename_session",
+  "set_session_saved",
+  "applet_action",
+  "close_applet",
   "rewind_undo",
   "cancel_soft_interrupts",
   "ping",
