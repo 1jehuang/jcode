@@ -651,7 +651,7 @@ test("health endpoint reports database size vs soft limit", async () => {
   assert.equal(response.status, 200);
   assert.equal(json.ok, true);
   assert.equal(json.db_size_bytes, 12345678);
-  assert.equal(json.db_soft_limit_bytes, 4_500_000_000);
+  assert.equal(json.db_soft_limit_bytes, 8_000_000_000);
   assert.equal(json.over_soft_limit, false);
 });
 
@@ -669,7 +669,7 @@ test("paid-plan database size below the budget guardrail is healthy", async () =
 });
 
 test("database size above the paid-plan budget guardrail is reported", async () => {
-  const db = makeDb({ sizeAfter: 4_600_000_000 });
+  const db = makeDb({ sizeAfter: 8_100_000_000 });
   const response = await worker.fetch(
     new Request(HEALTH_URL, { method: "GET" }),
     { DB: db },
@@ -677,7 +677,7 @@ test("database size above the paid-plan budget guardrail is reported", async () 
   );
   const json = await response.json();
 
-  assert.equal(json.db_size_bytes, 4_600_000_000);
+  assert.equal(json.db_size_bytes, 8_100_000_000);
   assert.equal(json.over_soft_limit, true);
 });
 

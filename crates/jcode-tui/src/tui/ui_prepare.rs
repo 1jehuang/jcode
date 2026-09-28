@@ -368,6 +368,14 @@ fn push_user_prompt_lines(
 ) {
     let prefix_width = unicode_width::UnicodeWidthStr::width(prompt_num.to_string().as_str())
         + unicode_width::UnicodeWidthStr::width("› ");
+    // Voice prompts carry <transcription> tags for the model. Show the spoken
+    // words with a mic marker instead, like Jcode Desktop.
+    let (visible, transcribed) = jcode_session_types::strip_transcription(content);
+    let content: &str = if transcribed {
+        &format!("🎙 {visible}")
+    } else {
+        content
+    };
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     for (line_idx, content_line) in normalized.split('\n').enumerate() {
         let raw_line = raw_plain_lines.len();
@@ -739,7 +747,8 @@ pub(super) fn prepare_messages(
 /// so the same value can be re-applied above the header once messages exist,
 /// keeping the header from jumping when the first prompt is sent.
 fn initial_header_pad_top(height: u16, header_lines: usize) -> usize {
-    let input_reserve = 4;
+    // Input chrome plus the always-pinned session status line below it.
+    let input_reserve = 5;
     let available = (height as usize).saturating_sub(input_reserve);
     available.saturating_sub(header_lines) / 2
 }

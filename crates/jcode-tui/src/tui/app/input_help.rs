@@ -130,6 +130,9 @@ impl App {
             "overnight" => {
                 "/overnight <hours>[h|m] [mission]\nStart one overnight coordinator with a target wake/report time. The coordinator prioritizes verifiable, low-risk work, maintains structured logs, updates review notes, and generates a review HTML page.\n\n/overnight status\nShow the latest overnight run status.\n\n/overnight log\nShow recent overnight events.\n\n/overnight review\nOpen the generated review page.\n\n/overnight cancel\nRequest cancellation after the current coordinator turn reaches a safe boundary."
             }
+            "voice" => {
+                "/voice\nBuilt-in voice input, like Jcode Desktop. Run /voice or press Ctrl+Space to start recording, press again to send. On terminals that report key releases, hold Ctrl+Space and let go to send. Esc cancels.\n\nThe live transcript and a level meter show in the status line. The final text is sent to the agent wrapped in <transcription> tags, and anything already typed in the composer stays there.\n\nSetup:\n  Nari API key  NARI_API_KEY or ~/.config/jcode/nari.env\n  microphone    auto-detects pw-record, parecord, arecord, rec, or ffmpeg\n\nConfigure in ~/.jcode/config.toml:\n  [keybindings] voice_input = \"ctrl+space\"\n  [dictation]   recorder = \"<command printing raw s16le mono 16 kHz>\"\n                vocabulary = [\"names\", \"terms\"]"
+            }
             "dictate" | "dictation" => {
                 "/dictate\nRun the configured external speech-to-text command and inject the transcript into jcode.\n\nConfigure [dictation] in ~/.jcode/config.toml:\n  command       shell command that prints transcript to stdout,\n                for example ~/.local/bin/my-whisper-script --grammar-target code\n  mode          insert|append|replace|send\n  key           optional hotkey (for example alt+;)\n  timeout_secs  max wait time"
             }

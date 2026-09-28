@@ -999,6 +999,7 @@ impl JcodeClient {
                 provider,
                 model,
                 reasoning_effort,
+                auth_method,
                 routes,
             } => {
                 let mut providers = Vec::new();
@@ -1019,6 +1020,7 @@ impl JcodeClient {
                     provider,
                     model,
                     reasoning_effort,
+                    auth_method,
                     providers,
                     routes,
                 })
@@ -1285,6 +1287,49 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Bookmark or unbookmark a session. A label also becomes its title.
+    pub fn set_session_saved(
+        &self,
+        session_id: &str,
+        saved: bool,
+        label: Option<String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetSessionSaved {
+            session_id: session_id.to_string(),
+            saved,
+            label,
+        })
+        .map(drop)
+    }
+
+    /// Report a user action in an agent applet instance.
+    pub fn applet_action(
+        &self,
+        session_id: &str,
+        instance: &str,
+        action: jcode_applet_types::Action,
+        state: serde_json::Value,
+        source_key: Option<String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::AppletAction {
+            session_id: session_id.to_string(),
+            instance: instance.to_string(),
+            action,
+            state,
+            source_key,
+        })
+        .map(drop)
+    }
+
+    /// Close an agent applet instance. The agent is not woken.
+    pub fn close_applet(&self, session_id: &str, instance: &str) -> Result<()> {
+        self.request_ok(ApiRequest::CloseApplet {
+            session_id: session_id.to_string(),
+            instance: instance.to_string(),
+        })
+        .map(drop)
+    }
+
     /// Restore the history the last `rewind` removed.
     pub fn rewind_undo(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::RewindUndo {
@@ -1418,6 +1463,8 @@ pub struct RuntimeInfo {
     pub model: Option<String>,
     /// Reasoning effort, e.g. `high`, when the provider exposes it.
     pub reasoning_effort: Option<String>,
+    /// Credential the session bills against (`oauth` or `api_key`).
+    pub auth_method: Option<String>,
     pub providers: Vec<String>,
     pub routes: Vec<ModelRouteInfo>,
 }
@@ -1767,6 +1814,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | Tools { session_id, .. }
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
+        | KvCacheMiss { session_id, .. }
         | TurnDone { session_id, .. }
         | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }

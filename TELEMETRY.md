@@ -379,6 +379,21 @@ We do **not** sell event-level telemetry, and we do not collect conversation con
 sell or to train models. If that ever changes, it will be a separate, clearly disclosed,
 **opt-in** program rather than a silent change to this document.
 
+### De-identified usage data for investor due diligence
+
+We may share de-identified, per-installation usage summaries with prospective investors
+under confidentiality, for evaluating Jcode only. These summaries contain a random label
+for each installation (not the telemetry ID), and per day: session counts, token counts,
+and the estimated list-price value of model usage, plus the first day of activity. They
+contain no telemetry IDs, prompts, code, model responses, file paths, account details,
+country, operating system, or other device information, and the labels cannot be linked
+back to an installation without our internal mapping, which we never share. Recipients may
+not attempt to re-identify anyone or use the data for any other purpose.
+
+If you would rather your usage not be included, turn off telemetry (see
+[How to Opt Out](#how-to-opt-out)). Installations with telemetry disabled are never
+included.
+
 We do not attempt to re-identify users from telemetry, and the client does not link
 telemetry to account identity.
 
@@ -399,8 +414,10 @@ The telemetry endpoint is a Cloudflare Worker that stores events in a D1 databas
 ## Changes to This Policy
 
 The version of this document in the repository is the current policy. If we ever want to
-collect conversation content, or to share or sell anything beyond aggregate statistics,
-that will require a separate opt-in rather than a quiet edit here.
+collect conversation content, or to sell telemetry or share it beyond aggregate statistics
+and the confidential, de-identified investor summaries described above, that will require
+a separate opt-in rather than a quiet edit here. Changes to this document are visible in its
+git history.
 
 ### Schema v5 deployment note
 
@@ -439,6 +456,6 @@ This is open source. The telemetry implementation is in [`crates/jcode-telemetry
 
 ## Data Retention
 
-Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
+Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts), and in the de-identified investor summaries described under [How We Use and Share Data](#how-we-use-and-share-data). Individual event records are retained for up to 12 months and then deleted.
 
 High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months.

@@ -17,6 +17,8 @@ fn unknown_ctrl_chord_sets_hotkey_feedback_with_suggestion() {
         .expect("unknown chord should set feedback");
     assert!(message.contains("Ctrl+M"), "{message}");
     assert!(message.contains("isn't bound"), "{message}");
+    // The suggestion renders the platform chord via alt_chord (Option symbol
+    // on macOS, Alt elsewhere); assert that instead of hardcoded "Alt+M".
     assert!(
         message.contains(&jcode_tui_core::keybind::alt_chord("M")),
         "{message}"

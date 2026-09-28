@@ -169,6 +169,7 @@ fn save_test_openrouter_model_cache(namespace: &str, source_api_base: &str, mode
                 context_length: None,
                 pricing: jcode_provider_openrouter::ModelPricing::default(),
                 created: None,
+                ..Default::default()
             })
             .collect(),
     };

@@ -3144,7 +3144,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.88.0"
+version = "0.89.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3231,6 +3231,7 @@ dependencies = [
  "ignore",
  "jcode-agent-runtime",
  "jcode-ambient-types",
+ "jcode-applet-types",
  "jcode-base",
  "jcode-build-meta",
  "jcode-build-support",
@@ -3277,6 +3278,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-applet-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jcode-auth-types"
 version = "0.1.0"
 dependencies = [
@@ -3316,6 +3325,7 @@ dependencies = [
  "hex",
  "image",
  "jcode-agent-runtime",
+ "jcode-applet-types",
  "jcode-auth-types",
  "jcode-azure-auth",
  "jcode-background-types",
@@ -3467,6 +3477,7 @@ dependencies = [
 name = "jcode-harness-api"
 version = "0.1.0"
 dependencies = [
+ "jcode-applet-types",
  "jcode-session-types",
  "jcode-side-panel-types",
  "jcode-usage-types",
@@ -3482,6 +3493,7 @@ dependencies = [
  "jcode-background-types",
  "jcode-base",
  "jcode-harness-api",
+ "jcode-session-types",
  "jcode-transport",
  "libc",
  "rusqlite",
@@ -3591,6 +3603,7 @@ name = "jcode-protocol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jcode-applet-types",
  "jcode-batch-types",
  "jcode-config-types",
  "jcode-message-types",
@@ -3971,6 +3984,7 @@ name = "jcode-sdk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "jcode-applet-types",
  "jcode-harness-api",
  "jcode-provider-metadata",
  "jcode-transport",
@@ -4145,6 +4159,7 @@ dependencies = [
  "hex",
  "image",
  "jcode-app-core",
+ "jcode-base",
  "jcode-build-meta",
  "jcode-config-types",
  "jcode-core",

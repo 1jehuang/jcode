@@ -94,6 +94,8 @@ fn offer_requires_an_eligible_reset_arm() {
         json!({"eligible": false, "arm": "reset", "available": true}),
         json!({"eligible": true, "arm": "control", "available": true}),
         json!({"eligible": true, "available": true}),
+        json!({"eligible": true, "arm": "reset"}),
+        json!({"eligible": true, "arm": "reset", "available": null}),
     ] {
         assert!(offer_from_status(&json!({ "juniper_tide": block }), None).is_none());
     }
@@ -103,6 +105,36 @@ fn offer_requires_an_eligible_reset_arm() {
     let spent = offer_from_status(&status(false, Some("soon")), None).unwrap();
     assert!(!spent.available);
     assert!(spent.next_available_at.is_none());
+}
+
+#[test]
+fn availability_below_the_wall_is_not_hidden_or_invented() {
+    let mut available = status(true, None);
+    available["five_hour"]["utilization"] = json!(26.0);
+    assert!(
+        offer_from_status(&available, Some("work"))
+            .unwrap()
+            .available
+    );
+    available["juniper_tide"]["available"] = json!(false);
+    let zero = offer_from_status(&available, Some("work")).unwrap();
+    assert!(!zero.available);
+    assert!(zero.next_available_at.is_none());
+    available["juniper_tide"]["eligible"] = json!(false);
+    assert!(offer_from_status(&available, Some("work")).is_none());
+}
+
+#[test]
+fn only_explicit_denial_is_reported_as_ineligible() {
+    for unknown in [json!({}), json!({"juniper_tide": null}), status(true, None)] {
+        assert!(!explicitly_ineligible(&unknown));
+    }
+    assert!(!explicitly_ineligible(
+        &json!({"juniper_tide": {"eligible": null}})
+    ));
+    assert!(explicitly_ineligible(
+        &json!({"juniper_tide": {"eligible": false}})
+    ));
 }
 
 #[tokio::test]

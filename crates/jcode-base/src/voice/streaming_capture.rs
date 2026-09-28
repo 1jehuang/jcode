@@ -1,5 +1,10 @@
-//! Dedicated-thread native streaming capture and nonblocking desktop handle.
-use super::{resample::Resampler, *};
+//! Dedicated-thread streaming capture and the nonblocking push-to-talk handle.
+//! Native (cpal) capture needs the `voice-capture` feature. External recorder
+//! capture (`super::command_capture`) works in every build.
+#[cfg(feature = "voice-capture")]
+use super::resample::Resampler;
+use super::*;
+#[cfg(feature = "voice-capture")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::{
     collections::VecDeque,
@@ -11,14 +16,15 @@ use std::{
     thread,
 };
 
-/// Native mono 16k PCM capture. Stop is a signal, EOF follows buffered chunks.
+/// Mono 16k PCM capture. Stop is a signal, EOF follows buffered chunks.
 /// Dropping an unfinished handle cancels, never blocks the UI on native teardown.
 pub struct PcmRecording {
-    level: Arc<AtomicU32>,
-    stop: Arc<AtomicBool>,
-    cancel: Arc<AtomicBool>,
-    worker: Option<thread::JoinHandle<Result<(), VoiceError>>>,
+    pub(super) level: Arc<AtomicU32>,
+    pub(super) stop: Arc<AtomicBool>,
+    pub(super) cancel: Arc<AtomicBool>,
+    pub(super) worker: Option<thread::JoinHandle<Result<(), VoiceError>>>,
 }
+#[cfg(feature = "voice-capture")]
 impl MicrophoneRecording {
     /// Blocking setup, call off the UI thread and only after explicit user consent.
     pub fn start_pcm_cancellable(
@@ -28,8 +34,25 @@ impl MicrophoneRecording {
     }
 }
 impl PcmRecording {
+    #[cfg(feature = "voice-capture")]
     fn start(
         cancel: Arc<AtomicBool>,
+    ) -> Result<(Self, tokio::sync::mpsc::Receiver<Vec<i16>>), VoiceError> {
+        Self::start_worker(cancel, capture)
+    }
+    /// Shared setup: `body` owns the device on a dedicated thread, sends PCM on
+    /// the channel, reports readiness once, and returns after stop or cancel.
+    pub(super) fn start_worker(
+        cancel: Arc<AtomicBool>,
+        body: impl FnOnce(
+            tokio::sync::mpsc::Sender<Vec<i16>>,
+            &mpsc::SyncSender<Result<(), VoiceError>>,
+            Arc<AtomicBool>,
+            Arc<AtomicBool>,
+            Arc<AtomicU32>,
+        ) -> Result<(), VoiceError>
+        + Send
+        + 'static,
     ) -> Result<(Self, tokio::sync::mpsc::Receiver<Vec<i16>>), VoiceError> {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
@@ -43,7 +66,7 @@ impl PcmRecording {
         let worker = thread::Builder::new()
             .name("voice-pcm".into())
             .spawn(move || {
-                let result = capture(tx, &ready, c, s, worker_level);
+                let result = body(tx, &ready, c, s, worker_level);
                 if let Err(e) = &result {
                     let _ = ready.try_send(Err(e.clone()));
                 }
@@ -67,7 +90,14 @@ impl PcmRecording {
         }
     }
     pub fn stop(&self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.stop_handle().stop();
+    }
+    /// Cloneable release signal that wakes the capture thread immediately.
+    fn stop_handle(&self) -> StopHandle {
+        StopHandle {
+            flag: self.stop.clone(),
+            thread: self.worker.as_ref().map(|w| w.thread().clone()),
+        }
     }
     pub fn is_finished(&self) -> bool {
         self.worker.as_ref().is_none_or(|w| w.is_finished())
@@ -88,6 +118,21 @@ impl Drop for PcmRecording {
             self.cancel.store(true, Ordering::SeqCst);
         }
         self.stop();
+    }
+}
+#[derive(Clone)]
+struct StopHandle {
+    flag: Arc<AtomicBool>,
+    thread: Option<thread::Thread>,
+}
+impl StopHandle {
+    fn stop(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+        // The capture loop parks between checks. Waking it here makes release
+        // take effect now rather than on the next poll.
+        if let Some(thread) = &self.thread {
+            thread.unpark();
+        }
     }
 }
 fn wait_started(
@@ -111,6 +156,7 @@ fn wait_started(
     }
 }
 
+#[cfg(feature = "voice-capture")]
 struct Chunker {
     level: Arc<AtomicU32>,
     resampler: Resampler,
@@ -121,6 +167,7 @@ struct Chunker {
     first_callback: bool,
     first_voice: bool,
 }
+#[cfg(feature = "voice-capture")]
 impl Chunker {
     fn push<T>(&mut self, data: &[T], channels: usize)
     where
@@ -198,6 +245,7 @@ impl Chunker {
         }
     }
 }
+#[cfg(feature = "voice-capture")]
 fn build<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -226,6 +274,7 @@ where
         )
         .map_err(|_| VoiceError::MicrophoneUnavailable)
 }
+#[cfg(feature = "voice-capture")]
 fn capture(
     tx: tokio::sync::mpsc::Sender<Vec<i16>>,
     ready: &mpsc::SyncSender<Result<(), VoiceError>>,
@@ -330,11 +379,15 @@ fn capture(
                 break;
             }
         }
-        thread::sleep(Duration::from_millis(10));
+        // Parked, not slept: stop() unparks so release is seen immediately.
+        thread::park_timeout(Duration::from_millis(10));
     }
+    super::timing::mark("capture saw stop");
     drop(stream);
+    super::timing::mark("input stream dropped");
     let mut state = state.lock().map_err(|_| VoiceError::CaptureFailed)?;
     state.finish(16000 * MAX_RECORDING_DURATION.as_secs() as usize);
+    super::timing::mark("capture flushed tail");
     if state.failed {
         Err(VoiceError::CaptureFailed)
     } else {
@@ -346,9 +399,12 @@ fn capture(
 struct Events {
     queue: VecDeque<NariEvent>,
     finished: bool,
+    ready: Arc<tokio::sync::Notify>,
 }
 impl Events {
     fn push(&mut self, event: NariEvent) {
+        // Stores a permit when nobody waits, so a wakeup is never lost.
+        self.ready.notify_one();
         if matches!(event, NariEvent::Finished(_)) {
             self.finished = true;
         }
@@ -372,8 +428,13 @@ pub struct NariRecording {
     worker: thread::JoinHandle<()>,
     // Set once the native stream exists. Reads zero until then.
     level: Arc<std::sync::OnceLock<Arc<AtomicU32>>>,
+    // Microphone release signal once capture exists. The mutex orders it
+    // against stop() so a release during setup is never lost.
+    mic_stop: Arc<Mutex<Option<StopHandle>>>,
 }
 impl NariRecording {
+    /// Native microphone capture. Requires the `voice-capture` feature.
+    #[cfg(feature = "voice-capture")]
     pub fn start_cancellable(cancel: Arc<AtomicBool>, key: &str) -> Result<Self, VoiceError> {
         Self::start_with(
             cancel,
@@ -381,6 +442,35 @@ impl NariRecording {
             super::nari::URL,
             MicrophoneRecording::start_pcm_cancellable,
         )
+    }
+    /// Capture through external recorder processes, tried in order until one
+    /// delivers audio. Works without the `voice-capture` feature.
+    pub fn start_with_recorders(
+        cancel: Arc<AtomicBool>,
+        key: &str,
+        recorders: Vec<super::RecorderCommand>,
+    ) -> Result<Self, VoiceError> {
+        if recorders.is_empty() {
+            return Err(VoiceError::MicrophoneUnavailable);
+        }
+        Self::start_with(cancel, key, super::nari::URL, move |c| {
+            super::command_capture::start_pcm(c, recorders)
+        })
+    }
+    /// Push-to-talk for terminal clients. A configured `recorder` command wins.
+    /// Otherwise native capture is used when compiled in, else the first
+    /// working external recorder found on `PATH`.
+    pub fn start_auto(
+        cancel: Arc<AtomicBool>,
+        key: &str,
+        recorder: &str,
+    ) -> Result<Self, VoiceError> {
+        let custom = recorder.trim();
+        #[cfg(feature = "voice-capture")]
+        if custom.is_empty() {
+            return Self::start_cancellable(cancel, key);
+        }
+        Self::start_with_recorders(cancel, key, super::detect_recorders(custom))
     }
     fn start_with(
         cancel: Arc<AtomicBool>,
@@ -402,7 +492,9 @@ impl NariRecording {
         let events = Arc::new(Mutex::new(Events::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let level = Arc::new(std::sync::OnceLock::new());
+        let mic_stop = Arc::new(Mutex::new(None::<StopHandle>));
         let (c, s, e, l) = (cancel.clone(), stop.clone(), events.clone(), level.clone());
+        let m = mic_stop.clone();
         let worker = thread::Builder::new()
             .name("voice-nari".into())
             .spawn(move || {
@@ -433,19 +525,17 @@ impl NariRecording {
                         };
                         let _ = l.set(mic.level.clone());
                         super::timing::mark("microphone capturing");
-                        // Forward release even while still connecting. Buffered
-                        // audio then drains and commits once the session is up.
-                        let mic_stop = mic.stop.clone();
-                        let stop_signal = s.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                if stop_signal.load(Ordering::SeqCst) {
-                                    mic_stop.store(true, Ordering::SeqCst);
-                                    return;
-                                }
-                                tokio::time::sleep(Duration::from_millis(10)).await;
+                        // Release reaches the microphone directly, even while still
+                        // connecting. Buffered audio then drains and commits once
+                        // the session is up.
+                        {
+                            let mut slot = m.lock().map_err(|_| VoiceError::CaptureFailed)?;
+                            let handle = mic.stop_handle();
+                            if s.load(Ordering::SeqCst) {
+                                handle.stop();
                             }
-                        });
+                            *slot = Some(handle);
+                        }
                         // Dropping `mic` on failure cancels the unfinished capture.
                         let session = connect.await.map_err(|_| VoiceError::CaptureFailed)??;
                         let stream = session.run(pcm, |event| {
@@ -455,9 +545,11 @@ impl NariRecording {
                                 }
                         });
                         let result = stream.await;
+                        super::timing::mark("nari stream finished");
                         mic.stop();
                         // Native stream is owned by its capture thread, never the UI.
                         let capture = mic.finish();
+                        super::timing::mark("capture joined");
                         match (result, capture) {
                             (Err(err), _) => Err(err),
                             (Ok(_), Err(err)) => Err(err),
@@ -465,11 +557,13 @@ impl NariRecording {
                         }
                     });
                     runtime.shutdown_background();
+                    super::timing::mark("runtime shut down");
                     result
                 })();
                 if let Ok(mut events) = e.lock() {
                     events.push(NariEvent::Finished(result));
                 }
+                super::timing::mark("finished event published");
             })
             .map_err(|_| VoiceError::CaptureFailed)?;
         Ok(Self {
@@ -478,10 +572,37 @@ impl NariRecording {
             events,
             worker,
             level,
+            mic_stop,
         })
     }
     pub fn stop(&self) {
+        let slot = self.mic_stop.lock();
         self.stop.store(true, Ordering::SeqCst);
+        if let Ok(slot) = slot
+            && let Some(mic) = slot.as_ref()
+        {
+            mic.stop();
+        }
+    }
+    /// Resolves when an event may be available (or immediately if one arrived
+    /// since the last wait). Lets a UI react to the final transcript at once
+    /// instead of on its next poll. Executor-agnostic and `'static`.
+    pub fn event_ready(&self) -> impl std::future::Future<Output = ()> + Send + 'static + use<> {
+        let ready = self
+            .events
+            .lock()
+            .map(|events| events.ready.clone())
+            .unwrap_or_default();
+        async move { ready.notified().await }
+    }
+    /// Shared wakeup behind [`Self::event_ready`], for a long-lived waker task
+    /// that does not hold the recording itself. Stores a permit when nobody
+    /// waits, so an event is never missed.
+    pub fn event_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.events
+            .lock()
+            .map(|events| events.ready.clone())
+            .unwrap_or_default()
     }
     /// Latest microphone callback's linear RMS of the downmixed mono signal,
     /// before resampling, normalized to `0.0..=1.0` (not decibels).
@@ -518,6 +639,7 @@ impl Drop for NariRecording {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "voice-capture")]
     fn level_chunker() -> Chunker {
         let (tx, _rx) = nari_pcm_channel();
         Chunker {
@@ -531,9 +653,11 @@ mod tests {
             first_voice: false,
         }
     }
+    #[cfg(feature = "voice-capture")]
     fn level(c: &Chunker) -> f32 {
         f32::from_bits(c.level.load(Ordering::Relaxed))
     }
+    #[cfg(feature = "voice-capture")]
     #[test]
     fn callback_level_is_latest_rms_not_peak_or_signed_average() {
         let mut c = level_chunker();
@@ -547,6 +671,7 @@ mod tests {
         c.push::<f32>(&[], 1);
         assert_eq!(level(&c), 0.0);
     }
+    #[cfg(feature = "voice-capture")]
     #[test]
     fn callback_level_downmixes_and_normalizes_native_formats() {
         let mut c = level_chunker();
@@ -563,6 +688,7 @@ mod tests {
         c.push(&[0.25f64, -0.25], 1);
         assert_eq!(level(&c), 0.25);
     }
+    #[cfg(feature = "voice-capture")]
     #[test]
     fn callback_level_is_finite_and_bounded_for_invalid_float_samples() {
         let mut c = level_chunker();
@@ -571,6 +697,7 @@ mod tests {
         c.push(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY], 1);
         assert_eq!(level(&c), 0.0);
     }
+    #[cfg(feature = "voice-capture")]
     #[test]
     fn recording_level_reads_callback_atomic_without_consuming_events() {
         let mut c = level_chunker();
@@ -583,6 +710,7 @@ mod tests {
             worker: thread::spawn(move || {
                 wait.recv().unwrap();
             }),
+            mic_stop: Arc::new(Mutex::new(None)),
         };
         recording.events.lock().unwrap().push(NariEvent::Started);
         thread::spawn(move || c.push(&[0.5f32; 100], 1))
@@ -603,6 +731,7 @@ mod tests {
         }
         assert_eq!(recording.audio_level(), 0.0);
     }
+    #[cfg(feature = "voice-capture")]
     #[test]
     fn cancelled_constructors_never_open_microphone() {
         let cancel = Arc::new(AtomicBool::new(true));
@@ -615,6 +744,7 @@ mod tests {
             Err(VoiceError::Cancelled)
         ));
     }
+    #[cfg(feature = "voice-capture")]
     #[test]
     fn bounded_chunks_downmix_and_fail_on_backpressure() {
         let (tx, mut rx) = nari_pcm_channel();
@@ -639,6 +769,56 @@ mod tests {
         assert!(!c.failed);
         c.push(&vec![0.0f32; 48000 * 6], 2);
         assert!(c.failed);
+    }
+    #[test]
+    fn stop_unparks_capture_thread_immediately() {
+        // A long park stands in for the capture loop. stop() must wake it
+        // rather than waiting out the timeout.
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let worker = thread::spawn(move || {
+            while !s.load(Ordering::SeqCst) {
+                thread::park_timeout(Duration::from_secs(5));
+            }
+            Ok(())
+        });
+        let recording = PcmRecording {
+            level: Arc::new(AtomicU32::new(0)),
+            stop,
+            cancel: Arc::new(AtomicBool::new(false)),
+            worker: Some(worker),
+        };
+        let started = std::time::Instant::now();
+        recording.finish().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+    #[tokio::test]
+    async fn event_ready_wakes_on_push_and_keeps_early_permit() {
+        let events = Arc::new(Mutex::new(Events::default()));
+        let recording = NariRecording {
+            cancel: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            level: Arc::new(std::sync::OnceLock::new()),
+            events: events.clone(),
+            worker: thread::spawn(|| {}),
+            mic_stop: Arc::new(Mutex::new(None)),
+        };
+        // Pushed before anyone waits: the permit must not be lost.
+        events.lock().unwrap().push(NariEvent::Started);
+        tokio::time::timeout(Duration::from_millis(200), recording.event_ready())
+            .await
+            .expect("early event wakes the next wait");
+        let wait = recording.event_ready();
+        let e = events.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            e.lock()
+                .unwrap()
+                .push(NariEvent::Finished(Ok("done".into())));
+        });
+        tokio::time::timeout(Duration::from_secs(2), wait)
+            .await
+            .expect("finish wakes a pending wait");
     }
     #[test]
     fn events_coalesce_but_preserve_lifecycle() {
@@ -814,6 +994,7 @@ mod tests {
         .await
         .unwrap();
     }
+    #[cfg(feature = "voice-capture")]
     #[test]
     fn filter_tail_never_exceeds_duration_cap() {
         for rate in [8000, 16000, 44100, 48000, 96000, 192000] {
@@ -840,6 +1021,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "voice-capture")]
     #[test]
     fn upsampling_final_frame_cannot_exceed_cap() {
         let (tx, _rx) = nari_pcm_channel();

@@ -146,6 +146,12 @@ struct SessionListCacheEntry {
     sessions: Vec<SessionInfo>,
 }
 
+#[derive(Default)]
+struct SessionListCacheState {
+    generation: u64,
+    entry: Option<SessionListCacheEntry>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct GroupedSessionListDiskCache {
     version: u32,
@@ -166,14 +172,37 @@ pub(crate) fn default_true() -> bool {
     true
 }
 
-fn session_list_cache() -> &'static Mutex<Option<SessionListCacheEntry>> {
-    static CACHE: OnceLock<Mutex<Option<SessionListCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+fn session_list_cache() -> &'static Mutex<SessionListCacheState> {
+    static CACHE: OnceLock<Mutex<SessionListCacheState>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SessionListCacheState::default()))
 }
 
 pub fn invalidate_session_list_cache() {
-    if let Ok(mut cache) = session_list_cache().lock() {
-        *cache = None;
+    if let Ok(mut state) = session_list_cache().lock() {
+        state.generation = state.generation.wrapping_add(1);
+        state.entry = None;
+    }
+}
+
+#[cfg(test)]
+fn before_session_list_cache_publish_hook() -> &'static Mutex<Option<Box<dyn Fn() + Send>>> {
+    static HOOK: OnceLock<Mutex<Option<Box<dyn Fn() + Send>>>> = OnceLock::new();
+    HOOK.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(test)]
+fn run_before_session_list_cache_publish_hook() {
+    if let Ok(hook) = before_session_list_cache_publish_hook().lock()
+        && let Some(hook) = hook.as_ref()
+    {
+        hook();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_session_list_cache_publish_hook(hook: Option<Box<dyn Fn() + Send>>) {
+    if let Ok(mut slot) = before_session_list_cache_publish_hook().lock() {
+        *slot = hook;
     }
 }
 
@@ -1769,19 +1798,28 @@ fn parse_jcode_session_info(
 }
 
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
+    load_sessions_inner(false)
+}
+
+fn load_sessions_inner(bypass_cache: bool) -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
     let want_external = include_external_sessions();
 
-    if let Ok(cache) = session_list_cache().lock()
-        && let Some(entry) = cache.as_ref()
-        && entry.sessions_dir == sessions_dir
-        && entry.scan_limit == scan_limit
-        && entry.external_sessions == want_external
-        && entry.loaded_at.elapsed() <= SESSION_LIST_CACHE_TTL
-    {
-        return Ok(entry.sessions.clone());
-    }
+    let cache_generation = if let Ok(state) = session_list_cache().lock() {
+        if !bypass_cache
+            && let Some(entry) = state.entry.as_ref()
+            && entry.sessions_dir == sessions_dir
+            && entry.scan_limit == scan_limit
+            && entry.external_sessions == want_external
+            && entry.loaded_at.elapsed() <= SESSION_LIST_CACHE_TTL
+        {
+            return Ok(entry.sessions.clone());
+        }
+        state.generation
+    } else {
+        0
+    };
 
     let candidates = if sessions_dir.exists() {
         // Keep startup responsive by avoiding `session_has_history` here. That helper parses
@@ -1887,8 +1925,13 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
 
     sessions.sort_by(|a, b| b.last_message_time.cmp(&a.last_message_time));
 
-    if let Ok(mut cache) = session_list_cache().lock() {
-        *cache = Some(SessionListCacheEntry {
+    #[cfg(test)]
+    run_before_session_list_cache_publish_hook();
+
+    if let Ok(mut state) = session_list_cache().lock()
+        && state.generation == cache_generation
+    {
+        state.entry = Some(SessionListCacheEntry {
             loaded_at: Instant::now(),
             sessions_dir,
             scan_limit,

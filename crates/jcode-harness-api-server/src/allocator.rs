@@ -86,7 +86,13 @@ mod tests {
     #[test]
     fn streaming_events_do_not_enter_block_in_place() {
         use crate::translate::legacy_event_may_block;
-        for kind in ["text_delta", "reasoning_delta", "tool_start", "tool_exec", "done"] {
+        for kind in [
+            "text_delta",
+            "reasoning_delta",
+            "tool_start",
+            "tool_exec",
+            "done",
+        ] {
             assert!(!legacy_event_may_block(&json!({"type": kind})), "{kind}");
         }
         for kind in ["state", "history", "split_response", "side_panel_state"] {
