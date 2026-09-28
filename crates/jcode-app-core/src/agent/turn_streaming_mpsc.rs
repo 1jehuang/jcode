@@ -1105,6 +1105,14 @@ impl Agent {
                 crate::session_metrics::record_token_usage(&self.session.id, total, output);
             }
 
+            // Read the model that actually served the call now that the stream
+            // has ended, so both the cost below and the resync further down use
+            // the model the provider actually used. A provider may transparently
+            // fall back mid-stream (for example a retired model) and mutates its
+            // own model state during the request, so pricing under the requested
+            // id would bill the wrong model (P2).
+            let model_after_stream = self.provider.model();
+
             if usage_input.is_some()
                 || usage_output.is_some()
                 || usage_cache_read.is_some()
@@ -1143,9 +1151,14 @@ impl Agent {
                     let is_anthropic =
                         provider_lower.contains("anthropic") || provider_lower.contains("claude");
                     let is_openai = provider_lower.contains("openai");
+                    let priced_model = if model_after_stream == model_at_request_start {
+                        model_at_request_start.as_str()
+                    } else {
+                        model_after_stream.as_str()
+                    };
                     match crate::model_pricing::call_cost(
                         &source_key,
-                        &model_at_request_start,
+                        priced_model,
                         call_started_at,
                         self.provider.service_tier().as_deref(),
                         usage_input.unwrap_or(0),
@@ -1196,7 +1209,9 @@ impl Agent {
             // requested model with a stale context-limit. Resync the session and
             // notify clients with a `ModelChanged` so the header, picker, and
             // context budget all reflect the model that actually served.
-            let model_after_stream = self.provider.model();
+            //
+            // `model_after_stream` was read above (before pricing) so the cost
+            // and this resync agree on the served model.
             if model_after_stream != model_at_request_start {
                 let provider_name = self.provider.display_name();
                 logging::warn(&format!(

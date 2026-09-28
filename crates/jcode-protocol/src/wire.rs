@@ -984,19 +984,24 @@ pub enum ServerEvent {
         cache_read_input: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_creation_input: Option<u64>,
-        /// Dollar cost the *server* resolved for this call, when it could price
-        /// it itself (same `model_pricing` path, at the call's own start
-        /// instant, under the provider/model the server actually used).
+        /// Cost the *server* resolved for this call, denominated in
+        /// [`Self::TokenUsage::currency`] (not necessarily USD), when it could
+        /// price the call itself (same `model_pricing` path, at the call's own
+        /// start instant, under the provider/model the server actually used).
         ///
         /// The client must prefer this over re-pricing the tokens with its own
         /// configuration, so two clients with different cards/currency/vendor
-        /// files/schedules cannot bill the same call differently. Absent from
-        /// older servers and from calls no layer can price; a client that sees
-        /// no value falls back to its local pricing path.
+        /// files/schedules cannot bill the same call differently. For a call
+        /// whose usage arrives in several snapshots this is the call's
+        /// *cumulative* cost so far, not an increment. Absent from older servers
+        /// and from calls no layer can price; a client that sees no value falls
+        /// back to its local pricing path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<f64>,
         /// Currency `cost` is denominated in, reported alongside it. Present
-        /// exactly when `cost` is (see its note); never assumed to be USD.
+        /// exactly when `cost` is (see its note); never assumed to be USD. A
+        /// client that cannot reconcile it with the currency it already accrued
+        /// for the call must not add the figure to a different bucket.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         currency: Option<String>,
     },
