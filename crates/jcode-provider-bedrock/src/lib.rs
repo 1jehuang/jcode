@@ -812,7 +812,11 @@ impl BedrockProvider {
 
     fn model_info(model: &str) -> BedrockModelInfo {
         let id = Self::normalize_model_id(model).to_ascii_lowercase();
-        if id.contains("claude-opus-4") || id.contains("claude-sonnet-4") {
+        if id.contains("claude-opus-4")
+            || id.contains("claude-sonnet-4")
+            || id.contains("claude-opus-5")
+            || id.contains("claude-sonnet-5")
+        {
             BedrockModelInfo {
                 context_tokens: 200_000,
                 max_output_tokens: 64_000,
@@ -820,6 +824,15 @@ impl BedrockProvider {
                 supports_vision: true,
                 supports_reasoning: true,
                 pricing: Some((3_000_000, 15_000_000)),
+            }
+        } else if id.contains("claude-haiku-4-5") {
+            BedrockModelInfo {
+                context_tokens: 200_000,
+                max_output_tokens: 8_192,
+                supports_tools: true,
+                supports_vision: true,
+                supports_reasoning: false,
+                pricing: Some((800_000, 4_000_000)),
             }
         } else if id.contains("claude-3-7-sonnet") || id.contains("claude-3-5-sonnet") {
             BedrockModelInfo {
@@ -1848,6 +1861,28 @@ mod tests {
         assert!(!BedrockProvider::model_info("openai.gpt-oss-120b-1:0").supports_tools);
         assert!(BedrockProvider::model_info("us.amazon.nova-2-lite-v1:0").supports_tools);
         assert!(BedrockProvider::model_info("us.anthropic.claude-sonnet-4-6").supports_tools);
+    }
+
+    #[test]
+    fn claude_5_family_advertises_tools() {
+        // Regression: the Claude 5 family (sonnet-5, opus-5, opus-5-5) previously
+        // fell through to the untooled default because model_info only matched
+        // "claude-opus-4"/"claude-sonnet-4", silently dropping tool defs for
+        // Bedrock requests and causing the model to hallucinate fake tool-call
+        // text instead of invoking real tools.
+        assert!(BedrockProvider::model_info("us.anthropic.claude-sonnet-5").supports_tools);
+        assert!(BedrockProvider::model_info("us.anthropic.claude-opus-5").supports_tools);
+        assert!(BedrockProvider::model_info("us.anthropic.claude-opus-5-5").supports_tools);
+        assert!(
+            BedrockProvider::model_info(
+                "arn:aws:bedrock:us-east-2:1234:inference-profile/us.anthropic.claude-sonnet-5"
+            )
+            .supports_tools
+        );
+        assert!(
+            BedrockProvider::model_info("us.anthropic.claude-haiku-4-5-20251001-v1:0")
+                .supports_tools
+        );
     }
 
     #[test]
