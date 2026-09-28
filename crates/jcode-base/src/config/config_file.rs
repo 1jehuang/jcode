@@ -190,9 +190,9 @@ impl Config {
     /// it drops the user's comments and every section a newer build wrote.
     /// This overlays the serialized struct onto the parsed existing file
     /// instead, keeping anything the struct does not model, and then applies
-    /// the declared removals. When the existing file cannot be parsed, fall
-    /// back to the plain write (callers normally reach `save` through
-    /// `load_for_update`, which refuses an unreadable config).
+    /// the declared removals. A file that exists but cannot be parsed is
+    /// refused outright (see below); only a merge that cannot round-trip falls
+    /// back to the plain write.
     fn save_with_removals(&self, removals: &[String]) -> anyhow::Result<()> {
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
 
@@ -203,21 +203,44 @@ impl Config {
 
         let serialized = toml::to_string_pretty(self)?;
         let content = match std::fs::read_to_string(&path) {
-            Ok(existing) => match merge_into_existing(&existing, &serialized, removals) {
-                Some(merged) => merged,
-                None => {
-                    // The merge could not be understood or would not parse back
-                    // (see `merged_document_parses`); a file jcode refuses is
-                    // worse than a file without comments, so write the plain
-                    // serialization instead.
-                    crate::logging::warn(
-                        "config: preserving save could not round-trip; writing the plain \
-                         serialization (comments in unmodeled sections are lost)",
+            Ok(existing) => {
+                // A file jcode cannot parse must never be overwritten. Callers
+                // normally reach a save through `load_for_update`, which
+                // refuses an unreadable config, but `save` is public: a caller
+                // holding a default `Config` would otherwise replace the user's
+                // file with defaults and destroy every setting it holds. Refuse
+                // instead, leaving the file byte-for-byte untouched.
+                if let Err(error) = existing.parse::<toml_edit::Document>() {
+                    anyhow::bail!(
+                        "refusing to overwrite unparsable config file {}: {error}",
+                        path.display()
                     );
-                    serialized
                 }
-            },
-            Err(_) => serialized,
+                match merge_into_existing(&existing, &serialized, removals) {
+                    Some(merged) => merged,
+                    None => {
+                        // The merge could not be understood or would not parse
+                        // back (see `merged_document_parses`); a file jcode
+                        // refuses is worse than a file without comments, so
+                        // write the plain serialization instead.
+                        crate::logging::warn(
+                            "config: preserving save could not round-trip; writing the plain \
+                             serialization (comments in unmodeled sections are lost)",
+                        );
+                        serialized
+                    }
+                }
+            }
+            // A missing file is a first save: there is nothing to preserve.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serialized,
+            // An existing but unreadable file is as unsafe to replace as an
+            // unparsable one; refuse rather than guess at its contents.
+            Err(error) => {
+                anyhow::bail!(
+                    "refusing to overwrite unreadable config file {}: {error}",
+                    path.display()
+                );
+            }
         };
         // A torn write here would destroy the user's comments and unmodeled
         // sections, so use the atomic (temp file + rename, fsync'd) writer the
@@ -941,7 +964,9 @@ impl Config {
 ///
 /// Returns `None` when `existing` cannot be parsed as TOML, or when the merged
 /// result does not parse back into [`Config`]; the caller then writes
-/// `serialized` unchanged.
+/// `serialized` unchanged. `save_with_removals` refuses an unparsable
+/// `existing` before calling this, so a `None` it receives is the mixed document
+/// the overlay could not round-trip, not the user's broken file.
 pub(crate) fn merge_into_existing(
     existing: &str,
     serialized: &str,

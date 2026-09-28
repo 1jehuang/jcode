@@ -216,25 +216,63 @@ fn clearing_the_default_model_removes_the_key_from_the_file() {
     );
 }
 
-/// An unparseable file takes the plain-write fallback rather than being merged
-/// against a document that cannot be understood.
+/// An unparsable existing file must be refused outright: a direct `save()` on a
+/// default `Config` must not replace it and destroy whatever settings it holds,
+/// even though `load_for_update` would normally have rejected it first.
 #[test]
-fn unparseable_file_falls_back_to_a_plain_write() {
+fn unparsable_file_is_refused_and_left_untouched() {
     let _guard = crate::storage::lock_test_env();
     let home = HomeGuard::new();
     let broken = "[display\ncolors = {}\n";
     home.write(broken);
 
     let cfg = Config::default();
-    cfg.save().expect("save");
+    let error = cfg
+        .save()
+        .expect_err("an unparsable config must block a save");
+    assert!(
+        error
+            .to_string()
+            .contains("refusing to overwrite unparsable config file"),
+        "the error must say why the save was refused: {error}"
+    );
+
+    assert_eq!(
+        home.read(),
+        broken,
+        "the refused file must be left byte-for-byte untouched"
+    );
+}
+
+/// The round-trip fallback still applies to a file the overlay cannot reproduce
+/// but a plain serialization can: here a `[[providers.<name>.models]]` entry that
+/// serde would refuse after the merge (a `duplicate field`), which must not stop
+/// the save from persisting a valid file.
+#[test]
+fn a_merge_that_cannot_round_trip_still_falls_back_to_a_plain_write() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write(
+        "[[providers.acme.models]]\n\
+         id = \"acme-large\"\n\
+         context-window = 200000\n\
+         context_window = 200000\n",
+    );
+
+    // The file parses as TOML, so the save is not refused; the merge cannot
+    // round-trip into `Config`, so the plain serialization is written instead.
+    Config::default()
+        .save()
+        .expect("save falls back to a plain write");
 
     let written = home.read();
-    assert_ne!(
-        written, broken,
-        "the fallback must replace the unreadable file: {written}"
-    );
     toml::from_str::<Config>(&written)
         .unwrap_or_else(|err| panic!("fallback content must be valid TOML: {err}\n{written}"));
+    assert_eq!(
+        written.matches("context_window").count(),
+        0,
+        "the plain serialization drops the user's hand-written models table: {written}"
+    );
 }
 
 /// A declared removal is recorded for the active config path and consumed by
