@@ -73,7 +73,8 @@ conversation has started.
 
 Each command is bounded by `session_start_context_timeout_ms` (default and
 maximum 3000). Empty output, a non-zero exit, a timeout (the process is
-killed) or a spawn failure adds nothing.
+killed) or a spawn failure adds nothing. `jcode version --json` lists
+`session_start_context` in `hook_capabilities`.
 
 ```toml
 [hooks]

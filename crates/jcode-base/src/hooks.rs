@@ -328,6 +328,10 @@ fn build_hook_process(
 
 /// Hard cap on a session_start_context provider's wait, whatever the config says.
 pub const SESSION_START_CONTEXT_MAX_MS: u64 = 3000;
+/// Hook features this build supports beyond the base observer events, reported
+/// by `jcode version --json` as `hook_capabilities` so an installer can tell
+/// whether a key it would write is one this build reads.
+pub const HOOK_CAPABILITIES: &[&str] = &["session_start_context"];
 /// Maximum chars of context one provider may add.
 const SESSION_START_CONTEXT_LIMIT: usize = 8000;
 
