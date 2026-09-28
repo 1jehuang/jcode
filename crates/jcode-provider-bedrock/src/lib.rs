@@ -577,7 +577,43 @@ impl BedrockProvider {
                         .map_err(|err| anyhow::anyhow!(err)),
                 )
             })
-            .collect()
+            .collect::<Result<Vec<Message>>>()
+            .map(Self::merge_consecutive_same_role_messages)
+    }
+
+    /// Merge consecutive Bedrock messages of the same role into one.
+    ///
+    /// jcode records one `ToolResult` per user message when a turn ran
+    /// multiple tools (see `Agent::add_message` calls in the tool-execution
+    /// loop), which produces back-to-back `User` messages: one per tool
+    /// result. The Bedrock Converse API requires every `toolResult` for a
+    /// preceding assistant turn to land in a single following `user`
+    /// message; unlike the Anthropic Messages API, Bedrock does not merge
+    /// consecutive same-role messages itself and instead rejects the
+    /// request with `ValidationException: Expected toolResult blocks for
+    /// the following Ids`. Fold same-role runs into one message, mirroring
+    /// the merge pass `jcode-provider-anthropic` already performs.
+    #[cfg(feature = "aws-sdk")]
+    fn merge_consecutive_same_role_messages(messages: Vec<Message>) -> Vec<Message> {
+        let mut merged: Vec<Message> = Vec::with_capacity(messages.len());
+        for msg in messages {
+            if let Some(last) = merged.last_mut() {
+                if last.role() == msg.role() {
+                    let mut combined = last.content().to_vec();
+                    combined.extend(msg.content().to_vec());
+                    if let Ok(rebuilt) = Message::builder()
+                        .role(msg.role().clone())
+                        .set_content(Some(combined))
+                        .build()
+                    {
+                        *last = rebuilt;
+                        continue;
+                    }
+                }
+            }
+            merged.push(msg);
+        }
+        merged
     }
 
     #[cfg(feature = "aws-sdk")]
@@ -1882,6 +1918,91 @@ mod tests {
         assert!(
             BedrockProvider::model_info("us.anthropic.claude-haiku-4-5-20251001-v1:0")
                 .supports_tools
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "aws-sdk")]
+    fn to_bedrock_messages_merges_consecutive_tool_results() {
+        // Regression: when a turn runs multiple tools, jcode records one
+        // `ToolResult` per user message (see `Agent::add_message` calls in
+        // the tool-execution loop), producing back-to-back `User` messages.
+        // Bedrock's Converse API requires every `toolResult` for the
+        // preceding assistant turn to land in a single following `user`
+        // message and rejects the request otherwise with
+        // `ValidationException: Expected toolResult blocks for the
+        // following Ids`. Unlike the Anthropic Messages API, Bedrock does
+        // not merge same-role messages itself, so jcode must do it.
+        let messages = vec![
+            JMessage {
+                role: JRole::User,
+                content: vec![JContentBlock::Text {
+                    text: "do two things".to_string(),
+                    cache_control: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            JMessage {
+                role: JRole::Assistant,
+                content: vec![
+                    JContentBlock::ToolUse {
+                        id: "tool_a".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "echo a"}),
+                        thought_signature: None,
+                    },
+                    JContentBlock::ToolUse {
+                        id: "tool_b".to_string(),
+                        name: "mcp__chron__log_message".to_string(),
+                        input: serde_json::json!({"content": "b"}),
+                        thought_signature: None,
+                    },
+                ],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            // Two separate user messages, one per tool result: this is what
+            // the agent loop actually produces today.
+            JMessage {
+                role: JRole::User,
+                content: vec![JContentBlock::ToolResult {
+                    tool_use_id: "tool_a".to_string(),
+                    content: "a".to_string(),
+                    is_error: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            JMessage {
+                role: JRole::User,
+                content: vec![JContentBlock::ToolResult {
+                    tool_use_id: "tool_b".to_string(),
+                    content: "b".to_string(),
+                    is_error: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+
+        let converted =
+            BedrockProvider::to_bedrock_messages(&messages, false).expect("conversion succeeds");
+
+        // The two trailing user tool-result messages must be folded into one,
+        // or Bedrock rejects the request.
+        assert_eq!(
+            converted.len(),
+            3,
+            "expected [user, assistant, user] after merging consecutive tool-result messages, got {} messages",
+            converted.len()
+        );
+        let last = converted.last().expect("has a final message");
+        assert_eq!(*last.role(), ConversationRole::User);
+        assert_eq!(
+            last.content().len(),
+            2,
+            "final user message should carry both tool results"
         );
     }
 
