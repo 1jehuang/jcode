@@ -12,6 +12,7 @@ import fs from "node:fs";
 import { NdjsonDecoder } from "../dist/index.js";
 
 export interface MockOptions {
+  capabilities?: string[];
   /** Called for each client request; return frames to send back. */
   onRequest?: (request: any, send: (frame: any) => void) => void;
 }
@@ -46,7 +47,7 @@ export async function startMockHarness(options: MockOptions = {}): Promise<MockS
             ev: "hello_ok",
             version: 1,
             server: "mock/0.1",
-            capabilities: ["sessions", "streaming"],
+            capabilities: options.capabilities ?? ["sessions", "streaming"],
           });
           continue;
         }

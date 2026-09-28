@@ -46,8 +46,32 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token, cache_key).await {
-        Ok(data) => provider_report_from_usage_data(display_name, &data),
+    match fetch_anthropic_usage_data(access_token.clone(), cache_key).await {
+        Ok(data) => {
+            let mut report = provider_report_from_usage_data(display_name, &data);
+            // Availability can be inspected before reaching the five-hour wall.
+            // Looking it up is read-only and does not imply a reset can be spent.
+            if report.error.is_none() {
+                // External Claude Code logins report as "default" but are not
+                // stored accounts. Pin those to the default scope instead.
+                let stored = auth::claude::list_accounts()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|account| account.label == account_label);
+                let (offer, ineligible) = super::anthropic_reset::fetch_limit_reset_offer(
+                    &access_token,
+                    stored.then_some(account_label.as_str()),
+                )
+                .await;
+                report.anthropic_limit_reset = offer;
+                if ineligible {
+                    report
+                        .extra_info
+                        .push(("Session resets".into(), "Not eligible".into()));
+                }
+            }
+            report
+        }
         Err(e) => ProviderUsage {
             provider_name: display_name,
             error: Some(e.to_string()),
@@ -117,6 +141,7 @@ pub(super) async fn fetch_openai_usage_for_account(
     mut creds: auth::codex::CodexCredentials,
     account_label: Option<&str>,
 ) -> ProviderUsage {
+    let generation = openai_usage_generation();
     let is_chatgpt = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     if creds.access_token.is_empty() || !is_chatgpt {
         return ProviderUsage {
@@ -166,7 +191,8 @@ pub(super) async fn fetch_openai_usage_for_account(
                         )),
                         ..Default::default()
                     };
-                    store_openai_usage(
+                    store_openai_usage_for_generation(
+                        generation,
                         initial_cache_key,
                         openai_usage_data_from_provider_report(&report),
                     );
@@ -201,7 +227,11 @@ pub(super) async fn fetch_openai_usage_for_account(
                 error: Some(format!("Failed to fetch: {}", e)),
                 ..Default::default()
             };
-            store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+            store_openai_usage_for_generation(
+                generation,
+                cache_key,
+                openai_usage_data_from_provider_report(&report),
+            );
             return report;
         }
     };
@@ -214,7 +244,11 @@ pub(super) async fn fetch_openai_usage_for_account(
             error: Some(format!("API error ({}): {}", status, body)),
             ..Default::default()
         };
-        store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+        store_openai_usage_for_generation(
+            generation,
+            cache_key,
+            openai_usage_data_from_provider_report(&report),
+        );
         return report;
     }
 
@@ -226,7 +260,11 @@ pub(super) async fn fetch_openai_usage_for_account(
                 error: Some(format!("Failed to read response: {}", e)),
                 ..Default::default()
             };
-            store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+            store_openai_usage_for_generation(
+                generation,
+                cache_key,
+                openai_usage_data_from_provider_report(&report),
+            );
             return report;
         }
     };
@@ -239,22 +277,48 @@ pub(super) async fn fetch_openai_usage_for_account(
                 error: Some(format!("Failed to parse response: {}", e)),
                 ..Default::default()
             };
-            store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+            store_openai_usage_for_generation(
+                generation,
+                cache_key,
+                openai_usage_data_from_provider_report(&report),
+            );
             return report;
         }
     };
 
     let parsed = parse_openai_usage_payload(&json);
 
+    // Read-only detail lookup. Failure must not hide otherwise valid usage.
+    let available_expirations = if parsed.available_reset_count.is_some_and(|count| count > 0) {
+        super::openai_reset::fetch_available_expirations(&client, &creds)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let report = ProviderUsage {
         provider_name: display_name,
         limits: parsed.limits,
         extra_info: parsed.extra_info,
         hard_limit_reached: parsed.hard_limit_reached,
+        openai_reset_credits: parsed.available_reset_count.map(|available_count| {
+            jcode_usage_types::OpenAiResetCredits {
+                available_count,
+                available_expirations,
+                account_label: account_label.map(str::to_string),
+                ordinary_usage_allowed: parsed.ordinary_usage_allowed,
+            }
+        }),
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     };
-    store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+    store_openai_usage_for_generation(
+        generation,
+        cache_key,
+        openai_usage_data_from_provider_report(&report),
+    );
     report
 }
 
@@ -356,6 +420,8 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -453,6 +519,8 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -493,6 +561,8 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
         limits: Vec::new(),
         extra_info: vec![("Key status".to_string(), status)],
         hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -555,6 +625,8 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         limits: Vec::new(),
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -676,7 +748,77 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
+}
+
+/// Jcode subscription: included daily feature allowances plus an upgrade hint
+/// when an allowance is running low, so users see the limit before a feature
+/// stops working rather than after.
+pub(super) async fn fetch_jcode_usage_report() -> Option<ProviderUsage> {
+    match crate::subscription_api::fetch_subscription_me().await {
+        Ok(me) => Some(jcode_usage_report(&me)),
+        Err(error) => Some(ProviderUsage {
+            provider_name: "Jcode subscription".to_string(),
+            error: Some(format!("{error:#}")),
+            ..Default::default()
+        }),
+    }
+}
+
+/// Share of a daily allowance at which Jcode starts suggesting an upgrade.
+pub(crate) const JCODE_UPGRADE_HINT_PERCENT: f32 = 80.0;
+
+pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -> ProviderUsage {
+    let mut limits = Vec::new();
+    let mut extra_info = vec![(
+        "Plan".to_string(),
+        crate::subscription_catalog::JcodeTier::parse(&me.tier)
+            .map(|tier| tier.display_name().to_string())
+            .unwrap_or_else(|| me.tier.clone()),
+    )];
+    let mut hard_limit_reached = false;
+    if let Some(jev) = &me.jev_usage {
+        let mut worst = 0.0f32;
+        for (label, feature) in [
+            ("Memory recall (daily)", &jev.memory),
+            ("Browser automation (daily)", &jev.browser),
+        ] {
+            if feature.limit == 0 {
+                continue;
+            }
+            let percent = usage_percent_from_used_limit(feature.used as f64, feature.limit as f64);
+            worst = worst.max(percent);
+            hard_limit_reached |= feature.used >= feature.limit;
+            limits.push(UsageLimit {
+                name: label.to_string(),
+                usage_percent: percent,
+                resets_at: jev.resets_at.clone(),
+            });
+        }
+        let upgrade_link = jev.upgrade_url.as_deref().filter(|url| {
+            url.starts_with("https://jcode.sh/") || url.starts_with("https://www.jcode.sh/")
+        });
+        if worst >= JCODE_UPGRADE_HINT_PERCENT
+            && let (Some(tier), Some(url)) = (jev.upgrade_tier.as_deref(), upgrade_link)
+        {
+            let name = crate::subscription_catalog::JcodeTier::parse(tier)
+                .map(|tier| tier.display_name().to_string())
+                .unwrap_or_else(|| tier.to_string());
+            extra_info.push((
+                "Upgrade".to_string(),
+                format!("{name} raises daily limits: {url}"),
+            ));
+        }
+    }
+    ProviderUsage {
+        provider_name: "Jcode subscription".to_string(),
+        limits,
+        extra_info,
+        hard_limit_reached,
+        ..Default::default()
+    }
 }

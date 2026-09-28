@@ -8,9 +8,7 @@ mod layout_support;
 mod util_support;
 use crate::tui::mermaid;
 #[cfg(test)]
-use layout_support::{
-    clamp_side_panel_image_rows, estimate_side_panel_image_rows_with_font,
-};
+use layout_support::{clamp_side_panel_image_rows, estimate_side_panel_image_rows_with_font};
 use layout_support::{
     estimate_side_panel_image_layout, estimate_side_panel_image_layout_with_font,
     fit_image_area_with_font, plan_fit_image_render, scaled_image_rows,

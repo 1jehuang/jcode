@@ -794,13 +794,13 @@ pub fn should_refresh_anthropic_model_catalog() -> bool {
 
 pub fn should_refresh_anthropic_model_catalog_for_scope(scope: &str) -> bool {
     let _ = cached_anthropic_model_ids_for_scope(scope);
-    if anthropic_model_cache_is_fresh(&scope) {
+    if anthropic_model_cache_is_fresh(scope) {
         return false;
     }
-    if anthropic_model_catalog_refresh_throttled(&scope) {
+    if anthropic_model_catalog_refresh_throttled(scope) {
         return false;
     }
-    ANTHROPIC_MODEL_CATALOG_SERVICE.should_refresh(&scope)
+    ANTHROPIC_MODEL_CATALOG_SERVICE.should_refresh(scope)
 }
 
 pub fn begin_openai_model_catalog_refresh() -> bool {
@@ -998,6 +998,25 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
         return;
     }
 
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
+/// Clear the quota cooldown for the exact OpenAI account that was reset, even
+/// if the active account changed while confirmation or redemption was pending.
+/// `None` refers to the default scope, not the current active account.
+pub fn clear_openai_provider_unavailability_for_account_label(account_label: Option<&str>) {
+    let key = provider_runtime_scope_key("openai", account_label);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
+/// Clear the quota cooldown for the exact Claude login whose limits were reset.
+/// `None` refers to the active (or default) login.
+pub fn clear_claude_provider_unavailability_for_account_label(account_label: Option<&str>) {
+    let key = provider_runtime_scope_key("claude", account_label);
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
         unavailable.remove(&key);
     }

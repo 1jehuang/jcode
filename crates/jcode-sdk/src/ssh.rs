@@ -38,6 +38,16 @@ pub struct SshConnectOptions {
     pub connect_timeout: Duration,
     pub client_name: String,
     pub request_timeout: Option<Duration>,
+    /// Private key used exclusively for this connection (`IdentitiesOnly`).
+    /// Managed hosts authorize a fresh key per connection, so agent and
+    /// configured identities are never offered.
+    pub identity_file: Option<std::path::PathBuf>,
+    /// Pinned host keys. When set, the user's and system known_hosts files are
+    /// not consulted, and an unknown or changed host key fails the connection.
+    pub known_hosts_file: Option<std::path::PathBuf>,
+    /// Ignore `~/.ssh/config` and the system SSH config (`-F /dev/null`). The
+    /// destination must then be a literal hostname or address.
+    pub isolated_config: bool,
 }
 
 impl Default for SshConnectOptions {
@@ -51,6 +61,9 @@ impl Default for SshConnectOptions {
             connect_timeout: Duration::from_secs(30),
             client_name: defaults.client_name,
             request_timeout: defaults.request_timeout,
+            identity_file: None,
+            known_hosts_file: None,
+            isolated_config: false,
         }
     }
 }
@@ -107,6 +120,25 @@ impl SshConnectOptions {
                 "remote_binary must be an executable name or literal path without control characters",
             ));
         }
+        for (name, path) in [
+            ("identity_file", &self.identity_file),
+            ("known_hosts_file", &self.known_hosts_file),
+        ] {
+            if let Some(path) = path {
+                let text = path.to_string_lossy();
+                // OpenSSH expands % and ~ tokens in these options.
+                if !path.is_absolute() || text.contains('%') || text.chars().any(char::is_control) {
+                    return Err(invalid(match name {
+                        "identity_file" => {
+                            "identity_file must be an absolute path without % or control characters"
+                        }
+                        _ => {
+                            "known_hosts_file must be an absolute path without % or control characters"
+                        }
+                    }));
+                }
+            }
+        }
         if self.connect_timeout.is_zero() || self.connect_timeout > Duration::from_secs(3600) {
             return Err(invalid(
                 "SSH connect_timeout must be greater than zero and at most one hour",
@@ -127,8 +159,95 @@ impl SshConnectOptions {
     }
 
     fn command_with_control(&self, control: Option<(&std::path::Path, bool)>) -> Result<Command> {
+        let remote = format!(
+            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
+            shell_quote(&self.remote_binary)
+        );
+        self.command_for(control, &remote)
+    }
+
+    /// Run a POSIX shell script on the host with the same authentication,
+    /// host-key pinning and hardening as the API connection.
+    ///
+    /// The script travels on stdin (`sh -s`), never in argv, so it may carry
+    /// secrets. `$JCODE_BIN` names the configured remote binary. The process is
+    /// killed when `timeout` elapses. Output is returned even on a non-zero exit.
+    pub fn run_script(&self, script: &[u8], timeout: Duration) -> Result<std::process::Output> {
+        let remote = format!(
+            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; JCODE_BIN={}; export JCODE_BIN; exec sh -s",
+            shell_quote(&self.remote_binary)
+        );
+        let mut command = self.command_for(None, &remote)?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| Error::new(ErrorKind::Transport, format!("could not start ssh: {e}")))?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let script = script.to_vec();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&script);
+        });
+        let read = |mut pipe: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.by_ref().take(1024 * 1024).read_to_end(&mut bytes);
+                bytes
+            })
+        };
+        let stdout = read(Box::new(child.stdout.take().expect("piped stdout")));
+        let stderr = read(Box::new(child.stderr.take().expect("piped stderr")));
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child.try_wait().map_err(|e| {
+                Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}"))
+            })? {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::new(ErrorKind::Timeout, "remote script timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let _ = writer.join();
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
+    }
+
+    fn command_for(
+        &self,
+        control: Option<(&std::path::Path, bool)>,
+        remote: &str,
+    ) -> Result<Command> {
         self.validate()?;
         let mut command = Command::new("ssh");
+        if self.isolated_config {
+            command.args(["-F", "/dev/null"]);
+        }
+        if let Some(identity) = &self.identity_file {
+            command
+                .arg("-o")
+                .arg(format!("IdentityFile={}", identity.display()))
+                .args(["-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]);
+        }
+        if let Some(known) = &self.known_hosts_file {
+            command
+                .arg("-o")
+                .arg(format!("UserKnownHostsFile={}", known.display()))
+                .args([
+                    "-o",
+                    "GlobalKnownHostsFile=/dev/null",
+                    "-o",
+                    "UpdateHostKeys=no",
+                ]);
+        }
         command.args([
             "-T",
             "-o",
@@ -186,12 +305,8 @@ impl SshConnectOptions {
         if let Some(user) = &self.user {
             command.arg("-l").arg(user);
         }
-        // SSH joins remote arguments into shell source. Supply exactly one,
-        // quoting the executable as a literal POSIX shell word.
-        let remote = format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
-            shell_quote(&self.remote_binary)
-        );
+        // SSH joins remote arguments into shell source. Supply exactly one;
+        // callers quote the executable as a literal POSIX shell word.
         command.arg("--").arg(&self.host);
         if !control.is_some_and(|(_, master)| master) {
             command.arg(remote);
@@ -442,19 +557,19 @@ impl SshProcess {
     }
 
     pub(crate) fn shutdown(&self) {
-        if let Ok(mut child) = self.child.lock() {
-            if let Some(mut child) = child.take() {
-                // A dedicated process group also closes ProxyCommand helpers.
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
-                }
-                let _ = child.kill();
-                if let Ok(status) = child.wait() {
-                    if let Ok(mut saved) = self.status.lock() {
-                        *saved = Some(status);
-                    }
-                }
+        if let Ok(mut child) = self.child.lock()
+            && let Some(mut child) = child.take()
+        {
+            // A dedicated process group also closes ProxyCommand helpers.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            if let Ok(status) = child.wait()
+                && let Ok(mut saved) = self.status.lock()
+            {
+                *saved = Some(status);
             }
         }
         // Retained EventStreams can outlive the last client. A closed channel
@@ -465,10 +580,10 @@ impl SshProcess {
         }
         // Usually EOF arrives immediately. Never hang cleanup on an inherited
         // stderr handle held by a configured external SSH helper.
-        if let Ok(mut done) = self.stderr_done.lock() {
-            if let Some(done) = done.take() {
-                let _ = done.recv_timeout(Duration::from_millis(100));
-            }
+        if let Ok(mut done) = self.stderr_done.lock()
+            && let Some(done) = done.take()
+        {
+            let _ = done.recv_timeout(Duration::from_millis(100));
         }
     }
 
@@ -685,6 +800,39 @@ mod tests {
         opts.connect_timeout = Duration::from_secs(2);
         opts.client_name = "\0".repeat(1024);
         assert!(opts.command().is_err());
+    }
+
+    #[test]
+    fn managed_hosts_use_only_the_supplied_identity_and_pinned_host_keys() {
+        let mut opts = options();
+        opts.host = "203.0.113.7".into();
+        opts.user = Some("ec2-user".into());
+        opts.identity_file = Some("/run/jcode/key".into());
+        opts.known_hosts_file = Some("/run/jcode/known_hosts".into());
+        opts.isolated_config = true;
+        let command = opts.command().unwrap();
+        let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert!(args.windows(2).any(|a| a == ["-F", "/dev/null"]));
+        for expected in [
+            "IdentityFile=/run/jcode/key",
+            "IdentitiesOnly=yes",
+            "IdentityAgent=none",
+            "UserKnownHostsFile=/run/jcode/known_hosts",
+            "GlobalKnownHostsFile=/dev/null",
+            "StrictHostKeyChecking=yes",
+            "BatchMode=yes",
+        ] {
+            assert!(args.contains(&expected), "missing {expected}: {args:?}");
+        }
+        for bad in ["relative/key", "/tmp/%h", "/tmp/a\nb"] {
+            let mut opts = opts.clone();
+            opts.identity_file = Some(bad.into());
+            assert!(opts.command().is_err(), "accepted identity {bad:?}");
+            let mut opts = opts.clone();
+            opts.identity_file = None;
+            opts.known_hosts_file = Some(bad.into());
+            assert!(opts.command().is_err(), "accepted known_hosts {bad:?}");
+        }
     }
 
     #[test]

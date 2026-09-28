@@ -30,7 +30,7 @@ impl Access {
     fn description(self) -> &'static str {
         match self {
             Self::SignedOut => {
-                "Compile remotely using Jcode cloud-compute credits. Not signed in. Tell the user to subscribe at https://jcode.sh/pricing, then run `jcode account login` (existing subscribers only need to sign in). No source is uploaded while signed out."
+                "Not signed in. Subscribe at https://jcode.sh/pricing, then `jcode account login`."
             }
             Self::SubscriptionRequired => SUBSCRIBE,
             Self::Ready => {
@@ -390,10 +390,10 @@ impl Tool for CompileRemoteTool {
             "type": "object",
             "properties": {
                 "intent": super::intent_schema_property(),
-                "action": {"type":"string","enum":["compile","status"],"description":"compile (default) uploads source and spends shared cloud-compute credits. status checks account access without uploading source or starting compute."},
-                "command": {"type":"string","maxLength":8192,"description":"Build command for the remote Linux shell, e.g. cargo check or cargo build --release. Required for compile. Never include secrets. This command is never executed locally."},
-                "path": {"type":"string","description":"Git repository root, relative to the session workspace. Defaults to the working directory. Uploads current tracked and nonignored untracked regular files, excluding common secrets and build outputs. Exclusions are not a guarantee that source contains no secrets. No local credentials or environment are forwarded. No artifact download or persistent build cache in this version."},
-                "timeout_seconds": {"type":"integer","minimum":1,"maximum":600,"description":"Build deadline in seconds, default 300. Credits are reserved for the maximum sandbox lifetime including setup, then settled against measured usage."}
+                "action": {"type":"string","enum":["compile","status"],"description":"compile (default) uploads source and spends credits. status checks access without uploading."},
+                "command": {"type":"string","maxLength":8192,"description":"Remote Linux build command, e.g. cargo check. Required for compile. Never include secrets."},
+                "path": {"type":"string","description":"Git repo root relative to workspace (default cwd). Uploads tracked/untracked non-ignored files."},
+                "timeout_seconds": {"type":"integer","minimum":1,"maximum":600,"description":"Build deadline in seconds, default 300. Credits reserved up front, settled by measured usage."}
             }
         })
     }

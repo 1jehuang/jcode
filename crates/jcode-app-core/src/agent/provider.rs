@@ -274,11 +274,30 @@ impl Agent {
         self.session.provider_key = provider_key;
     }
 
+    /// Bookmark or unbookmark the session, returning the effective label.
+    pub fn set_session_saved(
+        &mut self,
+        saved: bool,
+        label: Option<String>,
+    ) -> Result<Option<String>> {
+        if saved {
+            self.session.mark_saved(label);
+        } else {
+            self.session.unmark_saved();
+        }
+        self.session.save()?;
+        Ok(self.session.save_label.clone())
+    }
+
     pub fn rename_session_title(&mut self, title: Option<String>) -> Result<String> {
         self.session.rename_title(title);
         self.log_env_snapshot("rename_session");
         self.session.save()?;
         Ok(self.session.display_title_or_name().to_string())
+    }
+
+    pub fn session_display_title_or_name(&self) -> String {
+        self.session.display_title_or_name().to_string()
     }
 
     pub fn autoreview_enabled(&self) -> Option<bool> {

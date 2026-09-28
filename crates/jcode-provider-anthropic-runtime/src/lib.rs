@@ -773,7 +773,8 @@ impl AnthropicProvider {
     }
 
     /// Default reasoning effort to apply when the user has *not* explicitly
-    /// configured one. Claude Opus 5 defaults to `low`: it is strong enough
+    /// configured one. Claude Opus 5.5 (jcode's default Claude model) defaults
+    /// to `medium`. Claude Opus 5 defaults to `low`: it is strong enough
     /// at low effort for day-to-day coding/agentic work, and users can cycle
     /// up when they want deeper reasoning. Older Claude Opus models are
     /// reasoning-heavy flagships, so we default them to `xhigh` where
@@ -786,7 +787,9 @@ impl AnthropicProvider {
     /// cheaper models stay cheap.
     fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
         let key = Self::normalized_model_key(model);
-        if key.contains("claude-opus-5") {
+        if key.contains("claude-opus-5-5") {
+            Some("medium".to_string())
+        } else if key.contains("claude-opus-5") {
             Some("low".to_string())
         } else if key.contains("claude-opus") {
             Some(if Self::model_supports_xhigh_effort(model) {
@@ -1150,8 +1153,13 @@ impl AnthropicProvider {
 
     /// Convert our Message type to Anthropic API format
     /// Also repairs dangling tool_uses by injecting synthetic tool_results
-    fn format_messages(&self, messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
-        jcode_provider_anthropic::format_messages(messages, is_oauth)
+    fn format_messages(
+        &self,
+        messages: &[Message],
+        is_oauth: bool,
+        api_tools: &[ApiTool],
+    ) -> Vec<ApiMessage> {
+        jcode_provider_anthropic::format_messages_with_tools(messages, is_oauth, api_tools)
     }
 
     /// Convert our ContentBlock to Anthropic API format
@@ -1251,8 +1259,8 @@ impl Provider for AnthropicProvider {
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
-        let api_messages = self.format_messages(messages, is_oauth);
         let api_tools = self.format_tools(tools, is_oauth);
+        let api_messages = self.format_messages(messages, is_oauth, &api_tools);
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
 
@@ -1552,6 +1560,13 @@ impl Provider for AnthropicProvider {
         true
     }
 
+    fn supports_deferred_tools(&self) -> bool {
+        // Deferred loading and `tool_reference` are first-party Messages API
+        // features. Custom gateways (JCODE_ANTHROPIC_API_URL) may proxy a
+        // different backend that rejects the fields, so keep them eager there.
+        self.direct_transport.api_url == API_URL
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             client: self.client.clone(),
@@ -1616,8 +1631,8 @@ impl Provider for AnthropicProvider {
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
-        let api_messages = self.format_messages(messages, is_oauth);
         let api_tools = self.format_tools(tools, is_oauth);
+        let api_messages = self.format_messages(messages, is_oauth, &api_tools);
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
 

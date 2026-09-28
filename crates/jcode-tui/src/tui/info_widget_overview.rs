@@ -1,4 +1,7 @@
-use super::info_widget::{AuthMethod, InfoWidgetData, UsageProvider, is_traceworthy_memory_event};
+use super::info_widget::{
+    InfoWidgetData, UsageProvider, changes_section_height, is_traceworthy_memory_event,
+    model_info_height,
+};
 
 pub(crate) const MAX_TODO_LINES: usize = 12;
 
@@ -103,15 +106,6 @@ pub(crate) fn compute_page_layout(
     }
 }
 
-fn compact_context_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.context_info
-        && info.total_chars > 0
-    {
-        return 1;
-    }
-    0
-}
-
 fn compact_todos_height(data: &InfoWidgetData) -> u16 {
     if data.todos.is_empty() { 0 } else { 2 }
 }
@@ -123,33 +117,6 @@ fn compact_memory_height(data: &InfoWidgetData) -> u16 {
         return 1;
     }
     0
-}
-
-fn compact_model_height(data: &InfoWidgetData) -> u16 {
-    if data.model.is_some() {
-        let mut lines = 1u16;
-        let has_provider = data
-            .provider_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .is_some();
-        if has_provider || data.auth_method != AuthMethod::Unknown {
-            lines += 1;
-        }
-        // Mirror render_model_info: a blank session name alone produces no line.
-        let has_session_line = data.session_count.is_some()
-            || data
-                .session_name
-                .as_deref()
-                .is_some_and(|s| !s.trim().is_empty());
-        if has_session_line {
-            lines += 1;
-        }
-        lines
-    } else {
-        0
-    }
 }
 
 fn compact_background_height(data: &InfoWidgetData) -> u16 {
@@ -189,24 +156,16 @@ fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
     if data.cache_hit_info.is_some() { 1 } else { 0 }
 }
 
-fn compact_git_height(data: &InfoWidgetData) -> u16 {
-    if let Some(info) = &data.git_info
-        && info.is_interesting()
-    {
-        return 1;
-    }
-    0
-}
-
+/// Overview height. Status-line facts (model identity, context %, branch and
+/// counts) are not sections here, only the detail behind them.
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
-    compact_model_height(data)
-        + compact_context_height(data)
+    model_info_height(data)
         + compact_todos_height(data)
         + compact_memory_height(data)
         + compact_background_height(data)
         + compact_usage_height(data)
         + compact_kv_cache_height(data)
-        + compact_git_height(data)
+        + changes_section_height(data)
 }
 
 fn expanded_todos_height(data: &InfoWidgetData) -> u16 {
@@ -254,7 +213,7 @@ mod tests {
     #[test]
     fn compute_page_layout_falls_back_to_compact_page() {
         let data = InfoWidgetData {
-            model: Some("gpt-test".to_string()),
+            session_name: Some("sauropod".to_string()),
             queue_mode: Some(true),
             ..Default::default()
         };

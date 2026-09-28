@@ -1928,14 +1928,49 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
 
 pub use gateway::{detect_tailscale_dns_name, parse_tailscale_dns_name, resolve_connect_host};
 
-pub async fn run_browser(action: &str) -> Result<()> {
+pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
     match action {
-        "setup" => browser::run_setup_command().await?,
+        "setup" => browser::run_setup_command_for(requested).await?,
+        "detect" => {
+            let target = browser::resolve_target_browser(requested)?;
+            println!("Browser detection");
+            println!(
+                "  target: {} ({})",
+                target.kind.display_name(),
+                target.source.describe()
+            );
+            match crate::browser_detect::system_default_browser_id() {
+                Some(id) => println!("  system default: {}", id),
+                None => println!("  system default: unknown"),
+            }
+            let installed: Vec<&str> = crate::browser_detect::ALL_BROWSERS
+                .iter()
+                .filter(|k| k.is_installed())
+                .map(|k| k.id())
+                .collect();
+            println!(
+                "  installed: {}",
+                if installed.is_empty() {
+                    "none detected".to_string()
+                } else {
+                    installed.join(", ")
+                }
+            );
+            if let Some(saved) = browser::saved_browser_preference() {
+                println!("  configured by setup: {}", saved.id());
+            }
+            println!("\nOverride with `jcode browser setup <browser>` or JCODE_BROWSER=<browser>.");
+        }
         "status" => {
-            let status = browser::ensure_browser_ready_noninteractive().await?;
+            let target = browser::resolve_target_browser(requested)?;
+            let name = target.kind.display_name();
+            let status = browser::ensure_browser_ready_noninteractive_for(&target).await?;
             println!("Browser automation");
             println!("  backend: {}", status.backend);
-            println!("  browser: {}", status.browser);
+            println!("  browser: {} ({})", status.browser, status.detected_via);
+            if let Some(connected) = &status.connected_browser {
+                println!("  connected browser: {}", connected);
+            }
             println!(
                 "  binary: {}",
                 if status.binary_installed {
@@ -1976,15 +2011,18 @@ pub async fn run_browser(action: &str) -> Result<()> {
                 println!("\nBuilt-in browser tool is ready.");
             } else if status.responding && !status.compatible {
                 println!(
-                    "\nThe browser bridge is connected, but the installed Firefox extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
+                    "\nThe browser bridge is connected, but the installed extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
                 );
-            } else if status.binary_installed && !browser::is_firefox_running() {
+            } else if status.binary_installed && !browser::is_browser_running(target.kind) {
                 println!(
-                    "\nFirefox is not running, so the bridge cannot respond. Start Firefox (or run a browser tool action, which launches it automatically), then re-check status. Setup is one-time and does not need to be re-run."
+                    "\n{} is not running, so the bridge cannot respond. Start {} (or run a browser tool action, which launches it automatically), then re-check status. Setup is one-time and does not need to be re-run.",
+                    name, name
                 );
             } else if status.binary_installed {
                 println!(
-                    "\nFirefox is running, but the bridge is not responding. Check that the Browser Agent Bridge extension is enabled in the running profile. Run `jcode browser setup` only to repair the install."
+                    "\n{} is running, but the bridge is not responding. Check that the Browser Agent Bridge extension is enabled ({}). Run `jcode browser setup` only to repair the install.",
+                    name,
+                    target.kind.extensions_page()
                 );
             } else {
                 println!("\nRun `jcode browser setup` to install or repair it.");
@@ -1992,7 +2030,7 @@ pub async fn run_browser(action: &str) -> Result<()> {
         }
         other => {
             eprintln!("Unknown browser action: {}", other);
-            eprintln!("Available: setup, status");
+            eprintln!("Available: setup [browser], status [browser], detect");
             std::process::exit(1);
         }
     }
@@ -2118,6 +2156,38 @@ pub fn run_server_promote_command(version: Option<&str>, emit_json: bool) -> Res
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct ServerReloadReport {
+    socket: String,
+    had_listener: bool,
+    forced: bool,
+    reloaded: bool,
+    already_current: bool,
+    handoff_ready: bool,
+    detail: String,
+}
+
+fn validate_server_reload_report(report: &ServerReloadReport) -> Result<()> {
+    // A reload that asked the old server to hand over, and then never saw the
+    // new one take the socket, did not succeed. It is the one outcome a caller
+    // cannot infer from the exit status alone: until now every path here
+    // returned Ok(()), and the distinction lived only inside the JSON body.
+    //
+    // Scope is deliberately narrow, because the comment below documents that
+    // an installer may call `jcode server reload` unconditionally. The two
+    // states that are arguably a success keep exit 0: there was nothing
+    // running (`had_listener == false`), or the binary was already current
+    // (`already_current`). Only the not-ready handoff, where the daemon is
+    // genuinely not serving yet, reports failure.
+    if report.had_listener && !report.already_current && !report.handoff_ready {
+        anyhow::bail!(
+            "jcode server reload was requested but the new server never became ready: {}",
+            report.detail
+        );
+    }
+    Ok(())
+}
+
 /// Gracefully reload the running background server onto the newest binary.
 ///
 /// This is the preferred upgrade path (issue #291): instead of killing the
@@ -2134,29 +2204,31 @@ pub fn run_server_promote_command(version: Option<&str>, emit_json: bool) -> Res
 /// - If no server is running, this is a successful no-op so installers can call
 ///   it unconditionally.
 pub async fn run_server_reload_command(force: bool, emit_json: bool) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    run_server_reload_command_to(force, emit_json, &mut stdout).await
+}
+
+async fn run_server_reload_command_to(
+    force: bool,
+    emit_json: bool,
+    stdout: &mut impl Write,
+) -> Result<()> {
     use crate::protocol::ServerEvent;
     use std::time::Duration;
 
     let socket = crate::server::socket_path();
 
-    #[derive(Serialize)]
-    struct ServerReloadReport {
-        socket: String,
-        had_listener: bool,
-        forced: bool,
-        reloaded: bool,
-        already_current: bool,
-        handoff_ready: bool,
-        detail: String,
-    }
-
-    let emit = |report: ServerReloadReport| -> Result<()> {
+    let mut emit = |report: ServerReloadReport| -> Result<()> {
+        let outcome = validate_server_reload_report(&report);
         if emit_json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            serde_json::to_writer_pretty(&mut *stdout, &report)?;
+            stdout.write_all(b"\n")?;
         } else if !report.detail.is_empty() {
-            println!("{}", report.detail);
+            writeln!(stdout, "{}", report.detail)?;
         }
-        Ok(())
+        // Keep printing the report above the status check so --json output is
+        // byte-identical for callers that parse it.
+        outcome
     };
 
     // No server? Nothing to reload. This is a success so an installer can call
@@ -3160,7 +3232,7 @@ fn emit_ndjson_event(
             stdout,
             &serde_json::json!({ "type": "tool_start", "id": id, "name": name }),
         ),
-        ServerEvent::ToolInput { delta } => write_json_line(
+        ServerEvent::ToolInput { delta, .. } => write_json_line(
             stdout,
             &serde_json::json!({ "type": "tool_input", "delta": delta }),
         ),
@@ -3455,9 +3527,7 @@ fn filter_cli_model_routes_for_choice(
     use super::provider_init::ProviderChoice;
 
     let keep = |route: &&crate::provider::ModelRoute| match choice {
-        ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
-            route.api_method_kind().is_anthropic_credential_route()
-        }
+        ProviderChoice::Claude => route.api_method_kind().is_anthropic_credential_route(),
         ProviderChoice::Openai => {
             let method = route.api_method_kind();
             matches!(method, crate::provider::ModelRouteApiMethod::OpenAIOAuth)

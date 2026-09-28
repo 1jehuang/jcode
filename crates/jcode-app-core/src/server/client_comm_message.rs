@@ -109,6 +109,7 @@ pub(super) async fn handle_comm_message(
     delivery: Option<CommDeliveryMode>,
     wake: Option<bool>,
     tldr: Option<String>,
+    to_swarm: Option<String>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     sessions: &SessionAgents,
     soft_interrupt_queues: &SessionInterruptQueues,
@@ -157,15 +158,83 @@ pub(super) async fn handle_comm_message(
     if let Some(swarm_id) = swarm_id {
         let friendly_name = friendly_name_for_session(&from_session, swarm_members).await;
 
+        // Cross-swarm DMs: resolve `to_swarm` (label or id). When it names a
+        // different swarm, the DM targets `to_session` inside that swarm, or
+        // its coordinator when no session is given. Channels and broadcasts
+        // never cross swarm boundaries.
+        let cross_swarm_id = match to_swarm.as_deref().map(str::trim) {
+            Some(target) if !target.is_empty() => {
+                let live_swarm_ids: HashSet<String> = {
+                    let swarms = swarms_by_id.read().await;
+                    swarms
+                        .iter()
+                        .filter(|(_, sessions)| !sessions.is_empty())
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                };
+                match super::swarm_labels::resolve_swarm_target(target, &live_swarm_ids) {
+                    Ok(resolved) if resolved == swarm_id => None,
+                    Ok(resolved) => Some(resolved),
+                    Err(err) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: format!("Cross-swarm DM failed: {err}"),
+                            retry_after_secs: None,
+                        });
+                        return;
+                    }
+                }
+            }
+            _ => None,
+        };
+        if cross_swarm_id.is_some() && channel.is_some() && to_session.is_none() {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: "Channels are swarm-local. Cross-swarm messages are DMs: pass to_swarm with an optional to_session.".to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+        let delivery_swarm_id = cross_swarm_id.clone().unwrap_or_else(|| swarm_id.clone());
+
         let swarm_session_ids: Vec<String> = {
             let swarms = swarms_by_id.read().await;
             swarms
-                .get(&swarm_id)
+                .get(&delivery_swarm_id)
                 .map(|sessions| sessions.iter().cloned().collect())
                 .unwrap_or_default()
         };
 
-        let resolved_to_session = if let Some(ref target) = to_session {
+        let cross_swarm_default_target = if cross_swarm_id.is_some() && to_session.is_none() {
+            let members = swarm_members.read().await;
+            let mut coordinators: Vec<&String> = swarm_session_ids
+                .iter()
+                .filter(|id| members.get(*id).is_some_and(|m| m.role == "coordinator"))
+                .collect();
+            coordinators.sort();
+            let fallback = || {
+                let mut ids: Vec<&String> = swarm_session_ids
+                    .iter()
+                    .filter(|id| {
+                        members
+                            .get(*id)
+                            .is_some_and(|m| m.report_back_to_session_id.is_none())
+                    })
+                    .collect();
+                ids.sort();
+                ids.first().map(|id| (*id).clone())
+            };
+            match coordinators.first() {
+                Some(id) => Some((*id).clone()),
+                None => fallback().or_else(|| swarm_session_ids.iter().min().cloned()),
+            }
+        } else {
+            None
+        };
+
+        let resolved_to_session = if let Some(target) = cross_swarm_default_target {
+            Some(target)
+        } else if let Some(ref target) = to_session {
             match resolve_dm_target_session(target, &swarm_session_ids, swarm_members).await {
                 Ok(session_id) => Some(session_id),
                 Err(message) => {
@@ -202,17 +271,34 @@ pub(super) async fn handle_comm_message(
                     ("request_id", id.to_string()),
                     ("from_session", from_session.clone()),
                     ("target_session", target.clone()),
-                    ("swarm_id", swarm_id.clone()),
+                    ("swarm_id", delivery_swarm_id.clone()),
                     ("elapsed_ms", started.elapsed().as_millis().to_string()),
                 ],
             );
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
-                message: format!("DM failed: session '{}' not in swarm", target),
+                message: format!(
+                    "DM failed: session '{}' not in swarm '{}'",
+                    target,
+                    super::swarm_labels::swarm_display_name(&delivery_swarm_id)
+                ),
                 retry_after_secs: None,
             });
             return;
         }
+
+        if cross_swarm_id.is_some() && resolved_to_session.is_none() {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!(
+                    "Cross-swarm DM failed: swarm '{}' has no reachable members.",
+                    super::swarm_labels::swarm_display_name(&delivery_swarm_id)
+                ),
+                retry_after_secs: None,
+            });
+            return;
+        }
+        let sender_swarm_display = super::swarm_labels::swarm_display_name(&swarm_id);
 
         let scope = if resolved_to_session.is_some() {
             "dm"
@@ -281,9 +367,15 @@ pub(super) async fn handle_comm_message(
                     .clone()
                     .unwrap_or_else(|| from_session[..8.min(from_session.len())].to_string());
                 let scope_label = match (scope, channel.as_deref()) {
+                    _ if cross_swarm_id.is_some() => "Cross-swarm DM".to_string(),
                     ("channel", Some(channel_name)) => format!("#{}", channel_name),
                     ("dm", _) => "DM".to_string(),
                     _ => "broadcast".to_string(),
+                };
+                let from_label = if cross_swarm_id.is_some() {
+                    format!("{} (swarm '{}')", from_label, sender_swarm_display)
+                } else {
+                    from_label
                 };
                 let delivery_mode = resolve_comm_delivery_mode(scope, delivery, wake);
                 let notification_msg = format!("{} from {}: {}", scope_label, from_label, message);
@@ -307,6 +399,10 @@ pub(super) async fn handle_comm_message(
                     .clone()
                     .unwrap_or_else(|| from_session.clone());
                 let reminder = match scope {
+                    _ if cross_swarm_id.is_some() => Some(format!(
+                        "You just received a cross-swarm direct message from {} in swarm '{}'. To reply, use swarm action=dm with to_swarm='{}' and to_session='{}'.",
+                        sender_name, sender_swarm_display, sender_swarm_display, from_session
+                    )),
                     "dm" => Some(format!(
                         "You just received a direct swarm message from {}. Review it and respond or act if useful.",
                         sender_name
@@ -397,11 +493,26 @@ pub(super) async fn handle_comm_message(
             friendly_name.clone(),
             Some(swarm_id.clone()),
             SwarmEventType::Notification {
-                notification_type: scope_value,
+                notification_type: scope_value.clone(),
                 message: truncate_detail(&message, 220),
             },
         )
         .await;
+        if let Some(ref target_swarm) = cross_swarm_id {
+            record_swarm_event(
+                event_history,
+                event_counter,
+                swarm_event_tx,
+                from_session.clone(),
+                friendly_name.clone(),
+                Some(target_swarm.clone()),
+                SwarmEventType::Notification {
+                    notification_type: "cross_swarm_dm".to_string(),
+                    message: truncate_detail(&message, 220),
+                },
+            )
+            .await;
+        }
 
         let _ = client_event_tx.send(ServerEvent::Done { id });
         crate::logging::event_info(

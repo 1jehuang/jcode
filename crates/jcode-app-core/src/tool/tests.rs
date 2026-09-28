@@ -82,6 +82,54 @@ async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::
 }
 
 #[tokio::test]
+async fn mcp_list_remains_available_while_background_connect_is_handshaking() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+    let _home_guard = TestHomeGuard::new(home.path());
+    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
+
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{
+            "mcpServers": {
+                "slow": {
+                    "command": "/bin/sh",
+                    "args": ["-c", "sleep 2"],
+                    "timeout_secs": 86400
+                }
+            }
+        }"#,
+    )
+    .expect("write slow MCP config");
+
+    let registry = Registry::empty();
+    registry
+        .register_mcp_tools_for_dir(None, None, None, Some(working_dir.path().to_path_buf()))
+        .await;
+
+    // Let the background connection task acquire its read guard and enter the
+    // slow initialize handshake before asking the management tool to list.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        registry.execute(
+            "mcp",
+            serde_json::json!({"action": "list"}),
+            mcp_test_context(working_dir.path()),
+        ),
+    )
+    .await
+    .expect("mcp list must not wait for a slow background handshake")
+    .expect("mcp list should succeed");
+
+    assert!(
+        output.output.contains("slow"),
+        "unexpected output: {}",
+        output.output
+    );
+}
+
+#[tokio::test]
 async fn real_mcp_registration_does_not_retain_registry_tool_map() {
     let _env_lock = crate::storage::lock_test_env();
     let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
@@ -630,7 +678,22 @@ async fn tool_descriptions_stay_under_token_cap() {
     // integration_tools keeps a deliberate second sentence explaining that catalog
     // entries integrate directly with the agent.
     // swarm appends the user-tunable swarm-prompt.md by design.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm"];
+    // batch carries a deliberate parallel-call example (2f4abae33, pinned by
+    // batch_tests::description_includes_parallel_tool_call_example).
+    // browser carries the status-first and handoff-by-default routing policy
+    // (e1576e9e3 and earlier), pinned by browser_tests.
+    // todo carries a deliberate "use it very often" directive requested by the
+    // user, so planning happens proactively rather than only when prompted.
+    // applet carries the whole view-node vocabulary inline, since the model has
+    // no other way to learn which node types and props the host renders.
+    const EXEMPT: &[&str] = &[
+        "integration_tools",
+        "swarm",
+        "batch",
+        "browser",
+        "todo",
+        "applet",
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -687,6 +750,20 @@ fn collect_param_descriptions(schema: &Value, path: &str, out: &mut Vec<(String,
 #[tokio::test]
 async fn tool_parameter_descriptions_stay_under_token_cap() {
     const PARAM_DESCRIPTION_TOKEN_CAP: usize = 25;
+    // The feedback-loop relevance rubric defines every enum state inline
+    // (abb0baabc, d21916db5) and todo::tests pins each concept, so it is
+    // deliberately longer than the cap.
+    // applet placement lists every shorthand so the model can pick a surface
+    // without a round trip. desktop_selfdev action carries a safety warning:
+    // killing the harness bridge by hand strands the calling session.
+    const EXEMPT: &[(&str, &str)] = &[
+        (
+            "todo",
+            "$.properties.goals.items.properties.feedback_loop_relevance",
+        ),
+        ("applet", "$.properties.placement"),
+        ("desktop_selfdev", "$.properties.action"),
+    ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -696,7 +773,9 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         collect_param_descriptions(&def.input_schema, "$", &mut descriptions);
         for (path, description) in descriptions {
             let tokens = crate::util::estimate_tokens(&description);
-            if tokens > PARAM_DESCRIPTION_TOKEN_CAP {
+            if tokens > PARAM_DESCRIPTION_TOKEN_CAP
+                && !EXEMPT.contains(&(def.name.as_str(), path.as_str()))
+            {
                 over_cap.push(format!(
                     "{} {} (~{} tokens): {}",
                     def.name, path, tokens, description
@@ -1762,7 +1841,8 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
 async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode() {
     /// Built-ins that legitimately cannot be strict. Verified against master
     /// before the #711/#713 eligibility changes, so this is pre-existing.
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser", "swarm"];
+    // applet's view is a recursive, open-ended node tree.
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["applet", "batch", "browser", "swarm"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -1792,3 +1872,6 @@ async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode()
 
 #[path = "tests/mcp_collision.rs"]
 mod mcp_collision;
+
+#[path = "tests/sdk.rs"]
+mod sdk_tests;

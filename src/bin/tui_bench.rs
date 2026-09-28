@@ -648,7 +648,8 @@ fn stored_message_visible_text(message: &jcode::session::StoredMessage) -> Strin
             ContentBlock::OpenAICompaction { .. }
             | ContentBlock::AnthropicThinking { .. }
             | ContentBlock::ReasoningTrace { .. }
-            | ContentBlock::OpenAIReasoning { .. } => {}
+            | ContentBlock::OpenAIReasoning { .. }
+            | ContentBlock::ToolReference { .. } => {}
         }
     }
     parts.join("\n\n")
@@ -803,6 +804,7 @@ fn reconstruct_side_panel_snapshot_from_session(session: &Session) -> SidePanelS
     }
 
     SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id,
         pages,
     }
@@ -1126,9 +1128,6 @@ impl TuiState for BenchState {
         jcode::config::config().display.native_scrollbars.side_panel
     }
 
-    fn diff_line_wrap(&self) -> bool {
-        true
-    }
     fn inline_interactive_state(&self) -> Option<&jcode::tui::InlineInteractiveState> {
         None
     }

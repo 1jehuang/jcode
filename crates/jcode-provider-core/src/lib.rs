@@ -6,6 +6,7 @@ pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
 pub mod model_id;
+pub mod model_names;
 pub mod models;
 pub mod openai_schema;
 pub mod pricing;
@@ -171,6 +172,14 @@ pub trait Provider: Send + Sync {
 
     /// Whether this provider path can safely receive `ContentBlock::Image` inputs.
     fn supports_image_input(&self) -> bool {
+        false
+    }
+
+    /// Whether this provider path natively supports deferred tool definitions
+    /// (`ToolDefinition::defer_loading`) loaded by `ContentBlock::ToolReference`
+    /// without invalidating the prompt cache. Providers that return false must
+    /// tolerate (and drop) deferred definitions and reference blocks.
+    fn supports_deferred_tools(&self) -> bool {
         false
     }
 
@@ -860,8 +869,8 @@ impl RouteSelection {
 }
 
 /// Grok Build routing spec: `grok-4.6` and `grok-build:grok-4.6` both become
-/// `grok-build:grok-4.6` so `MultiProvider::set_model` dispatches to the ACP
-/// runtime instead of treating the bare id as the active provider's model.
+/// `grok-build:grok-4.6` so `MultiProvider::set_model` dispatches to the Grok
+/// Build runtime instead of treating the bare id as the active provider's model.
 pub fn grok_build_model_spec(model: &str) -> String {
     let bare = model.strip_prefix("grok-build:").unwrap_or(model).trim();
     format!("grok-build:{bare}")

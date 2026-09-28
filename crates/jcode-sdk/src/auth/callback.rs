@@ -3,7 +3,7 @@ use super::*;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 
 pub(super) struct CallbackListener {
-    listener: TcpListener,
+    listener: Mutex<Option<TcpListener>>,
     redirect: url::Url,
     state: String,
 }
@@ -45,10 +45,14 @@ impl CallbackListener {
         let listener: TcpListener = socket.into();
         listener.set_nonblocking(true).ok()?;
         Some(Self {
-            listener,
+            listener: Mutex::new(Some(listener)),
             redirect,
             state,
         })
+    }
+
+    pub(super) fn close(&self) {
+        self.listener.lock().unwrap().take();
     }
 
     fn interrupted(flow: &FlowInner) -> bool {
@@ -67,7 +71,14 @@ impl CallbackListener {
                     "Browser callback timed out. Paste the callback URL or start a new login.",
                 ));
             }
-            match self.listener.accept() {
+            let accepted = {
+                let listener = self.listener.lock().unwrap();
+                let Some(listener) = listener.as_ref() else {
+                    return Err(cancelled());
+                };
+                listener.accept()
+            };
+            match accepted {
                 Ok((mut stream, peer)) => {
                     if !peer.ip().is_loopback() {
                         continue;

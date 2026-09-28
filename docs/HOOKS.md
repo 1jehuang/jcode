@@ -82,6 +82,28 @@ Fail-open is deliberate: a broken policy script should degrade to "no policy"
 rather than brick every session. If you need fail-closed semantics, make the
 hook itself robust (it is your trust boundary, not jcode).
 
+## Tool-input transformers: `pre_tool_transform`
+
+Transformers are synchronous external plugins that can replace a tool's JSON
+input before it is validated and executed. Configure one or more in order:
+
+```toml
+[hooks]
+pre_tool_transform = ["~/.jcode/plugins/rtk-transform"]
+pre_tool_transform_timeout_ms = 500
+```
+
+Each transformer receives the current complete tool-input JSON on stdin and
+`JCODE_HOOK_TOOL_NAME`, `JCODE_HOOK_SESSION_ID`, and `JCODE_HOOK_CWD` in its
+environment. It may print a replacement JSON object to stdout. Empty stdout,
+invalid JSON, a non-zero exit, a spawn error, or a timeout leaves the input
+unchanged. This fail-open contract makes optional integrations safe to enable.
+
+Transformers compose in configuration order and run before the `pre_tool`
+policy gate, so policies evaluate the final transformed input. Keep plugins
+small and tool-specific. For example, an RTK plugin should only change
+`bash.command` when `rtk rewrite` returns a replacement.
+
 ### Example policy script
 
 ```bash

@@ -33,6 +33,7 @@ fn session(id: &str) -> SessionInfo {
         last_active_at_ms: None,
         archived: false,
         archived_at_ms: None,
+        save_label: None,
     }
 }
 

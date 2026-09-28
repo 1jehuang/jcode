@@ -22,10 +22,7 @@ fn parse_diff_mode_name_maps_known_aliases() {
 #[test]
 fn parse_diff_mode_name_is_case_insensitive_and_trims() {
     use crate::config::DiffDisplayMode;
-    assert_eq!(
-        parse_diff_mode_name("  FILE "),
-        Some(DiffDisplayMode::File)
-    );
+    assert_eq!(parse_diff_mode_name("  FILE "), Some(DiffDisplayMode::File));
 }
 
 #[test]

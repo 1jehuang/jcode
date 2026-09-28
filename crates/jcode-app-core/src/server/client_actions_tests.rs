@@ -1,8 +1,9 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::{
-    NotifySessionContext, clone_split_session, handle_notify_session, handle_rename_session,
-    handle_resume_all_sessions, handle_set_feature, handle_split,
+    NotifySessionContext, clone_split_session, create_transfer_child_session,
+    handle_notify_session, handle_rename_session, handle_resume_all_sessions, handle_set_feature,
+    handle_split,
 };
 use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
@@ -118,6 +119,7 @@ fn clone_split_session_uses_persisted_session_state() {
     );
     parent.working_dir = Some("/tmp/jcode-split-test".to_string());
     parent.model = Some("gpt-test".to_string());
+    parent.system_prompt = Some("forked system prompt".into());
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -136,6 +138,7 @@ fn clone_split_session_uses_persisted_session_state() {
 
     let mut unsaved_parent = parent.clone();
     unsaved_parent.model = Some("unsaved-model".into());
+    unsaved_parent.system_prompt = Some("unsaved prompt".into());
     unsaved_parent.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
@@ -148,6 +151,7 @@ fn clone_split_session_uses_persisted_session_state() {
     let child = crate::session::Session::load(&child_id).expect("load child");
 
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(child.system_prompt, parent.system_prompt);
     assert_eq!(
         child.messages.len(),
         parent.messages.len() + 1,
@@ -360,6 +364,20 @@ fn split_missing_parent_never_uses_another_live_session() {
 }
 
 #[test]
+fn transfer_preserves_system_prompt_including_empty_override() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = SplitTestHome::new();
+    for prompt in [None, Some(""), Some("custom system prompt")] {
+        let mut parent = crate::session::Session::create(None, None);
+        parent.system_prompt = prompt.map(str::to_string);
+        let (child_id, _) = create_transfer_child_session(&parent.id, &parent, None)
+            .expect("create transfer session");
+        let child = crate::session::Session::load(&child_id).expect("load transfer session");
+        assert_eq!(child.system_prompt, parent.system_prompt);
+    }
+}
+
+#[test]
 fn split_corrupt_persisted_parent_is_not_hidden_by_live_fallback() {
     let _guard = crate::storage::lock_test_env();
     let _home = SplitTestHome::new();
@@ -443,9 +461,10 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
             .read()
             .await
             .get(session_id)
-            .and_then(|member| member.swarm_id.clone())
-            .as_deref(),
-        Some("/tmp/jcode-passive-swarm")
+            .and_then(|member| member.swarm_id.clone()),
+        // Root sessions own a session-scoped swarm rather than one derived
+        // from the working directory (83dbc36dc).
+        crate::server::util::swarm_id_for_session(session_id)
     );
     assert_eq!(
         swarm_members
@@ -998,6 +1017,51 @@ async fn resume_all_skips_session_with_completed_turn() {
 
     if let Some(home) = prev_home {
         crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn daemon_saved_flag_survives_later_session_writes() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let session_id = agent.lock().await.session_id().to_string();
+
+    let label = agent
+        .lock()
+        .await
+        .set_session_saved(true, Some("investor catch up".to_string()))
+        .expect("save session");
+    assert_eq!(label.as_deref(), Some("investor catch up"));
+    // A later daemon-owned write, such as the next turn, must keep the bookmark.
+    agent
+        .lock()
+        .await
+        .set_autoreview_enabled(true)
+        .expect("later write");
+    let loaded = crate::session::Session::load(&session_id).expect("load saved session");
+    assert!(loaded.saved);
+    assert_eq!(loaded.save_label.as_deref(), Some("investor catch up"));
+
+    agent
+        .lock()
+        .await
+        .set_session_saved(false, None)
+        .expect("unsave session");
+    let loaded = crate::session::Session::load(&session_id).expect("load unsaved session");
+    assert!(!loaded.saved);
+    assert!(loaded.save_label.is_none());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
     } else {
         crate::env::remove_var("JCODE_HOME");
     }

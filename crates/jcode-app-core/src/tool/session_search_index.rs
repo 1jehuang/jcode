@@ -298,13 +298,10 @@ impl TokenHashIndex {
         for (key, mtime_ms, size, overflow, token_count, word_count) in metas {
             let bytes = cursor.take(word_count * 8)?;
             let bits: Vec<u64> = bytes
-                .chunks_exact(8)
-                .map(|chunk| {
-                    u64::from_le_bytes([
-                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
-                        chunk[7],
-                    ])
-                })
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|chunk| u64::from_le_bytes(*chunk))
                 .collect();
             entries.push(IndexEntry {
                 key,

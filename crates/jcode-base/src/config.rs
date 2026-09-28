@@ -9,7 +9,7 @@ pub use jcode_config_types::{
     DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
     KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
     MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
-    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, OverscrollStatusMode,
+    NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
     PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
     SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
     WebSearchConfig, WebSearchEngine,
@@ -50,6 +50,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_AUTO_SERVER_RELOAD",
     "JCODE_CHECK_UPDATES",
     "JCODE_BING_API_KEY",
+    "JCODE_BLOCK_LID_CLOSE",
     "JCODE_BING_API_KEY_ENV",
     "JCODE_BING_MARKET",
     "JCODE_CENTERED_TOGGLE_KEY",
@@ -66,6 +67,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_DEBUG_SOCKET",
     "JCODE_DEFAULT_REASONING_DISPLAY",
     "JCODE_DICTATION_COMMAND",
+    "JCODE_DICTATION_RECORDER",
     "JCODE_DICTATION_KEY",
     "JCODE_DICTATION_MODE",
     "JCODE_DICTATION_TIMEOUT_SECS",
@@ -91,6 +93,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_GATEWAY_PORT",
     "JCODE_HOME",
     "JCODE_HOOK_PRE_TOOL",
+    "JCODE_HOOK_PRE_TOOL_TRANSFORM",
+    "JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS",
     "JCODE_HOOK_PRE_TOOL_TIMEOUT_MS",
     "JCODE_HOOK_POST_TOOL",
     "JCODE_HOOK_SESSION_END",
@@ -117,6 +121,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_MEMORY_EMBEDDING_DIM",
     "JCODE_MEMORY_EMBEDDING_MODEL",
     "JCODE_MEMORY_ENABLED",
+    "JCODE_MEMORY_JEV_PROVIDER",
     "JCODE_ENABLE_MERMAID",
     "JCODE_MEMORY_MODEL",
     "JCODE_MEMORY_SIDECAR_ENABLED",
@@ -187,6 +192,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES",
     "JCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY",
     "JCODE_UPDATE_CHANNEL",
+    "JCODE_VOICE_INPUT_KEY",
     "JCODE_WEBSEARCH_ENGINE",
     "JCODE_WEBSEARCH_FALLBACK_ENGINES",
     "JCODE_WORKSPACE_DOWN_KEY",
@@ -554,6 +560,12 @@ pub struct Config {
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
+
+    /// `[desktop.*]` tables owned by Jcode Desktop (voice, workspace,
+    /// appearance, ...). The CLI never interprets them, but it must round-trip
+    /// them verbatim so a CLI settings save never wipes Desktop preferences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<toml::Table>,
 }
 
 /// Controls who owns autonomous wake execution.
@@ -607,13 +619,16 @@ impl Default for AcpConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpToolsMode {
-    /// Expose individual tools until their serialized definitions exceed the
-    /// configured threshold, then use the fixed search/call surface.
+    /// Never change the cached tool list for MCP changes. Providers with
+    /// native deferred loading (Claude, OpenAI gpt-5.4+) get MCP tools as
+    /// deferred definitions; others get the fixed `mcp_search`/`mcp_call`
+    /// surface, with new tools described in the transcript.
     #[default]
     Auto,
     /// Always expose every MCP server tool as a top-level tool definition.
+    /// Adding a server mid-session then invalidates the prompt cache.
     Eager,
-    /// Expose only the fixed `mcp_search` and `mcp_call` tools.
+    /// Same as `Auto` (kept for existing configs).
     Deferred,
 }
 
@@ -651,7 +666,9 @@ pub struct ToolConfig {
     pub disable_base_tools: bool,
     /// MCP tool exposure mode: auto (default), eager, or deferred.
     pub mcp_tools: McpToolsMode,
-    /// In auto mode, defer MCP tools when their definitions exceed this token estimate.
+    /// Ignored. `auto` used to switch MCP exposure at this token estimate,
+    /// which changed the cached tool list mid-session. Kept so existing
+    /// configs and the env override still parse.
     #[serde(
         alias = "mcp_tools_threshold",
         alias = "mcp_tools_auto_threshold",
@@ -733,9 +750,8 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "multiedit",
+                    "replace",
                     "apply_patch",
-                    "patch",
                     "agentgrep",
                     "ls",
                     "batch",
@@ -752,9 +768,8 @@ impl ToolConfig {
                     "read",
                     "write",
                     "edit",
-                    "multiedit",
+                    "replace",
                     "apply_patch",
-                    "patch",
                     "agentgrep",
                     "ls",
                 ]
@@ -804,6 +819,14 @@ pub struct DictationConfig {
     pub key: String,
     /// Maximum time to wait for the command to finish (0 = no timeout).
     pub timeout_secs: u64,
+    /// Personal names or terms sent as recognition context to built-in voice
+    /// transcription. Appended to the built-in vocabulary every user gets
+    /// (Jcode names plus common coding agent terms), for this user only.
+    pub vocabulary: Vec<String>,
+    /// Built-in voice input: optional shell command that records the
+    /// microphone and prints raw mono 16 kHz s16le PCM to stdout. Empty means
+    /// auto-detect (pw-record, parecord, arecord, rec, ffmpeg).
+    pub recorder: String,
 }
 
 impl Default for DictationConfig {
@@ -813,6 +836,8 @@ impl Default for DictationConfig {
             mode: crate::protocol::TranscriptMode::Send,
             key: "off".to_string(),
             timeout_secs: 90,
+            vocabulary: Vec::new(),
+            recorder: String::new(),
         }
     }
 }

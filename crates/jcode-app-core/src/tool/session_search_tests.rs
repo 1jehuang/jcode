@@ -322,7 +322,9 @@ fn system_reminders_are_hidden_by_default_and_opt_in_searchable() {
             vec![text("display-role-needle")],
             Some(StoredDisplayRole::System),
         );
-        session.save().expect("save system session");
+        // Only hidden messages here, so bypass the untouched-session gate
+        // (783c979a0) to exercise search over persisted hidden content.
+        session.save_prepared().expect("save system session");
 
         let options = SearchOptions::for_test("current-session");
         assert!(run_search(home, "secret-system-needle", &options).is_empty());

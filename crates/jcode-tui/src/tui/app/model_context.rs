@@ -779,6 +779,7 @@ impl App {
 
     pub(super) fn handle_turn_error(&mut self, error: impl Into<String>) {
         let error = error.into();
+        self.refresh_openai_usage_after_quota_error(&error);
         self.last_stream_error = Some(error.clone());
         self.restore_failed_input_to_box();
 

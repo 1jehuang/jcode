@@ -44,7 +44,10 @@ fn run_session<R: BufRead, W: Write>(mut client: HarnessClient<R, W>, message: &
     print_event(&hello);
 
     client
-        .send(ApiRequest::CreateSession { working_dir: None })
+        .send(ApiRequest::CreateSession {
+            working_dir: None,
+            system_prompt: None,
+        })
         .expect("create session");
     let session_id = loop {
         let frame = client.recv().expect("recv");
@@ -131,6 +134,7 @@ fn run_demo() {
                             last_active_at_ms: None,
                             archived: false,
                             archived_at_ms: None,
+                            save_label: None,
                         },
                     },
                 )),

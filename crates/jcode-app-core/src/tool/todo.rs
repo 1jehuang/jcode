@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, TodoEvent};
 use crate::todo::{
@@ -727,7 +728,13 @@ impl Tool for TodoTool {
         // deliberately handwritten. Never generate it from gate constants or
         // interpolate private thresholds, because that would teach the model
         // how to target the evaluator instead of reporting an honest assessment.
-        "Read or update structured todo items and optional goal-level assessments."
+        "Read or update structured todo items and optional goal-level assessments. \
+         Use this tool VERY frequently, far more than feels necessary. The user watches \
+         todo progress live, so a stale list looks like stalled work. For any task with \
+         more than one step: write the full plan before starting, mark an item \
+         in_progress before working on it, mark it completed the moment it is done \
+         (never batch completions), and add newly discovered work as soon as you find it. \
+         Expect to call this after nearly every meaningful step."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -820,12 +827,12 @@ impl Tool for TodoTool {
                             "feedback_loop_coverage": {
                                 "type": "string",
                                 "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
-                                "description": "How broadly the checks exercise main workflows, integration boundaries, edge cases, packaging, and likely failure modes."
+                                "description": "Coverage of integration boundaries, edge cases, packaging, and likely failure modes."
                             },
                             "feedback_loop_traceability": {
                                 "type": "string",
                                 "enum": ["unmapped", "partial", "complete"],
-                                "description": "How completely requirements map to evidence. unmapped = requirements are not tied to checks; partial = only some explicit requirements or changed public outputs have concrete checks and observed results; complete = every explicit requirement and changed public output has a concrete check and observed result. Aggregate test counts alone do not establish complete traceability."
+                                "description": "How completely each requirement and changed output maps to a concrete check and observed result."
                             },
                             "delivery_state": {
                                 "type": "string",
@@ -2023,7 +2030,7 @@ mod tests {
             ..before.clone()
         };
 
-        let changes = goal_changes(&[before.clone()], &[after.clone()]);
+        let changes = goal_changes(std::slice::from_ref(&before), std::slice::from_ref(&after));
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].before.as_ref(), Some(&before));

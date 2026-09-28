@@ -197,11 +197,6 @@ pub async fn run_login(
 ) -> Result<()> {
     options.validate()?;
     if let Some(provider) = login_provider_for_choice(choice) {
-        if matches!(choice, ProviderChoice::ClaudeSubprocess) {
-            eprintln!(
-                "Warning: Claude subprocess transport is deprecated and will be removed. Direct Anthropic API is already the default for `--provider claude`."
-            );
-        }
         return run_login_provider(provider, account_label, options).await;
     }
 
@@ -334,7 +329,7 @@ pub async fn run_login_provider(
             LoginProviderTarget::OpenAiApiKey => {
                 login_openai_api_key_flow().map(|_| LoginFlowOutcome::Completed)
             }
-            LoginProviderTarget::GrokBuild => login_grok_build_flow()
+            LoginProviderTarget::GrokBuild => login_grok_build_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::OpenRouter => {
@@ -411,7 +406,14 @@ pub async fn run_login_provider(
         notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
         return Ok(());
     }
-    if let Err(err) = super::commands::run_post_login_validation(provider).await {
+    // Scriptable callers require exactly one JSON object on stdout. The human
+    // validation report belongs only to interactive login, including failures.
+    let validation = if options.json {
+        super::auth_test::run_post_login_validation_quiet(provider).await
+    } else {
+        super::commands::run_post_login_validation(provider).await
+    };
+    if let Err(err) = validation {
         let error_message = err.to_string();
         let reason = crate::auth::login_diagnostics::classify_auth_failure_message(&error_message);
         crate::telemetry::record_auth_failed_reason(
@@ -445,25 +447,23 @@ pub async fn run_login_provider(
     Ok(())
 }
 
-async fn login_grok_build_flow() -> Result<()> {
-    eprintln!("Preparing the Jcode-managed Grok Build backend...");
-    let cli = crate::auth::grok_build::ensure_cli().await?;
-    let status = tokio::process::Command::new(&cli)
-        .arg("login")
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to launch Jcode's managed Grok Build backend at '{}'",
-                cli.display()
-            )
-        })?;
-    if !status.success() {
-        anyhow::bail!("`{} login` exited with status {status}", cli.display());
-    }
+/// Native xAI OAuth device flow with the Grok CLI client id. Tokens are stored
+/// in the Grok CLI credential store (`$GROK_HOME/auth.json`), so an existing
+/// `grok login` is reused and this login is visible to the Grok CLI too.
+async fn login_grok_build_flow(no_browser: bool) -> Result<()> {
+    let client = crate::provider::shared_http_client();
+    let authorization = crate::auth::grok_build::initiate_device_login(&client).await?;
+    let url = authorization
+        .verification_uri_complete
+        .as_deref()
+        .unwrap_or(&authorization.verification_uri);
+    eprintln!("\nGrok Build login (xAI)");
+    eprintln!("  Open: {url}");
+    eprintln!("  Code: {}\n", authorization.user_code);
+    maybe_open_browser(url, no_browser);
+    eprintln!("Waiting for authorization...");
+    crate::auth::grok_build::complete_device_login(&client, &authorization).await?;
+    eprintln!("Grok Build login complete.");
     Ok(())
 }
 

@@ -1293,6 +1293,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         app.session.working_dir = Some("/tmp".to_string());
         app.session.model = Some("test-model".to_string());
         app.session.provider_key = Some("test-provider".to_string());
+        app.session.system_prompt = Some("custom transfer prompt".to_string());
         app.session.messages.push(crate::session::StoredMessage {
             id: "msg-1".to_string(),
             role: Role::User,
@@ -1343,9 +1344,21 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         assert_eq!(child.compaction, Some(transfer_compaction));
         assert_eq!(child.model.as_deref(), Some("test-model"));
         assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
+        assert_eq!(child.system_prompt, app.session.system_prompt);
         assert_eq!(child.working_dir.as_deref(), Some("/tmp"));
         assert_eq!(child_todos.len(), 1);
         assert_eq!(child_todos[0].content, "Carry this forward");
+        for prompt in [None, Some("")] {
+            app.session.system_prompt = prompt.map(str::to_string);
+            let (child_id, _) = super::commands::create_transfer_session_from_parent(
+                &app.session.id,
+                &app.session,
+                None,
+            )
+            .expect("create transfer session with optional prompt");
+            let child = crate::session::Session::load(&child_id).expect("load child session");
+            assert_eq!(child.system_prompt, app.session.system_prompt);
+        }
     });
 }
 
