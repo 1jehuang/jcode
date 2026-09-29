@@ -390,3 +390,96 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
 
+
+/// A provider overload (Openference 529 "heavy usage ... please try again in a
+/// moment") must hold the turn and resend it automatically, also when the
+/// user typed it (auto_retry false), instead of failing the turn at once.
+#[test]
+fn test_remote_provider_overload_529_holds_user_turn_and_retries() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    let overload = "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  auth: JCODE_PROVIDER_OPENCODE_OPENFERENCE_API_KEY\n  status: 529 <unknown status code>\n  response: data: {\"error\":{\"message\":\"We're experiencing heavy usage right now, which may cause increased latency or temporary unavailability. We're working on adding more capacity \u{2014} please try again in a moment.\",\"type\":\"server_error\"}}data: [DONE]";
+
+    let mut delays = Vec::new();
+    for attempt in 1..=App::OVERLOAD_RETRY_MAX_ATTEMPTS {
+        if attempt == 1 {
+            app.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "fix the flaky test".to_string(),
+                images: vec![],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: false,
+                retry_attempts: 0,
+                retry_at: None,
+            });
+        }
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(20 + u64::from(attempt));
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 20 + u64::from(attempt),
+                message: overload.to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert!(!app.is_processing, "attempt {attempt}");
+        let pending = app
+            .rate_limit_pending_message
+            .as_ref()
+            .unwrap_or_else(|| panic!("attempt {attempt}: turn must be held for retry"));
+        assert_eq!(pending.content, "fix the flaky test");
+        assert!(pending.auto_retry, "held turn is resent automatically");
+        assert_eq!(pending.retry_attempts, attempt);
+        let reset = app.rate_limit_reset.expect("retry scheduled");
+        delays.push(reset.saturating_duration_since(std::time::Instant::now()).as_secs());
+        let last = app.display_messages().last().expect("notice");
+        assert!(
+            last.content.contains("provider is overloaded"),
+            "{}",
+            last.content
+        );
+        assert!(app.input.is_empty(), "prompt stays queued, not restored");
+    }
+    // Growing delays: 15s, 30s, 60s, 120s (allow a second of scheduling slack).
+    for (got, want) in delays.iter().zip(App::OVERLOAD_RETRY_DELAYS_SECS) {
+        assert!(*got + 1 >= want && *got <= want, "delays {delays:?}");
+    }
+
+    // After the budget is used up, the next overload falls through to the
+    // normal failure path instead of retrying forever.
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(99);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: overload.to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    assert!(
+        !app
+            .display_messages()
+            .last()
+            .is_some_and(|m| m.content.contains("Retrying automatically in")),
+        "no fifth overload retry"
+    );
+}
+
+#[test]
+fn test_provider_overload_classifier() {
+    use crate::tui::app::commands::is_provider_overload_error as overload;
+    assert!(overload("status: 529 <unknown status code>"));
+    assert!(overload("  status: 503 Service Unavailable\n"));
+    assert!(overload("stream error: We're experiencing heavy usage right now"));
+    assert!(!overload("status: 402 Payment Required"));
+    assert!(!overload("status: 400 Bad Request"));
+    assert!(!overload("status: 401 Unauthorized"));
+    assert!(!overload("model_not_found"));
+}

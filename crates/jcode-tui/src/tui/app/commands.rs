@@ -150,6 +150,37 @@ pub(super) fn is_auto_poke_connectivity_error(error: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
+/// Whether `error` says the provider is temporarily overloaded or failing on
+/// its side: HTTP 5xx (including the non-standard 529 "overloaded"), or the
+/// wording providers use for a busy period ("heavy usage", "try again in a
+/// moment"). The provider answered, so this is not a network problem, but
+/// waiting and resending the same turn usually works.
+pub(super) fn is_provider_overload_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let status_5xx = lower
+        .find("status:")
+        .map(|idx| lower[idx + "status:".len()..].trim_start())
+        .and_then(|rest| rest.get(..3))
+        .and_then(|code| code.parse::<u16>().ok())
+        .is_some_and(|code| (500..=599).contains(&code));
+    status_5xx
+        || [
+            "overloaded",
+            "heavy usage",
+            "temporarily unavailable",
+            "temporary unavailability",
+            "try again in a moment",
+            "server is busy",
+            "at capacity",
+            "capacity constraints",
+            "503 service unavailable",
+            "502 bad gateway",
+            "504 gateway timeout",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
 /// Whether `error` is a deterministic model/endpoint-capability failure that can
 /// never succeed by resending the identical request: the configured model is not
 /// valid for the configured endpoint (e.g. Volcengine Ark's coding-plan endpoint

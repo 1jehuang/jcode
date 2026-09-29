@@ -141,6 +141,43 @@ impl App {
         self.schedule_pending_remote_network_wait_with_force(reason, false)
     }
 
+    /// Hold the in-flight remote turn after the provider reported it is
+    /// overloaded (5xx, 529, "heavy usage, try again in a moment"), then
+    /// resend it. Unlike ordinary failures this also covers turns the user
+    /// typed: the provider will likely take the same request a moment later,
+    /// so making the user resend it by hand is only friction. Bounded by
+    /// [`Self::OVERLOAD_RETRY_MAX_ATTEMPTS`] with a growing delay; after that
+    /// the turn fails as before and the prompt is restored.
+    pub(super) fn schedule_pending_remote_overload_retry(&mut self, reason: &str) -> bool {
+        let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            return false;
+        };
+        if pending.retry_attempts >= Self::OVERLOAD_RETRY_MAX_ATTEMPTS {
+            return false;
+        }
+        pending.auto_retry = true;
+        pending.retry_attempts += 1;
+        let attempt = pending.retry_attempts;
+        let delay_secs = Self::OVERLOAD_RETRY_DELAYS_SECS
+            .get(usize::from(attempt - 1))
+            .copied()
+            .unwrap_or(60);
+        let retry_at = Instant::now() + Duration::from_secs(delay_secs);
+        pending.retry_at = Some(retry_at);
+        self.rate_limit_reset = Some(retry_at);
+        self.status_detail = Some(format!(
+            "provider overloaded; retrying in {delay_secs}s ({attempt}/{})",
+            Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+        ));
+        let first_line = reason.lines().next().unwrap_or(reason).trim();
+        self.push_display_message(DisplayMessage::system(format!(
+            "⏳ The provider is overloaded. Retrying automatically in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+            Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+        )));
+        self.set_status_notice(format!("Provider overloaded; retrying in {delay_secs}s"));
+        true
+    }
+
     /// Hold the in-flight remote turn until the network recovers, then resume it.
     ///
     /// Connectivity failures (DNS, connection reset, no route, transient TLS,

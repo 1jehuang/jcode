@@ -1365,6 +1365,17 @@ pub(in crate::tui::app) fn handle_server_event(
             {
                 return false;
             }
+            // Provider overload (5xx, 529 "heavy usage, try again in a
+            // moment"): the provider answered, so this is not a connectivity
+            // problem, but the same request usually succeeds a little later.
+            // Hold the turn and resend it, also for turns the user typed,
+            // before any path below can fail it or stop auto-poke.
+            if !is_connectivity_error
+                && crate::tui::app::commands::is_provider_overload_error(&message)
+                && app.schedule_pending_remote_overload_retry(&message)
+            {
+                return false;
+            }
             // Credential-failure circuit breaker: repeated auth failures mean
             // the login/API key is dead. Resending the identical request can
             // never succeed and (before this breaker) produced runaway retry

@@ -1782,6 +1782,11 @@ impl Provider for InertRuntimeProvider {
 impl App {
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
+    /// Turn-level resends after a provider overload (5xx / 529). The stream
+    /// layer already retried several times within seconds, so these waits are
+    /// longer: about 3.5 minutes in total before giving up.
+    const OVERLOAD_RETRY_MAX_ATTEMPTS: u8 = 4;
+    const OVERLOAD_RETRY_DELAYS_SECS: [u64; 4] = [15, 30, 60, 120];
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one
