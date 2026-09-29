@@ -939,6 +939,9 @@ pub(super) async fn handle_client(
                         let _ = client_event_tx.send(event);
                         last_available_models_snapshot = Some(dedup_key);
                     }
+                    Ok(BusEvent::CredentialsChanged { provider }) => {
+                        let _ = client_event_tx.send(ServerEvent::CredentialsChanged { provider });
+                    }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
                             let _ = client_event_tx.send(ServerEvent::BatchProgress { progress });
