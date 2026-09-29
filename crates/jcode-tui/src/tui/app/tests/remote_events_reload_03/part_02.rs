@@ -483,3 +483,32 @@ fn test_provider_overload_classifier() {
     assert!(!overload("status: 401 Unauthorized"));
     assert!(!overload("model_not_found"));
 }
+
+/// A user turn held after an overload is announced as "Resending your
+/// message", while continuations and plain rate-limit resumes keep their
+/// existing wording.
+#[test]
+fn test_held_user_turn_resend_notice_wording() {
+    use crate::tui::app::remote::held_user_turn_resend_notice as notice;
+    let mut pending = PendingRemoteMessage {
+        content: "fix the flaky test".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: true,
+        retry_attempts: 1,
+        retry_at: None,
+    };
+    assert_eq!(
+        notice(&pending).as_deref(),
+        Some("✓ Resending your message (attempt 2)...")
+    );
+    pending.is_system = true;
+    assert_eq!(notice(&pending), None, "system continuation keeps its wording");
+    pending.is_system = false;
+    pending.retry_attempts = 0;
+    assert_eq!(notice(&pending), None, "first send is not a resend");
+    pending.retry_attempts = 1;
+    pending.auto_retry = false;
+    assert_eq!(notice(&pending), None, "rate-limit resume keeps its wording");
+}

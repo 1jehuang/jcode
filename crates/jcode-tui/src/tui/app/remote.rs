@@ -87,6 +87,20 @@ pub(super) enum RemoteEventOutcome {
     Quit,
 }
 
+/// Notice for a turn the user typed that was held after a transient failure
+/// (provider overload) and is now sent again: say plainly that their message
+/// is being resent, instead of the internal "Retrying continuation" wording.
+pub(super) fn held_user_turn_resend_notice(
+    pending: &super::PendingRemoteMessage,
+) -> Option<String> {
+    (pending.auto_retry && !pending.is_system && pending.retry_attempts > 0).then(|| {
+        format!(
+            "✓ Resending your message (attempt {})...",
+            pending.retry_attempts + 1
+        )
+    })
+}
+
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
     app.refresh_terminal_title_metrics();
     app.sync_herdr_agent_state();
@@ -237,7 +251,9 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 app.status = ProcessingStatus::Idle;
                 app.status_detail = None;
             }
-            let status = if pending.auto_retry {
+            let status = if let Some(notice) = held_user_turn_resend_notice(&pending) {
+                notice
+            } else if pending.auto_retry {
                 format!(
                     "✓ Retrying continuation...{}",
                     if pending.is_system {
