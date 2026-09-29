@@ -1757,6 +1757,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.status_detail = status_detail;
             }
             if session_changed || reasoning_effort.is_some() {
+                // The server just reported the current effort, so an older
+                // rollback value no longer applies.
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = reasoning_effort;
             }
             app.remote_service_tier = service_tier;
@@ -2336,6 +2339,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 // Always replace: the server reports the effort the new model
                 // runs with (`None` = cleared), so the chip must not keep the
                 // previous model's level.
+                // An effort request still in flight may later be rejected.
+                // Drop its rollback value so it cannot restore the old
+                // model's level over this one.
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
                 if !app.auth_catalog_refresh_pending {
