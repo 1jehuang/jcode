@@ -266,8 +266,15 @@ pub fn analyze_frames_with_scroll(
                     // are per-frame jiggle (drift against the text); a large residual
                     // means the widget jumped to a different pocket (a recycle), which
                     // is counted separately so it doesn't masquerade as smooth travel.
+                    // A widget that did not move at all is holding a fixed screen
+                    // row (stuck at the viewport edge after its line scrolled out),
+                    // which is deliberate, so it is not counted as drift.
                     let signed_dy = c.y as i64 - p.y as i64;
-                    let residual = (signed_dy + scroll_delta).abs();
+                    let residual = if signed_dy == 0 {
+                        0
+                    } else {
+                        (signed_dy + scroll_delta).abs()
+                    };
                     if residual <= RIDE_TOLERANCE {
                         m.content_y_travel += residual as u32;
                     } else {
@@ -537,6 +544,7 @@ pub fn simulate_scroll_mode(
             right_reliable,
             left_reliable: Vec::new(),
             scroll_top: scroll,
+            content_start_row: 0,
         };
         // Greedy mode forgets all anchors each frame, so every frame independently
         // maximizes coverage (the old "fill the biggest pocket now" philosophy).
