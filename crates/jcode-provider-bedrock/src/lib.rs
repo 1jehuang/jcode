@@ -859,13 +859,22 @@ impl BedrockProvider {
 
     fn model_info(model: &str) -> BedrockModelInfo {
         let id = Self::normalize_model_id(model).to_ascii_lowercase();
+        let claude_45 = id.contains("claude-opus-4-5")
+            || id.contains("claude-opus-4.5")
+            || id.contains("claude-sonnet-4-5")
+            || id.contains("claude-sonnet-4.5");
         if id.contains("claude-opus-4")
             || id.contains("claude-sonnet-4")
             || id.contains("claude-opus-5")
             || id.contains("claude-sonnet-5")
+            || id.contains("claude-fable-5")
         {
             BedrockModelInfo {
-                context_tokens: 200_000,
+                // Claude 4.6+ and the whole Claude 5 family ship a 1M context
+                // window (Anthropic model comparison table, 2026-09). Only 4.5
+                // and older stay at 200K. Hardcoding 200K made the context meter
+                // and compaction fire at 1/5 of the real window.
+                context_tokens: if claude_45 { 200_000 } else { 1_000_000 },
                 max_output_tokens: 64_000,
                 supports_tools: true,
                 supports_vision: true,

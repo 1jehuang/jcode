@@ -444,7 +444,12 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(131_072);
     }
 
-    // --- xAI grok-code-fast: 256K context ---
+    // --- xAI Grok ---
+    // grok-4.7 / grok-4.6: 500K (docs.x.ai/docs/models, 2026-09).
+    if m.contains("grok-4") {
+        return Some(500_000);
+    }
+    // grok-code-fast: 256K context.
     if m.contains("grok-code-fast") {
         return Some(256_000);
     }
@@ -611,6 +616,20 @@ mod tests {
         assert_eq!(
             context_limit_for_model_with_provider("claude-sonnet-4-5", Some("claude")),
             Some(200_000)
+        );
+        // Claude 5 family is native 1M per the official comparison table.
+        assert_eq!(
+            context_limit_for_model_with_provider("claude-sonnet-5-5", Some("claude")),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("claude-opus-5-5", Some("bedrock")),
+            Some(1_000_000)
+        );
+        // xAI Grok 4.x is 500K (docs.x.ai), not the 200K default.
+        assert_eq!(
+            context_limit_for_model("grok-4.6"),
+            Some(500_000)
         );
         assert_eq!(
             context_limit_for_model_with_provider("claude-opus-4-5", Some("claude")),
