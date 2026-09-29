@@ -314,3 +314,99 @@ fn test_restored_retry_disconnect_releases_delivery_without_duplicate() {
         assert!(app.restored_retry_delivery.is_some());
     });
 }
+
+#[test]
+fn test_stopped_restored_retry_stays_stopped_after_reopen() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let id = "stopped_saved_retry";
+        let mut app = create_test_app();
+        app.remote_session_id = Some(id.into());
+        app.restored_retries.push(PendingRemoteMessage {
+            content: "saved retry".into(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: u8::MAX,
+            retry_at: None,
+        });
+        app.save_input_for_reload(id);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.set_session_id(id.into());
+        remote.mark_history_loaded();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        let failed_id = app.current_message_id.unwrap();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: failed_id,
+                message: "Request failed".into(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Done { id: failed_id },
+            &mut remote,
+        );
+        assert_eq!(app.restored_retries.len(), 1);
+        let checkpoint: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                crate::storage::jcode_dir()
+                    .unwrap()
+                    .join(format!("client-input-{id}")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint["restored_retry_stopped"], true);
+        drop(app);
+
+        let mut reopened = App::new_for_remote(Some(id.into()));
+        assert_eq!(reopened.restored_retries.len(), 1);
+        rt.block_on(super::remote::process_remote_followups(
+            &mut reopened,
+            &mut remote,
+        ));
+        assert!(
+            reopened.current_message_id.is_none(),
+            "reopening must not start a stopped retry"
+        );
+        reopened.save_input_for_reload(id);
+        drop(reopened);
+        let mut reopened = App::new_for_remote(Some(id.into()));
+        rt.block_on(super::remote::process_remote_followups(
+            &mut reopened,
+            &mut remote,
+        ));
+        assert!(
+            reopened.current_message_id.is_none(),
+            "saving and reopening again must keep the retry stopped"
+        );
+        let fresh_id = rt
+            .block_on(super::remote::begin_remote_send(
+                &mut reopened,
+                &mut remote,
+                "fresh prompt".into(),
+                vec![],
+                false,
+                None,
+                false,
+                0,
+            ))
+            .unwrap();
+        reopened.handle_server_event(
+            crate::protocol::ServerEvent::Done { id: fresh_id },
+            &mut remote,
+        );
+        rt.block_on(super::remote::process_remote_followups(
+            &mut reopened,
+            &mut remote,
+        ));
+        assert!(reopened.restored_retry_delivery.is_some());
+    });
+}

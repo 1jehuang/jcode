@@ -1251,9 +1251,9 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 
 async fn dispatch_restored_retry(app: &mut App, remote: &mut RemoteConnection) -> bool {
     if app.passive_restart_restore
+        || app.restored_retry_stopped
         || app.restored_retry_delivery.is_some()
-        // A terminal failure stopped the normal retry policy. Keep the saved
-        // entry, but require a fresh submission before automatically sending it.
+        // Also guard the current window before its stopped state is checkpointed.
         || (app.pending_remote_is_restored_retry && app.rate_limit_pending_message.is_none())
         || app.is_processing
         || app.rate_limit_reset.is_some()

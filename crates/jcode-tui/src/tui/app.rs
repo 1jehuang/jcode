@@ -1638,6 +1638,7 @@ pub struct App {
     restored_retries: Vec<PendingRemoteMessage>,
     restored_retry_delivery: Option<RestoredRetryDelivery>,
     pending_remote_is_restored_retry: bool,
+    restored_retry_stopped: bool,
     // Consecutive turn errors that classify as credential/auth failures.
     // Reset on turn success or auth change; drives the credential-failure
     // circuit breaker that halts automatic resends (see

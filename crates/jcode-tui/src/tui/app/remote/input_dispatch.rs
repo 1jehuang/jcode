@@ -96,6 +96,9 @@ pub(super) async fn send_remote_message(
         app.restored_retries.insert(0, pending_delivery.clone());
     }
     app.pending_remote_is_restored_retry = restored_retry || retain_followup;
+    if !restored_retry && !is_system && !auto_retry && system_reminder.is_none() {
+        app.restored_retry_stopped = false;
+    }
     if restored_retry && let Some(saved) = app.restored_retries.first_mut() {
         saved.retry_attempts = retry_attempts;
     }

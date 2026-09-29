@@ -18,6 +18,7 @@ pub(super) struct RestoredReloadInput {
     pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
     pub rate_limit_reset: Option<Instant>,
     pub restored_retries: Vec<super::PendingRemoteMessage>,
+    pub restored_retry_stopped: bool,
     pub observe_mode_enabled: bool,
     pub observe_page_markdown: String,
     pub observe_page_updated_at_ms: u64,
@@ -348,6 +349,7 @@ impl App {
             let data = serde_json::json!({
                 "retain_until_dispatch": retain_until_dispatch || !self.restored_retries.is_empty(),
                 "restored_retries": self.saved_restored_retries(),
+                "restored_retry_stopped": self.restored_retry_stopped && !self.restored_retries.is_empty(),
                 "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
                 "input": resume_input.unwrap_or(self.input.as_str()),
                 "pending_images": resume_images.unwrap_or(self.pending_images.as_slice()).iter().map(|(media_type, data)| serde_json::json!({
@@ -504,6 +506,8 @@ impl App {
         );
         value["submit_on_restore"] = serde_json::json!(false);
         value["restored_retries"] = self.saved_restored_retries();
+        value["restored_retry_stopped"] =
+            serde_json::json!(self.restored_retry_stopped && !self.restored_retries.is_empty());
         value["rate_limit_pending_message"] = serde_json::Value::Null;
         value["rate_limit_reset_in_ms"] = serde_json::Value::Null;
         value["retain_until_dispatch"] = serde_json::json!(
@@ -760,6 +764,10 @@ impl App {
                             .collect()
                     })
                     .unwrap_or_default(),
+                restored_retry_stopped: value
+                    .get("restored_retry_stopped")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 observe_mode_enabled,
                 observe_page_markdown,
                 observe_page_updated_at_ms,
@@ -795,6 +803,7 @@ impl App {
             rate_limit_pending_message: None,
             rate_limit_reset: None,
             restored_retries: Vec::new(),
+            restored_retry_stopped: false,
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),
             observe_page_updated_at_ms: 0,

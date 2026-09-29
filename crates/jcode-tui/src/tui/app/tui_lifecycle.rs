@@ -32,6 +32,8 @@ impl App {
         self.rate_limit_pending_message = restored.rate_limit_pending_message;
         self.rate_limit_reset = restored.rate_limit_reset;
         self.restored_retries = restored.restored_retries;
+        self.restored_retry_stopped =
+            restored.restored_retry_stopped && !self.restored_retries.is_empty();
         self.restored_retry_delivery = None;
         self.pending_remote_is_restored_retry = false;
         self.observe_page_markdown = restored.observe_page_markdown;
@@ -233,8 +235,7 @@ impl App {
 
         match outcome {
             Err(current_attempts) => {
-                self.rate_limit_pending_message = None;
-                self.rate_limit_reset = None;
+                self.clear_pending_remote_retry();
                 self.push_display_message(DisplayMessage::error(format!(
                     "{} Auto-retry limit reached after {} attempt{}. Use `/poke` again to retry manually.",
                     reason,
@@ -287,8 +288,25 @@ impl App {
     }
 
     pub(super) fn clear_pending_remote_retry(&mut self) {
+        let stopped_now =
+            self.pending_remote_is_restored_retry && !self.restored_retries.is_empty();
+        if stopped_now {
+            self.restored_retry_stopped = true;
+            self.restored_retry_delivery = None;
+        }
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
+        if stopped_now
+            && let Some(session_id) = self
+                .remote_session_id
+                .as_deref()
+                .or(self.resume_session_id.as_deref())
+            && let Err(error) = self.checkpoint_restored_followups(session_id)
+        {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Could not save stopped retry checkpoint: {error}"
+            )));
+        }
     }
 
     /// Track a failed turn for the credential-failure circuit breaker.
@@ -741,6 +759,7 @@ impl App {
             restored_retries: Vec::new(),
             restored_retry_delivery: None,
             pending_remote_is_restored_retry: false,
+            restored_retry_stopped: false,
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
@@ -1203,6 +1222,7 @@ impl App {
             restored_retries: Vec::new(),
             restored_retry_delivery: None,
             pending_remote_is_restored_retry: false,
+            restored_retry_stopped: false,
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
