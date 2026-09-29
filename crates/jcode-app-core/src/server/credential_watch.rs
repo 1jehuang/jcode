@@ -132,6 +132,65 @@ pub(super) fn changed_providers(
     changed
 }
 
+/// Watched providers an in-process `CredentialsChanged` announcement already
+/// covers. `None` means every provider.
+fn announced_watch_providers(announced: Option<&str>) -> Vec<&'static str> {
+    let Some(provider) = announced else {
+        return vec!["anthropic", "openai"];
+    };
+    let provider = provider.trim().to_ascii_lowercase();
+    if provider.starts_with("claude") || provider.starts_with("anthropic") {
+        vec!["anthropic"]
+    } else if provider.starts_with("openai") || provider.starts_with("codex") {
+        vec!["openai"]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Providers whose change must be published after taking snapshot `now`.
+/// `announced` is `Some(provider)` when the snapshot was triggered by an
+/// in-process announcement for `provider` (`None` inside means all).
+pub(super) fn providers_to_publish(
+    last: &CredentialIdentity,
+    now: &CredentialIdentity,
+    announced: Option<Option<&str>>,
+) -> Vec<&'static str> {
+    let suppressed = announced.map(announced_watch_providers).unwrap_or_default();
+    changed_providers(last, now)
+        .into_iter()
+        .filter(|provider| !suppressed.contains(provider))
+        .collect()
+}
+
+/// Drop local state tied to the previous login of `provider`, then tell every
+/// client. Mirrors the in-process auth-change path, scoped to the provider
+/// whose login changed: a relogin often reuses the label, so the old login's
+/// usage snapshot and usage-limit marker would otherwise gate the new one.
+fn apply_external_change(provider: &'static str) {
+    crate::logging::info(&format!(
+        "Credential identity changed on disk for {provider}; notifying clients"
+    ));
+    crate::auth::AuthStatus::invalidate_cache();
+    match provider {
+        "anthropic" => {
+            crate::usage::invalidate_active_anthropic_usage();
+            crate::provider::clear_claude_provider_unavailability_for_account_label(None);
+        }
+        "openai" => {
+            let label = crate::auth::codex::active_account_label();
+            crate::provider::clear_openai_provider_unavailability_for_account_label(
+                label.as_deref(),
+            );
+            crate::provider::clear_all_model_unavailability_for_account();
+        }
+        _ => {}
+    }
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
+        provider: Some(provider.to_string()),
+    });
+}
+
 pub(super) fn spawn() {
     tokio::spawn(async move {
         let mut bus_rx = crate::bus::Bus::global().subscribe();
@@ -145,10 +204,10 @@ pub(super) fn spawn() {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
         loop {
-            let announced = tokio::select! {
-                _ = interval.tick() => false,
+            let announced: Option<Option<String>> = tokio::select! {
+                _ = interval.tick() => None,
                 event = bus_rx.recv() => match event {
-                    Ok(crate::bus::BusEvent::CredentialsChanged { .. }) => true,
+                    Ok(crate::bus::BusEvent::CredentialsChanged { provider }) => Some(provider),
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
@@ -156,18 +215,12 @@ pub(super) fn spawn() {
             let Ok(now) = tokio::task::spawn_blocking(current_identity).await else {
                 continue;
             };
-            // An in-process login/switch already announced this change; only
-            // move the baseline so the next poll does not announce it again.
-            if !announced {
-                for provider in changed_providers(&last, &now) {
-                    crate::logging::info(&format!(
-                        "Credential identity changed on disk for {provider}; notifying clients"
-                    ));
-                    crate::auth::AuthStatus::invalidate_cache();
-                    crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
-                        provider: Some(provider.to_string()),
-                    });
-                }
+            // An in-process login/switch already announced its own provider's
+            // change, so only that provider is skipped. Changes to other
+            // providers in the same window are still published.
+            let announced = announced.as_ref().map(|provider| provider.as_deref());
+            for provider in providers_to_publish(&last, &now, announced) {
+                apply_external_change(provider);
             }
             last = now;
         }
@@ -183,6 +236,62 @@ mod tests {
             anthropic: anthropic.map(str::to_string),
             openai: openai.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn announcement_suppresses_only_its_own_provider() {
+        let before = id(Some("claude-otter|a@x|max"), Some("openai-fox|b@x|acct1"));
+        let both = id(Some("claude-fox|c@x|max"), Some("openai-fox|z@x|acct9"));
+        // Poll tick: everything that changed is published.
+        assert_eq!(
+            providers_to_publish(&before, &both, None),
+            vec!["anthropic", "openai"]
+        );
+        // In-process Claude login races an external Codex relogin.
+        assert_eq!(
+            providers_to_publish(&before, &both, Some(Some("claude"))),
+            vec!["openai"]
+        );
+        assert_eq!(
+            providers_to_publish(&before, &both, Some(Some("anthropic"))),
+            vec!["openai"]
+        );
+        // And the reverse.
+        assert_eq!(
+            providers_to_publish(&before, &both, Some(Some("openai"))),
+            vec!["anthropic"]
+        );
+        // A login for an unwatched provider covers neither.
+        assert_eq!(
+            providers_to_publish(&before, &both, Some(Some("groq"))),
+            vec!["anthropic", "openai"]
+        );
+        // A provider-less announcement covers every provider.
+        assert!(providers_to_publish(&before, &both, Some(None)).is_empty());
+    }
+
+    /// An external relogin under the same label must not inherit the previous
+    /// login's usage-limit marker, or the precheck keeps skipping Claude.
+    #[test]
+    fn external_claude_change_clears_previous_login_state() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        let _ = &sandbox;
+        crate::provider::record_provider_unavailable_for_account("claude", "usage limit");
+        crate::provider::record_provider_unavailable_for_account("openai", "quota");
+        assert!(crate::provider::provider_unavailability_detail_for_account("claude").is_some());
+
+        apply_external_change("anthropic");
+        assert!(
+            crate::provider::provider_unavailability_detail_for_account("claude").is_none(),
+            "old Claude login's marker must be cleared"
+        );
+        assert!(
+            crate::provider::provider_unavailability_detail_for_account("openai").is_some(),
+            "an unchanged provider keeps its marker"
+        );
+
+        apply_external_change("openai");
+        assert!(crate::provider::provider_unavailability_detail_for_account("openai").is_none());
     }
 
     #[test]
