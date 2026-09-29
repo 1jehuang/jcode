@@ -1024,7 +1024,7 @@ impl App {
                     "Switched to Anthropic account {}.",
                     label
                 )));
-                self.release_rate_limit_hold_after_credentials_changed();
+                self.release_rate_limit_hold_after_credentials_changed(Some("anthropic"));
                 // Keep account-sensitive UI state in sync immediately.
                 crate::auth::AuthStatus::invalidate_cache();
                 self.context_limit = self.provider.context_window() as u64;
@@ -1098,7 +1098,7 @@ impl App {
                     "Switched to OpenAI account {}.",
                     label
                 )));
-                self.release_rate_limit_hold_after_credentials_changed();
+                self.release_rate_limit_hold_after_credentials_changed(Some("openai"));
                 crate::auth::AuthStatus::invalidate_cache();
                 self.context_limit = self.provider.context_window() as u64;
                 self.context_warning_shown = false;

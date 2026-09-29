@@ -208,9 +208,10 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::LoginCompleted(login)) => {
             let success = login.success;
+            let provider = login.provider.clone();
             app.handle_login_completed(login);
             if success {
-                app.release_rate_limit_hold_after_credentials_changed();
+                app.release_rate_limit_hold_after_credentials_changed(Some(&provider));
             }
             true
         }
