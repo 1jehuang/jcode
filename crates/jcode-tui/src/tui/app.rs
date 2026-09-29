@@ -151,6 +151,21 @@ struct PendingRemoteMessage {
     retry_at: Option<Instant>,
 }
 
+impl PendingRemoteMessage {
+    fn same_payload(&self, other: &Self) -> bool {
+        self.content == other.content
+            && self.images == other.images
+            && self.is_system == other.is_system
+            && self.system_reminder == other.system_reminder
+    }
+}
+
+struct RestoredRetryDelivery {
+    session_id: String,
+    request_id: u64,
+    rejected: bool,
+}
+
 #[derive(Debug, Clone)]
 struct PendingSplitPrompt {
     content: String,
@@ -1631,6 +1646,7 @@ pub struct App {
     // Message being sent when rate limit hit (to auto-retry in remote mode)
     rate_limit_pending_message: Option<PendingRemoteMessage>,
     restored_retries: Vec<PendingRemoteMessage>,
+    restored_retry_delivery: Option<RestoredRetryDelivery>,
     // Consecutive turn errors that classify as credential/auth failures.
     // Reset on turn success or auth change; drives the credential-failure
     // circuit breaker that halts automatic resends (see

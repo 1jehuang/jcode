@@ -560,6 +560,32 @@ pub(in crate::tui::app) fn handle_server_event(
         return true;
     }
 
+    // A socket write does not acknowledge a turn. Keep the durable retry
+    // until its own completion; errors and unrelated Done frames cannot retire it.
+    if let ServerEvent::Error { id, .. } = &event
+        && let Some(delivery) = app.restored_retry_delivery.as_mut()
+        && delivery.request_id == *id
+    {
+        delivery.rejected = true;
+    }
+    if let ServerEvent::Done { id } = &event
+        && app
+            .restored_retry_delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.request_id == *id && !delivery.rejected)
+        && app.current_message_id == Some(*id)
+    {
+        let delivery = app.restored_retry_delivery.take().unwrap();
+        if !app.restored_retries.is_empty() {
+            app.restored_retries.remove(0);
+        }
+        if let Err(error) = app.checkpoint_restored_followups(&delivery.session_id) {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Could not update completed retry checkpoint: {error}"
+            )));
+        }
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -1716,6 +1742,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
                     app.restored_retries.clear();
+                    app.restored_retry_delivery = None;
                     app.interleave_message = None;
                     app.interleave_images.clear();
                     app.clear_pending_soft_interrupt_tracking();

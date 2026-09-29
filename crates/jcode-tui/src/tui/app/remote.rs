@@ -1260,6 +1260,7 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 
 async fn dispatch_restored_retry(app: &mut App, remote: &mut RemoteConnection) -> bool {
     if app.passive_restart_restore
+        || app.restored_retry_delivery.is_some()
         || app.is_processing
         || app.rate_limit_reset.is_some()
         || !remote.has_loaded_history()
@@ -1272,7 +1273,7 @@ async fn dispatch_restored_retry(app: &mut App, remote: &mut RemoteConnection) -
     {
         return false;
     }
-    let pending = app.restored_retries.remove(0);
+    let pending = app.restored_retries[0].clone();
     if let Err(error) = begin_remote_send(
         app,
         remote,
@@ -1285,7 +1286,6 @@ async fn dispatch_restored_retry(app: &mut App, remote: &mut RemoteConnection) -
     )
     .await
     {
-        app.restored_retries.insert(0, pending);
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to send restored retry: {error}"
         )));

@@ -230,8 +230,14 @@ impl App {
     }
 
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
+        let pending_is_restored = self
+            .rate_limit_pending_message
+            .as_ref()
+            .zip(self.restored_retries.first())
+            .is_some_and(|(pending, saved)| pending.same_payload(saved));
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            !pending.auto_retry
+            !pending_is_restored
+                && !pending.auto_retry
                 && !pending.is_system
                 && (!pending.content.trim().is_empty() || !pending.images.is_empty())
         });
@@ -242,7 +248,8 @@ impl App {
         // the queued/hidden lists instead; the restored queue re-sends it once
         // the turn is proven idle (issue #391).
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            pending.is_system
+            !pending_is_restored
+                && pending.is_system
                 && self.rate_limit_reset.is_none()
                 && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
         });
@@ -284,34 +291,38 @@ impl App {
         }
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let path = jcode_dir.join(format!("client-input-{}", session_id));
-            let rate_limit_reset_in_ms =
-                if resume_prompt.is_some() || inflight_continuation.is_some() {
-                    None
-                } else {
-                    self.rate_limit_reset.map(|reset| {
-                        let now = Instant::now();
-                        if reset <= now {
-                            0
-                        } else {
-                            (reset - now).as_millis().min(u64::MAX as u128) as u64
-                        }
+            let rate_limit_reset_in_ms = if pending_is_restored
+                || resume_prompt.is_some()
+                || inflight_continuation.is_some()
+            {
+                None
+            } else {
+                self.rate_limit_reset.map(|reset| {
+                    let now = Instant::now();
+                    if reset <= now {
+                        0
+                    } else {
+                        (reset - now).as_millis().min(u64::MAX as u128) as u64
+                    }
+                })
+            };
+            let rate_limit_pending_message = if pending_is_restored
+                || resume_prompt.is_some()
+                || inflight_continuation.is_some()
+            {
+                None
+            } else {
+                self.rate_limit_pending_message.as_ref().map(|pending| {
+                    serde_json::json!({
+                        "content": pending.content,
+                        "images": pending.images,
+                        "is_system": pending.is_system,
+                        "system_reminder": pending.system_reminder,
+                        "auto_retry": pending.auto_retry,
+                        "retry_attempts": pending.retry_attempts,
                     })
-                };
-            let rate_limit_pending_message =
-                if resume_prompt.is_some() || inflight_continuation.is_some() {
-                    None
-                } else {
-                    self.rate_limit_pending_message.as_ref().map(|pending| {
-                        serde_json::json!({
-                            "content": pending.content,
-                            "images": pending.images,
-                            "is_system": pending.is_system,
-                            "system_reminder": pending.system_reminder,
-                            "auto_retry": pending.auto_retry,
-                            "retry_attempts": pending.retry_attempts,
-                        })
-                    })
-                };
+                })
+            };
             let mut queued_messages = self.queued_messages.clone();
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
@@ -412,17 +423,32 @@ impl App {
         crate::client_input::save_startup_submission_for_session(session_id, input, pending_images);
     }
 
+    pub(super) fn has_retained_followup_checkpoint(session_id: &str) -> bool {
+        crate::storage::jcode_dir()
+            .ok()
+            .and_then(|dir| {
+                std::fs::read_to_string(dir.join(format!("client-input-{session_id}"))).ok()
+            })
+            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .is_some_and(|value| {
+                value.get("retain_until_dispatch").and_then(|v| v.as_bool()) == Some(true)
+            })
+    }
+
     fn saved_restored_retries(&self) -> serde_json::Value {
         serde_json::Value::Array(
             self.restored_retries
                 .iter()
                 .map(|pending| {
                     let mut value = serde_json::to_value(pending).expect("retry serialization");
-                    value["retry_delay_ms"] = serde_json::json!(pending.retry_at.map(|at| {
-                        at.saturating_duration_since(Instant::now())
-                            .as_millis()
-                            .min(u64::MAX as u128) as u64
-                    }));
+                    value["retry_deadline_unix_ms"] =
+                        serde_json::json!(pending.retry_at.map(|at| {
+                            chrono::Utc::now().timestamp_millis().saturating_add(
+                                at.saturating_duration_since(Instant::now())
+                                    .as_millis()
+                                    .min(i64::MAX as u128) as i64,
+                            )
+                        }));
                     value
                 })
                 .collect(),
@@ -695,10 +721,34 @@ impl App {
                             .filter_map(|item| {
                                 let mut pending: super::PendingRemoteMessage =
                                     serde_json::from_value(item.clone()).ok()?;
-                                pending.retry_at = item
-                                    .get("retry_delay_ms")
-                                    .and_then(|v| v.as_u64())
-                                    .map(|delay| Instant::now() + Duration::from_millis(delay));
+                                let deadline = item
+                                    .get("retry_deadline_unix_ms")
+                                    .and_then(|v| v.as_i64())
+                                    .or_else(|| {
+                                        // Migrate checkpoints from the relative-delay format
+                                        // using their write time, not the time of reopening.
+                                        let delay = item.get("retry_delay_ms")?.as_u64()?;
+                                        let written = std::fs::metadata(&path)
+                                            .ok()?
+                                            .modified()
+                                            .ok()?
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .ok()?
+                                            .as_millis();
+                                        Some(
+                                            written
+                                                .saturating_add(delay as u128)
+                                                .min(i64::MAX as u128)
+                                                as i64,
+                                        )
+                                    });
+                                pending.retry_at = deadline.map(|deadline| {
+                                    let remaining = deadline
+                                        .saturating_sub(chrono::Utc::now().timestamp_millis())
+                                        .max(0)
+                                        as u64;
+                                    Instant::now() + Duration::from_millis(remaining)
+                                });
                                 Some(pending)
                             })
                             .collect()

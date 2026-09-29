@@ -41,6 +41,42 @@ pub(in crate::tui::app) async fn begin_remote_send(
             app.active_skill.clone(),
         )
         .await?;
+    let pending_delivery = PendingRemoteMessage {
+        content: content.clone(),
+        images: images.clone(),
+        is_system,
+        system_reminder: system_reminder.clone(),
+        auto_retry,
+        retry_attempts,
+        retry_at: None,
+    };
+    let already_saved = app
+        .restored_retries
+        .first()
+        .is_some_and(|pending| pending.same_payload(&pending_delivery));
+    // Queued and hidden follow-ups use this same transport. Move their
+    // checkpoint into the completion-tracked queue instead of consuming it
+    // when the socket write succeeds.
+    if is_system
+        && !already_saved
+        && !crate::tui::is_ssh_remote()
+        && let Some(session_id) = remote.session_id()
+        && App::has_retained_followup_checkpoint(session_id)
+    {
+        app.restored_retries.insert(0, pending_delivery.clone());
+    }
+    if app
+        .restored_retries
+        .first()
+        .is_some_and(|pending| pending.same_payload(&pending_delivery))
+        && let Some(session_id) = remote.session_id()
+    {
+        app.restored_retry_delivery = Some(super::super::RestoredRetryDelivery {
+            session_id: session_id.to_string(),
+            request_id: msg_id,
+            rejected: false,
+        });
+    }
     if !app.passive_restart_restore
         && !crate::tui::is_ssh_remote()
         && let Some(session_id) = remote.session_id()
