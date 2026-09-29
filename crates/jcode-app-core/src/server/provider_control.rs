@@ -1022,6 +1022,10 @@ pub(super) async fn handle_notify_auth_changed(
             return;
         }
         let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+        // A relogin can put a different account under the same label. Do not
+        // let the old login's usage snapshot or usage-limit marker gate it.
+        crate::usage::invalidate_active_anthropic_usage();
+        crate::provider::clear_all_provider_unavailability_for_account();
         // Snapshot which providers jcode now believes are configured right after
         // an auth change activates. This is the cornerstone for diagnosing
         // "logged in but model picker still empty / only OpenAI+Anthropic" and
@@ -1340,6 +1344,8 @@ fn spawn_account_switch_refresh(
 
         match provider_kind {
             "anthropic" => {
+                // Drop the previous login's usage snapshot before refetching.
+                crate::usage::invalidate_active_anthropic_usage();
                 tokio::spawn(async {
                     let _ = crate::usage::get().await;
                 });

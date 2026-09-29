@@ -62,14 +62,17 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
             .filter(|label| !label.is_empty())
         {
             Some(label) => {
-                map.remove(&format!("label:{label}"));
-                let key = format!("label:{label}");
-                super::disk_cache::invalidate(|candidate| candidate == key);
+                let prefix = anthropic_label_key_prefix(label);
+                map.retain(|key, _| !key.starts_with(&prefix));
+                super::disk_cache::invalidate(|key| key.starts_with(&prefix));
             }
             None => {
-                map.retain(|key, _| !key.starts_with("token:") && key != "label:default");
+                let default_prefix = anthropic_label_key_prefix("default");
+                map.retain(|key, _| {
+                    !key.starts_with("token:") && !key.starts_with(&default_prefix)
+                });
                 super::disk_cache::invalidate(|key| {
-                    key.starts_with("token:") || key == "label:default"
+                    key.starts_with("token:") || key.starts_with(&default_prefix)
                 });
             }
         }
@@ -82,20 +85,31 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
     }
 }
 
+/// Key prefix shared by every credential stored under one Claude label.
+fn anthropic_label_key_prefix(label: &str) -> String {
+    format!("label:{label}:")
+}
+
+/// Short, non-reversible fingerprint of an access token.
+fn anthropic_token_fingerprint(access_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(access_token.trim().as_bytes());
+    format!("{:x}", digest)[..16].to_string()
+}
+
+/// Usage is keyed by the label *and* the credential. A relogin that reuses a
+/// label (often "default") for a different Claude account must not inherit
+/// the old account's exhausted limits or its shared 429 backoff, while the
+/// same credential keeps one key so the cross-process backoff still applies.
 pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
-    if let Some(label) = account_label
+    let fingerprint = anthropic_token_fingerprint(access_token);
+    match account_label
         .map(str::trim)
         .filter(|label| !label.is_empty())
     {
-        return format!("label:{}", label);
+        Some(label) => format!("{}{fingerprint}", anthropic_label_key_prefix(label)),
+        None => format!("token:{fingerprint}"),
     }
-
-    let prefix = access_token
-        .get(..20)
-        .unwrap_or(access_token)
-        .trim()
-        .to_string();
-    format!("token:{}", prefix)
 }
 
 pub(super) fn openai_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
