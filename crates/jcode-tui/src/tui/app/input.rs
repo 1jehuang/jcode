@@ -3946,7 +3946,13 @@ impl App {
                 if let Some(prompt) = trailing_prompt {
                     input = prompt;
                 } else {
-                    return;
+                    // A bare `/skill` used to only arm `active_skill` and
+                    // return, so nothing ran until the user typed a second
+                    // message. Claude Code runs the skill immediately, and
+                    // users expect the same: `/ce-handoff` should create the
+                    // handoff now, not wait. Send the skill name as the turn
+                    // so the model acts on the injected skill prompt.
+                    input = format!("/{}", skill_name);
                 }
             } else {
                 // Distinguish an endorsed-but-not-installed skill from a
