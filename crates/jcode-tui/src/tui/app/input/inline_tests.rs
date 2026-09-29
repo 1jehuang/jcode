@@ -155,6 +155,15 @@ fn image_name_missing_base_or_file_is_not_confirmed() {
     for path in ["missing image.png", "~/missing image.png"] {
         assert!(!super::names_existing_file(path, None, None));
     }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("shots")).unwrap();
+    let base = Some(dir.path().to_path_buf());
+    assert!(!super::names_existing_file(
+        "shots/missing shot.png",
+        None,
+        base.clone()
+    ));
+    assert!(!super::names_existing_file("shots", None, base));
 }
 
 #[test]
