@@ -118,6 +118,7 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
         });
         let host = host.to_string();
         self.set_status_notice(format!(

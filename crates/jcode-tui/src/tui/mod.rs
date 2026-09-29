@@ -1499,9 +1499,25 @@ pub struct InlineInteractiveState {
     pub filter: String,
     /// Preview mode: picker is visible but input stays in main text box
     pub preview: bool,
+    /// Routes an `@provider` scope switched, as (entry index, route the user
+    /// had before). Restored when the scope no longer applies, so a temporary
+    /// filter never changes where a later unscoped selection goes.
+    pub scoped_route_restore: Vec<(usize, usize)>,
 }
 
 impl InlineInteractiveState {
+    /// The user picked route `option` for entry `index` by hand. Their choice
+    /// replaces any route a scope switched for it, so clearing the scope
+    /// keeps it instead of restoring the older route.
+    pub fn choose_route(&mut self, index: usize, option: usize) {
+        if let Some(entry) = self.entries.get_mut(index)
+            && option < entry.options.len()
+        {
+            entry.selected_option = option;
+            self.scoped_route_restore.retain(|(i, _)| *i != index);
+        }
+    }
+
     pub fn debug_memory_profile(&self) -> serde_json::Value {
         let entries_bytes: usize = self.entries.iter().map(estimate_picker_entry_bytes).sum();
         let filtered_bytes = self.filtered.capacity() * std::mem::size_of::<usize>();

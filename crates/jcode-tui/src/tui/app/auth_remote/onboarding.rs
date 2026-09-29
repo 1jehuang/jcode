@@ -152,6 +152,7 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
         });
         self.set_status_notice("Choose Yes or No with arrows (or Y/N), then Enter. Esc cancels.");
     }

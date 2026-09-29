@@ -47,6 +47,7 @@ fn model_browser_state(preview: bool) -> crate::tui::InlineInteractiveState {
         column: 0,
         filter: String::new(),
         preview,
+        scoped_route_restore: Vec::new(),
     }
 }
 
@@ -147,7 +148,7 @@ fn preview_enter_after_arrow_navigation_selects_that_row() {
 #[test]
 fn at_provider_token_filters_rows_and_scopes_route() {
     let mut picker = model_browser_state(false);
-    picker.filter = "@fireworks".to_string();
+    picker.filter = "@anthropic".to_string();
     App::apply_inline_interactive_filter(&mut picker);
 
     let names: Vec<&str> = picker
@@ -157,7 +158,7 @@ fn at_provider_token_filters_rows_and_scopes_route() {
         .collect();
     assert_eq!(names, vec!["claude-opus-4-8"]);
     let entry = &picker.entries[picker.filtered[0]];
-    assert_eq!(entry.active_option().unwrap().provider, "Fireworks");
+    assert_eq!(entry.active_option().unwrap().provider, "Anthropic");
 
     // `@openrouter` groups every route reached through OpenRouter.
     picker.filter = "@openrouter".to_string();
@@ -179,6 +180,116 @@ fn at_provider_token_filters_rows_and_scopes_route() {
     let (scopes, search) = split_model_picker_filter("claude-opus-4-8@Fireworks");
     assert!(scopes.is_empty());
     assert_eq!(search, "claude-opus-4-8@Fireworks");
+}
+
+/// Review #1567: `@fireworks` must not match an OpenRouter route that only
+/// names Fireworks upstream. Selecting it would send the request through
+/// OpenRouter, a different provider than the filter names.
+#[test]
+fn provider_scope_never_matches_an_openrouter_upstream_label() {
+    let mut picker = model_browser_state(false);
+    picker.filter = "@fireworks".to_string();
+    App::apply_inline_interactive_filter(&mut picker);
+    assert!(
+        picker.filtered.is_empty(),
+        "no route is reached through Fireworks itself: {:?}",
+        picker
+            .filtered
+            .iter()
+            .map(|&i| &picker.entries[i].name)
+            .collect::<Vec<_>>()
+    );
+
+    // The OpenRouter route is still reachable under the provider it uses.
+    picker.filter = "@openrouter".to_string();
+    App::apply_inline_interactive_filter(&mut picker);
+    let entry = &picker.entries[picker.filtered[0]];
+    assert_eq!(entry.name, "claude-opus-4-8");
+    assert_eq!(entry.active_option().unwrap().api_method, "openrouter");
+}
+
+/// Review #1567: a scope switches a row to that provider's route only while
+/// the scope applies. Clearing it (Esc, Backspace, Ctrl+P back to all) must
+/// give the row back the route it had, so a later unscoped selection goes
+/// where it went before the filter.
+#[test]
+fn clearing_a_provider_scope_restores_the_previous_route() {
+    let mut app = create_test_app();
+    app.inline_interactive_state = Some(model_browser_state(false));
+    let claude = |app: &App| {
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        let entry = picker
+            .entries
+            .iter()
+            .find(|e| e.name == "claude-opus-4-8")
+            .unwrap();
+        entry.active_option().unwrap().api_method.clone()
+    };
+    assert_eq!(claude(&app), "claude-oauth");
+
+    type_into(&mut app, "@openrouter");
+    assert_eq!(claude(&app), "openrouter", "scope selects its route");
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+    assert!(app.inline_interactive_state.as_ref().unwrap().filter.is_empty());
+    assert_eq!(claude(&app), "claude-oauth", "Esc restores the route");
+
+    // Backspacing the scope away restores it too.
+    type_into(&mut app, "@openrouter");
+    for _ in 0.."@openrouter".len() {
+        app.handle_key(KeyCode::Backspace, KeyModifiers::empty())
+            .unwrap();
+    }
+    assert_eq!(claude(&app), "claude-oauth", "Backspace restores the route");
+
+    // So does cycling Ctrl+P back to all providers.
+    for _ in 0..5 {
+        app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            .unwrap();
+    }
+    assert_eq!(
+        model_picker_active_provider(app.inline_interactive_state.as_ref().unwrap()),
+        None
+    );
+    assert_eq!(claude(&app), "claude-oauth", "Ctrl+P to all restores the route");
+}
+
+/// Review #1567: with a scope active the route column only moves between
+/// routes of that provider, so the header's `Provider:` stays true. A route
+/// the user picks by hand while scoped is kept after the scope is cleared.
+#[test]
+fn route_column_stays_inside_the_provider_scope() {
+    let mut app = create_test_app();
+    app.inline_interactive_state = Some(model_browser_state(false));
+    type_into(&mut app, "@anthropic");
+    {
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        assert_eq!(picker.entries[picker.filtered[0]].name, "claude-opus-4-8");
+        picker.column = 1;
+    }
+    let route = |app: &App| {
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        let entry = &picker.entries[picker.filtered[picker.selected]];
+        entry.active_option().unwrap().api_method.clone()
+    };
+    assert_eq!(route(&app), "claude-oauth");
+    app.handle_key(KeyCode::Down, KeyModifiers::empty()).unwrap();
+    assert_eq!(route(&app), "claude-oauth", "Down cannot leave @anthropic");
+    app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
+    assert_eq!(route(&app), "claude-oauth");
+
+    // Unscoped, the route column reaches every route, and a route picked by
+    // hand under a later scope survives clearing that scope.
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+    let picker = app.inline_interactive_state.as_mut().unwrap();
+    picker.selected = picker
+        .filtered
+        .iter()
+        .position(|&i| picker.entries[i].name == "claude-opus-4-8")
+        .unwrap();
+    picker.column = 1;
+    app.handle_key(KeyCode::Down, KeyModifiers::empty()).unwrap();
+    assert_eq!(route(&app), "openrouter", "unscoped Down reaches OpenRouter");
 }
 
 #[test]

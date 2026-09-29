@@ -1098,6 +1098,7 @@ mod tests {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
             entries: vec![crate::tui::PickerEntry {
                 name: "gpt-5.4".to_string(),
                 options: vec![crate::tui::PickerOption {
@@ -1248,6 +1249,7 @@ mod tests {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
             entries: models,
         }
     }
@@ -1260,6 +1262,7 @@ mod tests {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
             entries: vec![crate::tui::PickerEntry {
                 name: "Swarm / subagent".to_string(),
                 options: vec![crate::tui::PickerOption {

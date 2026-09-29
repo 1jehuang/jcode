@@ -59,6 +59,7 @@ fn model_picker_state() -> TestState {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
             entries: vec![model_picker_entry()],
         }),
         ..Default::default()

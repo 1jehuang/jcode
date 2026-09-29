@@ -33,6 +33,7 @@ fn remote_model_picker_preview_state() -> crate::tui::InlineInteractiveState {
         column: 0,
         filter: String::new(),
         preview: true,
+        scoped_route_restore: Vec::new(),
     }
 }
 
