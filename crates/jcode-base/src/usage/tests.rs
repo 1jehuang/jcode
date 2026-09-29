@@ -1104,3 +1104,57 @@ async fn usage_report_finishing_after_account_switch_keeps_old_account_key() {
         None => crate::env::remove_var("JCODE_HOME"),
     }
 }
+
+/// The usage tasks pick the active Claude account while they are enqueued.
+/// If the user switches accounts in that window, the fetched report may belong
+/// to either login, so it must not be tied to the key captured before.
+#[test]
+fn account_switch_while_enqueueing_usage_does_not_tie_report_to_old_key() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::auth::claude::set_active_account_override(None);
+    let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let account = |label: &str, access: &str| crate::auth::claude::AnthropicAccount {
+        label: label.to_string(),
+        access: access.to_string(),
+        refresh: format!("{access}-refresh"),
+        expires: far_future,
+        email: None,
+        subscription_type: Some("max".to_string()),
+        scopes: vec!["user:inference".to_string()],
+    };
+    let first =
+        crate::auth::claude::upsert_account(account("first", "sk-ant-oat01-enqueue-a")).unwrap();
+    let second =
+        crate::auth::claude::upsert_account(account("second", "sk-ant-oat01-enqueue-b")).unwrap();
+    crate::auth::claude::set_active_account(&first).unwrap();
+
+    // No switch: the key is the active login's key.
+    let (_, key) = enqueue_with_stable_anthropic_key(|| 1);
+    assert_eq!(
+        key,
+        Some(anthropic_usage_cache_key(
+            "sk-ant-oat01-enqueue-a",
+            Some(&first)
+        ))
+    );
+
+    // A switch while the tasks are being enqueued: no key, so the report is
+    // neither stored under the first account nor applied as active usage.
+    let (_, key) = enqueue_with_stable_anthropic_key(|| {
+        crate::auth::claude::set_active_account(&second).unwrap();
+        1
+    });
+    assert_eq!(
+        key, None,
+        "report must not be tied to the key captured before the switch"
+    );
+
+    crate::auth::claude::set_active_account_override(None);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}

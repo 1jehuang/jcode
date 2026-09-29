@@ -235,8 +235,8 @@ where
     }
 
     let mut tasks = tokio::task::JoinSet::<Option<ProviderUsage>>::new();
-    let anthropic_key = accessors::current_anthropic_usage_key();
-    let total = enqueue_provider_usage_tasks(&mut tasks);
+    let (total, anthropic_key) =
+        enqueue_with_stable_anthropic_key(|| enqueue_provider_usage_tasks(&mut tasks));
 
     if total == 0 {
         sync_cached_usage_from_reports(&results, anthropic_key, openai_generation).await;
@@ -335,6 +335,20 @@ fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
             crate::provider_activity::format_relative_age(used),
         ));
     }
+}
+
+/// Enqueue the usage fetches and return the Claude usage key they belong to.
+///
+/// The key is read before and after enqueueing. The tasks pick the active
+/// Claude account while they are enqueued, so if the active login changed in
+/// between, the active report cannot be tied to one account. Then no key is
+/// returned and the Claude report is neither cached nor applied, which is
+/// better than storing one account's usage under another account's key.
+fn enqueue_with_stable_anthropic_key(enqueue: impl FnOnce() -> usize) -> (usize, Option<String>) {
+    let before = accessors::current_anthropic_usage_key();
+    let total = enqueue();
+    let after = accessors::current_anthropic_usage_key();
+    (total, if before == after { before } else { None })
 }
 
 fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<ProviderUsage>>) -> usize {
