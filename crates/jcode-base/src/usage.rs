@@ -13,6 +13,7 @@ mod model;
 mod openai_helpers;
 mod openai_reset;
 mod provider_fetch;
+use accessors::set_active_usage_key;
 pub use accessors::*;
 pub use anthropic_reset::{
     AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
@@ -615,11 +616,11 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
         Some(report) => {
             let usage_data = usage_data_from_provider_report(report);
             if let Ok(creds) = auth::claude::load_credentials() {
-                let cache_key = anthropic_usage_cache_key(
-                    &creds.access_token,
-                    auth::claude::active_account_label().as_deref(),
-                );
-                store_anthropic_usage(cache_key, usage_data.clone());
+                let label = auth::claude::active_account_label()
+                    .unwrap_or_else(auth::claude::primary_account_label);
+                let cache_key = anthropic_usage_cache_key(&creds.access_token, Some(&label));
+                store_anthropic_usage(cache_key.clone(), usage_data.clone());
+                set_active_usage_key(Some(cache_key));
             }
             *cached = usage_data;
             if report.error.is_none() {
