@@ -407,16 +407,29 @@ where
         return true;
     }
     // An existing file, absolute, `~/`, or relative to the working directory.
-    let local = match path.strip_prefix("~/") {
-        Some(rest) => dirs::home_dir().map(|home| home.join(rest)),
-        None => Some(std::path::PathBuf::from(path)),
-    };
-    if local.is_some_and(|local| local.is_file()) {
+    if names_existing_file(path, dirs::home_dir(), std::env::current_dir().ok()) {
         return true;
     }
     copied_files()
         .iter()
         .any(|file| file.as_os_str() == path || file.file_name().is_some_and(|name| name == path))
+}
+
+/// True when `path` names an existing file: absolute, under `~/` (expanded
+/// against `home`), or relative to `cwd`.
+fn names_existing_file(
+    path: &str,
+    home: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+) -> bool {
+    let candidate = if let Some(rest) = path.strip_prefix("~/") {
+        home.map(|home| home.join(rest))
+    } else if std::path::Path::new(path).is_absolute() {
+        Some(std::path::PathBuf::from(path))
+    } else {
+        cwd.map(|cwd| cwd.join(path))
+    };
+    candidate.is_some_and(|candidate| candidate.is_file())
 }
 
 #[cfg(test)]
@@ -688,24 +701,38 @@ mod tests {
     }
 
     #[test]
-    fn smart_paste_attaches_existing_relative_spaced_name() {
+    fn existing_relative_and_home_names_with_spaces_are_recognized() {
         // Greptile #1450: an existing file named relative to the working
-        // directory, with no clipboard file list, must still attach.
-        let dir = tempfile::tempdir_in(".").unwrap();
-        let name = dir.path().file_name().unwrap().to_str().unwrap();
-        std::fs::write(dir.path().join("my shot.png"), b"png").unwrap();
-        let relative = format!("{name}/my shot.png");
-        let content = super::read_clipboard_for_paste_with_files(
-            &ClipboardPasteKind::Smart,
-            || Some(relative.clone()),
-            || Some(("image/png".to_string(), "base64".to_string())),
-            |_| None,
-            Vec::new,
-        );
-        assert!(
-            matches!(content, ClipboardPasteContent::Image { .. }),
-            "{relative}: expected image, got {content:?}"
-        );
+        // directory (or under ~/), with no clipboard file list, must count
+        // as an image name. Uses an injected base directory so the test does
+        // not need a writable working directory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("shots")).unwrap();
+        std::fs::write(dir.path().join("shots/my shot.png"), b"png").unwrap();
+        let base = Some(dir.path().to_path_buf());
+        assert!(super::names_existing_file(
+            "shots/my shot.png",
+            None,
+            base.clone()
+        ));
+        assert!(super::names_existing_file(
+            "~/shots/my shot.png",
+            base.clone(),
+            None
+        ));
+        let absolute = dir.path().join("shots/my shot.png");
+        assert!(super::names_existing_file(
+            absolute.to_str().unwrap(),
+            None,
+            None
+        ));
+        assert!(!super::names_existing_file(
+            "shots/missing shot.png",
+            None,
+            base.clone()
+        ));
+        assert!(!super::names_existing_file("shots/my shot.png", None, None));
+        assert!(!super::names_existing_file("shots", None, base));
     }
 
     #[test]
