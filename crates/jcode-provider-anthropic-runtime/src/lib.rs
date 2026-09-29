@@ -2149,17 +2149,10 @@ async fn resolve_oauth_access_token(
         {
             Ok(refreshed) => {
                 jcode_base::logging::info("OAuth token refreshed successfully");
-
-                // Cache the refreshed credentials
-                let mut cached = credentials.write().await;
-                *cached = Some(CachedCredentials {
-                    access_token: refreshed.access_token.clone(),
-                    refresh_token: refreshed.refresh_token,
-                    expires_at: refreshed.expires_at,
-                    source,
-                });
-
-                return Ok((refreshed.access_token, true));
+                return Ok((
+                    commit_claude_refresh(credentials, source, refreshed).await,
+                    true,
+                ));
             }
             Err(e) => {
                 jcode_base::logging::error(&format!("OAuth token refresh failed: {}", e));
@@ -2230,17 +2223,41 @@ async fn force_refresh_oauth_token(
             }
         };
 
-    {
-        let mut cached = credentials.write().await;
-        *cached = Some(CachedCredentials {
-            access_token: refreshed.access_token.clone(),
-            refresh_token: refreshed.refresh_token,
-            expires_at: refreshed.expires_at,
-            source,
-        });
-    }
+    Ok(commit_claude_refresh(&credentials, source, refreshed).await)
+}
 
-    Ok(refreshed.access_token)
+/// Write a finished Claude refresh into the session cache and return the
+/// bearer the caller should use.
+///
+/// The login can change while the refresh awaits the OAuth response. The
+/// result is only cached while the stored credential is still the one the
+/// refresh started from (an external login that is not rewritten on refresh)
+/// or the refreshed tokens themselves (a stored account whose refresh was
+/// persisted). Otherwise another login is active now: leave the cache alone
+/// and return that login's token instead of the old account's bearer.
+async fn commit_claude_refresh(
+    credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+    source: (String, String),
+    refreshed: oauth::OAuthTokens,
+) -> String {
+    let mut cached = credentials.write().await;
+    if let Ok(stored) = auth::claude::load_credentials() {
+        let still_source = stored.access_token == source.0 && stored.refresh_token == source.1;
+        let persisted_refresh = stored.access_token == refreshed.access_token;
+        if !still_source && !persisted_refresh && !stored.access_token.is_empty() {
+            jcode_base::logging::info(
+                "Claude credentials changed while a token refresh was in flight; using the new login",
+            );
+            return stored.access_token;
+        }
+    }
+    *cached = Some(CachedCredentials {
+        access_token: refreshed.access_token.clone(),
+        refresh_token: refreshed.refresh_token,
+        expires_at: refreshed.expires_at,
+        source,
+    });
+    refreshed.access_token
 }
 
 /// Stream the response from Anthropic API

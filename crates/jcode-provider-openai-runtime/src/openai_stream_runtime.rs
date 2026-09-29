@@ -149,7 +149,29 @@ pub(super) async fn force_refresh_openai_token(
     };
     let refreshed = oauth::refresh_openai_tokens(refresh_token).await?;
     record_refreshed_from(&refreshed.access_token, &origin);
+    Ok(commit_openai_refresh(credentials, refresh_token, refreshed).await)
+}
+
+/// Write a finished refresh into the session cache and return the bearer the
+/// caller should use.
+///
+/// The account can change while the refresh awaits the OAuth response. The
+/// result only belongs in the cache while the cache still holds the refresh
+/// token the refresh started from. Otherwise the cache now holds another
+/// login (or a newer refresh of the same one), so keep it and return its
+/// bearer instead of pairing the old account's token with the new account id.
+pub(super) async fn commit_openai_refresh(
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    refreshed_from: &str,
+    refreshed: oauth::OAuthTokens,
+) -> String {
     let mut tokens = credentials.write().await;
+    if tokens.refresh_token != refreshed_from && !tokens.access_token.is_empty() {
+        jcode_base::logging::info(
+            "OpenAI credentials changed while a token refresh was in flight; keeping the new login",
+        );
+        return tokens.access_token.clone();
+    }
     let account_id = tokens.account_id.clone();
     let id_token = refreshed
         .id_token
@@ -165,7 +187,7 @@ pub(super) async fn force_refresh_openai_token(
         expires_at: Some(refreshed.expires_at),
     };
 
-    Ok(new_access_token)
+    new_access_token
 }
 
 /// Stream the response from OpenAI API
