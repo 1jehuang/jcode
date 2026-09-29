@@ -1054,6 +1054,11 @@ pub(super) async fn handle_notify_auth_changed(
         for provider in session_providers {
             provider.on_auth_changed_preserve_current_provider();
         }
+        // Providers now drop cached credentials, so every connected session
+        // can resend a turn held on the previous account's limit.
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
+            provider: activation.provider_id.clone(),
+        });
 
         // Auth refresh is global so every live session learns about newly
         // configured credentials, but the automatic post-login model switch is
@@ -1341,6 +1346,9 @@ fn spawn_account_switch_refresh(
 
         crate::provider::clear_all_provider_unavailability_for_account();
         crate::provider::clear_all_model_unavailability_for_account();
+        crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
+            provider: Some(provider_kind.to_string()),
+        });
 
         match provider_kind {
             "anthropic" => {

@@ -1286,19 +1286,27 @@ pub(in crate::tui::app) fn handle_server_event(
                 .map(Duration::from_secs)
                 .or_else(|| parse_rate_limit_error(&message));
             if let Some(reset_duration) = reset_duration {
+                // The limit was hit by a turn sent before the account changed,
+                // so it reports the previous account's reset time (possibly
+                // hours away). Resend now on the new credentials instead.
+                let previous_account_limit = app.turn_predates_credentials_change();
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
                 if let Some(is_system) = app
                     .rate_limit_pending_message
                     .as_ref()
                     .map(|pending| pending.is_system)
                 {
-                    let rate_limit_line =
-                        app.rate_limit_notice_with_nudge(reset_duration.as_secs());
-                    app.push_display_message(DisplayMessage::system(rate_limit_line));
-                    if is_system {
-                        app.set_status_notice("Rate limited; queued system retry");
+                    if previous_account_limit {
+                        app.arm_account_change_resend(Instant::now());
                     } else {
-                        app.set_status_notice("Rate limited; queued retry");
+                        let rate_limit_line =
+                            app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                        app.push_display_message(DisplayMessage::system(rate_limit_line));
+                        if is_system {
+                            app.set_status_notice("Rate limited; queued system retry");
+                        } else {
+                            app.set_status_notice("Rate limited; queued retry");
+                        }
                     }
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;
@@ -2359,6 +2367,13 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.invalidate_model_picker_cache();
             true
+        }
+        ServerEvent::CredentialsChanged { provider } => {
+            crate::logging::info(&format!(
+                "Credentials changed on server (provider={:?}); releasing any rate-limit hold",
+                provider
+            ));
+            app.release_rate_limit_hold_after_credentials_changed()
         }
         ServerEvent::AvailableModelsUpdated {
             provider_name,

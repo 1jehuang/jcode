@@ -1,0 +1,219 @@
+// OAuth/account swap mid-session: a turn held on the previous account's
+// rate/usage limit must resend promptly on the new credentials instead of
+// sleeping until the old account's reset time (which can be hours away).
+
+fn held_on_rate_limit_app(hold: Duration) -> App {
+    let mut app = create_test_app();
+    let retry_at = Instant::now() + hold;
+    app.rate_limit_reset = Some(retry_at);
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "finish the refactor".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = false;
+    app.status = ProcessingStatus::Idle;
+    app
+}
+
+fn account_changed_notices(app: &App) -> usize {
+    app.display_messages()
+        .iter()
+        .filter(|m| m.content.contains("Account changed. Resending your message"))
+        .count()
+}
+
+#[test]
+fn test_credentials_changed_resends_turn_held_on_rate_limit() {
+    let mut app = held_on_rate_limit_app(Duration::from_secs(3 * 3600));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: Some("anthropic".to_string()),
+        },
+        &mut remote,
+    );
+
+    let reset = app
+        .rate_limit_reset
+        .expect("the held turn must stay armed for resend");
+    assert!(
+        reset <= Instant::now(),
+        "account change must pull the 3h hold forward to now"
+    );
+    assert_eq!(account_changed_notices(&app), 1);
+
+    // A second auth broadcast (login + catalog refresh both fire) must not
+    // add a duplicate notice or schedule a second resend.
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        &mut remote,
+    );
+    assert_eq!(account_changed_notices(&app), 1);
+
+    rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+    assert!(app.is_processing, "tick must resend the held turn");
+    assert!(app.rate_limit_reset.is_none());
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .map(|p| p.content.as_str()),
+        Some("finish the refactor")
+    );
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("Rate limit reset")),
+        "resend after an account change must not claim the limit reset"
+    );
+
+    // Once resent, further broadcasts are inert: no double send.
+    let sent_id = app.current_message_id;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        &mut remote,
+    );
+    rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+    assert_eq!(app.current_message_id, sent_id);
+    assert!(app.rate_limit_reset.is_none());
+    assert_eq!(account_changed_notices(&app), 1);
+}
+
+#[test]
+fn test_credentials_changed_without_hold_is_a_noop() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let before = app.display_messages().len();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        &mut remote,
+    );
+
+    assert!(app.rate_limit_reset.is_none());
+    assert!(app.rate_limit_pending_message.is_none());
+    assert_eq!(app.display_messages().len(), before);
+}
+
+#[test]
+fn test_credentials_changed_does_not_shortcut_network_wait() {
+    let mut app = held_on_rate_limit_app(Duration::from_secs(5));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.status = ProcessingStatus::WaitingForNetwork {
+        listener: "test".to_string(),
+    };
+    let reset = app.rate_limit_reset;
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        &mut remote,
+    );
+
+    assert_eq!(app.rate_limit_reset, reset, "offline holds are not auth holds");
+    assert_eq!(account_changed_notices(&app), 0);
+}
+
+#[test]
+fn test_rate_limit_error_for_turn_started_before_account_change_retries_promptly() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // Turn in flight on the old account (possibly sleeping in a provider retry).
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "retry me".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(9);
+    app.processing_started = Some(Instant::now() - Duration::from_secs(30));
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        &mut remote,
+    );
+    assert!(app.is_processing, "an in-flight turn is not interrupted");
+
+    // The old account's limit error lands after the swap.
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 9,
+            message: "rate limited".to_string(),
+            retry_after_secs: Some(3 * 3600),
+        },
+        &mut remote,
+    );
+
+    let reset = app.rate_limit_reset.expect("turn must stay held for resend");
+    assert!(
+        reset <= Instant::now() + Duration::from_secs(5),
+        "limit from the previous account must not hold the turn for hours"
+    );
+    assert!(app.rate_limit_pending_message.is_some());
+    assert_eq!(account_changed_notices(&app), 1);
+}
+
+#[test]
+fn test_rate_limit_error_without_account_change_keeps_full_hold() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "retry me".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(9);
+    app.processing_started = Some(Instant::now());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 9,
+            message: "rate limited".to_string(),
+            retry_after_secs: Some(3 * 3600),
+        },
+        &mut remote,
+    );
+
+    let reset = app.rate_limit_reset.expect("rate limit hold");
+    assert!(reset > Instant::now() + Duration::from_secs(3 * 3600 - 60));
+    assert_eq!(account_changed_notices(&app), 0);
+}
+
+#[test]
+fn test_local_account_switch_releases_rate_limit_hold() {
+    let mut app = held_on_rate_limit_app(Duration::from_secs(3 * 3600));
+
+    assert!(app.release_rate_limit_hold_after_credentials_changed());
+    assert!(app.rate_limit_reset.expect("armed") <= Instant::now());
+    assert_eq!(account_changed_notices(&app), 1);
+    // Idempotent.
+    assert!(!app.release_rate_limit_hold_after_credentials_changed());
+    assert_eq!(account_changed_notices(&app), 1);
+}
