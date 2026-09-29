@@ -45,7 +45,8 @@ pub const DEEPSEEK_SELECTABLE_EFFORTS: &[&str] = &[
 
 /// Position of a canonical effort in [`OPENAI_SELECTABLE_EFFORTS`].
 ///
-/// Returns `None` for non-reasoning values such as `swarm`/`swarm-deep`.
+/// Jcode's `swarm` and `swarm-deep` sentinels are part of that ladder, so
+/// they rank after `max`. Returns `None` only for values not in the ladder.
 /// Used to sort dynamically advertised effort ladders (e.g. from the Codex
 /// models catalog API, whose array order is not guaranteed) into the
 /// canonical low-to-high order.
