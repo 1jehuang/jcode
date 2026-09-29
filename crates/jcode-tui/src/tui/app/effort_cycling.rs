@@ -68,7 +68,6 @@ pub(crate) fn cycle_effort_index(
     current: Option<&str>,
     direction: i8,
 ) -> CycledEffort {
-    let len = efforts.len();
     let (reasoning, swarm) = reasoning_split(efforts);
 
     let default_index = default_effort_index(efforts).expect("non-empty ladder");
@@ -141,11 +140,7 @@ fn cycle_up(
         } else {
             // At last reasoning level (max) → first swarm sentinel, or wrap
             // to first reasoning if no swarm sentinels exist.
-            if swarm.is_empty() {
-                0
-            } else {
-                reasoning.len()
-            }
+            if swarm.is_empty() { 0 } else { reasoning.len() }
         }
     }
 }
@@ -237,15 +232,7 @@ mod tests {
         // max, then wrap within reasoning down to none, then wrap to max.
         let mut cur: &'static str = "swarm-deep";
         let expected = [
-            "swarm",
-            "max",
-            "xhigh",
-            "high",
-            "medium",
-            "low",
-            "minimal",
-            "none",
-            "max",
+            "swarm", "max", "xhigh", "high", "medium", "low", "minimal", "none", "max",
         ];
         for want in expected {
             let r = cycle_effort_index(&ladder, Some(cur), -1);
@@ -291,10 +278,7 @@ mod tests {
     fn default_effort_index_is_highest_reasoning_level() {
         assert_eq!(default_effort_index(&ladder()), Some(6)); // "max"
         // Swarm-only ladder: last rung.
-        assert_eq!(
-            default_effort_index(&["swarm", "swarm-deep"]),
-            Some(1)
-        );
+        assert_eq!(default_effort_index(&["swarm", "swarm-deep"]), Some(1));
         assert_eq!(default_effort_index(&[]), None);
     }
 
