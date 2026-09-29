@@ -257,8 +257,9 @@ fn search_messages(messages: &[Message], query: &str) -> Vec<SearchResult> {
 
     for (idx, msg) in messages.iter().enumerate() {
         let text = message_to_text(msg);
-        if text.to_lowercase().contains(&query_lower) {
-            let snippet = extract_snippet(&text, &query_lower);
+        let lower = text.to_lowercase();
+        if lower.contains(&query_lower) {
+            let snippet = snippet_from_lower(&text, &lower, &query_lower);
             results.push(SearchResult {
                 turn: idx,
                 role: msg.role.clone(),
@@ -285,22 +286,20 @@ fn message_to_text(msg: &Message) -> String {
         .join("\n")
 }
 
+#[cfg(test)]
 fn extract_snippet(text: &str, query: &str) -> String {
-    // Lowercase char by char and remember which byte of `text` each lowercased
-    // byte came from. A match in the lowercased copy then maps back onto
-    // `text` even when lowercasing changes byte lengths (e.g. 'İ').
-    let mut lower = String::with_capacity(text.len());
-    let mut origin = Vec::with_capacity(text.len());
-    for (idx, ch) in text.char_indices() {
-        let before = lower.len();
-        lower.extend(ch.to_lowercase());
-        origin.resize(origin.len() + (lower.len() - before), idx);
-    }
+    snippet_from_lower(text, &text.to_lowercase(), query)
+}
+
+/// Build a snippet around the first match of `query` in `lower`, which must be
+/// `text.to_lowercase()`: the exact copy the search matched against, so a hit
+/// found by the search (including context-sensitive final sigma) is always
+/// found here too.
+fn snippet_from_lower(text: &str, lower: &str, query: &str) -> String {
     let Some(pos) = lower.find(query) else {
         return text.chars().take(100).collect();
     };
-    let match_start = origin.get(pos).copied().unwrap_or(0);
-    let match_end = origin.get(pos + query.len()).copied().unwrap_or(text.len());
+    let (match_start, match_end) = map_lower_range(text, pos, pos + query.len());
     // 50 bytes of context each side, widened to whole characters so the
     // slice never splits a multi-byte char like '·'.
     let mut start = match_start.saturating_sub(50);
@@ -319,6 +318,30 @@ fn extract_snippet(text: &str, query: &str) -> String {
         snippet = format!("{}...", snippet);
     }
     snippet
+}
+
+/// Map the byte range `lo..hi` of `text.to_lowercase()` back to a byte range
+/// of `text` covering the same characters.
+///
+/// `str::to_lowercase` lowercases each char like `char::to_lowercase`, except
+/// 'Σ', which becomes 'σ' or word-final 'ς'. Both are 2 bytes, so each char's
+/// lowercased byte length can be computed on its own. Walking `text` while
+/// summing those lengths gives the mapping with O(1) extra memory, and the
+/// walk stops as soon as it passes the end of the match.
+fn map_lower_range(text: &str, lo: usize, hi: usize) -> (usize, usize) {
+    let mut lower_offset = 0;
+    let mut start = None;
+    for (idx, ch) in text.char_indices() {
+        if lower_offset >= hi {
+            return (start.unwrap_or(idx), idx);
+        }
+        let lowered_len: usize = ch.to_lowercase().map(char::len_utf8).sum();
+        if start.is_none() && lower_offset + lowered_len > lo {
+            start = Some(idx);
+        }
+        lower_offset += lowered_len;
+    }
+    (start.unwrap_or(text.len()), text.len())
 }
 
 #[cfg(test)]
@@ -449,5 +472,30 @@ mod tests {
         let snippet = extract_snippet(&text, "needle");
         assert!(snippet.contains("Needle"), "{snippet}");
         assert_eq!(extract_snippet("no match here", "zzz"), "no match here");
+    }
+
+    #[test]
+    fn snippet_finds_word_final_sigma_like_search() {
+        // The search lowercases the whole message, so "ΟΔΟΣ" becomes "οδος"
+        // with a word-final 'ς'. Lowercasing char by char would give "οδοσ"
+        // instead, and the snippet would fall back to the first 100 chars.
+        let text = format!("{} ΟΔΟΣ {}", "x".repeat(200), "y".repeat(200));
+        let query = "ος".to_lowercase();
+        assert!(text.to_lowercase().contains(&query));
+        let snippet = extract_snippet(&text, &query);
+        assert!(snippet.contains("ΟΔΟΣ"), "{snippet}");
+        assert!(snippet.starts_with("...") && snippet.ends_with("..."));
+    }
+
+    #[test]
+    fn snippet_from_large_message_is_short_and_contains_hit() {
+        // 4 MiB of mixed-width text with the hit in the middle. The offset
+        // mapping walks chars with O(1) extra state instead of building a
+        // per-byte table, so this stays cheap in memory.
+        let half = "ab·İΣ ".repeat(4 * 1024 * 1024 / 2 / 9);
+        let text = format!("{half}HiddenNeedle{half}");
+        let snippet = extract_snippet(&text, "hiddenneedle");
+        assert!(snippet.contains("HiddenNeedle"), "{snippet}");
+        assert!(snippet.len() < 200, "{}", snippet.len());
     }
 }
