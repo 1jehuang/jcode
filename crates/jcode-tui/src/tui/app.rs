@@ -1115,6 +1115,8 @@ pub struct App {
     route_next_prompt_to_new_session: bool,
     // Restore-time flag: auto-submit restored input after startup.
     submit_input_on_startup: bool,
+    /// This client was opened from a reboot snapshot; old turns stay paused.
+    passive_restart_restore: bool,
     /// Debug guard: tracks the last reason the startup auto-submit was deferred
     /// so `process_remote_followups` logs each distinct blocker exactly once
     /// instead of spamming every tick. Used to debug headed-spawn prompts that

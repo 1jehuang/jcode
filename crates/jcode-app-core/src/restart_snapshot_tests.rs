@@ -101,6 +101,16 @@ fn clear_snapshot_removes_saved_file() {
 }
 
 #[test]
+fn passive_marker_is_session_scoped_and_persists_until_cleared() {
+    let _guard = TestEnvGuard::new().expect("setup test env");
+    super::mark_passive_restore("session/one").expect("mark session");
+    assert!(super::is_passive_restore("session/one").expect("marker"));
+    assert!(!super::is_passive_restore("session/two").expect("marker"));
+    super::clear_passive_restore("session/one").expect("clear session");
+    assert!(!super::is_passive_restore("session/one").expect("marker"));
+}
+
+#[test]
 fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
     let _guard = TestEnvGuard::new().expect("setup test env");
 

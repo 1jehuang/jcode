@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use serde::Deserialize;
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::PathBuf;
 
 pub async fn run_restart_save_command(auto_restore: bool) -> Result<()> {
@@ -93,12 +94,22 @@ pub async fn maybe_run_pending_restart_restore_on_startup() -> Result<bool> {
     };
 
     if snapshot.auto_restore_on_next_start {
-        let _ = crate::restart_snapshot::set_auto_restore_on_next_start(false);
+        anyhow::ensure!(
+            crate::restart_snapshot::set_auto_restore_on_next_start(false)?,
+            "Reboot snapshot disappeared before automatic restore"
+        );
+        print_restore_preview(&snapshot);
+        if requires_restore_confirmation(&snapshot) {
+            println!(
+                "Automatic restore paused: this snapshot is old or contains multiple sessions. Review it, then run `jcode restart restore` (or `jcode restart restore --yes` in a script).\n"
+            );
+            return Ok(false);
+        }
         println!(
             "Found a reboot snapshot with auto-restore enabled. Restoring {} jcode window(s)...\n",
             snapshot.sessions.len()
         );
-        run_restart_restore_command()?;
+        restore_reviewed_snapshot(snapshot)?;
         return Ok(true);
     }
 
@@ -118,9 +129,61 @@ pub fn run_restart_clear_command() -> Result<()> {
     Ok(())
 }
 
-pub fn run_restart_restore_command() -> Result<()> {
+const STALE_RESTORE_HOURS: i64 = 24;
+
+fn requires_restore_confirmation(snapshot: &crate::restart_snapshot::RestartSnapshot) -> bool {
+    let age = Utc::now().signed_duration_since(snapshot.created_at);
+    snapshot.sessions.len() > 1
+        || age < chrono::Duration::zero()
+        || age >= chrono::Duration::hours(STALE_RESTORE_HOURS)
+}
+
+fn print_restore_preview(snapshot: &crate::restart_snapshot::RestartSnapshot) {
+    let age = Utc::now().signed_duration_since(snapshot.created_at);
+    println!(
+        "Reboot snapshot: created {} ({} hour(s) ago), {} session(s):",
+        snapshot.created_at,
+        age.num_hours(),
+        snapshot.sessions.len()
+    );
+    for session in &snapshot.sessions {
+        println!(
+            "- {} ({}){}",
+            session.display_name,
+            session.session_id,
+            if session.is_selfdev {
+                " [self-dev]"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
+pub fn run_restart_restore_command(yes: bool) -> Result<()> {
+    let snapshot = crate::restart_snapshot::load_snapshot()?;
+    print_restore_preview(&snapshot);
+    if requires_restore_confirmation(&snapshot) && !yes {
+        if !std::io::stdin().is_terminal() {
+            anyhow::bail!(
+                "Restore requires confirmation. Review the snapshot above and rerun with `jcode restart restore --yes`."
+            );
+        }
+        print!("Restore these sessions? Type 'yes' to continue: ");
+        std::io::stdout().flush()?;
+        let mut reply = String::new();
+        std::io::stdin().read_line(&mut reply)?;
+        if reply.trim() != "yes" {
+            println!("Restore cancelled; snapshot kept.");
+            return Ok(());
+        }
+    }
+    restore_reviewed_snapshot(snapshot)
+}
+
+fn restore_reviewed_snapshot(snapshot: crate::restart_snapshot::RestartSnapshot) -> Result<()> {
     let exe = current_restart_restore_exe()?;
-    let result = match crate::restart_snapshot::restore_snapshot(&exe) {
+    let result = match crate::restart_snapshot::restore_snapshot(&exe, snapshot) {
         Ok(result) => result,
         Err(error) => {
             let path = crate::restart_snapshot::snapshot_path()?;
@@ -134,7 +197,6 @@ pub fn run_restart_restore_command() -> Result<()> {
 
     if result.snapshot.sessions.is_empty() {
         println!("Saved reboot snapshot is empty. Nothing to restore.");
-        let _ = crate::restart_snapshot::clear_snapshot();
         return Ok(());
     }
 
@@ -164,8 +226,9 @@ pub fn run_restart_restore_command() -> Result<()> {
         return Ok(());
     }
 
-    let _ = crate::restart_snapshot::clear_snapshot();
-    println!("Cleared reboot snapshot after successful restore.");
+    println!(
+        "The reboot snapshot was kept. Once the restored windows are attached and safe, remove it with `jcode restart clear`."
+    );
     Ok(())
 }
 

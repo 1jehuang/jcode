@@ -1,6 +1,6 @@
 use super::{
     maybe_run_pending_restart_restore_on_startup, run_restart_clear_command,
-    run_restart_save_command,
+    run_restart_restore_command, run_restart_save_command,
 };
 use crate::session::Session;
 use std::ffi::OsString;
@@ -104,4 +104,56 @@ async fn restart_clear_removes_saved_snapshot() {
     run_restart_clear_command().expect("clear restart snapshot");
 
     assert!(crate::restart_snapshot::load_snapshot().is_err());
+}
+
+#[test]
+fn stale_snapshot_requires_noninteractive_confirmation_without_launching() {
+    let _guard = TestEnvGuard::new().expect("setup test env");
+    let snapshot = crate::restart_snapshot::RestartSnapshot {
+        version: 1,
+        created_at: chrono::Utc::now() - chrono::Duration::hours(47),
+        auto_restore_on_next_start: false,
+        sessions: vec![crate::restart_snapshot::RestartSnapshotSession {
+            session_id: "stale-session".to_string(),
+            display_name: "Stale session".to_string(),
+            working_dir: None,
+            is_selfdev: false,
+        }],
+    };
+    crate::restart_snapshot::write_snapshot(&snapshot).expect("write snapshot");
+    let error = run_restart_restore_command(false).expect_err("stale restore must require consent");
+    assert!(error.to_string().contains("--yes"));
+    assert!(!crate::restart_snapshot::is_passive_restore("stale-session").expect("marker"));
+    assert!(crate::restart_snapshot::load_snapshot().is_ok());
+}
+
+#[tokio::test]
+async fn multi_session_auto_restore_disarms_without_launching() {
+    let _guard = TestEnvGuard::new().expect("setup test env");
+    let snapshot = crate::restart_snapshot::RestartSnapshot {
+        version: 1,
+        created_at: chrono::Utc::now(),
+        auto_restore_on_next_start: true,
+        sessions: ["one", "two"]
+            .into_iter()
+            .map(|id| crate::restart_snapshot::RestartSnapshotSession {
+                session_id: id.to_string(),
+                display_name: id.to_string(),
+                working_dir: None,
+                is_selfdev: false,
+            })
+            .collect(),
+    };
+    crate::restart_snapshot::write_snapshot(&snapshot).expect("write snapshot");
+    assert!(
+        !maybe_run_pending_restart_restore_on_startup()
+            .await
+            .expect("check restore")
+    );
+    assert!(
+        !crate::restart_snapshot::load_snapshot()
+            .expect("snapshot kept")
+            .auto_restore_on_next_start
+    );
+    assert!(!crate::restart_snapshot::is_passive_restore("one").expect("marker"));
 }

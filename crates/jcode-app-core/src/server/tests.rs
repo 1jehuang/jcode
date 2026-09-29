@@ -967,6 +967,72 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
 #[tokio::test]
 #[allow(
     clippy::await_holding_lock,
+    reason = "test serializes process-wide JCODE_HOME while checking startup recovery"
+)]
+async fn passive_restart_restore_does_not_continue_headless_session() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("unexpected continuation".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+
+    let mut session = crate::session::Session::create(None, Some("paused worker".to_string()));
+    session.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "tool_bash".to_string(),
+            content: "[Tool 'bash' interrupted by server reload]".to_string(),
+            is_error: Some(true),
+        }],
+    );
+    session.save()?;
+    ReloadContext {
+        task_context: Some("continue pending work".to_string()),
+        version_before: "old".to_string(),
+        version_after: "new".to_string(),
+        session_id: session.id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }
+    .save()?;
+    crate::restart_snapshot::mark_passive_restore(&session.id)?;
+
+    let swarm_id = "swarm-paused-restart";
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        None,
+        &[persisted_headless_member(
+            &session.id,
+            swarm_id,
+            "running",
+            "bash tool",
+        )],
+    );
+    let server = Server::new(provider.clone());
+    server.recover_headless_sessions_on_startup().await;
+
+    assert_eq!(provider.responses.lock().expect("response queue").len(), 1);
+    assert_eq!(
+        server
+            .swarm_state
+            .members
+            .read()
+            .await
+            .get(&session.id)
+            .map(|member| member.status.as_str()),
+        Some("ready")
+    );
+    assert!(crate::restart_snapshot::is_passive_restore(&session.id)?);
+    assert!(ReloadContext::peek_for_session(&session.id)?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
     reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
 )]
 async fn startup_recovery_preserves_headed_session_reload_context_for_later_reconnect() -> Result<()>

@@ -24,6 +24,9 @@ pub(in crate::tui::app) async fn begin_remote_send(
             app.active_skill.clone(),
         )
         .await?;
+    if !is_system {
+        app.passive_restart_restore = false;
+    }
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;

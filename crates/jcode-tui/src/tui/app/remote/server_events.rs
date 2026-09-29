@@ -2059,6 +2059,11 @@ pub(in crate::tui::app) fn handle_server_event(
             let reload_recovery = reload_recovery.or_else(|| {
                 ReloadContext::recovery_directive(None, was_interrupted == Some(true), "", None)
             });
+            let reload_recovery = if app.passive_restart_restore {
+                None
+            } else {
+                reload_recovery
+            };
             if let Some(reload_recovery) = reload_recovery
                 && !app.display_messages.is_empty()
             {

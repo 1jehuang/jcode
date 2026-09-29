@@ -506,6 +506,7 @@ impl App {
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
+            passive_restart_restore: false,
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
             onboarding_sim: None,
@@ -964,6 +965,7 @@ impl App {
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
+            passive_restart_restore: false,
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
             onboarding_sim: None,
@@ -1344,6 +1346,14 @@ impl App {
     }
 
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        Self::new_for_remote_with_restore(resume_session, fresh_spawn, false)
+    }
+
+    pub fn new_for_remote_with_restore(
+        resume_session: Option<String>,
+        fresh_spawn: bool,
+        passive_restore: bool,
+    ) -> Self {
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1354,6 +1364,7 @@ impl App {
             .unwrap_or_else(|| Session::create(None, None));
         let mut app = Self::new_minimal_with_session(provider, registry, session);
         app.is_remote = true;
+        app.passive_restart_restore = passive_restore;
         app.runtime_mode = AppRuntimeMode::RemoteClient;
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
         app.remote_startup_phase_started = Some(Instant::now());
@@ -1398,10 +1409,20 @@ impl App {
                 ));
             }
             if let Some(restored) = Self::restore_input_for_reload(session_id) {
-                app.apply_restored_reload_input(restored);
+                if passive_restore {
+                    // Keep the visible draft, but never replay saved work queues.
+                    app.input = restored.input;
+                    app.cursor_pos = restored.cursor;
+                    app.pending_images = restored.pending_images;
+                } else {
+                    app.apply_restored_reload_input(restored);
+                }
             }
         }
 
+        if passive_restore {
+            app.set_status_notice("Restored session paused; submit a new message to continue");
+        }
         app.resume_session_id = resume_session;
         app
     }
