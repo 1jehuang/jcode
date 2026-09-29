@@ -164,6 +164,7 @@ pub fn format_messages_with_tools(
     }
 
     rewrite_orphaned_tool_results(&mut merged);
+    answer_unpaired_tool_uses(&mut merged);
 
     // Anthropic rejects a request whose final message is an assistant turn on
     // models that do not support assistant prefill ("This model does not support
@@ -432,6 +433,96 @@ fn rewrite_orphaned_tool_results(messages: &mut [ApiMessage]) {
     if rewritten > 0 {
         jcode_logging::warn(&format!(
             "[anthropic] Rewrote {rewritten} orphaned tool_result(s) as text to prevent a 400"
+        ));
+    }
+}
+
+/// Text of the synthetic tool_result injected for a tool_use whose real result
+/// exists but is not in the message right after the call.
+const DISPLACED_TOOL_RESULT_TEXT: &str =
+    "[Tool output was recorded later in the conversation and is included there as text]";
+
+/// Guarantee every `tool_use` is answered by a `tool_result` in the
+/// immediately following user message.
+///
+/// The dangling repair only covers tool_uses with no result anywhere in the
+/// transcript. A result that exists but arrived after another assistant turn is
+/// rewritten to text by [`rewrite_orphaned_tool_results`], which would leave the
+/// call unanswered and the request rejected with a 400. Inject an error
+/// tool_result for each such call, at the front of the next user message, or
+/// in a new user message when the next message is not a user turn.
+fn answer_unpaired_tool_uses(messages: &mut Vec<ApiMessage>) {
+    use std::collections::HashSet;
+
+    let mut injected = 0usize;
+    let mut i = 0;
+    while i < messages.len() {
+        if messages[i].role != "assistant" {
+            i += 1;
+            continue;
+        }
+        let tool_use_ids: Vec<String> = messages[i]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ApiContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        if tool_use_ids.is_empty() {
+            i += 1;
+            continue;
+        }
+        let next_is_user = messages.get(i + 1).is_some_and(|m| m.role == "user");
+        let answered: HashSet<String> = if next_is_user {
+            messages[i + 1]
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ApiContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let synthetic: Vec<ApiContentBlock> = tool_use_ids
+            .into_iter()
+            .filter(|id| !answered.contains(id))
+            .map(|id| ApiContentBlock::ToolResult {
+                tool_use_id: id,
+                content: ToolResultContent::Text(DISPLACED_TOOL_RESULT_TEXT.to_string()),
+                is_error: true,
+            })
+            .collect();
+        if !synthetic.is_empty() {
+            injected += synthetic.len();
+            if next_is_user {
+                // tool_results must lead the user turn. Place the synthetic
+                // results after any existing paired results.
+                let content = &mut messages[i + 1].content;
+                let insert_at = content
+                    .iter()
+                    .position(|b| !matches!(b, ApiContentBlock::ToolResult { .. }))
+                    .unwrap_or(content.len());
+                content.splice(insert_at..insert_at, synthetic);
+            } else {
+                messages.insert(
+                    i + 1,
+                    ApiMessage {
+                        role: "user".to_string(),
+                        content: synthetic,
+                    },
+                );
+            }
+        }
+        i += 2;
+    }
+
+    if injected > 0 {
+        jcode_logging::warn(&format!(
+            "[anthropic] Injected {injected} synthetic tool_result(s) for tool_use(s) whose \
+             result was not in the next message, to prevent a 400"
         ));
     }
 }
