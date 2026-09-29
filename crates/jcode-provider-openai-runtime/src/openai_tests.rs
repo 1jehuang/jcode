@@ -508,3 +508,70 @@ async fn openai_external_codex_relogin_replaces_token() {
         "codex-new-login-other-account"
     );
 }
+
+/// A token refresh that started for one account and finishes after the session
+/// moved to another account must not overwrite the new account's bearer while
+/// keeping the new account id.
+#[tokio::test]
+async fn openai_refresh_finishing_after_account_switch_keeps_new_credentials() {
+    let credentials = Arc::new(RwLock::new(CodexCredentials {
+        access_token: "new-account-access".to_string(),
+        refresh_token: "new-account-refresh".to_string(),
+        id_token: None,
+        account_id: Some("new-account-id".to_string()),
+        expires_at: Some(chrono::Utc::now().timestamp_millis() + 8 * 60 * 60 * 1000),
+    }));
+    // The refresh began from the old account's refresh token, before the switch.
+    let refreshed = jcode_base::auth::oauth::OAuthTokens {
+        access_token: "old-account-refreshed-access".to_string(),
+        refresh_token: "old-account-rotated-refresh".to_string(),
+        expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        id_token: None,
+        scopes: Vec::new(),
+    };
+
+    let bearer = super::openai_stream_runtime::commit_openai_refresh(
+        &credentials,
+        "old-account-refresh",
+        refreshed,
+    )
+    .await;
+
+    let cached = credentials.read().await;
+    assert_eq!(bearer, "new-account-access");
+    assert_eq!(cached.access_token, "new-account-access");
+    assert_eq!(cached.refresh_token, "new-account-refresh");
+    assert_eq!(cached.account_id.as_deref(), Some("new-account-id"));
+}
+
+/// Without an account change the refreshed bearer replaces the cached one.
+#[tokio::test]
+async fn openai_refresh_without_account_switch_updates_cache() {
+    let credentials = Arc::new(RwLock::new(CodexCredentials {
+        access_token: "same-account-access".to_string(),
+        refresh_token: "same-account-refresh".to_string(),
+        id_token: None,
+        account_id: Some("same-account-id".to_string()),
+        expires_at: Some(0),
+    }));
+    let refreshed = jcode_base::auth::oauth::OAuthTokens {
+        access_token: "same-account-refreshed-access".to_string(),
+        refresh_token: "same-account-rotated-refresh".to_string(),
+        expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        id_token: None,
+        scopes: Vec::new(),
+    };
+
+    let bearer = super::openai_stream_runtime::commit_openai_refresh(
+        &credentials,
+        "same-account-refresh",
+        refreshed,
+    )
+    .await;
+
+    let cached = credentials.read().await;
+    assert_eq!(bearer, "same-account-refreshed-access");
+    assert_eq!(cached.access_token, "same-account-refreshed-access");
+    assert_eq!(cached.refresh_token, "same-account-rotated-refresh");
+    assert_eq!(cached.account_id.as_deref(), Some("same-account-id"));
+}

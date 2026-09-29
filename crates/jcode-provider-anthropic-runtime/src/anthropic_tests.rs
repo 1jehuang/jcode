@@ -2773,3 +2773,113 @@ fn reset_duration_format_is_compact() {
     assert_eq!(format_reset_duration(3 * 3600 + 17 * 60), "3h 17m");
     assert_eq!(format_reset_duration(2 * 86_400 + 3600), "2d 1h 0m");
 }
+
+fn refreshed_claude_tokens(access: &str, refresh: &str) -> jcode_base::auth::oauth::OAuthTokens {
+    jcode_base::auth::oauth::OAuthTokens {
+        access_token: access.to_string(),
+        refresh_token: refresh.to_string(),
+        expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        id_token: None,
+        scopes: vec!["user:inference".to_string()],
+    }
+}
+
+/// A token refresh that started for one Claude account and finishes after an
+/// account switch must not cache or return the old account's bearer.
+#[tokio::test]
+async fn claude_refresh_finishing_after_account_switch_keeps_new_login() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+
+    let first = jcode_base::auth::claude::upsert_account(oauth_account(
+        "claude-1",
+        "first-account-access",
+        "first-account-refresh",
+    ))
+    .unwrap();
+    let second = jcode_base::auth::claude::upsert_account(oauth_account(
+        "claude-2",
+        "second-account-access",
+        "second-account-refresh",
+    ))
+    .unwrap();
+    jcode_base::auth::claude::set_active_account(&first).unwrap();
+    let source = (
+        "first-account-access".to_string(),
+        "first-account-refresh".to_string(),
+    );
+    let credentials = Arc::new(RwLock::new(None));
+
+    // The refresh for the first account is in flight when the user switches.
+    jcode_base::auth::claude::set_active_account(&second).unwrap();
+    let bearer = commit_claude_refresh(
+        &credentials,
+        source,
+        refreshed_claude_tokens("first-account-refreshed", "first-account-rotated"),
+    )
+    .await;
+
+    assert_eq!(bearer, "second-account-access");
+    assert!(
+        credentials
+            .read()
+            .await
+            .as_ref()
+            .is_none_or(|cached| cached.access_token != "first-account-refreshed"),
+        "the old account's refreshed token must not be cached for the new login"
+    );
+    jcode_base::auth::claude::set_active_account_override(None);
+}
+
+/// Without an account change the refreshed token is cached and returned, both
+/// for a stored account (whose refresh is persisted) and an external source
+/// (whose stored credential is not rewritten).
+#[tokio::test]
+async fn claude_refresh_without_account_switch_updates_cache() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+
+    let label = jcode_base::auth::claude::upsert_account(oauth_account(
+        "claude-1",
+        "account-access",
+        "account-refresh",
+    ))
+    .unwrap();
+    let source = ("account-access".to_string(), "account-refresh".to_string());
+    let credentials = Arc::new(RwLock::new(None));
+
+    // External-style: the store still holds the source credential.
+    let bearer = commit_claude_refresh(
+        &credentials,
+        source.clone(),
+        refreshed_claude_tokens("account-refreshed-1", "account-rotated-1"),
+    )
+    .await;
+    assert_eq!(bearer, "account-refreshed-1");
+
+    // Stored-account style: the refresh was persisted under the same label.
+    jcode_base::auth::claude::upsert_account(oauth_account(
+        &label,
+        "account-refreshed-2",
+        "account-rotated-2",
+    ))
+    .unwrap();
+    let bearer = commit_claude_refresh(
+        &credentials,
+        source,
+        refreshed_claude_tokens("account-refreshed-2", "account-rotated-2"),
+    )
+    .await;
+    assert_eq!(bearer, "account-refreshed-2");
+    assert_eq!(
+        credentials.read().await.as_ref().unwrap().access_token,
+        "account-refreshed-2"
+    );
+    jcode_base::auth::claude::set_active_account_override(None);
+}
