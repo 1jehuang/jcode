@@ -4,6 +4,8 @@
 
 fn held_on_rate_limit_app(hold: Duration) -> App {
     let mut app = create_test_app();
+    // The held turn runs on Claude; credential changes are scoped by provider.
+    app.remote_provider_name = Some("Claude".to_string());
     let retry_at = Instant::now() + hold;
     app.rate_limit_reset = Some(retry_at);
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
@@ -210,10 +212,101 @@ fn test_rate_limit_error_without_account_change_keeps_full_hold() {
 fn test_local_account_switch_releases_rate_limit_hold() {
     let mut app = held_on_rate_limit_app(Duration::from_secs(3 * 3600));
 
-    assert!(app.release_rate_limit_hold_after_credentials_changed());
+    assert!(app.release_rate_limit_hold_after_credentials_changed(None));
     assert!(app.rate_limit_reset.expect("armed") <= Instant::now());
     assert_eq!(account_changed_notices(&app), 1);
     // Idempotent.
-    assert!(!app.release_rate_limit_hold_after_credentials_changed());
+    assert!(!app.release_rate_limit_hold_after_credentials_changed(None));
+    assert_eq!(account_changed_notices(&app), 1);
+}
+
+// Greptile PRRT_kwDOQz8JRs6nTkDO: a credential change for one provider must
+// not resend a turn held on a different provider's exhausted account.
+fn claude_held_app() -> App {
+    let mut app = held_on_rate_limit_app(Duration::from_secs(3 * 3600));
+    app.remote_provider_name = Some("Claude".to_string());
+    app
+}
+
+#[test]
+fn test_credentials_changed_scope_openai_credentials_change_keeps_claude_turn_held() {
+    let mut app = claude_held_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: Some("openai".to_string()),
+        },
+        &mut remote,
+    );
+
+    let reset = app.rate_limit_reset.expect("hold stays armed");
+    assert!(
+        reset > Instant::now() + Duration::from_secs(3 * 3600 - 60),
+        "an OpenAI change must not release a hold on the Claude account"
+    );
+    assert_eq!(account_changed_notices(&app), 0);
+    assert!(
+        !app.turn_predates_credentials_change(),
+        "an unrelated provider change must not mark Claude limits as stale"
+    );
+}
+
+#[test]
+fn test_credentials_changed_scope_claude_credentials_change_releases_claude_turn() {
+    for provider in ["anthropic", "claude"] {
+        let mut app = claude_held_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::CredentialsChanged {
+                provider: Some(provider.to_string()),
+            },
+            &mut remote,
+        );
+
+        assert!(app.rate_limit_reset.expect("armed") <= Instant::now());
+        assert_eq!(account_changed_notices(&app), 1, "provider={provider}");
+    }
+}
+
+#[test]
+fn test_credentials_changed_scope_unscoped_credentials_change_releases_claude_turn() {
+    let mut app = claude_held_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        &mut remote,
+    );
+
+    assert!(app.rate_limit_reset.expect("armed") <= Instant::now());
+    assert_eq!(account_changed_notices(&app), 1);
+}
+
+#[test]
+fn test_credentials_changed_scope_claude_change_keeps_openai_turn_held() {
+    let mut app = held_on_rate_limit_app(Duration::from_secs(3 * 3600));
+    app.remote_provider_name = Some("openai".to_string());
+
+    assert!(!app.release_rate_limit_hold_after_credentials_changed(Some("claude")));
+    assert_eq!(account_changed_notices(&app), 0);
+    assert!(app.release_rate_limit_hold_after_credentials_changed(Some("openai-api")));
+    assert_eq!(account_changed_notices(&app), 1);
+}
+
+#[test]
+fn test_credentials_changed_scope_local_openai_account_switch_keeps_claude_turn_held() {
+    let mut app = claude_held_app();
+
+    assert!(!app.release_rate_limit_hold_after_credentials_changed(Some("openai")));
+    assert_eq!(account_changed_notices(&app), 0);
+    assert!(app.release_rate_limit_hold_after_credentials_changed(Some("anthropic")));
     assert_eq!(account_changed_notices(&app), 1);
 }

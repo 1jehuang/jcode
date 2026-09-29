@@ -2373,7 +2373,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 "Credentials changed on server (provider={:?}); releasing any rate-limit hold",
                 provider
             ));
-            app.release_rate_limit_hold_after_credentials_changed()
+            app.release_rate_limit_hold_after_credentials_changed(provider.as_deref())
         }
         ServerEvent::AvailableModelsUpdated {
             provider_name,
