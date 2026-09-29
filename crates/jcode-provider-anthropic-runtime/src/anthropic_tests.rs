@@ -908,6 +908,71 @@ async fn test_dangling_tool_use_repair() {
 }
 
 #[tokio::test]
+async fn test_orphaned_tool_result_is_rewritten_as_text() {
+    // Mirrors a real stuck session: the assistant called tool_a, the interrupt
+    // repair answered it, then a late result for a tool_use that is not in the
+    // transcript was persisted right after. Anthropic 400s on that orphan.
+    let provider = AnthropicProvider::new();
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let messages = vec![
+        msg(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "go".to_string(),
+                cache_control: None,
+            }],
+        ),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_a".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        ),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_a".to_string(),
+                content: "ok".to_string(),
+                is_error: None,
+            }],
+        ),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_ghost".to_string(),
+                content: "no leftovers".to_string(),
+                is_error: None,
+            }],
+        ),
+    ];
+
+    let formatted = provider.format_messages(&messages, false, &[]);
+    let last = formatted.last().unwrap();
+    assert_eq!(last.role, "user");
+    assert!(matches!(
+        &last.content[0],
+        ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tool_a"
+    ));
+    for block in &last.content {
+        if let ApiContentBlock::ToolResult { tool_use_id, .. } = block {
+            assert_ne!(tool_use_id, "tool_ghost");
+        }
+    }
+    assert!(last.content.iter().any(|b| matches!(
+        b,
+        ApiContentBlock::Text { text, .. } if text.contains("tool_ghost") && text.contains("no leftovers")
+    )));
+}
+
+#[tokio::test]
 async fn test_no_repair_when_tool_results_present() {
     let provider = AnthropicProvider::new();
 
