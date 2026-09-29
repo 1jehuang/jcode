@@ -43,6 +43,24 @@ pub const DEEPSEEK_SELECTABLE_EFFORTS: &[&str] = &[
     "swarm-deep",
 ];
 
+/// Position of a canonical effort in [`OPENAI_SELECTABLE_EFFORTS`].
+///
+/// Returns `None` for non-reasoning values such as `swarm`/`swarm-deep`.
+/// Used to sort dynamically advertised effort ladders (e.g. from the Codex
+/// models catalog API, whose array order is not guaranteed) into the
+/// canonical low-to-high order.
+pub fn reasoning_effort_rank(effort: &str) -> Option<usize> {
+    OPENAI_SELECTABLE_EFFORTS
+        .iter()
+        .position(|candidate| *candidate == effort)
+}
+
+/// Sort a dynamically advertised reasoning-effort list into canonical ladder
+/// order. Unknown values sort to the end, preserving their relative order.
+pub fn sort_reasoning_efforts(efforts: &mut [&str]) {
+    efforts.sort_by_key(|effort| reasoning_effort_rank(effort).unwrap_or(usize::MAX));
+}
+
 /// Convert a provider-advertised OpenAI/OpenRouter effort into the canonical
 /// static value used by the provider trait.
 pub fn canonical_reasoning_effort(value: &str) -> Option<&'static str> {
