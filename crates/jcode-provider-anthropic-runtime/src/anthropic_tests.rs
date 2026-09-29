@@ -2301,3 +2301,160 @@ fn opus_55_empty_signed_thinking_is_replayed_unchanged() {
         );
     }
 }
+
+fn oauth_account(
+    label: &str,
+    access: &str,
+    refresh: &str,
+) -> jcode_base::auth::claude::AnthropicAccount {
+    jcode_base::auth::claude::AnthropicAccount {
+        label: label.to_string(),
+        access: access.to_string(),
+        refresh: refresh.to_string(),
+        expires: chrono::Utc::now().timestamp_millis() + 8 * 60 * 60 * 1000,
+        email: None,
+        subscription_type: Some("max".to_string()),
+        scopes: vec!["user:inference".to_string()],
+    }
+}
+
+/// A same-label relogin (`jcode login --provider claude` reusing the current
+/// label for a different Claude account) must reach every live session,
+/// including forks that already cached the previous account's token.
+#[tokio::test]
+async fn same_label_relogin_replaces_cached_token_in_every_live_session() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+
+    let label = jcode_base::auth::claude::upsert_account(oauth_account(
+        "claude-1",
+        "old-account-access",
+        "old-account-refresh",
+    ))
+    .unwrap();
+
+    let provider = AnthropicProvider::new();
+    // Each fork owns an independent credential cache, like a second session.
+    let fork = &AnthropicProvider::new();
+    assert_eq!(
+        provider.get_access_token().await.unwrap().0,
+        "old-account-access"
+    );
+    assert_eq!(
+        fork.get_access_token().await.unwrap().0,
+        "old-account-access"
+    );
+
+    // Relogin stores a different account under the same label. The login
+    // flow invalidates auth state the same way the CLI/TUI notify path does.
+    jcode_base::auth::claude::upsert_account(oauth_account(
+        &label,
+        "new-account-access-token",
+        "new-account-refresh-token",
+    ))
+    .unwrap();
+    jcode_base::auth::AuthStatus::invalidate_cache();
+
+    assert_eq!(
+        provider.get_access_token().await.unwrap().0,
+        "new-account-access-token",
+        "the originating session must not keep the old account's cached token"
+    );
+    assert_eq!(
+        fork.get_access_token().await.unwrap().0,
+        "new-account-access-token",
+        "other live sessions must not keep the old account's cached token"
+    );
+}
+
+/// `/account switch` only reaches the requesting session's provider. Every
+/// other live session must still pick up the newly active account on its next
+/// request instead of reusing its cached token for hours.
+#[tokio::test]
+async fn account_switch_replaces_cached_token_in_other_live_sessions() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+
+    let first = jcode_base::auth::claude::upsert_account(oauth_account(
+        "claude-1",
+        "first-account-access",
+        "first-account-refresh",
+    ))
+    .unwrap();
+    let second = jcode_base::auth::claude::upsert_account(oauth_account(
+        "claude-2",
+        "second-account-access",
+        "second-account-refresh",
+    ))
+    .unwrap();
+    jcode_base::auth::claude::set_active_account(&first).unwrap();
+
+    let other_session = AnthropicProvider::new();
+    assert_eq!(
+        other_session.get_access_token().await.unwrap().0,
+        "first-account-access"
+    );
+
+    jcode_base::auth::claude::set_active_account(&second).unwrap();
+
+    assert_eq!(
+        other_session.get_access_token().await.unwrap().0,
+        "second-account-access"
+    );
+    jcode_base::auth::claude::set_active_account_override(None);
+}
+
+/// An external Claude Code relogin rewrites its credentials file without
+/// notifying jcode. The next request must still use the new login.
+#[tokio::test]
+async fn external_claude_code_relogin_replaces_cached_token() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+
+    let path = temp.path().join("external/.claude/.credentials.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let write_login = |access: &str| {
+        let expires = chrono::Utc::now().timestamp_millis() + 8 * 60 * 60 * 1000;
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": access,
+                    "refreshToken": format!("{access}-refresh"),
+                    "expiresAt": expires,
+                    "scopes": ["user:inference"],
+                    "subscriptionType": "max"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    write_login("claude-code-old-login");
+    jcode_base::auth::claude::trust_external_auth_source(
+        jcode_base::auth::claude::ExternalClaudeAuthSource::ClaudeCode,
+    )
+    .unwrap();
+
+    let provider = AnthropicProvider::new();
+    assert_eq!(
+        provider.get_access_token().await.unwrap().0,
+        "claude-code-old-login"
+    );
+
+    write_login("claude-code-new-login-other-account");
+
+    assert_eq!(
+        provider.get_access_token().await.unwrap().0,
+        "claude-code-new-login-other-account"
+    );
+}
