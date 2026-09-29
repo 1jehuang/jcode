@@ -329,7 +329,15 @@ impl App {
                 .iter()
                 .map(|(_, content)| content.clone())
                 .collect::<Vec<_>>();
+            let retain_until_dispatch = self.passive_restart_restore
+                || std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                    .is_some_and(|value| {
+                        value.get("retain_until_dispatch").and_then(|v| v.as_bool()) == Some(true)
+                    });
             let data = serde_json::json!({
+                "retain_until_dispatch": retain_until_dispatch,
                 "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
                 "input": resume_input.unwrap_or(self.input.as_str()),
                 "pending_images": resume_images.unwrap_or(self.pending_images.as_slice()).iter().map(|(media_type, data)| serde_json::json!({
@@ -353,7 +361,11 @@ impl App {
                 "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
                 "final_response_todo_fingerprint": self.final_response_todo_fingerprint,
             });
-            let _ = std::fs::write(&path, data.to_string());
+            if retain_until_dispatch {
+                let _ = crate::storage::write_json(&path, &data);
+            } else {
+                let _ = std::fs::write(&path, data.to_string());
+            }
         }
     }
 
@@ -397,6 +409,58 @@ impl App {
         crate::client_input::save_startup_submission_for_session(session_id, input, pending_images);
     }
 
+    /// Keep restored input recoverable across crashes until its queues have
+    /// been sent. Reopening a window must not consume this checkpoint.
+    pub(super) fn checkpoint_restored_followups(&self, session_id: &str) -> anyhow::Result<()> {
+        let path = crate::storage::jcode_dir()?.join(format!("client-input-{session_id}"));
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut value = serde_json::from_str::<serde_json::Value>(&data)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !self.passive_restart_restore
+            && value.get("retain_until_dispatch").and_then(|v| v.as_bool()) != Some(true)
+        {
+            return Ok(());
+        }
+        // Interleaves and unacknowledged interrupts were folded into the
+        // restored queue. Save the remaining queue, not their old copies.
+        value["queued_messages"] = serde_json::json!(self.queued_messages);
+        value["hidden_queued_system_messages"] =
+            serde_json::json!(self.hidden_queued_system_messages);
+        value["interleave_message"] = serde_json::json!(self.interleave_message);
+        value["pending_soft_interrupts"] = serde_json::json!(self.pending_soft_interrupts);
+        value["pending_soft_interrupt_resend"] = serde_json::json!(
+            self.pending_soft_interrupt_requests
+                .iter()
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+        );
+        value["input"] = serde_json::json!(self.input);
+        value["cursor"] = serde_json::json!(self.cursor_pos);
+        value["pending_images"] = serde_json::json!(
+            self.pending_images
+                .iter()
+                .map(
+                    |(media_type, data)| serde_json::json!({"media_type": media_type, "data": data})
+                )
+                .collect::<Vec<_>>()
+        );
+        value["submit_on_restore"] = serde_json::json!(false);
+        value["rate_limit_pending_message"] = serde_json::Value::Null;
+        value["rate_limit_reset_in_ms"] = serde_json::Value::Null;
+        value["retain_until_dispatch"] = serde_json::json!(
+            self.has_queued_followups()
+                || self.interleave_message.is_some()
+                || !self.pending_soft_interrupt_requests.is_empty()
+        );
+        crate::storage::write_json(&path, &value)
+    }
+
     pub(super) fn restore_input_for_reload(session_id: &str) -> Option<RestoredReloadInput> {
         Self::read_input_for_reload(session_id, true)
     }
@@ -411,7 +475,11 @@ impl App {
             return None;
         }
         let data = std::fs::read_to_string(&path).ok()?;
-        if consume {
+        let retain = serde_json::from_str::<serde_json::Value>(&data)
+            .ok()
+            .and_then(|value| value.get("retain_until_dispatch").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        if consume && !retain {
             let _ = std::fs::remove_file(&path);
         }
 

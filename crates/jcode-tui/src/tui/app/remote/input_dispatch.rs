@@ -19,6 +19,14 @@ pub(in crate::tui::app) async fn begin_remote_send(
     if app.passive_restart_restore && (is_system || auto_retry || system_reminder.is_some()) {
         anyhow::bail!("Restored session is paused; submit a new message to continue");
     }
+    // Persist the remaining follow-ups before a fresh prompt can release the
+    // server's pause. A crash during the send must still leave them recoverable.
+    if app.passive_restart_restore
+        && !crate::tui::is_ssh_remote()
+        && let Some(session_id) = remote.session_id()
+    {
+        app.checkpoint_restored_followups(session_id)?;
+    }
     let msg_id = remote
         .send_message_with_images_reminder_and_skill(
             content.clone(),
@@ -27,17 +35,16 @@ pub(in crate::tui::app) async fn begin_remote_send(
             app.active_skill.clone(),
         )
         .await?;
+    if !app.passive_restart_restore
+        && !crate::tui::is_ssh_remote()
+        && let Some(session_id) = remote.session_id()
+        && let Err(error) = app.checkpoint_restored_followups(session_id)
+    {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Could not update saved follow-ups: {error}"
+        )));
+    }
     if !is_system {
-        if app.passive_restart_restore
-            && !crate::tui::is_ssh_remote()
-            && let Some(session_id) = remote.session_id()
-        {
-            // The queues now belong to this client. Until this fresh send,
-            // keep the handoff file so closing a paused window loses nothing.
-            if let Ok(dir) = crate::storage::jcode_dir() {
-                let _ = std::fs::remove_file(dir.join(format!("client-input-{session_id}")));
-            }
-        }
         app.passive_restart_restore = false;
     }
     app.current_message_id = Some(msg_id);

@@ -1417,3 +1417,77 @@ fn test_passive_restore_accepts_fresh_prompt_after_history_loads() {
         assert!(app.current_message_id.is_some());
     });
 }
+
+#[test]
+fn test_passive_restore_followups_survive_fresh_prompt_and_repeated_reopen() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let id = "session_durable_followups";
+        let mut original = create_test_app();
+        original.queued_messages.push("saved follow-up".into());
+        original
+            .hidden_queued_system_messages
+            .push("saved hidden follow-up".into());
+        original.save_input_for_reload(id);
+        crate::restart_snapshot::mark_passive_restore(id).unwrap();
+        let mut app = App::new_for_remote(Some(id.into()));
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.set_session_id(id.into());
+        remote.mark_history_loaded();
+        app.input = "fresh prompt".into();
+        let prepared = super::input::take_prepared_input(&mut app);
+        rt.block_on(super::remote::submit_prepared_remote_input(
+            &mut app,
+            &mut remote,
+            prepared,
+        ))
+        .unwrap();
+        crate::restart_snapshot::clear_passive_restore(id).unwrap();
+        // Simulate crashes without graceful-save hooks, including a crash
+        // after reopening but before the saved queue can dispatch.
+        drop(app);
+        for _ in 0..2 {
+            let reopened = App::new_for_remote(Some(id.into()));
+            assert_eq!(reopened.queued_messages(), &["saved follow-up"]);
+            assert_eq!(
+                reopened.hidden_queued_system_messages,
+                vec!["saved hidden follow-up"]
+            );
+            assert!(!reopened.submit_input_on_startup);
+            reopened.save_input_for_reload(id);
+        }
+        let mut reopened = App::new_for_remote(Some(id.into()));
+        rt.block_on(super::remote::process_remote_followups(
+            &mut reopened,
+            &mut remote,
+        ));
+        assert!(reopened.is_processing);
+        assert!(reopened.queued_messages().is_empty());
+        assert!(reopened.hidden_queued_system_messages.is_empty());
+        let after_dispatch = App::new_for_remote(Some(id.into()));
+        assert!(
+            after_dispatch.queued_messages().is_empty(),
+            "sent follow-ups must not replay"
+        );
+        assert!(after_dispatch.hidden_queued_system_messages.is_empty());
+    });
+}
+
+#[test]
+fn test_passive_restore_checkpoints_legacy_plain_text_input() {
+    with_temp_jcode_home(|| {
+        let id = "session_legacy_plain_input";
+        let path = crate::storage::jcode_dir()
+            .unwrap()
+            .join(format!("client-input-{id}"));
+        std::fs::write(&path, "legacy draft").unwrap();
+        let mut app = create_test_app();
+        app.passive_restart_restore = true;
+        app.queued_messages.push("remaining follow-up".into());
+        app.checkpoint_restored_followups(id).unwrap();
+        let restored = App::restore_input_for_reload(id).unwrap();
+        assert_eq!(restored.queued_messages, vec!["remaining follow-up"]);
+        assert!(path.exists());
+    });
+}

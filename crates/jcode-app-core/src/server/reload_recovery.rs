@@ -458,6 +458,71 @@ mod tests {
     }
 
     #[test]
+    fn passive_resume_removes_matching_legacy_context_and_backup() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let _home = IsolatedHome::new();
+        let id = "session_matching_legacy";
+        let legacy = crate::storage::jcode_dir()?.join("reload-context.json");
+        let context = crate::tool::selfdev::ReloadContext {
+            session_id: id.into(),
+            task_context: Some("old task".into()),
+            version_before: "old".into(),
+            version_after: "new".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        crate::storage::write_json(&legacy, &context)?;
+        crate::storage::write_json(&legacy, &context)?;
+        crate::restart_snapshot::mark_passive_restore(id)?;
+        resume_passive_session_with_new_prompt(id)?;
+        assert!(!legacy.exists());
+        assert!(!legacy.with_extension("bak").exists());
+        assert!(!crate::restart_snapshot::is_passive_restore(id)?);
+        Ok(())
+    }
+
+    #[test]
+    fn passive_resume_ignores_corrupt_shared_context_and_preserves_foreign_context() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let _home = IsolatedHome::new();
+        let legacy = crate::storage::jcode_dir()?.join("reload-context.json");
+        for corrupt in [false, true] {
+            if corrupt {
+                std::fs::write(&legacy, "not json")?;
+                std::fs::write(legacy.with_extension("bak"), "also not json")?;
+            } else {
+                crate::storage::write_json(
+                    &legacy,
+                    &crate::tool::selfdev::ReloadContext {
+                        session_id: "another-session".into(),
+                        task_context: Some("foreign task".into()),
+                        version_before: "old".into(),
+                        version_after: "new".into(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
+            }
+            let original = std::fs::read(&legacy)?;
+            for _ in 0..2 {
+                let id = "session_resume_with_foreign_context";
+                crate::restart_snapshot::mark_passive_restore(id)?;
+                persist_intent(
+                    "old",
+                    id,
+                    ReloadRecoveryRole::InterruptedPeer,
+                    directive("old work"),
+                    "test",
+                )?;
+                resume_passive_session_with_new_prompt(id)?;
+                assert!(!crate::restart_snapshot::is_passive_restore(id)?);
+                assert!(!has_pending_for_session(id));
+                assert!(recovery_was_superseded(id));
+                assert_eq!(std::fs::read(&legacy)?, original);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn passive_restore_keeps_pause_if_old_context_cannot_be_removed() -> Result<()> {
         let _lock = crate::storage::lock_test_env();
         let _home = IsolatedHome::new();

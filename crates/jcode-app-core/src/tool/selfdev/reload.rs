@@ -73,7 +73,18 @@ impl ReloadContext {
         }
         let legacy = Self::legacy_path()?;
         if legacy.exists() {
-            let ctx: Self = storage::read_json(&legacy)?;
+            let ctx: Self = match storage::read_json(&legacy) {
+                Ok(ctx) => ctx,
+                Err(error) => {
+                    // This file is shared with other sessions. If ownership
+                    // cannot be established, leave it untouched; the caller
+                    // already retired this session's durable recovery intent.
+                    crate::logging::warn(&format!(
+                        "Leaving unreadable shared reload context in place: {error}"
+                    ));
+                    return Ok(());
+                }
+            };
             if ctx.session_id == session_id {
                 for path in [legacy.clone(), legacy.with_extension("bak")] {
                     match std::fs::remove_file(path) {
