@@ -2301,3 +2301,89 @@ fn opus_55_empty_signed_thinking_is_replayed_unchanged() {
         );
     }
 }
+
+/// Reported 400: "`tool_use` ids were found without `tool_result` blocks
+/// immediately after". The calls do have results, but a message was written
+/// between the call and its results (a user interjection or a reload
+/// continuation), so the results are not in the next message. Every
+/// tool_use must still be answered in the very next user message.
+#[tokio::test]
+async fn test_tool_use_answered_later_still_gets_result_immediately_after() {
+    let provider = AnthropicProvider::new();
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let tool_use = |id: &str| ContentBlock::ToolUse {
+        id: id.to_string(),
+        name: "bash".to_string(),
+        input: serde_json::json!({}),
+        thought_signature: None,
+    };
+    let tool_result = |id: &str| ContentBlock::ToolResult {
+        tool_use_id: id.to_string(),
+        content: format!("output of {id}"),
+        is_error: None,
+    };
+    let text = |t: &str| ContentBlock::Text {
+        text: t.to_string(),
+        cache_control: None,
+    };
+    let messages = vec![
+        msg(Role::User, vec![text("go")]),
+        // The real session: two assistant messages back to back, the second
+        // with its own calls, answered right away; the first message's calls
+        // were answered only after more turns were written.
+        msg(
+            Role::Assistant,
+            vec![text("Checking."), tool_use("tool_a"), tool_use("tool_b")],
+        ),
+        msg(Role::Assistant, vec![tool_use("tool_c")]),
+        msg(Role::User, vec![tool_result("tool_c")]),
+        msg(Role::Assistant, vec![text("Working on it.")]),
+        msg(Role::User, vec![text("also check the logs")]),
+        msg(Role::User, vec![tool_result("tool_b")]),
+        msg(Role::User, vec![tool_result("tool_a")]),
+        msg(Role::Assistant, vec![text("Done.")]),
+    ];
+
+    let formatted = provider.format_messages(&messages, false, &[]);
+    for (i, m) in formatted.iter().enumerate() {
+        let uses: Vec<&String> = m
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ApiContentBlock::ToolUse { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        if uses.is_empty() {
+            continue;
+        }
+        let next = formatted
+            .get(i + 1)
+            .expect("a message follows every tool_use");
+        assert_eq!(next.role, "user");
+        for id in uses {
+            assert!(
+                next.content.iter().any(|b| matches!(
+                    b,
+                    ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+                )),
+                "tool_use {id} has no tool_result immediately after: {}",
+                serde_json::to_string_pretty(&formatted).unwrap()
+            );
+        }
+    }
+    // The real output is not lost.
+    let all_text = serde_json::to_string(&formatted).unwrap();
+    assert!(
+        ["tool_a", "tool_b", "tool_c"]
+            .iter()
+            .all(|id| all_text.contains(&format!("output of {id}")))
+    );
+    // Roles still alternate.
+    assert!(formatted.windows(2).all(|w| w[0].role != w[1].role));
+}
