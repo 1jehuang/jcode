@@ -2458,3 +2458,318 @@ async fn external_claude_code_relogin_replaces_cached_token() {
         "claude-code-new-login-other-account"
     );
 }
+
+/// Tiny fake of the OAuth Messages endpoint. A bearer containing `LIMITED`
+/// gets a subscription usage-limit 429 (`retry-after: 60`, unified reset
+/// hours away); any other bearer gets a short streamed reply. Records each
+/// request's bearer token.
+async fn spawn_fake_messages_api(
+    reset_in_secs: u64,
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_task = Arc::clone(&seen);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let seen = Arc::clone(&seen_task);
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                // Read headers, then the declared body.
+                let (head_end, content_length) = loop {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break (pos + 4, len);
+                    }
+                };
+                while buf.len() < head_end + content_length {
+                    let n = socket.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let token = head
+                    .lines()
+                    .find_map(|l| {
+                        let lower = l.to_ascii_lowercase();
+                        lower
+                            .starts_with("authorization:")
+                            .then(|| l["authorization:".len()..].trim().to_string())
+                    })
+                    .unwrap_or_default()
+                    .trim_start_matches("Bearer ")
+                    .to_string();
+                let limited = token.contains("LIMITED");
+                seen.lock().unwrap().push(token);
+                let response = if limited {
+                    let reset = chrono::Utc::now().timestamp() as u64 + reset_in_secs;
+                    let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}"#;
+                    format!(
+                        "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nretry-after: {reset_in_secs}\r\nanthropic-ratelimit-unified-status: rejected\r\nanthropic-ratelimit-unified-reset: {reset}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    let body = concat!(
+                        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n",
+                        "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                        "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi from B\"}}\n\n",
+                        "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    );
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    (format!("http://{addr}/v1/messages?beta=true"), seen)
+}
+
+struct OAuthUrlOverride;
+
+impl OAuthUrlOverride {
+    fn set(url: &str) -> Self {
+        *OAUTH_API_URL_OVERRIDE.lock().unwrap() = Some(url.to_string());
+        Self
+    }
+}
+
+impl Drop for OAuthUrlOverride {
+    fn drop(&mut self) {
+        *OAUTH_API_URL_OVERRIDE.lock().unwrap() = None;
+    }
+}
+
+fn minimal_oauth_request() -> ApiRequest {
+    ApiRequest {
+        model: "claude-opus-4-8".to_string(),
+        max_tokens: 64,
+        system: None,
+        messages: Vec::new(),
+        tools: None,
+        metadata: None,
+        thinking: None,
+        output_config: None,
+        temperature: None,
+        service_tier: None,
+        stream: true,
+    }
+}
+
+/// Start `run_stream_with_retries` exactly as `complete()` does, on the
+/// token currently stored.
+async fn start_oauth_stream(provider: &AnthropicProvider) -> mpsc::Receiver<Result<StreamEvent>> {
+    let (token, is_oauth) = provider.get_access_token().await.unwrap();
+    assert!(is_oauth);
+    let (tx, rx) = mpsc::channel(100);
+    tokio::spawn(run_stream_with_retries(
+        provider.client.clone(),
+        token,
+        true,
+        minimal_oauth_request(),
+        tx,
+        Arc::clone(&provider.credentials),
+        "claude-opus-4-8".to_string(),
+        provider.oauth_session_id.clone(),
+        Arc::clone(&provider.model),
+        provider.direct_transport.clone(),
+        reasoning_request::RetrySettings::from_provider(provider),
+    ));
+    rx
+}
+
+/// Drain the stream until it ends. Returns (text, first error).
+async fn drain_stream(rx: &mut mpsc::Receiver<Result<StreamEvent>>) -> (String, Option<String>) {
+    let mut text = String::new();
+    while let Some(event) = rx.recv().await {
+        match event {
+            Ok(StreamEvent::TextDelta(delta)) => text.push_str(&delta),
+            Ok(_) => {}
+            Err(error) => return (text, Some(format!("{error:#}"))),
+        }
+    }
+    (text, None)
+}
+
+/// A turn held on account A's usage limit is sleeping out the 60 s
+/// Retry-After cap when the user swaps to account B. The retry must wake as
+/// soon as the credential changes and finish on B, not after the full sleep.
+#[tokio::test]
+async fn held_retry_wakes_on_credential_swap_and_finishes_on_new_account() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+    let (url, seen) = spawn_fake_messages_api(60).await;
+    let _url = OAuthUrlOverride::set(&url);
+
+    let label = jcode_base::auth::claude::upsert_account(oauth_account(
+        "claude-1",
+        "token-A-LIMITED",
+        "refresh-A",
+    ))
+    .unwrap();
+    let provider = AnthropicProvider::new();
+    let mut rx = start_oauth_stream(&provider).await;
+
+    // Let the first attempt hit the 429 and enter the retry sleep.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while seen.lock().unwrap().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no first request");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Same-label relogin to account B, announced like every auth path does.
+    let swapped_at = std::time::Instant::now();
+    jcode_base::auth::claude::upsert_account(oauth_account(&label, "token-B-HEALTHY", "refresh-B"))
+        .unwrap();
+    jcode_base::auth::AuthStatus::invalidate_cache();
+
+    let (text, error) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), drain_stream(&mut rx))
+            .await
+            .expect("held retry must not sleep out the 60 s Retry-After after a swap");
+    assert_eq!(error, None);
+    assert_eq!(text, "hi from B");
+    assert!(swapped_at.elapsed() < std::time::Duration::from_secs(5));
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen, vec!["token-A-LIMITED", "token-B-HEALTHY"]);
+}
+
+/// A subscription usage limit that resets hours from now is doomed on this
+/// account. Without a credential change, fail fast with the reset time (so
+/// the client can hold the turn and resend on a swap) instead of burning two
+/// minutes of capped Retry-After sleeps against the same token.
+#[tokio::test]
+async fn far_usage_limit_reset_fails_fast_with_reset_time() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+    let reset_in = 3 * 3600 + 17 * 60;
+    let (url, seen) = spawn_fake_messages_api(reset_in).await;
+    let _url = OAuthUrlOverride::set(&url);
+
+    jcode_base::auth::claude::upsert_account(oauth_account(
+        "claude-1",
+        "token-A-LIMITED",
+        "refresh-A",
+    ))
+    .unwrap();
+    let provider = AnthropicProvider::new();
+    let started = std::time::Instant::now();
+    let mut rx = start_oauth_stream(&provider).await;
+
+    let (_, error) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), drain_stream(&mut rx))
+            .await
+            .expect("a usage limit resetting hours away must fail fast");
+    let error = error.expect("usage limit must surface as an error");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "no doomed retries on the same token"
+    );
+    assert!(error.contains("429"), "{error}");
+    // The TUI hold logic parses "resets in 3h 17m" (unit-suffixed, < 1 day).
+    let lower = error.to_lowercase();
+    assert!(
+        lower.contains("resets in 3h 1"),
+        "reset time missing: {error}"
+    );
+}
+
+#[test]
+fn short_429_keeps_retry_after_and_far_usage_limit_is_terminal() {
+    let now = chrono::Utc::now().timestamp();
+    let mut headers = HeaderMap::new();
+    headers.insert("retry-after", HeaderValue::from_static("7"));
+    let short = anthropic_status_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        &headers,
+        "rate_limit_error",
+    );
+    assert!(short.downcast_ref::<UsageLimitExhausted>().is_none());
+    assert_eq!(
+        jcode_provider_core::retry_after::retry_after_from_error(&short).map(|d| d.as_secs() <= 7),
+        Some(true),
+        "ordinary 429 keeps its Retry-After hint"
+    );
+
+    // Unified limit that resets within the retry window stays retryable.
+    headers.insert(
+        "anthropic-ratelimit-unified-status",
+        HeaderValue::from_static("rejected"),
+    );
+    headers.insert(
+        "anthropic-ratelimit-unified-reset",
+        HeaderValue::from_str(&(now + 30).to_string()).unwrap(),
+    );
+    let near = anthropic_status_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        &headers,
+        "rate_limit_error",
+    );
+    assert!(near.downcast_ref::<UsageLimitExhausted>().is_none());
+
+    headers.insert(
+        "anthropic-ratelimit-unified-reset",
+        HeaderValue::from_str(&(now + 5 * 3600 + 60).to_string()).unwrap(),
+    );
+    let far = anthropic_status_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        &headers,
+        "rate_limit_error",
+    );
+    assert!(far.downcast_ref::<UsageLimitExhausted>().is_some());
+    assert!(far.to_string().contains("resets in 5h"), "{far}");
+
+    // No unified headers, but the body names a usage limit.
+    let body_only = anthropic_status_error(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        &HeaderMap::new(),
+        "You have reached your usage limit",
+    );
+    assert!(body_only.downcast_ref::<UsageLimitExhausted>().is_some());
+
+    // Other statuses are untouched.
+    let server = anthropic_status_error(
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        &headers,
+        "overloaded",
+    );
+    assert!(server.downcast_ref::<UsageLimitExhausted>().is_none());
+}
+
+#[test]
+fn reset_duration_format_is_compact() {
+    assert_eq!(format_reset_duration(30), "1m");
+    assert_eq!(format_reset_duration(3 * 3600 + 17 * 60), "3h 17m");
+    assert_eq!(format_reset_duration(2 * 86_400 + 3600), "2d 1h 0m");
+}

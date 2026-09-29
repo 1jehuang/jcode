@@ -62,6 +62,21 @@ const API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// OAuth endpoint (with beta=true query param)
 const API_URL_OAUTH: &str = "https://api.anthropic.com/v1/messages?beta=true";
 
+#[cfg(test)]
+static OAUTH_API_URL_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn oauth_api_url() -> String {
+    #[cfg(test)]
+    if let Some(url) = OAUTH_API_URL_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return url;
+    }
+    API_URL_OAUTH.to_string()
+}
+
 fn direct_api_url() -> String {
     let base = std::env::var("JCODE_ANTHROPIC_API_BASE")
         .ok()
@@ -452,6 +467,130 @@ const MAX_RETRIES: u32 = 3;
 
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
+
+/// A subscription usage limit that resets later than this cannot clear during
+/// this turn's retries (about two minutes of capped Retry-After sleeps).
+const USAGE_LIMIT_FAIL_FAST_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Marks a 429 whose subscription usage limit resets well beyond what the
+/// retry loop can wait. Retrying on the same credential is doomed.
+#[derive(Debug)]
+struct UsageLimitExhausted {
+    message: String,
+}
+
+impl std::fmt::Display for UsageLimitExhausted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UsageLimitExhausted {}
+
+/// Seconds until a rejected unified (subscription) limit resets, from the
+/// `anthropic-ratelimit-unified-*` headers. `None` when the headers do not
+/// describe a rejected limit.
+fn unified_limit_reset_in(headers: &HeaderMap, now_secs: i64) -> Option<u64> {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+    };
+    if header("anthropic-ratelimit-unified-status") != Some("rejected") {
+        return None;
+    }
+    let reset = header("anthropic-ratelimit-unified-reset")?
+        .parse::<i64>()
+        .ok()?;
+    Some(reset.saturating_sub(now_secs).max(0) as u64)
+}
+
+/// "3h 17m" style duration that the TUI rate-limit hold parser understands.
+fn format_reset_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3600;
+    let minutes = (secs % 3600).div_ceil(60).min(59);
+    match (days, hours) {
+        (0, 0) => format!("{}m", minutes.max(1)),
+        (0, h) => format!("{h}h {minutes}m"),
+        (d, h) => format!("{d}d {h}h {minutes}m"),
+    }
+}
+
+/// Build the error for a failed Messages response. A 429 whose usage limit
+/// resets far in the future is tagged so the retry loop fails fast, with the
+/// reset time in the message.
+fn anthropic_status_error(
+    status: reqwest::StatusCode,
+    headers: &HeaderMap,
+    error_text: &str,
+) -> anyhow::Error {
+    let message = format!("Anthropic API error ({}): {}", status, error_text);
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let reset_in = unified_limit_reset_in(headers, chrono::Utc::now().timestamp());
+        let usage_limit_body = error_text.to_ascii_lowercase().contains("usage limit");
+        let far = match reset_in {
+            Some(secs) => std::time::Duration::from_secs(secs) > USAGE_LIMIT_FAIL_FAST_AFTER,
+            None => usage_limit_body,
+        };
+        if far {
+            let detail = match reset_in {
+                Some(secs) => {
+                    let at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+                    format!(
+                        " Usage limit reached for this Claude account; resets in {} ({} UTC).",
+                        format_reset_duration(secs),
+                        at.format("%Y-%m-%d %H:%M")
+                    )
+                }
+                None => " Usage limit reached for this Claude account.".to_string(),
+            };
+            return anyhow::Error::new(UsageLimitExhausted {
+                message: format!("{message}{detail}"),
+            });
+        }
+    }
+    jcode_provider_core::retry_after::error_with_retry_after(
+        message,
+        jcode_provider_core::retry_after::retry_after(headers),
+    )
+}
+
+/// Sleep before a retry, but wake early when the stored Claude credential
+/// changes (a swap announced through the process-wide credential signal).
+/// Returns the new token when one is now stored, so the retry uses it.
+async fn sleep_until_retry_or_credential_swap(
+    delay: std::time::Duration,
+    mut generation: u64,
+    is_oauth: bool,
+    current_token: &str,
+    credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+) -> Option<String> {
+    if !is_oauth {
+        tokio::time::sleep(delay).await;
+        return None;
+    }
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => return None,
+            _ = auth::credential_signal::changed_since(generation) => {
+                generation = auth::credential_signal::generation();
+                // Unrelated auth changes also bump the signal. Only cut the
+                // wait short when the Claude credential really changed.
+                if let Ok((token, true)) = resolve_oauth_access_token(credentials).await
+                    && token != current_token
+                {
+                    jcode_base::logging::info(
+                        "Claude credentials changed during retry wait; retrying now with the new account",
+                    );
+                    return Some(token);
+                }
+            }
+        }
+    }
+}
 
 /// Cached OAuth credentials
 #[derive(Clone)]
@@ -1644,6 +1783,9 @@ async fn run_stream_with_retries(
     // Track every model id we have already attempted so a retired/renamed
     // model only falls back to genuinely new candidates.
     let mut tried_models: Vec<String> = vec![original_model.clone()];
+    // Credential generation observed when the current attempt's token was
+    // chosen. A swap after this point wakes the retry wait.
+    let mut token_generation = auth::credential_signal::generation();
 
     for attempt in 0..MAX_RETRIES {
         if attempt > 0 {
@@ -1661,17 +1803,28 @@ async fn run_stream_with_retries(
                     },
                 }))
                 .await;
-            tokio::time::sleep(delay).await;
+            let swapped_token = sleep_until_retry_or_credential_swap(
+                delay,
+                token_generation,
+                is_oauth,
+                &token,
+                &credentials,
+            )
+            .await;
             jcode_base::logging::info(&format!(
                 "Retrying Anthropic API request (attempt {}/{})",
                 attempt + 1,
                 MAX_RETRIES
             ));
+            token_generation = auth::credential_signal::generation();
             // The user may have swapped Claude accounts while this request was
             // failing (often because the old account hit its usage limit).
             // Re-resolve so the retry uses the currently stored credential
             // instead of the token captured when the turn started.
-            if is_oauth && let Ok((current, true)) = resolve_oauth_access_token(&credentials).await
+            if let Some(swapped) = swapped_token {
+                token = swapped;
+            } else if is_oauth
+                && let Ok((current, true)) = resolve_oauth_access_token(&credentials).await
             {
                 token = current;
             }
@@ -1717,6 +1870,35 @@ async fn run_stream_with_retries(
                 // a connection reset) lives deeper than "Failed to send request to
                 // Anthropic API", and the retry classifier needs to see it.
                 let error_str = format!("{e:#}").to_lowercase();
+
+                // Usage limit that resets long after this turn's retries could
+                // end. Retrying the same account is doomed. If the stored
+                // credential already changed (a swap), retry right away on
+                // it. Otherwise fail fast with the reset time so the client
+                // holds the turn and resends when credentials change.
+                if is_oauth
+                    && !saw_output
+                    && e.chain()
+                        .any(|source| source.downcast_ref::<UsageLimitExhausted>().is_some())
+                {
+                    if let Ok((current, true)) = resolve_oauth_access_token(&credentials).await
+                        && current != token
+                        && attempt + 1 < MAX_RETRIES
+                    {
+                        jcode_base::logging::info(
+                            "Claude usage limit hit on a credential that was since replaced; retrying now with the new account",
+                        );
+                        token = current;
+                        next_retry_delay = Some(std::time::Duration::ZERO);
+                        last_error = Some(e);
+                        continue;
+                    }
+                    jcode_base::logging::warn(&format!(
+                        "Claude usage limit resets beyond the retry window; failing fast: {e}"
+                    ));
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
 
                 // OAuth auth failures: force refresh and retry once immediately.
                 if is_oauth && is_oauth_auth_error(&error_str) && !attempted_forced_refresh {
@@ -1925,6 +2107,12 @@ async fn resolve_oauth_access_token(
             if creds.source == source && creds.expires_at > now + 300_000 {
                 return Ok((creds.access_token.clone(), true));
             }
+            if creds.source != source {
+                // The stored login changed under this cache (relogin, account
+                // switch, external Claude Code login). Wake retry loops that
+                // are still waiting on the previous account.
+                auth::credential_signal::bump();
+            }
         }
     }
 
@@ -2090,12 +2278,12 @@ async fn stream_response(
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
     // Build request with appropriate auth headers
     let url = if is_oauth {
-        API_URL_OAUTH
+        oauth_api_url()
     } else {
-        direct_transport.api_url.as_str()
+        direct_transport.api_url.clone()
     };
 
-    let mut req = client.post(url);
+    let mut req = client.post(&url);
     if !is_oauth {
         req = req.headers(
             direct_transport
@@ -2175,12 +2363,9 @@ async fn stream_response(
 
     if !response.status().is_success() {
         let status = response.status();
-        let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
+        let headers = response.headers().clone();
         let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
-        return Err(jcode_provider_core::retry_after::error_with_retry_after(
-            format!("Anthropic API error ({}): {}", status, error_text),
-            retry_after,
-        ));
+        return Err(anthropic_status_error(status, &headers, &error_text));
     }
 
     let _ = tx
