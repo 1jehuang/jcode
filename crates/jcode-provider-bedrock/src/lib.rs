@@ -551,11 +551,22 @@ impl BedrockProvider {
                         JContentBlock::ToolUse {
                             id, name, input, ..
                         } => {
+                            // Bedrock Converse rejects a toolUse whose `input`
+                            // is absent ("The value at messages.N.content.M.toolUse.input
+                            // is empty"). `json_to_document` maps JSON null to
+                            // `Document::Null`, which the SDK serializes as a
+                            // missing field, so an interrupted or malformed tool
+                            // call (input null, a bare string, or an array)
+                            // poisons every later Bedrock turn that replays it.
+                            // Anthropic tolerates a null input, which is why the
+                            // same history only fails on the Bedrock route.
+                            // Coerce anything that is not an object to `{}`.
+                            let input = jcode_message_types::ToolCall::input_as_object(input);
                             let tool_use =
                                 match aws_sdk_bedrockruntime::types::ToolUseBlock::builder()
                                     .tool_use_id(id)
                                     .name(name)
-                                    .input(Self::json_to_document(input))
+                                    .input(Self::json_to_document(&input))
                                     .build()
                                 {
                                     Ok(tool_use) => tool_use,
@@ -2003,6 +2014,68 @@ mod tests {
             last.content().len(),
             2,
             "final user message should carry both tool results"
+        );
+    }
+
+    /// Regression: Bedrock Converse returns
+    /// `ValidationException: The value at messages.N.content.M.toolUse.input
+    /// is empty` when a replayed tool call has a null (or otherwise
+    /// non-object) input, which is what an interrupted tool call leaves in
+    /// history. The input must be coerced to an empty object so the history
+    /// stays replayable.
+    #[test]
+    #[cfg(feature = "aws-sdk")]
+    fn to_bedrock_messages_coerces_empty_tool_use_input_to_object() {
+        use aws_sdk_bedrockruntime::types::ContentBlock;
+
+        let messages = vec![JMessage {
+            role: JRole::Assistant,
+            content: vec![
+                JContentBlock::ToolUse {
+                    id: "tool_null".to_string(),
+                    name: "swarm".to_string(),
+                    input: serde_json::Value::Null,
+                    thought_signature: None,
+                },
+                JContentBlock::ToolUse {
+                    id: "tool_str".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!("not an object"),
+                    thought_signature: None,
+                },
+                JContentBlock::ToolUse {
+                    id: "tool_ok".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "echo ok"}),
+                    thought_signature: None,
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let converted =
+            BedrockProvider::to_bedrock_messages(&messages, false).expect("conversion succeeds");
+        let content = converted[0].content();
+
+        let input_of = |idx: usize| match &content[idx] {
+            ContentBlock::ToolUse(tool_use) => tool_use.input().as_object().cloned(),
+            other => panic!("expected ToolUse at {idx}, got {other:?}"),
+        };
+
+        assert_eq!(
+            input_of(0).as_ref().map(|m| m.len()),
+            Some(0),
+            "null input must become an empty object, not an absent field"
+        );
+        assert_eq!(
+            input_of(1).as_ref().map(|m| m.len()),
+            Some(0),
+            "non-object input must become an empty object"
+        );
+        assert!(
+            input_of(2).is_some_and(|m| m.contains_key("command")),
+            "object input must be preserved"
         );
     }
 
