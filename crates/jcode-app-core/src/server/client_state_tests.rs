@@ -761,3 +761,72 @@ fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepte
     );
     Ok(())
 }
+
+#[test]
+fn passive_restore_fresh_prompt_retires_old_history_recovery() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::TempDir::new()?;
+    let runtime = tempfile::TempDir::new()?;
+    let _guard = ReloadHistoryEnvGuard::new(home.path(), runtime.path());
+    let id = "session_passive_superseded";
+    use super::super::reload_recovery as recovery;
+    let directive = crate::tool::selfdev::ReloadRecoveryDirective {
+        reconnect_notice: None,
+        continuation_message: "old continuation".into(),
+    };
+    recovery::persist_intent(
+        "old",
+        id,
+        recovery::ReloadRecoveryRole::InterruptedPeer,
+        directive.clone(),
+        "test",
+    )?;
+    let context = crate::tool::selfdev::ReloadContext {
+        session_id: id.into(),
+        task_context: Some("old task".into()),
+        version_before: "old".into(),
+        version_after: "new".into(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    };
+    context.save()?;
+    context.save()?;
+    let context_path = crate::tool::selfdev::ReloadContext::path_for_session(id)?;
+    crate::restart_snapshot::mark_passive_restore(id)?;
+    assert!(super::history_reload_recovery_snapshot(id, Some(true)).is_none());
+    recovery::resume_passive_session_with_new_prompt(id)?;
+    assert!(!context_path.exists());
+    assert!(!context_path.with_extension("bak").exists());
+    assert!(
+        !recovery::path_for_session(id)?
+            .with_extension("bak")
+            .exists()
+    );
+    assert!(!crate::restart_snapshot::is_passive_restore(id)?);
+    assert!(super::history_reload_recovery_snapshot(id, Some(true)).is_none());
+    recovery::collect_garbage()?;
+    assert!(super::history_reload_recovery_snapshot(id, Some(true)).is_none());
+    let mut session = crate::session::Session::create_with_id(id.into(), None, None);
+    session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "new prompt interrupted by a later crash".into(),
+            cache_control: None,
+        }],
+    );
+    session.messages.last_mut().unwrap().timestamp =
+        Some(chrono::Utc::now() + chrono::Duration::seconds(1));
+    session.save()?;
+    assert!(
+        !recovery::recovery_was_superseded(id),
+        "later turns must retain normal interruption recovery"
+    );
+    recovery::persist_intent(
+        "new",
+        id,
+        recovery::ReloadRecoveryRole::InterruptedPeer,
+        directive,
+        "later reload",
+    )?;
+    assert!(super::history_reload_recovery_snapshot(id, Some(true)).is_some());
+    Ok(())
+}

@@ -3439,7 +3439,9 @@ async fn start_processing_message(
             });
             return;
         }
-        if let Err(error) = crate::restart_snapshot::clear_passive_restore(client_session_id) {
+        if let Err(error) =
+            super::reload_recovery::resume_passive_session_with_new_prompt(client_session_id)
+        {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
                 message: format!("Could not resume restored session: {error}"),

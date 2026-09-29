@@ -181,7 +181,11 @@ pub fn run_restart_restore_command(yes: bool) -> Result<()> {
     restore_reviewed_snapshot(snapshot)
 }
 
-fn restore_reviewed_snapshot(snapshot: crate::restart_snapshot::RestartSnapshot) -> Result<()> {
+fn restore_reviewed_snapshot(mut snapshot: crate::restart_snapshot::RestartSnapshot) -> Result<()> {
+    if snapshot.auto_restore_on_next_start {
+        snapshot.auto_restore_on_next_start = false;
+        crate::restart_snapshot::write_snapshot(&snapshot)?;
+    }
     let exe = current_restart_restore_exe()?;
     let result = match crate::restart_snapshot::restore_snapshot(&exe, snapshot) {
         Ok(result) => result,

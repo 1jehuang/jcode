@@ -1323,3 +1323,97 @@ fn test_new_for_remote_restored_interleave_triggers_dispatch_state() {
         }));
     });
 }
+
+#[test]
+fn test_passive_restore_preserves_followups_across_ticks_and_reopen() {
+    with_temp_jcode_home(|| {
+        let id = "session_passive_queues";
+        let mut original = create_test_app();
+        original.input = "draft".into();
+        original.cursor_pos = 3;
+        original.queued_messages.push("queued".into());
+        original.hidden_queued_system_messages.push("hidden".into());
+        original.interleave_message = Some("interrupt".into());
+        original.pending_soft_interrupts.push("pending".into());
+        original
+            .pending_soft_interrupt_requests
+            .push((17, "pending".into()));
+        original.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "retry".into(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: 1,
+            retry_at: None,
+        });
+        original.rate_limit_reset = Some(std::time::Instant::now());
+        original.save_input_for_reload(id);
+        crate::restart_snapshot::mark_passive_restore(id).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for _ in 0..2 {
+            let mut restored = App::new_for_remote(Some(id.into()));
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            assert!(restored.passive_restart_restore);
+            rt.block_on(super::remote::process_remote_followups(
+                &mut restored,
+                &mut remote,
+            ));
+            rt.block_on(super::remote::handle_tick(&mut restored, &mut remote));
+            assert_eq!(restored.input, "draft");
+            assert_eq!(restored.cursor_pos, 3);
+            assert_eq!(
+                restored.queued_messages(),
+                &["interrupt", "pending", "queued"]
+            );
+            assert_eq!(restored.hidden_queued_system_messages, vec!["hidden"]);
+            assert_eq!(
+                restored
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .unwrap()
+                    .content,
+                "retry"
+            );
+            assert!(!restored.is_processing);
+            assert!(restored.current_message_id.is_none());
+        }
+        assert!(App::restore_input_for_reload(id).is_some());
+    });
+}
+
+#[test]
+fn test_passive_restore_accepts_fresh_prompt_after_history_loads() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.passive_restart_restore = true;
+        app.input = "new instructions".into();
+        let prepared = super::input::take_prepared_input(&mut app);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        rt.block_on(super::remote::submit_prepared_remote_input(
+            &mut app,
+            &mut remote,
+            prepared,
+        ))
+        .unwrap();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        assert!(app.passive_restart_restore);
+        assert!(!app.is_processing);
+        remote.mark_history_loaded();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        assert!(!app.passive_restart_restore);
+        assert!(app.is_processing);
+        assert!(app.pending_prompt_before_history.is_none());
+        assert!(app.current_message_id.is_some());
+    });
+}

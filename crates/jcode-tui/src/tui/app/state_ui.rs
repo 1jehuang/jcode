@@ -398,13 +398,22 @@ impl App {
     }
 
     pub(super) fn restore_input_for_reload(session_id: &str) -> Option<RestoredReloadInput> {
+        Self::read_input_for_reload(session_id, true)
+    }
+
+    pub(super) fn read_input_for_reload(
+        session_id: &str,
+        consume: bool,
+    ) -> Option<RestoredReloadInput> {
         let jcode_dir = crate::storage::jcode_dir().ok()?;
         let path = jcode_dir.join(format!("client-input-{}", session_id));
         if !path.exists() {
             return None;
         }
         let data = std::fs::read_to_string(&path).ok()?;
-        let _ = std::fs::remove_file(&path);
+        if consume {
+            let _ = std::fs::remove_file(&path);
+        }
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
             let input = value

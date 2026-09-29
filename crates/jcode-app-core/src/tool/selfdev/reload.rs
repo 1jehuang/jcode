@@ -61,6 +61,32 @@ impl ReloadContext {
         }
     }
 
+    /// Discard session and legacy recovery context superseded by a fresh prompt.
+    pub fn discard_for_session(session_id: &str) -> Result<()> {
+        let session_path = Self::path_for_session(session_id)?;
+        for path in [session_path.clone(), session_path.with_extension("bak")] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let legacy = Self::legacy_path()?;
+        if legacy.exists() {
+            let ctx: Self = storage::read_json(&legacy)?;
+            if ctx.session_id == session_id {
+                for path in [legacy.clone(), legacy.with_extension("bak")] {
+                    match std::fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Load context only if it belongs to the given session; consumes on success.
     pub fn load_for_session(session_id: &str) -> Result<Option<Self>> {
         let session_path = Self::path_for_session(session_id)?;

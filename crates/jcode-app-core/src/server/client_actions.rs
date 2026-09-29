@@ -1096,6 +1096,10 @@ pub(super) async fn handle_resume_all_sessions(
     let mut skipped = 0usize;
 
     for session_id in live_session_ids {
+        if crate::restart_snapshot::passive_restore_guard_active(&session_id) {
+            skipped += 1;
+            continue;
+        }
         let agent = {
             let guard = sessions.read().await;
             guard.get(&session_id).cloned()
@@ -1126,23 +1130,11 @@ pub(super) async fn handle_resume_all_sessions(
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
 
-        // Best-effort: record that the durable recovery intent was delivered.
-        if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
-            &session_id,
-            &reminder,
-            "resume_all_sessions",
-        ) {
-            crate::logging::warn(&format!(
-                "resume_all_sessions: failed to mark recovery intent delivered for {}: {}",
-                session_id, error
-            ));
-        }
-
-        super::live_turn::spawn_tracked_live_turn(
+        let started = super::live_turn::spawn_tracked_live_turn(
             &session_id,
             agent_guard,
             String::new(),
-            Some(reminder),
+            Some(reminder.clone()),
             None,
             Some("resuming interrupted session".to_string()),
             super::live_turn::LiveTurnSwarmContext::new(
@@ -1154,6 +1146,23 @@ pub(super) async fn handle_resume_all_sessions(
             ),
         )
         .await;
+
+        if !started {
+            skipped += 1;
+            continue;
+        }
+
+        // Best-effort: record that the durable recovery intent was delivered.
+        if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
+            &session_id,
+            &reminder,
+            "resume_all_sessions",
+        ) {
+            crate::logging::warn(&format!(
+                "resume_all_sessions: failed to mark recovery intent delivered for {}: {}",
+                session_id, error
+            ));
+        }
 
         resumed_sessions.push(display_name);
     }

@@ -20,6 +20,11 @@ async fn emit_external_wake(
     notification: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> bool {
+    // Notifications were already delivered. Do not forward a wake to an
+    // external runner or fall through to an automatic turn while paused.
+    if crate::restart_snapshot::passive_restore_guard_active(session_id) {
+        return true;
+    }
     if crate::config::config().server.wake_mode != crate::config::WakeMode::External {
         return false;
     }

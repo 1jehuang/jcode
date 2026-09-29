@@ -1354,6 +1354,11 @@ impl App {
         fresh_spawn: bool,
         passive_restore: bool,
     ) -> Self {
+        let passive_restore = passive_restore
+            || (!crate::tui::is_ssh_remote()
+                && resume_session
+                    .as_deref()
+                    .is_some_and(crate::restart_snapshot::passive_restore_guard_active));
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1408,14 +1413,10 @@ impl App {
                     session_id
                 ));
             }
-            if let Some(restored) = Self::restore_input_for_reload(session_id) {
+            if let Some(restored) = Self::read_input_for_reload(session_id, !passive_restore) {
+                app.apply_restored_reload_input(restored);
                 if passive_restore {
-                    // Keep the visible draft, but never replay saved work queues.
-                    app.input = restored.input;
-                    app.cursor_pos = restored.cursor;
-                    app.pending_images = restored.pending_images;
-                } else {
-                    app.apply_restored_reload_input(restored);
+                    app.submit_input_on_startup = false;
                 }
             }
         }

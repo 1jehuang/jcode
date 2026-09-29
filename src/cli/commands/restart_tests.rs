@@ -7,6 +7,7 @@ use std::ffi::OsString;
 
 struct TestEnvGuard {
     prev_home: Option<OsString>,
+    prev_spawn_hook: Option<OsString>,
     _temp_home: tempfile::TempDir,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
@@ -21,6 +22,7 @@ impl TestEnvGuard {
         crate::env::set_var("JCODE_HOME", temp_home.path());
         Ok(Self {
             prev_home,
+            prev_spawn_hook: std::env::var_os("JCODE_SPAWN_HOOK"),
             _temp_home: temp_home,
             _lock: lock,
         })
@@ -29,6 +31,11 @@ impl TestEnvGuard {
 
 impl Drop for TestEnvGuard {
     fn drop(&mut self) {
+        if let Some(hook) = &self.prev_spawn_hook {
+            crate::env::set_var("JCODE_SPAWN_HOOK", hook);
+        } else {
+            crate::env::remove_var("JCODE_SPAWN_HOOK");
+        }
         if let Some(prev_home) = &self.prev_home {
             crate::env::set_var("JCODE_HOME", prev_home);
         } else {
@@ -156,4 +163,37 @@ async fn multi_session_auto_restore_disarms_without_launching() {
             .auto_restore_on_next_start
     );
     assert!(!crate::restart_snapshot::is_passive_restore("one").expect("marker"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_restore_disarms_retained_snapshot() -> anyhow::Result<()> {
+    let _guard = TestEnvGuard::new()?;
+    use std::os::unix::fs::PermissionsExt;
+    let home = crate::storage::jcode_dir()?;
+    let hook = home.join("capture-spawn");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$JCODE_HOME/launches\"\n",
+    )?;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))?;
+    crate::env::set_var("JCODE_SPAWN_HOOK", &hook);
+    crate::restart_snapshot::write_snapshot(&crate::restart_snapshot::RestartSnapshot {
+        version: 1,
+        created_at: chrono::Utc::now(),
+        auto_restore_on_next_start: true,
+        sessions: vec![crate::restart_snapshot::RestartSnapshotSession {
+            session_id: "manual-restore".into(),
+            display_name: "manual restore".into(),
+            working_dir: None,
+            is_selfdev: false,
+        }],
+    })?;
+    run_restart_restore_command(true)?;
+    assert!(!crate::restart_snapshot::load_snapshot()?.auto_restore_on_next_start);
+    assert!(!maybe_run_pending_restart_restore_on_startup().await?);
+    let launches = std::fs::read_to_string(home.join("launches"))?;
+    assert_eq!(launches.lines().count(), 1);
+    assert!(launches.contains("--passive-restore"));
+    Ok(())
 }

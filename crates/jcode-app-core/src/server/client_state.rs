@@ -426,7 +426,9 @@ fn history_reload_recovery_snapshot(
     session_id: &str,
     was_interrupted: Option<bool>,
 ) -> Option<crate::protocol::ReloadRecoverySnapshot> {
-    if crate::restart_snapshot::passive_restore_guard_active(session_id) {
+    if crate::restart_snapshot::passive_restore_guard_active(session_id)
+        || super::reload_recovery::recovery_was_superseded(session_id)
+    {
         return None;
     }
     match super::reload_recovery::pending_directive_for_session(session_id) {

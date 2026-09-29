@@ -1214,3 +1214,105 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
 
     Ok(())
 }
+
+#[tokio::test]
+async fn passive_restore_delivers_background_notifications_without_waking() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _env = configure_test_env(&temp);
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let queue = agent.lock().await.soft_interrupt_queue();
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        agent.clone(),
+    )])));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        queue.clone(),
+    )])));
+    let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        attached_swarm_member(&session_id, member_event_tx),
+    )])));
+    crate::restart_snapshot::mark_passive_restore(&session_id).unwrap();
+    let task = BackgroundTaskCompleted {
+        task_id: "bgnotify".to_string(),
+        tool_name: "bash".to_string(),
+        display_name: None,
+        session_id: session_id.clone(),
+        status: BackgroundTaskStatus::Completed,
+        exit_code: Some(0),
+        output_preview: "ok\n".to_string(),
+        output_file: std::env::temp_dir().join("bgnotify.output"),
+        duration_secs: 0.7,
+        notify: true,
+        wake: true,
+    };
+
+    let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
+    dispatch_background_task_completion(
+        &task,
+        &sessions,
+        &soft_interrupt_queues,
+        &swarm_members,
+        &swarms_by_id,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let notification = timeout(Duration::from_secs(2), member_event_rx.recv())
+        .await
+        .expect("background task notification should arrive promptly")
+        .expect("member stream should stay open");
+    match notification {
+        ServerEvent::Notification { message, .. } => {
+            assert!(message.contains("**Background task** `bgnotify`"));
+        }
+        other => panic!("expected notification, got {other:?}"),
+    }
+
+    let pending = queue.lock().expect("queue lock");
+    assert!(
+        pending.is_empty(),
+        "notify-only delivery should not wake the session"
+    );
+    drop(pending);
+    assert!(
+        !super::live_turn::run_live_turn_if_idle(
+            &session_id,
+            "wake",
+            None,
+            &sessions,
+            super::live_turn::LiveTurnSwarmContext::new(
+                &swarm_members,
+                &swarms_by_id,
+                &event_history,
+                &event_counter,
+                &swarm_event_tx
+            ),
+        )
+        .await
+    );
+    assert!(
+        !super::live_turn::run_live_system_turn_if_idle(
+            &session_id,
+            "scheduled work",
+            &sessions,
+            super::live_turn::LiveTurnSwarmContext::new(
+                &swarm_members,
+                &swarms_by_id,
+                &event_history,
+                &event_counter,
+                &swarm_event_tx
+            ),
+        )
+        .await
+    );
+    assert!(member_event_rx.try_recv().is_err());
+    assert_eq!(swarm_members.read().await[&session_id].status, "ready");
+}

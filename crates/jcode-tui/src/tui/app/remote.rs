@@ -219,7 +219,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
-    if let Some(reset_time) = app.rate_limit_reset
+    if !app.passive_restart_restore
+        && let Some(reset_time) = app.rate_limit_reset
         && Instant::now() >= reset_time
     {
         app.rate_limit_reset = None;
@@ -275,7 +276,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
-    if !app.is_processing && !app.queued_messages.is_empty() {
+    if !app.passive_restart_restore && !app.is_processing && !app.queued_messages.is_empty() {
         let queued_messages = std::mem::take(&mut app.queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
@@ -322,7 +323,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw = true;
     }
 
-    if !app.is_processing && !app.hidden_queued_system_messages.is_empty() {
+    if !app.passive_restart_restore
+        && !app.is_processing
+        && !app.hidden_queued_system_messages.is_empty()
+    {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let combined = reminders.join("\n\n");
         crate::logging::info(&format!(
@@ -1264,7 +1268,28 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         dispatch_pending_server_reload(app, remote).await;
         return;
     }
-
+    if app.passive_restart_restore {
+        // A prompt entered while History/model setup was pending is a fresh
+        // submission. Saved queues and retries remain untouched until then.
+        if remote.has_loaded_history()
+            && !app.is_processing
+            && !app.remote_model_switch_in_flight
+            && !app.auth_catalog_refresh_pending
+        {
+            if let Some(prepared) = app
+                .pending_prompt_before_history
+                .take()
+                .or_else(|| app.pending_prompt_after_model_switch.take())
+            {
+                if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to submit prompt: {error}"
+                    )));
+                }
+            }
+        }
+        return;
+    }
     // A headed fork stages its first prompt before launching the new client. We
     // can send that prompt immediately after Subscribe, without waiting for the
     // client to receive and render History: requests and events share one
@@ -1656,8 +1681,10 @@ const QUEUED_FOLLOWUP_STARVATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// queued follow-up has been idle-but-undispatched and re-arm the dispatch past
 /// the timeout, logging it so a recurrence is diagnosable from logs alone.
 fn detect_starved_queued_followup(app: &mut App) -> bool {
-    let starved_candidate =
-        !app.is_processing && !app.pending_queued_dispatch && app.has_queued_followups();
+    let starved_candidate = !app.passive_restart_restore
+        && !app.is_processing
+        && !app.pending_queued_dispatch
+        && app.has_queued_followups();
     if !starved_candidate {
         app.queued_followup_starved_since = None;
         return false;

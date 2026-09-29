@@ -16,6 +16,9 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
+    if app.passive_restart_restore && (is_system || auto_retry || system_reminder.is_some()) {
+        anyhow::bail!("Restored session is paused; submit a new message to continue");
+    }
     let msg_id = remote
         .send_message_with_images_reminder_and_skill(
             content.clone(),
@@ -25,6 +28,16 @@ pub(in crate::tui::app) async fn begin_remote_send(
         )
         .await?;
     if !is_system {
+        if app.passive_restart_restore
+            && !crate::tui::is_ssh_remote()
+            && let Some(session_id) = remote.session_id()
+        {
+            // The queues now belong to this client. Until this fresh send,
+            // keep the handoff file so closing a paused window loses nothing.
+            if let Ok(dir) = crate::storage::jcode_dir() {
+                let _ = std::fs::remove_file(dir.join(format!("client-input-{session_id}")));
+            }
+        }
         app.passive_restart_restore = false;
     }
     app.current_message_id = Some(msg_id);

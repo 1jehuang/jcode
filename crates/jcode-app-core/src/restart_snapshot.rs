@@ -221,13 +221,58 @@ pub fn passive_restore_guard_active(session_id: &str) -> bool {
 
 pub fn clear_passive_restore(session_id: &str) -> Result<()> {
     let path = passive_marker_path(session_id)?;
-    if path.exists() {
-        std::fs::remove_file(path)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
 
 pub fn restore_snapshot(exe: &Path, snapshot: RestartSnapshot) -> Result<RestoreSnapshotResult> {
+    restore_snapshot_with_launcher(exe, snapshot, |session| {
+        let cwd = resolve_session_cwd(session.working_dir.as_deref());
+        let context = crate::session_launch::SessionSpawnContext::kind("restart");
+        if session.is_selfdev {
+            crate::session_launch::spawn_selfdev_in_new_terminal_with_context(
+                exe,
+                &session.session_id,
+                &cwd,
+                None,
+                &context,
+            )
+        } else {
+            crate::session_launch::spawn_resume_in_new_terminal_with_context(
+                exe,
+                &session.session_id,
+                &cwd,
+                None,
+                &context,
+            )
+        }
+    })
+}
+
+#[derive(Default)]
+struct UnlaunchedMarkers(Vec<String>);
+
+impl Drop for UnlaunchedMarkers {
+    fn drop(&mut self) {
+        for session_id in &self.0 {
+            if let Err(error) = clear_passive_restore(session_id) {
+                crate::logging::warn(&format!(
+                    "Failed to remove unused restore marker for {session_id}: {error}"
+                ));
+            }
+        }
+    }
+}
+
+fn restore_snapshot_with_launcher(
+    exe: &Path,
+    snapshot: RestartSnapshot,
+    mut launch: impl FnMut(&RestartSnapshotSession) -> Result<bool>,
+) -> Result<RestoreSnapshotResult> {
     anyhow::ensure!(
         snapshot.version == 1,
         "Unsupported reboot snapshot version {}",
@@ -246,31 +291,20 @@ pub fn restore_snapshot(exe: &Path, snapshot: RestartSnapshot) -> Result<Restore
         );
     }
     let mut outcomes = Vec::new();
+    let mut unlaunched = UnlaunchedMarkers::default();
 
     for session in &snapshot.sessions {
-        mark_passive_restore(&session.session_id)?;
+        if !is_passive_restore(&session.session_id)? {
+            mark_passive_restore(&session.session_id)?;
+            unlaunched.0.push(session.session_id.clone());
+        }
     }
 
     for session in &snapshot.sessions {
-        let cwd = resolve_session_cwd(session.working_dir.as_deref());
-        let context = crate::session_launch::SessionSpawnContext::kind("restart");
-        let launched = if session.is_selfdev {
-            crate::session_launch::spawn_selfdev_in_new_terminal_with_context(
-                exe,
-                &session.session_id,
-                &cwd,
-                None,
-                &context,
-            )?
-        } else {
-            crate::session_launch::spawn_resume_in_new_terminal_with_context(
-                exe,
-                &session.session_id,
-                &cwd,
-                None,
-                &context,
-            )?
-        };
+        let launched = launch(session)?;
+        if launched {
+            unlaunched.0.retain(|id| id != &session.session_id);
+        }
         outcomes.push(RestoreLaunchOutcome {
             session: session.clone(),
             launched,
