@@ -609,7 +609,11 @@ impl SessionPicker {
             Style::default().fg(rgb(255, 180, 100)),
         ));
         title_parts.push(Span::styled(
-            " (s/S filter)",
+            if self.search_active {
+                " (Ctrl+S filter)"
+            } else {
+                " (s/S filter)"
+            },
             Style::default().fg(rgb(80, 80, 80)),
         ));
 
@@ -643,7 +647,8 @@ impl SessionPicker {
                 " type to search · Esc clear/close ".to_string()
             }
         } else if self.search_active {
-            " type to search · ↑↓ nav · Enter resume · Tab shortcuts · Esc clear/close ".to_string()
+            " type to search · ↑↓ nav · Enter resume · Ctrl+S filter · Tab shortcuts · Esc clear/close "
+                .to_string()
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {

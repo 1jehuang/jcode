@@ -607,6 +607,11 @@ impl SessionPicker {
         self.pending_claude_takeover.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn filter_mode_for_test(&self) -> SessionFilterMode {
+        self.filter_mode
+    }
+
     /// Whether the session's live process is streaming a model response.
     pub(super) fn session_is_streaming(&self, session: &SessionInfo) -> bool {
         self.live_presence

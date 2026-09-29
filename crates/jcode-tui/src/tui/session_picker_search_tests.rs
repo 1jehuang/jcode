@@ -495,3 +495,72 @@ fn test_search_live_claude_t_is_text_and_hint_points_at_tab() {
         "after Tab, T starts the explicit takeover confirmation"
     );
 }
+
+/// In the search box plain `s` is text, so the filter shortcut must still be
+/// reachable: Ctrl+S cycles forward, Ctrl+Shift+S backward, the query stays
+/// untouched, and the hints name the chord.
+#[test]
+fn test_search_ctrl_s_cycles_filter_without_typing() {
+    let mut picker = type_to_search_picker();
+    picker.focus_search_input();
+    picker
+        .handle_overlay_key(KeyCode::Char('o'), KeyModifiers::empty())
+        .unwrap();
+    let start = picker.filter_mode;
+
+    picker
+        .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(picker.filter_mode, start.next(), "Ctrl+S cycles forward");
+    assert_eq!(picker.search_query, "o", "Ctrl+S is not query text");
+    assert!(picker.search_active, "Ctrl+S keeps the search box focused");
+
+    // Terminals report Ctrl+Shift+S either as 'S' or as 's' with SHIFT.
+    for (c, mods) in [
+        ('S', KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        ('s', KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+    ] {
+        let before = picker.filter_mode;
+        picker.handle_overlay_key(KeyCode::Char(c), mods).unwrap();
+        assert_eq!(picker.filter_mode, before.previous(), "{c:?} cycles back");
+    }
+    assert_eq!(picker.search_query, "o");
+
+    let text = rendered_text(&mut picker);
+    assert!(text.contains("(Ctrl+S filter)"), "title names the chord");
+    assert!(
+        text.contains("Ctrl+S filter · Tab shortcuts"),
+        "footer names it"
+    );
+
+    // Plain `s` is still text while searching.
+    picker
+        .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(picker.search_query, "os");
+}
+
+/// `/resume` opens while the index still loads, so Ctrl+S must work then too
+/// and the chosen filter must apply once the sessions arrive.
+#[test]
+fn test_loading_picker_ctrl_s_filter_survives_reseed() {
+    let mut picker = SessionPicker::loading();
+    picker.focus_search_input();
+    let start = picker.filter_mode;
+    // All -> current dir -> catch up -> saved.
+    for _ in 0..3 {
+        picker
+            .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            .unwrap();
+    }
+    assert_eq!(picker.filter_mode, start.next().next().next());
+    assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
+    assert!(picker.search_query.is_empty(), "Ctrl+S is not query text");
+
+    let mut saved = make_session("session_saved", "saved", false, SessionStatus::Closed);
+    saved.saved = true;
+    let other = make_session("session_other", "other", false, SessionStatus::Closed);
+    picker.reseed_grouped(Vec::new(), vec![saved, other]);
+    assert_eq!(picker.filter_mode, SessionFilterMode::Saved);
+    assert_eq!(visible_ids(&picker), vec!["session_saved".to_string()]);
+}

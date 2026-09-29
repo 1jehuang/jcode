@@ -111,6 +111,15 @@ impl SessionPicker {
                 self.delete_search_word_back();
                 self.rebuild_items();
             }
+            // Plain `s` is query text here, so Ctrl+S / Ctrl+Shift+S cycle the
+            // filter without leaving the search box.
+            KeyCode::Char(c) if ctrl && c.eq_ignore_ascii_case(&'s') => {
+                if c == 'S' || modifiers.contains(KeyModifiers::SHIFT) {
+                    self.cycle_filter_mode_backwards();
+                } else {
+                    self.cycle_filter_mode();
+                }
+            }
             KeyCode::Char(c) => {
                 if ctrl && c == 'c' {
                     return Ok(OverlayAction::Close);
@@ -144,7 +153,24 @@ impl SessionPicker {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> bool {
-        if !self.search_active || modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if !self.search_active {
+            return false;
+        }
+        // Ctrl+S / Ctrl+Shift+S pick the filter while the index loads too; the
+        // mode survives `reseed_grouped` and applies to the loaded list.
+        if let KeyCode::Char(c) = code
+            && modifiers.contains(KeyModifiers::CONTROL)
+            && !modifiers.contains(KeyModifiers::ALT)
+            && c.eq_ignore_ascii_case(&'s')
+        {
+            if c == 'S' || modifiers.contains(KeyModifiers::SHIFT) {
+                self.filter_mode = self.filter_mode.previous();
+            } else {
+                self.filter_mode = self.filter_mode.next();
+            }
+            return true;
+        }
+        if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
             return false;
         }
         match code {
