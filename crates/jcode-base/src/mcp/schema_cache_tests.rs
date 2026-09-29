@@ -158,9 +158,7 @@ fn load_save_roundtrip_via_temp_home() {
     let _guard = crate::storage::lock_test_env();
     let tmp = tempfile::tempdir().unwrap();
     // Point the jcode dir at a temp location.
-    unsafe {
-        std::env::set_var("JCODE_HOME", tmp.path());
-    }
+    let _jcode_home = crate::env::ScopedVar::set("JCODE_HOME", tmp.path());
 
     let mut cache = McpSchemaCache::default();
     let config = cfg("node", &["s.js"]);
@@ -171,8 +169,4 @@ fn load_save_roundtrip_via_temp_home() {
     let tools = reloaded.tools_for("srv", &config).expect("reloaded tools");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "alpha");
-
-    unsafe {
-        std::env::remove_var("JCODE_HOME");
-    }
 }

@@ -364,7 +364,7 @@ mod tests {
     fn session_counts_counts_live_and_streaming_only() {
         let _guard = lock_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = jcode_core::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let live = std::process::id();
         // Pick a PID that is almost certainly dead.
@@ -419,15 +419,13 @@ mod tests {
         assert_eq!(session_counts().streaming, 1);
         unregister_active_pid("session_epsilon");
         assert_eq!(session_counts().streaming, 0);
-
-        jcode_core::env::remove_var("JCODE_HOME");
     }
 
     #[test]
     fn streaming_guard_marks_and_clears_on_drop() {
         let _guard = lock_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = jcode_core::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         register_active_pid("session_guard", std::process::id());
         assert_eq!(session_counts().streaming, 0);
@@ -436,8 +434,6 @@ mod tests {
             assert_eq!(session_counts().streaming, 1);
         }
         assert_eq!(session_counts().streaming, 0);
-
-        jcode_core::env::remove_var("JCODE_HOME");
     }
 
     /// Issue #508: internal (debug/child) sessions stay in the raw registry
@@ -446,7 +442,7 @@ mod tests {
     fn user_session_counts_exclude_internal_sessions() {
         let _guard = lock_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = jcode_core::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let live = std::process::id();
         register_active_pid("session_user", live);
@@ -475,8 +471,6 @@ mod tests {
         set_session_internal("session_worker", true);
         unregister_active_pid("session_worker");
         assert!(!session_is_internal("session_worker"));
-
-        jcode_core::env::remove_var("JCODE_HOME");
     }
 
     /// Regression for stale markers left by an exec-based reload: markers that
@@ -486,7 +480,7 @@ mod tests {
     fn prune_active_pids_owned_by_removes_only_that_pid_and_companions() {
         let _guard = lock_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = jcode_core::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let me = std::process::id();
         let other = 999_999u32;
@@ -512,8 +506,6 @@ mod tests {
 
         // Idempotent: nothing left to prune on a second pass.
         assert_eq!(prune_active_pids_owned_by(me), (0, 0));
-
-        jcode_core::env::remove_var("JCODE_HOME");
     }
 
     /// A marker that cannot be unlinked must not be reported as pruned, since
@@ -529,7 +521,7 @@ mod tests {
             return;
         }
         let temp = tempfile::tempdir().expect("tempdir");
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = jcode_core::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let me = std::process::id();
         register_active_pid("session_mine", me);
@@ -545,7 +537,5 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
             .expect("restore write access");
         assert_eq!(prune_active_pids_owned_by(me), (1, 0));
-
-        jcode_core::env::remove_var("JCODE_HOME");
     }
 }

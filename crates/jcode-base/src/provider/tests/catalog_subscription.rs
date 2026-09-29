@@ -311,7 +311,7 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
 fn test_hosted_model_guard_does_not_gate_models_by_legacy_tier() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::tempdir().expect("temp home");
-    crate::env::set_var("JCODE_HOME", temp_home.path().to_string_lossy().to_string());
+    let _jcode_home = crate::env::ScopedVar::set("JCODE_HOME", temp_home.path().to_string_lossy().to_string());
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
     crate::subscription_catalog::clear_runtime_env();
     crate::subscription_catalog::apply_runtime_env();
@@ -327,7 +327,6 @@ fn test_hosted_model_guard_does_not_gate_models_by_legacy_tier() {
     assert!(ensure_model_allowed_for_subscription("sol").is_ok());
 
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
-    crate::env::remove_var("JCODE_HOME");
     crate::subscription_catalog::clear_runtime_env();
 }
 
@@ -335,7 +334,7 @@ fn test_hosted_model_guard_does_not_gate_models_by_legacy_tier() {
 fn test_filtered_display_models_respects_curated_subscription_catalog() {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::tempdir().expect("temp home");
-    crate::env::set_var("JCODE_HOME", temp_home.path().to_string_lossy().to_string());
+    let _jcode_home = crate::env::ScopedVar::set("JCODE_HOME", temp_home.path().to_string_lossy().to_string());
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
     crate::subscription_catalog::clear_runtime_env();
     crate::subscription_catalog::apply_runtime_env();
@@ -373,7 +372,6 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
     );
 
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
-    crate::env::remove_var("JCODE_HOME");
     crate::subscription_catalog::clear_runtime_env();
 }
 

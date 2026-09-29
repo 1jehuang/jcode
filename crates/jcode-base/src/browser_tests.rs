@@ -27,7 +27,7 @@ fn test_rewrite_command_with_full_path() {
     // If binary exists, it rewrites; if not, returns unchanged
     if browser_binary_path().exists() {
         assert!(result.contains("ping"));
-        assert!(result.contains(".jcode/browser"));
+        assert!(result.contains(&*browser_binary_path().to_string_lossy()));
     } else {
         assert_eq!(result, cmd);
     }
@@ -37,9 +37,10 @@ fn test_rewrite_command_with_full_path() {
 fn test_paths() {
     let _guard = crate::storage::lock_test_env();
 
+    // The browser lives under the jcode dir, wherever JCODE_HOME points it;
+    // a substring match on ".jcode" failed for any JCODE_HOME not so named.
     let bdir = browser_dir();
-    assert!(bdir.to_string_lossy().contains(".jcode"));
-    assert!(bdir.to_string_lossy().ends_with("browser"));
+    assert_eq!(bdir, jcode_dir().join("browser"));
 
     let bin = browser_binary_path();
     assert!(bin.to_string_lossy().contains("browser"));
