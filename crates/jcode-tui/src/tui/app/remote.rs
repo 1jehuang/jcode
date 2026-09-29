@@ -219,6 +219,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
+    if dispatch_restored_retry(app, remote).await {
+        return true;
+    }
+
     if !app.passive_restart_restore
         && let Some(reset_time) = app.rate_limit_reset
         && Instant::now() >= reset_time
@@ -1254,6 +1258,41 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
     }
 }
 
+async fn dispatch_restored_retry(app: &mut App, remote: &mut RemoteConnection) -> bool {
+    if app.passive_restart_restore
+        || app.is_processing
+        || app.rate_limit_reset.is_some()
+        || !remote.has_loaded_history()
+        || app.remote_model_switch_in_flight
+        || app.auth_catalog_refresh_pending
+        || app
+            .restored_retries
+            .first()
+            .is_none_or(|pending| pending.retry_at.is_some_and(|at| at > Instant::now()))
+    {
+        return false;
+    }
+    let pending = app.restored_retries.remove(0);
+    if let Err(error) = begin_remote_send(
+        app,
+        remote,
+        pending.content.clone(),
+        pending.images.clone(),
+        pending.is_system,
+        pending.system_reminder.clone(),
+        pending.auto_retry,
+        pending.retry_attempts,
+    )
+    .await
+    {
+        app.restored_retries.insert(0, pending);
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to send restored retry: {error}"
+        )));
+    }
+    true
+}
+
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
     // A pending *server* reload must be dispatched even when the bootstrap
     // History payload was intentionally deferred. The runtime-identity /
@@ -1552,6 +1591,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 }
             }
         }
+        return;
+    }
+
+    if dispatch_restored_retry(app, remote).await {
         return;
     }
 

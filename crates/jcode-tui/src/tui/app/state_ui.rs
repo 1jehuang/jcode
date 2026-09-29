@@ -17,6 +17,7 @@ pub(super) struct RestoredReloadInput {
     pub pending_soft_interrupt_resend: Option<Vec<String>>,
     pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
     pub rate_limit_reset: Option<Instant>,
+    pub restored_retries: Vec<super::PendingRemoteMessage>,
     pub observe_mode_enabled: bool,
     pub observe_page_markdown: String,
     pub observe_page_updated_at_ms: u64,
@@ -253,6 +254,7 @@ impl App {
             && self.pending_soft_interrupts.is_empty()
             && self.pending_soft_interrupt_requests.is_empty()
             && self.rate_limit_pending_message.is_none()
+            && self.restored_retries.is_empty()
             && resume_prompt.is_none()
             && !self.observe_mode_enabled
             && !self.split_view_enabled
@@ -337,7 +339,8 @@ impl App {
                         value.get("retain_until_dispatch").and_then(|v| v.as_bool()) == Some(true)
                     });
             let data = serde_json::json!({
-                "retain_until_dispatch": retain_until_dispatch,
+                "retain_until_dispatch": retain_until_dispatch || !self.restored_retries.is_empty(),
+                "restored_retries": self.saved_restored_retries(),
                 "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
                 "input": resume_input.unwrap_or(self.input.as_str()),
                 "pending_images": resume_images.unwrap_or(self.pending_images.as_slice()).iter().map(|(media_type, data)| serde_json::json!({
@@ -361,7 +364,7 @@ impl App {
                 "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
                 "final_response_todo_fingerprint": self.final_response_todo_fingerprint,
             });
-            if retain_until_dispatch {
+            if retain_until_dispatch || !self.restored_retries.is_empty() {
                 let _ = crate::storage::write_json(&path, &data);
             } else {
                 let _ = std::fs::write(&path, data.to_string());
@@ -409,6 +412,23 @@ impl App {
         crate::client_input::save_startup_submission_for_session(session_id, input, pending_images);
     }
 
+    fn saved_restored_retries(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.restored_retries
+                .iter()
+                .map(|pending| {
+                    let mut value = serde_json::to_value(pending).expect("retry serialization");
+                    value["retry_delay_ms"] = serde_json::json!(pending.retry_at.map(|at| {
+                        at.saturating_duration_since(Instant::now())
+                            .as_millis()
+                            .min(u64::MAX as u128) as u64
+                    }));
+                    value
+                })
+                .collect(),
+        )
+    }
+
     /// Keep restored input recoverable across crashes until its queues have
     /// been sent. Reopening a window must not consume this checkpoint.
     pub(super) fn checkpoint_restored_followups(&self, session_id: &str) -> anyhow::Result<()> {
@@ -451,10 +471,12 @@ impl App {
                 .collect::<Vec<_>>()
         );
         value["submit_on_restore"] = serde_json::json!(false);
+        value["restored_retries"] = self.saved_restored_retries();
         value["rate_limit_pending_message"] = serde_json::Value::Null;
         value["rate_limit_reset_in_ms"] = serde_json::Value::Null;
         value["retain_until_dispatch"] = serde_json::json!(
             self.has_queued_followups()
+                || !self.restored_retries.is_empty()
                 || self.interleave_message.is_some()
                 || !self.pending_soft_interrupt_requests.is_empty()
         );
@@ -664,6 +686,24 @@ impl App {
                 pending_soft_interrupt_resend,
                 rate_limit_pending_message,
                 rate_limit_reset,
+                restored_retries: value
+                    .get("restored_retries")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                let mut pending: super::PendingRemoteMessage =
+                                    serde_json::from_value(item.clone()).ok()?;
+                                pending.retry_at = item
+                                    .get("retry_delay_ms")
+                                    .and_then(|v| v.as_u64())
+                                    .map(|delay| Instant::now() + Duration::from_millis(delay));
+                                Some(pending)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 observe_mode_enabled,
                 observe_page_markdown,
                 observe_page_updated_at_ms,
@@ -698,6 +738,7 @@ impl App {
             pending_soft_interrupt_resend: None,
             rate_limit_pending_message: None,
             rate_limit_reset: None,
+            restored_retries: Vec::new(),
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),
             observe_page_updated_at_ms: 0,

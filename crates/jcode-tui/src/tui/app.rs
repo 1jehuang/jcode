@@ -139,7 +139,7 @@ fn active_runtime_provider_key() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingRemoteMessage {
     content: String,
     images: Vec<(String, String)>,
@@ -147,6 +147,7 @@ struct PendingRemoteMessage {
     system_reminder: Option<String>,
     auto_retry: bool,
     retry_attempts: u8,
+    #[serde(skip)]
     retry_at: Option<Instant>,
 }
 
@@ -1629,6 +1630,7 @@ pub struct App {
     rate_limit_reset: Option<Instant>,
     // Message being sent when rate limit hit (to auto-retry in remote mode)
     rate_limit_pending_message: Option<PendingRemoteMessage>,
+    restored_retries: Vec<PendingRemoteMessage>,
     // Consecutive turn errors that classify as credential/auth failures.
     // Reset on turn success or auth change; drives the credential-failure
     // circuit breaker that halts automatic resends (see

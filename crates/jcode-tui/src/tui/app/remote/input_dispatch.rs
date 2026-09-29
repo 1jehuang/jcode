@@ -19,6 +19,12 @@ pub(in crate::tui::app) async fn begin_remote_send(
     if app.passive_restart_restore && (is_system || auto_retry || system_reminder.is_some()) {
         anyhow::bail!("Restored session is paused; submit a new message to continue");
     }
+    if app.passive_restart_restore
+        && let Some(mut pending) = app.rate_limit_pending_message.take()
+    {
+        pending.retry_at = app.rate_limit_reset.take().or(pending.retry_at);
+        app.restored_retries.push(pending);
+    }
     // Persist the remaining follow-ups before a fresh prompt can release the
     // server's pause. A crash during the send must still leave them recoverable.
     if app.passive_restart_restore
