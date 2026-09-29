@@ -1195,11 +1195,11 @@ impl App {
         // the analyzer can subtract the scroll-ride and report content-relative
         // travel (how much widgets move *relative to the text* they sit beside).
         let mut scroll_tops_abs: Vec<i64> = Vec::new();
-        // Screen rows widgets may occupy (below the top band, inside the
-        // messages area), so a widget stuck at either edge is not counted as
-        // drift. Taken from the last frame; the viewport does not change
-        // while the benchmark scrolls.
-        let mut viewport_rows: Option<std::ops::Range<u16>> = None;
+        // Screen rows widgets may occupy in each frame (below the top band,
+        // inside the messages area), so a widget stuck at either edge is not
+        // counted as drift. Recorded per frame: the top band (todos, prompt
+        // preview) can change height while the benchmark scrolls.
+        let mut viewport_rows: Vec<std::ops::Range<u16>> = Vec::new();
         let mut frame_payloads: Vec<serde_json::Value> = Vec::new();
         self.auto_scroll_paused = true;
 
@@ -1213,14 +1213,18 @@ impl App {
             }
             scroll_tops_abs.push(crate::tui::ui::last_resolved_chat_scroll() as i64);
             let latest = crate::tui::visual_debug::latest_frame();
-            if let Some(area) = latest.as_ref().and_then(|f| f.layout.messages_area) {
-                let band = latest
-                    .as_ref()
-                    .and_then(|f| f.layout.margins.as_ref())
-                    .map_or(0, |m| m.content_start_row as u16);
-                viewport_rows =
-                    Some(area.y.saturating_add(band)..area.y.saturating_add(area.height));
-            }
+            let rows = latest
+                .as_ref()
+                .and_then(|f| f.layout.messages_area)
+                .map(|area| {
+                    let band = latest
+                        .as_ref()
+                        .and_then(|f| f.layout.margins.as_ref())
+                        .map_or(0, |m| m.content_start_row as u16);
+                    area.y.saturating_add(band)..area.y.saturating_add(area.height)
+                })
+                .unwrap_or(0..height);
+            viewport_rows.push(rows);
             let placed: Vec<PlacedRect> = match latest {
                 Some(frame) => frame
                     .info_widgets
@@ -1263,7 +1267,7 @@ impl App {
         let report = crate::tui::info_widget_stability::analyze_frames_with_viewport_rows(
             &frames,
             &scroll_tops_abs,
-            viewport_rows,
+            Some(&viewport_rows),
         );
 
         saved_state.restore(self);
