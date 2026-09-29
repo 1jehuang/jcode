@@ -25,6 +25,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(feature = "aws-sdk")]
 use jcode_message_types::{ContentBlock as JContentBlock, Role as JRole, StreamEvent};
+#[cfg(feature = "aws-sdk")]
+use jcode_logging::warn;
 use jcode_message_types::{Message as JMessage, ToolDefinition};
 #[cfg(feature = "aws-sdk")]
 use jcode_provider_core::summarize_model_catalog_refresh;
@@ -304,7 +306,41 @@ impl BedrockProvider {
     }
 
     // Pure string logic; only reachable from aws-sdk request paths and tests.
+    /// Whether a failed Bedrock call is worth another attempt. Matches the
+    /// AWS SDK error codes that clear on their own (a burst throttle, a
+    /// momentary outage, a dropped stream) and nothing else. A daily quota,
+    /// an auth error, or a validation error fails the same way every time,
+    /// so retrying those only burns the window the user is waiting in.
+    /// The codes are matched whole, so prose that merely says "throttling"
+    /// does not loop.
     #[cfg_attr(not(feature = "aws-sdk"), allow(dead_code))]
+    fn is_retryable_bedrock_error(raw: &str) -> bool {
+        let lower = raw.to_ascii_lowercase();
+        if [
+            "servicequotaexceeded",
+            "daily",
+            "per day",
+            "billing",
+            "insufficient_quota",
+            "quota_exhausted",
+        ]
+        .iter()
+        .any(|reason| lower.contains(reason))
+        {
+            return false;
+        }
+        [
+            "throttlingexception",
+            "too many requests",
+            "rate exceeded",
+            "serviceunavailableexception",
+            "modelstreamerrorexception",
+            "modeltimeoutexception",
+        ]
+        .iter()
+        .any(|code| lower.contains(code))
+    }
+
     fn classify_error_message(raw: &str) -> String {
         let lower = raw.to_ascii_lowercase();
         let is_legacy_model_error = lower.contains("marked by provider as legacy")
@@ -1253,15 +1289,40 @@ impl Provider for BedrockProvider {
             if let Some(inference_config) = inference_config {
                 req = req.inference_config(inference_config);
             }
-            let resp = match req.send().await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(Self::classify_error_message(
-                            &Self::sdk_error_message(&err)
-                        ))))
-                        .await;
-                    return;
+            // Bedrock answers a burst of parallel calls (a swarm spawning
+            // several agents at once) with ThrottlingException. The AWS SDK
+            // retries some of these internally, but the ones that still
+            // surface used to kill the turn on the first failure. Retry only
+            // the transient classes, with the same backoff the other
+            // providers use, and give up cleanly on anything else.
+            const MAX_BEDROCK_RETRIES: u32 = 5;
+            let mut attempt: u32 = 0;
+            let resp = loop {
+                match req.clone().send().await {
+                    Ok(resp) => break resp,
+                    Err(err) => {
+                        let raw = Self::sdk_error_message(&err);
+                        if attempt < MAX_BEDROCK_RETRIES && Self::is_retryable_bedrock_error(&raw) {
+                            let delay = jcode_provider_core::retry_after::retry_delay(
+                                attempt,
+                                1500,
+                                None,
+                            );
+                            warn(&format!(
+                                "Bedrock converse_stream throttled (attempt {}/{}); retrying in {:?}",
+                                attempt + 1,
+                                MAX_BEDROCK_RETRIES,
+                                delay
+                            ));
+                            attempt += 1;
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(Self::classify_error_message(&raw))))
+                            .await;
+                        return;
+                    }
                 }
             };
             let mut stream = resp.stream;
@@ -2086,6 +2147,35 @@ mod tests {
             input_of(2).is_some_and(|m| m.contains_key("command")),
             "object input must be preserved"
         );
+    }
+
+    #[test]
+    fn throttling_is_retried_but_quota_and_auth_are_not() {
+        // The exact text the AWS SDK prints for a ThrottlingException.
+        assert!(BedrockProvider::is_retryable_bedrock_error(
+            "ServiceError(ServiceError { source: ThrottlingException(ThrottlingException { message: Some(\"Too many requests, please wait before trying again.\") }) })"
+        ));
+        assert!(BedrockProvider::is_retryable_bedrock_error(
+            "ServiceUnavailableException: Bedrock is currently unable to handle the request"
+        ));
+        assert!(BedrockProvider::is_retryable_bedrock_error(
+            "ModelStreamErrorException: An error occurred while streaming the response"
+        ));
+        // A real quota wall. Retrying would loop for nothing.
+        assert!(!BedrockProvider::is_retryable_bedrock_error(
+            "ServiceQuotaExceededException: You have reached your daily request quota"
+        ));
+        // Auth and validation fail the same way every time.
+        assert!(!BedrockProvider::is_retryable_bedrock_error(
+            "AccessDeniedException: Bearer Token has expired"
+        ));
+        assert!(!BedrockProvider::is_retryable_bedrock_error(
+            "ValidationException: The provided model identifier is invalid"
+        ));
+        // Mentioning the word is not the same as being throttled.
+        assert!(!BedrockProvider::is_retryable_bedrock_error(
+            "the user asked how throttling works"
+        ));
     }
 
     #[test]
