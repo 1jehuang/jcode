@@ -375,7 +375,8 @@ fn read_clipboard_file_list() -> Vec<std::path::PathBuf> {
 /// A line with whitespace may be prose that merely ends in a file name
 /// (`Please check figure.png`), and treating it as a name would replace the
 /// user's sentence with an image. Such text only counts when it is quoted as
-/// a path, names a file that exists, or matches a file the clipboard itself
+/// a path, names a file that exists (absolute, under `~/`, or relative to the
+/// working directory), or matches a file the clipboard itself
 /// lists (e.g. Finder's `Screenshot 2026-09-24 at 10.41.00.png`).
 fn text_names_an_image<CopiedFiles>(text: &str, copied_files: CopiedFiles) -> bool
 where
@@ -402,7 +403,15 @@ where
         return true;
     }
     let path_like = path.starts_with('/') || path.starts_with("~/");
-    if path_like && (quoted || std::path::Path::new(path).is_file()) {
+    if path_like && quoted {
+        return true;
+    }
+    // An existing file, absolute, `~/`, or relative to the working directory.
+    let local = match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().map(|home| home.join(rest)),
+        None => Some(std::path::PathBuf::from(path)),
+    };
+    if local.is_some_and(|local| local.is_file()) {
         return true;
     }
     copied_files()
@@ -676,6 +685,27 @@ mod tests {
             || vec![std::path::PathBuf::from("/Users/me/Desktop/other.png")],
         );
         assert!(matches!(content, ClipboardPasteContent::Text(_)));
+    }
+
+    #[test]
+    fn smart_paste_attaches_existing_relative_spaced_name() {
+        // Greptile #1450: an existing file named relative to the working
+        // directory, with no clipboard file list, must still attach.
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let name = dir.path().file_name().unwrap().to_str().unwrap();
+        std::fs::write(dir.path().join("my shot.png"), b"png").unwrap();
+        let relative = format!("{name}/my shot.png");
+        let content = super::read_clipboard_for_paste_with_files(
+            &ClipboardPasteKind::Smart,
+            || Some(relative.clone()),
+            || Some(("image/png".to_string(), "base64".to_string())),
+            |_| None,
+            Vec::new,
+        );
+        assert!(
+            matches!(content, ClipboardPasteContent::Image { .. }),
+            "{relative}: expected image, got {content:?}"
+        );
     }
 
     #[test]
