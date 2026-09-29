@@ -308,8 +308,11 @@ fn hoist_late_tool_results(messages: &[Message]) -> Vec<Message> {
                     .take_while(|&i| turn[i] == turn[call])
                     .last()
                     .unwrap_or(call);
-                late.insert((mi, bi));
-                moved.entry(anchor).or_default().push(block.clone());
+                let dest = moved.entry(anchor).or_default();
+                for j in std::iter::once(bi).chain(attached_to_result(&msg.content, bi)) {
+                    late.insert((mi, j));
+                    dest.push(msg.content[j].clone());
+                }
             }
         }
     }
@@ -317,7 +320,7 @@ fn hoist_late_tool_results(messages: &[Message]) -> Vec<Message> {
         return messages.to_vec();
     }
     jcode_logging::warn(&format!(
-        "[anthropic] Moved {} late tool_result(s) up to directly follow their tool_use",
+        "[anthropic] Moved {} late tool_result block(s) up to directly follow their tool_use",
         late.len()
     ));
 
@@ -348,6 +351,45 @@ fn hoist_late_tool_results(messages: &[Message]) -> Vec<Message> {
         }
     }
     out
+}
+
+/// Indices of the blocks that belong to the tool_result at `result_idx`, in
+/// order. A tool output is stored as the result followed by its images (each
+/// optionally followed by an "[Attached image ...]" label) and then its
+/// `ToolReference` blocks, so those travel with the result when it moves.
+/// References for the same call elsewhere in the message are included too,
+/// since they are matched to the result by id within one message.
+fn attached_to_result(blocks: &[ContentBlock], result_idx: usize) -> Vec<usize> {
+    const IMAGE_LABEL_PREFIX: &str = "[Attached image associated with the preceding tool result:";
+    let ContentBlock::ToolResult { tool_use_id, .. } = &blocks[result_idx] else {
+        return Vec::new();
+    };
+    let is_own_reference = |block: &ContentBlock| matches!(block, ContentBlock::ToolReference { tool_use_id: id, .. } if id == tool_use_id);
+    let mut attached = Vec::new();
+    let mut after_image = false;
+    let mut end = result_idx + 1;
+    while let Some(block) = blocks.get(end) {
+        let belongs = match block {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::Text { text, .. } => after_image && text.starts_with(IMAGE_LABEL_PREFIX),
+            other => is_own_reference(other),
+        };
+        if !belongs {
+            break;
+        }
+        after_image = matches!(block, ContentBlock::Image { .. });
+        attached.push(end);
+        end += 1;
+    }
+    attached.extend(
+        blocks
+            .iter()
+            .enumerate()
+            .skip(end)
+            .filter(|(_, block)| is_own_reference(block))
+            .map(|(i, _)| i),
+    );
+    attached
 }
 
 /// Fold `ContentBlock::ToolReference` blocks into their tool_result.

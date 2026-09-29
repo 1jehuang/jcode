@@ -2387,3 +2387,133 @@ async fn test_tool_use_answered_later_still_gets_result_immediately_after() {
     // Roles still alternate.
     assert!(formatted.windows(2).all(|w| w[0].role != w[1].role));
 }
+
+/// A late tool_result must carry the blocks that belong to it (its image, the
+/// image label and any deferred tool reference) when it is moved up, or the
+/// model sees a partial tool output and the reference is dropped.
+fn late_result_conversation(attachments: Vec<ContentBlock>) -> Vec<Message> {
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let text = |t: &str| ContentBlock::Text {
+        text: t.to_string(),
+        cache_control: None,
+    };
+    let mut late = vec![ContentBlock::ToolResult {
+        tool_use_id: "tool_a".to_string(),
+        content: "output of tool_a".to_string(),
+        is_error: None,
+    }];
+    late.extend(attachments);
+    late.push(text("unrelated note"));
+    vec![
+        msg(Role::User, vec![text("go")]),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_a".to_string(),
+                name: "mcp_search".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        ),
+        msg(Role::User, vec![text("also check the logs")]),
+        msg(Role::Assistant, vec![text("Working on it.")]),
+        msg(Role::User, late),
+        msg(Role::Assistant, vec![text("Done.")]),
+    ]
+}
+
+#[tokio::test]
+async fn test_late_tool_result_moves_with_its_image_and_label() {
+    let provider = AnthropicProvider::new();
+    let label = "[Attached image associated with the preceding tool result: shot.png]";
+    let messages = late_result_conversation(vec![
+        ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "aW1n".to_string(),
+        },
+        ContentBlock::Text {
+            text: label.to_string(),
+            cache_control: None,
+        },
+    ]);
+    let formatted = provider.format_messages(&messages, false, &[]);
+    let dump = serde_json::to_string_pretty(&formatted).unwrap();
+
+    assert_eq!(formatted[1].role, "assistant");
+    let answer = &formatted[2];
+    assert_eq!(answer.role, "user");
+    let ApiContentBlock::ToolResult {
+        tool_use_id,
+        content: ToolResultContent::Blocks(blocks),
+        ..
+    } = &answer.content[0]
+    else {
+        panic!("result with image blocks must follow the tool_use: {dump}");
+    };
+    assert_eq!(tool_use_id, "tool_a");
+    assert!(
+        matches!(&blocks[..], [
+            ToolResultContentBlock::Text { text: out },
+            ToolResultContentBlock::Image { .. },
+            ToolResultContentBlock::Text { text: l },
+        ] if out == "output of tool_a" && l == label),
+        "image and label must sit right after the result: {dump}"
+    );
+    // Nothing of the tool output is left behind in the later message.
+    let later = &formatted[4];
+    assert_eq!(later.role, "user");
+    assert!(
+        matches!(&later.content[..], [ApiContentBlock::Text { text, .. }] if text == "unrelated note"),
+        "later message must keep only its unrelated text: {dump}"
+    );
+    assert!(formatted.windows(2).all(|w| w[0].role != w[1].role));
+}
+
+#[tokio::test]
+async fn test_late_tool_result_moves_with_its_tool_reference() {
+    let provider = AnthropicProvider::new();
+    let messages = late_result_conversation(vec![ContentBlock::ToolReference {
+        tool_use_id: "tool_a".to_string(),
+        tool_name: "mcp__weather__forecast".to_string(),
+    }]);
+    let tools: Vec<ApiTool> = ["mcp_search", "mcp__weather__forecast"]
+        .iter()
+        .map(|name| ApiTool {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+            cache_control: None,
+            defer_loading: *name != "mcp_search",
+        })
+        .collect();
+    let formatted = provider.format_messages(&messages, false, &tools);
+    let dump = serde_json::to_string_pretty(&formatted).unwrap();
+
+    let answer = &formatted[2];
+    assert_eq!(answer.role, "user");
+    assert!(
+        matches!(&answer.content[0], ApiContentBlock::ToolResult {
+            tool_use_id,
+            content: ToolResultContent::Blocks(blocks),
+            ..
+        } if tool_use_id == "tool_a" && matches!(&blocks[..], [
+            ToolResultContentBlock::ToolReference { tool_name }
+        ] if tool_name == "mcp__weather__forecast")),
+        "the reference must load at the moved result: {dump}"
+    );
+    // The result text moves out beside it, ahead of the later user text.
+    assert!(
+        matches!(&answer.content[1], ApiContentBlock::Text { text, .. } if text == "output of tool_a"),
+        "{dump}"
+    );
+    let later = &formatted[4];
+    assert!(
+        matches!(&later.content[..], [ApiContentBlock::Text { text, .. }] if text == "unrelated note"),
+        "later message must keep only its unrelated text: {dump}"
+    );
+}
