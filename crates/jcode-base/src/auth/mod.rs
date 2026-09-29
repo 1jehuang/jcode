@@ -7,6 +7,7 @@ pub mod claude;
 pub mod codex;
 mod commands;
 pub mod copilot;
+pub mod credential_signal;
 pub mod cursor;
 pub mod doctor;
 pub mod env_facts;
@@ -941,6 +942,8 @@ impl AuthStatus {
     /// Invalidate all auth-derived state after credentials actually change.
     pub fn invalidate_cache() {
         Self::invalidate_cached_status();
+        // Wake provider retry loops sleeping on the previous account's limit.
+        crate::auth::credential_signal::bump();
         crate::auth::copilot::invalidate_github_token_cache();
         crate::provider::pricing::invalidate_auth_pricing_memos();
         crate::memory_rerank::clear_failure_backoff();
