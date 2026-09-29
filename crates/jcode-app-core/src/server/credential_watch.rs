@@ -17,28 +17,97 @@ pub(super) struct CredentialIdentity {
     openai: Option<String>,
 }
 
-fn anthropic_identity() -> Option<String> {
+/// Short, non-reversible fingerprint of a secret. Never log or store the
+/// secret itself.
+fn secret_fingerprint(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(secret.trim().as_bytes());
+    format!("{:x}", digest)[..16].to_string()
+}
+
+fn jcode_anthropic_identity() -> Option<(String, String)> {
     let auth = crate::auth::claude::load_auth_file().ok()?;
     let label = crate::auth::claude::active_account_label()?;
     let account = auth.anthropic_accounts.iter().find(|a| a.label == label)?;
-    Some(format!(
-        "{}|{}|{}",
-        label,
-        account.email.as_deref().unwrap_or(""),
-        account.subscription_type.as_deref().unwrap_or("")
+    Some((
+        format!(
+            "{}|{}|{}",
+            label,
+            account.email.as_deref().unwrap_or(""),
+            account.subscription_type.as_deref().unwrap_or("")
+        ),
+        account.refresh.clone(),
     ))
 }
 
-fn openai_identity() -> Option<String> {
+/// Identity of the Claude credential requests actually use. A trusted
+/// external login (Claude Code's `~/.claude/.credentials.json`) takes
+/// precedence over jcode's accounts, so it must be watched too. For jcode
+/// accounts the label/email identity ignores token refreshes. For an external
+/// login the refresh token identifies the login, so a plain access-token
+/// refresh of the same login is not reported as a change.
+fn anthropic_identity() -> Option<String> {
+    let jcode = jcode_anthropic_identity();
+    match crate::auth::claude::load_credentials() {
+        Ok(effective) => {
+            if let Some((identity, refresh)) = &jcode
+                && !refresh.is_empty()
+                && *refresh == effective.refresh_token
+            {
+                return Some(identity.clone());
+            }
+            let key = if effective.refresh_token.is_empty() {
+                &effective.access_token
+            } else {
+                &effective.refresh_token
+            };
+            Some(format!("effective|{}", secret_fingerprint(key)))
+        }
+        Err(_) => jcode.map(|(identity, _)| identity),
+    }
+}
+
+fn jcode_openai_identity() -> Option<(String, String)> {
     let auth = crate::auth::codex::load_auth_file().ok()?;
     let label = crate::auth::codex::active_account_label()?;
     let account = auth.openai_accounts.iter().find(|a| a.label == label)?;
-    Some(format!(
-        "{}|{}|{}",
-        label,
-        account.email.as_deref().unwrap_or(""),
-        account.account_id.as_deref().unwrap_or("")
+    Some((
+        format!(
+            "{}|{}|{}",
+            label,
+            account.email.as_deref().unwrap_or(""),
+            account.account_id.as_deref().unwrap_or("")
+        ),
+        account.refresh_token.clone(),
     ))
+}
+
+/// Identity of the OpenAI OAuth credential requests actually use (jcode
+/// account, trusted legacy Codex `auth.json`, or another external login).
+fn openai_identity() -> Option<String> {
+    let jcode = jcode_openai_identity();
+    match crate::auth::codex::load_oauth_credentials() {
+        Ok(effective) => {
+            if let Some((identity, refresh)) = &jcode
+                && !refresh.is_empty()
+                && *refresh == effective.refresh_token
+            {
+                return Some(identity.clone());
+            }
+            if let Some(account_id) = effective.account_id.as_deref()
+                && !account_id.is_empty()
+            {
+                return Some(format!("effective|account|{account_id}"));
+            }
+            let key = if effective.refresh_token.is_empty() {
+                &effective.access_token
+            } else {
+                &effective.refresh_token
+            };
+            Some(format!("effective|{}", secret_fingerprint(key)))
+        }
+        Err(_) => jcode.map(|(identity, _)| identity),
+    }
 }
 
 pub(super) fn current_identity() -> CredentialIdentity {
@@ -155,6 +224,91 @@ mod tests {
         assert_eq!(
             changed_providers(&first, &current_identity()),
             vec!["anthropic"]
+        );
+    }
+
+    fn write_claude_code_login(path: &std::path::Path, access: &str, refresh: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let expires = chrono::Utc::now().timestamp_millis() + 8 * 60 * 60 * 1000;
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": access,
+                    "refreshToken": refresh,
+                    "expiresAt": expires,
+                    "scopes": ["user:inference"],
+                    "subscriptionType": "max"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Claude Code rewrites its trusted credentials file on its own relogin.
+    /// jcode's auth.json is untouched, yet requests now use a different
+    /// account, so the watcher must report it. A plain access-token refresh of
+    /// the same login must not be reported.
+    #[test]
+    fn external_claude_code_relogin_is_an_identity_change() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        let path = sandbox.external_dir().join(".claude/.credentials.json");
+        write_claude_code_login(&path, "cc-access-A", "cc-refresh-A");
+        crate::auth::claude::trust_external_auth_source(
+            crate::auth::claude::ExternalClaudeAuthSource::ClaudeCode,
+        )
+        .expect("trust");
+        let first = current_identity();
+        assert!(first.anthropic.is_some());
+
+        write_claude_code_login(&path, "cc-access-A2", "cc-refresh-A");
+        assert!(
+            changed_providers(&first, &current_identity()).is_empty(),
+            "access-token refresh of the same login is not an account change"
+        );
+
+        write_claude_code_login(&path, "cc-access-B", "cc-refresh-B");
+        assert_eq!(
+            changed_providers(&first, &current_identity()),
+            vec!["anthropic"]
+        );
+        let serialized = format!("{:?}", current_identity());
+        assert!(!serialized.contains("cc-refresh-B") && !serialized.contains("cc-access-B"));
+    }
+
+    /// Same for a trusted legacy Codex `~/.codex/auth.json` login.
+    #[test]
+    fn external_codex_relogin_is_an_identity_change() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        let path = sandbox.external_dir().join(".codex/auth.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let write = |access: &str, refresh: &str| {
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "tokens": {
+                        "access_token": access,
+                        "refresh_token": refresh,
+                        "expires_at": chrono::Utc::now().timestamp_millis() + 8 * 60 * 60 * 1000
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        write("codex-access-A", "codex-refresh-A");
+        crate::auth::codex::trust_legacy_auth_for_future_use().expect("trust");
+        let first = current_identity();
+        assert!(first.openai.is_some());
+
+        write("codex-access-A2", "codex-refresh-A");
+        assert!(changed_providers(&first, &current_identity()).is_empty());
+
+        write("codex-access-B", "codex-refresh-B");
+        assert_eq!(
+            changed_providers(&first, &current_identity()),
+            vec!["openai"]
         );
     }
 }
