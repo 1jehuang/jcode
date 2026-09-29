@@ -235,10 +235,11 @@ where
     }
 
     let mut tasks = tokio::task::JoinSet::<Option<ProviderUsage>>::new();
+    let anthropic_key = accessors::current_anthropic_usage_key();
     let total = enqueue_provider_usage_tasks(&mut tasks);
 
     if total == 0 {
-        sync_cached_usage_from_reports(&results, openai_generation).await;
+        sync_cached_usage_from_reports(&results, anthropic_key, openai_generation).await;
         if let Ok(mut map) = cache.lock() {
             map.clear();
         }
@@ -268,7 +269,7 @@ where
         });
     }
 
-    sync_cached_usage_from_reports(&results, openai_generation).await;
+    sync_cached_usage_from_reports(&results, anthropic_key, openai_generation).await;
 
     if let Ok(mut map) = cache.lock()
         && openai_generation == openai_usage_generation()
@@ -602,38 +603,52 @@ fn enqueue_openai_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<ProviderUs
     1
 }
 
-async fn sync_cached_usage_from_reports(results: &[ProviderUsage], openai_generation: u64) {
-    sync_active_anthropic_usage_from_reports(results).await;
+async fn sync_cached_usage_from_reports(
+    results: &[ProviderUsage],
+    anthropic_key: Option<String>,
+    openai_generation: u64,
+) {
+    sync_active_anthropic_usage_from_reports(results, anthropic_key).await;
     sync_openai_usage_from_reports(results, openai_generation).await;
 }
 
-async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
+/// `fetched_for` is the usage key of the Claude login that was active when the
+/// fetch started, so the report is stored under the account that produced it.
+/// The process-wide snapshot is only updated while that login is still active:
+/// a fetch that finishes after an account switch must not make the new login
+/// look exhausted.
+async fn sync_active_anthropic_usage_from_reports(
+    results: &[ProviderUsage],
+    fetched_for: Option<String>,
+) {
     let report = active_anthropic_usage_report(results);
     let usage = get_usage().await;
     let mut cached = usage.write().await;
+    let still_active = fetched_for == accessors::current_anthropic_usage_key();
 
     match report {
         Some(report) => {
             let usage_data = usage_data_from_provider_report(report);
-            if let Ok(creds) = auth::claude::load_credentials() {
-                let label = auth::claude::active_account_label()
-                    .unwrap_or_else(auth::claude::primary_account_label);
-                let cache_key = anthropic_usage_cache_key(&creds.access_token, Some(&label));
-                store_anthropic_usage(cache_key.clone(), usage_data.clone());
-                set_active_usage_key(Some(cache_key));
+            if let Some(key) = &fetched_for {
+                store_anthropic_usage(key.clone(), usage_data.clone());
             }
+            if !still_active {
+                return;
+            }
+            set_active_usage_key(fetched_for);
             *cached = usage_data;
             if report.error.is_none() {
                 crate::provider::clear_provider_unavailable_for_account("claude");
             }
         }
-        None => {
+        None if still_active => {
             *cached = UsageData {
                 fetched_at: Some(Instant::now()),
                 last_error: Some("No Anthropic OAuth credentials found".to_string()),
                 ..Default::default()
             };
         }
+        None => {}
     }
 }
 
