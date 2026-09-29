@@ -563,19 +563,20 @@ pub(in crate::tui::app) fn handle_server_event(
     // A socket write does not acknowledge a turn. Keep the durable retry
     // until its own completion; errors and unrelated Done frames cannot retire it.
     if let ServerEvent::Error { id, .. } = &event
-        && let Some(delivery) = app.restored_retry_delivery.as_mut()
+        && let Some(delivery) = app.restored_retry_delivery.as_ref()
         && delivery.request_id == *id
     {
-        delivery.rejected = true;
+        app.restored_retry_delivery = None;
     }
     if let ServerEvent::Done { id } = &event
         && app
             .restored_retry_delivery
             .as_ref()
-            .is_some_and(|delivery| delivery.request_id == *id && !delivery.rejected)
+            .is_some_and(|delivery| delivery.request_id == *id)
         && app.current_message_id == Some(*id)
     {
         let delivery = app.restored_retry_delivery.take().unwrap();
+        app.pending_remote_is_restored_retry = false;
         if !app.restored_retries.is_empty() {
             app.restored_retries.remove(0);
         }
@@ -1743,6 +1744,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app.queued_messages.clear();
                     app.restored_retries.clear();
                     app.restored_retry_delivery = None;
+                    app.pending_remote_is_restored_retry = false;
                     app.interleave_message = None;
                     app.interleave_images.clear();
                     app.clear_pending_soft_interrupt_tracking();

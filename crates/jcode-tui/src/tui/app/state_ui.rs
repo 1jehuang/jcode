@@ -230,11 +230,7 @@ impl App {
     }
 
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
-        let pending_is_restored = self
-            .rate_limit_pending_message
-            .as_ref()
-            .zip(self.restored_retries.first())
-            .is_some_and(|(pending, saved)| pending.same_payload(saved));
+        let pending_is_restored = self.pending_remote_is_restored_retry;
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
             !pending_is_restored
                 && !pending.auto_retry
@@ -439,16 +435,26 @@ impl App {
         serde_json::Value::Array(
             self.restored_retries
                 .iter()
-                .map(|pending| {
+                .enumerate()
+                .map(|(index, saved)| {
+                    let pending = if index == 0 && self.pending_remote_is_restored_retry {
+                        self.rate_limit_pending_message.as_ref().unwrap_or(saved)
+                    } else {
+                        saved
+                    };
+                    let retry_at = if index == 0 && self.pending_remote_is_restored_retry {
+                        self.rate_limit_reset.or(pending.retry_at)
+                    } else {
+                        pending.retry_at
+                    };
                     let mut value = serde_json::to_value(pending).expect("retry serialization");
-                    value["retry_deadline_unix_ms"] =
-                        serde_json::json!(pending.retry_at.map(|at| {
-                            chrono::Utc::now().timestamp_millis().saturating_add(
-                                at.saturating_duration_since(Instant::now())
-                                    .as_millis()
-                                    .min(i64::MAX as u128) as i64,
-                            )
-                        }));
+                    value["retry_deadline_unix_ms"] = serde_json::json!(retry_at.map(|at| {
+                        chrono::Utc::now().timestamp_millis().saturating_add(
+                            at.saturating_duration_since(Instant::now())
+                                .as_millis()
+                                .min(i64::MAX as u128) as i64,
+                        )
+                    }));
                     value
                 })
                 .collect(),

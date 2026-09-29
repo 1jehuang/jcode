@@ -261,17 +261,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 )
             };
             app.push_display_message(DisplayMessage::system(status));
-            let _ = begin_remote_send(
-                app,
-                remote,
-                pending.content,
-                pending.images,
-                pending.is_system,
-                pending.system_reminder,
-                pending.auto_retry,
-                pending.retry_attempts,
-            )
-            .await;
+            let restored_retry = app.pending_remote_is_restored_retry;
+            let _ = input_dispatch::send_remote_message(app, remote, pending, restored_retry).await;
             return true;
         }
     }
@@ -1261,6 +1252,9 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
 async fn dispatch_restored_retry(app: &mut App, remote: &mut RemoteConnection) -> bool {
     if app.passive_restart_restore
         || app.restored_retry_delivery.is_some()
+        // A terminal failure stopped the normal retry policy. Keep the saved
+        // entry, but require a fresh submission before automatically sending it.
+        || (app.pending_remote_is_restored_retry && app.rate_limit_pending_message.is_none())
         || app.is_processing
         || app.rate_limit_reset.is_some()
         || !remote.has_loaded_history()
@@ -1273,19 +1267,15 @@ async fn dispatch_restored_retry(app: &mut App, remote: &mut RemoteConnection) -
     {
         return false;
     }
-    let pending = app.restored_retries[0].clone();
-    if let Err(error) = begin_remote_send(
-        app,
-        remote,
-        pending.content.clone(),
-        pending.images.clone(),
-        pending.is_system,
-        pending.system_reminder.clone(),
-        pending.auto_retry,
-        pending.retry_attempts,
-    )
-    .await
-    {
+    let pending = if app.pending_remote_is_restored_retry {
+        app.rate_limit_pending_message
+            .as_ref()
+            .unwrap_or(&app.restored_retries[0])
+            .clone()
+    } else {
+        app.restored_retries[0].clone()
+    };
+    if let Err(error) = input_dispatch::send_remote_message(app, remote, pending, true).await {
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to send restored retry: {error}"
         )));
@@ -1314,18 +1304,15 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             && !app.is_processing
             && !app.remote_model_switch_in_flight
             && !app.auth_catalog_refresh_pending
-        {
-            if let Some(prepared) = app
+            && let Some(prepared) = app
                 .pending_prompt_before_history
                 .take()
                 .or_else(|| app.pending_prompt_after_model_switch.take())
-            {
-                if let Err(error) = submit_prepared_remote_input(app, remote, prepared).await {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to submit prompt: {error}"
-                    )));
-                }
-            }
+            && let Err(error) = submit_prepared_remote_input(app, remote, prepared).await
+        {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit prompt: {error}"
+            )));
         }
         return;
     }

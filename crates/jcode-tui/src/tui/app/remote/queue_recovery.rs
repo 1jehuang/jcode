@@ -154,6 +154,13 @@ fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> b
         return false;
     };
     app.rate_limit_reset = None;
+    if app.pending_remote_is_restored_retry {
+        app.pending_remote_is_restored_retry = false;
+        app.restored_retry_delivery = None;
+        // The durable queue already owns this payload. Requeueing it here
+        // would dispatch a second copy after the saved retry completes.
+        return true;
+    }
     crate::logging::info(&format!(
         "Recovering in-flight queued continuation into queued follow-ups after {} (content_chars={}, has_reminder={})",
         reason,

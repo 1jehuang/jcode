@@ -16,7 +16,41 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
-    if app.passive_restart_restore && (is_system || auto_retry || system_reminder.is_some()) {
+    send_remote_message(
+        app,
+        remote,
+        PendingRemoteMessage {
+            content,
+            images,
+            is_system,
+            system_reminder,
+            auto_retry,
+            retry_attempts,
+            retry_at: None,
+        },
+        false,
+    )
+    .await
+}
+
+pub(super) async fn send_remote_message(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    pending: PendingRemoteMessage,
+    restored_retry: bool,
+) -> Result<u64> {
+    let PendingRemoteMessage {
+        content,
+        images,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+        ..
+    } = pending;
+    if app.passive_restart_restore
+        && (restored_retry || is_system || auto_retry || system_reminder.is_some())
+    {
         anyhow::bail!("Restored session is paused; submit a new message to continue");
     }
     if app.passive_restart_restore
@@ -50,33 +84,30 @@ pub(in crate::tui::app) async fn begin_remote_send(
         retry_attempts,
         retry_at: None,
     };
-    let already_saved = app
-        .restored_retries
-        .first()
-        .is_some_and(|pending| pending.same_payload(&pending_delivery));
-    // Queued and hidden follow-ups use this same transport. Move their
-    // checkpoint into the completion-tracked queue instead of consuming it
-    // when the socket write succeeds.
-    if is_system
-        && !already_saved
+    // Only a dispatch of the saved entry owns its completion. Equal payloads
+    // can be independent user requests (or independent queued follow-ups).
+    let retain_followup = is_system
+        && !restored_retry
         && !crate::tui::is_ssh_remote()
-        && let Some(session_id) = remote.session_id()
-        && App::has_retained_followup_checkpoint(session_id)
-    {
+        && remote
+            .session_id()
+            .is_some_and(App::has_retained_followup_checkpoint);
+    if retain_followup {
         app.restored_retries.insert(0, pending_delivery.clone());
     }
-    if app
-        .restored_retries
-        .first()
-        .is_some_and(|pending| pending.same_payload(&pending_delivery))
+    app.pending_remote_is_restored_retry = restored_retry || retain_followup;
+    if restored_retry && let Some(saved) = app.restored_retries.first_mut() {
+        saved.retry_attempts = retry_attempts;
+    }
+    if app.pending_remote_is_restored_retry
         && let Some(session_id) = remote.session_id()
     {
         app.restored_retry_delivery = Some(super::super::RestoredRetryDelivery {
             session_id: session_id.to_string(),
             request_id: msg_id,
-            rejected: false,
         });
     }
+    app.rate_limit_pending_message = Some(pending_delivery);
     if !app.passive_restart_restore
         && !crate::tui::is_ssh_remote()
         && let Some(session_id) = remote.session_id()
@@ -112,15 +143,6 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.thought_line_inserted = false;
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content,
-        images,
-        is_system,
-        system_reminder,
-        auto_retry,
-        retry_attempts,
-        retry_at: None,
-    });
     app.autoreview_after_current_turn = !is_system;
     app.autojudge_after_current_turn = !is_system;
     remote.reset_call_output_tokens_seen();

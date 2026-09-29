@@ -32,6 +32,8 @@ impl App {
         self.rate_limit_pending_message = restored.rate_limit_pending_message;
         self.rate_limit_reset = restored.rate_limit_reset;
         self.restored_retries = restored.restored_retries;
+        self.restored_retry_delivery = None;
+        self.pending_remote_is_restored_retry = false;
         self.observe_page_markdown = restored.observe_page_markdown;
         self.observe_page_updated_at_ms = restored.observe_page_updated_at_ms;
         self.set_observe_mode_enabled(restored.observe_mode_enabled, restored.observe_mode_enabled);
@@ -738,6 +740,7 @@ impl App {
             rate_limit_pending_message: None,
             restored_retries: Vec::new(),
             restored_retry_delivery: None,
+            pending_remote_is_restored_retry: false,
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
@@ -1199,6 +1202,7 @@ impl App {
             rate_limit_pending_message: None,
             restored_retries: Vec::new(),
             restored_retry_delivery: None,
+            pending_remote_is_restored_retry: false,
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
