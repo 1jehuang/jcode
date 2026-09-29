@@ -1508,10 +1508,13 @@ pub struct InlineInteractiveState {
 impl InlineInteractiveState {
     /// The user picked route `option` for entry `index` by hand. Their choice
     /// replaces any route a scope switched for it, so clearing the scope
-    /// keeps it instead of restoring the older route.
+    /// keeps it instead of restoring the older route. A key press that leaves
+    /// the route where it was (nothing else in scope to move to) is not a
+    /// choice, so the saved route is kept.
     pub fn choose_route(&mut self, index: usize, option: usize) {
         if let Some(entry) = self.entries.get_mut(index)
             && option < entry.options.len()
+            && option != entry.selected_option
         {
             entry.selected_option = option;
             self.scoped_route_restore.retain(|(i, _)| *i != index);

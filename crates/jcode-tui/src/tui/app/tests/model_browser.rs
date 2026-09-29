@@ -254,6 +254,46 @@ fn clearing_a_provider_scope_restores_the_previous_route() {
     assert_eq!(claude(&app), "claude-oauth", "Ctrl+P to all restores the route");
 }
 
+/// Review #1567: under `@openrouter` the Claude row has only one route in
+/// scope, so Up/Down in the route column cannot move. That must not count as
+/// picking the OpenRouter route: clearing the scope still restores the
+/// user's Anthropic route.
+#[test]
+fn blocked_route_navigation_keeps_the_saved_route() {
+    let mut app = create_test_app();
+    app.inline_interactive_state = Some(model_browser_state(false));
+    let claude = |app: &App| {
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        let entry = picker
+            .entries
+            .iter()
+            .find(|e| e.name == "claude-opus-4-8")
+            .unwrap();
+        entry.active_option().unwrap().api_method.clone()
+    };
+    type_into(&mut app, "@openrouter");
+    {
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|&i| picker.entries[i].name == "claude-opus-4-8")
+            .unwrap();
+        picker.column = 1;
+    }
+    assert_eq!(claude(&app), "openrouter");
+    for code in [KeyCode::Up, KeyCode::Down, KeyCode::Down, KeyCode::Up] {
+        app.handle_key(code, KeyModifiers::empty()).unwrap();
+        assert_eq!(claude(&app), "openrouter", "no other route in scope");
+    }
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+    assert_eq!(
+        claude(&app),
+        "claude-oauth",
+        "a key press that moved nothing must not drop the saved route"
+    );
+}
+
 /// Review #1567: with a scope active the route column only moves between
 /// routes of that provider, so the header's `Provider:` stays true. A route
 /// the user picks by hand while scoped is kept after the scope is cleared.
