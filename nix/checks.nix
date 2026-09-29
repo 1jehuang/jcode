@@ -1,0 +1,192 @@
+{
+  pkgs,
+  module,
+  nixosModule,
+}:
+let
+  lib = pkgs.lib;
+
+  # Evaluate the module with stub home-manager options so the generated
+  # config.toml can be inspected without pulling in home-manager itself.
+  evalConfig =
+    jcodeConfig:
+    (lib.evalModules {
+      modules = [
+        module
+        { programs.jcode = jcodeConfig; }
+        {
+          options = {
+            home.file = lib.mkOption {
+              type = lib.types.attrsOf lib.types.raw;
+              default = { };
+            };
+            home.packages = lib.mkOption {
+              type = lib.types.listOf lib.types.raw;
+              default = [ ];
+            };
+          };
+        }
+        { _module.args.pkgs = pkgs; }
+      ];
+    }).config;
+
+  parse =
+    cfg: builtins.fromTOML (builtins.readFile (evalConfig cfg).home.file.".jcode/config.toml".source);
+
+  # Every value shape jcode's config.toml uses, including the ones that are easy
+  # to get wrong: arrays of tables, floats, negative integers, empty containers,
+  # keys that need quoting and a table key sorting before a scalar key.
+  sample = {
+    apple = {
+      x = 1;
+    };
+    zebra = 2;
+
+    provider = {
+      default_model = "claude-sonnet-4-5";
+      anthropic_cache_ttl_1h = true;
+      openai_reasoning_effort = "low";
+    };
+
+    "my.gateway" = {
+      "a b" = 1;
+      note = "привет 🎉";
+    };
+
+    providers.aigate = {
+      type = "openai-compatible";
+      base_url = "https://llm.example.com/v1";
+      api_key_env = "AIGATE_API_KEY";
+      models = [
+        {
+          id = "deepseek-v4-pro";
+          name = "DeepSeek V4 Pro";
+          context_window = 200000;
+        }
+        {
+          id = "other";
+          name = "Other";
+          context_window = 8000;
+        }
+      ];
+    };
+
+    compaction = {
+      mode = "semantic";
+      ewma_alpha = 0.35;
+      min_samples = -3;
+      max_context_tokens = 200000;
+    };
+
+    tools = {
+      enabled = [
+        "bash"
+        "edit"
+      ];
+      disabled = [ ];
+      profile = "";
+    };
+
+    keybindings.side_panel_toggle = "ctrl+b";
+
+    hooks.pre_tool = ''
+      line one
+      line "two"
+    '';
+  };
+
+  noConfig = evalConfig {
+    enable = true;
+    manageConfig = false;
+  };
+
+  nixosEval =
+    jcodeConfig:
+    (lib.evalModules {
+      modules = [
+        nixosModule
+        { programs.jcode = jcodeConfig; }
+        {
+          options.environment.systemPackages = lib.mkOption {
+            type = lib.types.listOf lib.types.raw;
+            default = [ ];
+          };
+        }
+        { _module.args.pkgs = pkgs; }
+      ];
+    }).config;
+
+  check =
+    name: cond:
+    if cond then
+      pkgs.runCommand "jcode-check-${name}" { } "mkdir $out"
+    else
+      throw "TEST FAILED: ${name}";
+in
+{
+  # The whole point of the module: settings must survive the round trip
+  # Nix -> TOML -> Nix unchanged.
+  jcode-config-roundtrip = check "roundtrip" (
+    parse {
+      enable = true;
+      settings = sample;
+    } == sample
+  );
+
+  # A table key that sorts before a scalar key must not break serialization
+  # (TOML requires scalars before tables in a section).
+  jcode-config-scalar-after-table = check "scalar-after-table" (
+    let
+      parsed = parse {
+        enable = true;
+        settings = {
+          apple = {
+            x = 1;
+          };
+          zebra = 2;
+        };
+      };
+    in
+    parsed.apple.x == 1 && parsed.zebra == 2
+  );
+
+  jcode-config-arrays-of-tables = check "arrays-of-tables" (
+    let
+      models =
+        (parse {
+          enable = true;
+          settings = sample;
+        }).providers.aigate.models;
+    in
+    builtins.length models == 2
+    && (builtins.elemAt models 1).id == "other"
+    && (builtins.elemAt models 0).context_window == 200000
+  );
+
+  jcode-config-quoted-keys = check "quoted-keys" (
+    let
+      parsed = parse {
+        enable = true;
+        settings = sample;
+      };
+    in
+    parsed."my.gateway"."a b" == 1
+  );
+
+  # Empty settings still produce a file; an empty TOML document is valid and
+  # jcode falls back to its own defaults for every key.
+  jcode-config-empty-settings = check "empty-settings" (parse { enable = true; } == { });
+
+  # manageConfig = false installs the package without touching config.toml.
+  jcode-config-manage-config-off = check "manage-config-off" (
+    noConfig.home.file == { }
+    && lib.any (p: lib.isDerivation p && p.pname == "jcode") noConfig.home.packages
+  );
+
+  # The system module only installs the package, and only when enabled.
+  jcode-nixos-module = check "nixos-module" (
+    lib.any (p: lib.isDerivation p && p.pname == "jcode")
+      (nixosEval { enable = true; }).environment.systemPackages
+    && (nixosEval { }).environment.systemPackages == [ ]
+  );
+}
