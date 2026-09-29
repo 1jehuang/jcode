@@ -197,18 +197,20 @@ pub fn analyze_frames_with_viewport(
     scroll_tops: &[i64],
     viewport_height: Option<u16>,
 ) -> StabilityReport {
-    let rows = viewport_height.map(|h| 0..h);
-    analyze_frames_with_viewport_rows(frames, scroll_tops, rows)
+    let rows: Option<Vec<std::ops::Range<u16>>> = viewport_height.map(|h| vec![0..h; frames.len()]);
+    analyze_frames_with_viewport_rows(frames, scroll_tops, rows.as_deref())
 }
 
-/// Like [`analyze_frames_with_viewport`], with the viewport given as the
-/// screen rows widgets may occupy (`first..end`). Live frames need this: the
-/// messages area does not start at row 0, and widgets stick below the top
-/// band rather than at the area's first row.
+/// Like [`analyze_frames_with_viewport`], with the viewport given per frame
+/// as the screen rows widgets may occupy (`first..end`). Live frames need
+/// this: the messages area does not start at row 0, widgets stick below the
+/// top band rather than at the area's first row, and the band (todos, prompt
+/// preview) can change height between frames. Each step is judged against
+/// the bounds of the frame the widget is in.
 pub fn analyze_frames_with_viewport_rows(
     frames: &[Vec<PlacedRect>],
     scroll_tops: &[i64],
-    viewport_rows: Option<std::ops::Range<u16>>,
+    viewport_rows: Option<&[std::ops::Range<u16>]>,
 ) -> StabilityReport {
     let mut report = StabilityReport {
         frames: frames.len(),
@@ -297,9 +299,11 @@ pub fn analyze_frames_with_viewport_rows(
                     // is deliberate, so it is not counted as drift. Holding still
                     // anywhere else is real drift against the text.
                     let signed_dy = c.y as i64 - p.y as i64;
-                    let at_edge = viewport_rows.as_ref().is_some_and(|rows| {
-                        c.y <= rows.start || c.y.saturating_add(c.height) >= rows.end
-                    });
+                    let at_edge = viewport_rows
+                        .and_then(|rows| rows.get(step + 1))
+                        .is_some_and(|rows| {
+                            c.y <= rows.start || c.y.saturating_add(c.height) >= rows.end
+                        });
                     let residual = if signed_dy == 0 && at_edge {
                         0
                     } else {
