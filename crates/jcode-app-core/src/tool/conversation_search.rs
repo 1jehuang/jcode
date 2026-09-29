@@ -286,21 +286,39 @@ fn message_to_text(msg: &Message) -> String {
 }
 
 fn extract_snippet(text: &str, query: &str) -> String {
-    let lower = text.to_lowercase();
-    if let Some(pos) = lower.find(query) {
-        let start = pos.saturating_sub(50);
-        let end = (pos + query.len() + 50).min(text.len());
-        let mut snippet = text[start..end].to_string();
-        if start > 0 {
-            snippet = format!("...{}", snippet);
-        }
-        if end < text.len() {
-            snippet = format!("{}...", snippet);
-        }
-        snippet
-    } else {
-        text.chars().take(100).collect()
+    // Lowercase char by char and remember which byte of `text` each lowercased
+    // byte came from. A match in the lowercased copy then maps back onto
+    // `text` even when lowercasing changes byte lengths (e.g. 'İ').
+    let mut lower = String::with_capacity(text.len());
+    let mut origin = Vec::with_capacity(text.len());
+    for (idx, ch) in text.char_indices() {
+        let before = lower.len();
+        lower.extend(ch.to_lowercase());
+        origin.resize(origin.len() + (lower.len() - before), idx);
     }
+    let Some(pos) = lower.find(query) else {
+        return text.chars().take(100).collect();
+    };
+    let match_start = origin.get(pos).copied().unwrap_or(0);
+    let match_end = origin.get(pos + query.len()).copied().unwrap_or(text.len());
+    // 50 bytes of context each side, widened to whole characters so the
+    // slice never splits a multi-byte char like '·'.
+    let mut start = match_start.saturating_sub(50);
+    while !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (match_end + 50).min(text.len());
+    while !text.is_char_boundary(end) {
+        end += 1;
+    }
+    let mut snippet = text[start..end].to_string();
+    if start > 0 {
+        snippet = format!("...{}", snippet);
+    }
+    if end < text.len() {
+        snippet = format!("{}...", snippet);
+    }
+    snippet
 }
 
 #[cfg(test)]
@@ -399,5 +417,37 @@ mod tests {
         let result = tool.execute(input, ctx).await.unwrap();
         assert!(result.output.contains("No turns found"));
         restore_env(base, previous_home);
+    }
+
+    /// Snippet windows used to be cut at raw byte offsets and panicked when
+    /// they landed inside a multi-byte char (seen live on a '·' in tool
+    /// output). Every offset around the match must slice cleanly.
+    #[test]
+    fn snippet_never_splits_multibyte_chars() {
+        // Pad right next to the match on each side so the 50-byte window
+        // edges sweep every byte offset of the 7-byte "a · b " pattern,
+        // including the middle of the 2-byte '·'.
+        for before in 0..7 {
+            for after in 0..7 {
+                let text = format!(
+                    "{}{}apiduck{}{}",
+                    "a · b ".repeat(20),
+                    "x".repeat(before),
+                    "y".repeat(after),
+                    " · end".repeat(20)
+                );
+                let snippet = extract_snippet(&text, "apiduck");
+                assert!(snippet.contains("apiduck"), "{before}/{after}: {snippet}");
+                assert!(snippet.starts_with("..."), "{before}/{after}");
+                assert!(snippet.ends_with("..."), "{before}/{after}");
+            }
+        }
+        // Lowercasing can change byte lengths ('İ' is 2 bytes, 3 lowercased),
+        // so an offset found in the lowercased copy is not an offset in the
+        // original text. The match must still map back to it.
+        let text = format!("{}Needle{}", "İ".repeat(100), "İ".repeat(40));
+        let snippet = extract_snippet(&text, "needle");
+        assert!(snippet.contains("Needle"), "{snippet}");
+        assert_eq!(extract_snippet("no match here", "zzz"), "no match here");
     }
 }
