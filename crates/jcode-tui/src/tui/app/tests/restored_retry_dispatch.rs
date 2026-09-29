@@ -410,3 +410,58 @@ fn test_stopped_restored_retry_stays_stopped_after_reopen() {
         assert!(reopened.restored_retry_delivery.is_some());
     });
 }
+
+#[test]
+fn test_failover_prompt_stops_restored_retry_until_fresh_submission() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let id = "failover_saved_retry";
+        let mut app = create_test_app();
+        app.remote_session_id = Some(id.into());
+        app.restored_retries.push(PendingRemoteMessage {
+            content: "saved retry".into(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.save_input_for_reload(id);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.set_session_id(id.into());
+        remote.mark_history_loaded();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        let request_id = app.current_message_id.unwrap();
+        let prompt = crate::provider::ProviderFailoverPrompt {
+            from_provider: "openai".into(),
+            from_label: "OpenAI".into(),
+            to_provider: "anthropic".into(),
+            to_label: "Anthropic".into(),
+            reason: "unavailable".into(),
+            estimated_input_chars: 11,
+            estimated_input_tokens: 3,
+        };
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: request_id,
+                message: prompt.to_error_message(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert!(app.restored_retry_stopped);
+        drop(app);
+        let mut reopened = App::new_for_remote(Some(id.into()));
+        rt.block_on(super::remote::process_remote_followups(
+            &mut reopened,
+            &mut remote,
+        ));
+        assert!(reopened.current_message_id.is_none());
+        assert_eq!(reopened.restored_retries.len(), 1);
+    });
+}

@@ -1456,8 +1456,13 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return false;
             }
-            if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
-            {
+            if is_failover_prompt {
+                // The provider is waiting for an explicit failover decision;
+                // a saved retry must not bypass that decision on the next tick.
+                app.clear_pending_remote_retry();
+                return false;
+            }
+            if !app.schedule_pending_remote_retry("⚠ Remote request failed.") {
                 app.clear_pending_remote_retry();
                 // No automatic retry will resend this turn, so restore the prompt the
                 // user typed back into the input box instead of dropping it.
