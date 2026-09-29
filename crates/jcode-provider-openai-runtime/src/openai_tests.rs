@@ -363,3 +363,148 @@ fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
 include!("openai_tests/persistent_terminal.rs");
 
 include!("openai_tests/persistent_prefix.rs");
+
+fn stored_openai_account(
+    label: &str,
+    access: &str,
+    refresh: &str,
+) -> jcode_base::auth::codex::OpenAiAccount {
+    jcode_base::auth::codex::OpenAiAccount {
+        label: label.to_string(),
+        access_token: access.to_string(),
+        refresh_token: refresh.to_string(),
+        id_token: None,
+        account_id: Some(format!("{access}-acct")),
+        expires_at: Some(chrono::Utc::now().timestamp_millis() + 8 * 60 * 60 * 1000),
+        email: None,
+    }
+}
+
+fn openai_session_from_store() -> OpenAIProvider {
+    OpenAIProvider::new(jcode_base::auth::codex::load_credentials().expect("stored OpenAI login"))
+}
+
+/// A relogin that stores a different ChatGPT account under the same label
+/// must reach every live session, not just one that got a reload.
+#[tokio::test]
+async fn openai_same_label_relogin_replaces_token_in_every_live_session() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai");
+    let _api_key = EnvVarGuard::remove("OPENAI_API_KEY");
+    jcode_base::auth::codex::set_active_account_override(None);
+
+    let label = jcode_base::auth::codex::upsert_account(stored_openai_account(
+        "openai-1",
+        "old-openai-access",
+        "old-openai-refresh",
+    ))
+    .unwrap();
+    let session = openai_session_from_store();
+    let other_session = openai_session_from_store();
+    assert_eq!(
+        session.resolve_access_token().await.unwrap(),
+        "old-openai-access"
+    );
+
+    jcode_base::auth::codex::upsert_account(stored_openai_account(
+        &label,
+        "new-openai-access",
+        "new-openai-refresh",
+    ))
+    .unwrap();
+    jcode_base::auth::AuthStatus::invalidate_cache();
+
+    assert_eq!(
+        session.resolve_access_token().await.unwrap(),
+        "new-openai-access"
+    );
+    assert_eq!(
+        other_session.resolve_access_token().await.unwrap(),
+        "new-openai-access"
+    );
+}
+
+/// `/account switch` only invalidates the requesting session. Every other
+/// live session must use the newly active account on its next request.
+#[tokio::test]
+async fn openai_account_switch_replaces_token_in_other_live_sessions() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai");
+    let _api_key = EnvVarGuard::remove("OPENAI_API_KEY");
+    jcode_base::auth::codex::set_active_account_override(None);
+
+    let first = jcode_base::auth::codex::upsert_account(stored_openai_account(
+        "openai-1",
+        "first-openai-access",
+        "first-openai-refresh",
+    ))
+    .unwrap();
+    let second = jcode_base::auth::codex::upsert_account(stored_openai_account(
+        "openai-2",
+        "second-openai-access",
+        "second-openai-refresh",
+    ))
+    .unwrap();
+    jcode_base::auth::codex::set_active_account(&first).unwrap();
+    let other_session = openai_session_from_store();
+    assert_eq!(
+        other_session.resolve_access_token().await.unwrap(),
+        "first-openai-access"
+    );
+
+    jcode_base::auth::codex::set_active_account(&second).unwrap();
+
+    assert_eq!(
+        other_session.resolve_access_token().await.unwrap(),
+        "second-openai-access"
+    );
+    jcode_base::auth::codex::set_active_account_override(None);
+}
+
+/// An external Codex CLI relogin rewrites ~/.codex/auth.json without telling
+/// jcode. The next request must still use the new login.
+#[tokio::test]
+async fn openai_external_codex_relogin_replaces_token() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai");
+    let _api_key = EnvVarGuard::remove("OPENAI_API_KEY");
+    let _legacy = EnvVarGuard::set("JCODE_ALLOW_CODEX_LEGACY_AUTH", "1");
+    jcode_base::auth::codex::set_active_account_override(None);
+
+    let path = temp.path().join("external/.codex/auth.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let write_login = |access: &str| {
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "tokens": {
+                    "access_token": access,
+                    "refresh_token": format!("{access}-refresh"),
+                    "account_id": format!("{access}-acct"),
+                    "expires_at": chrono::Utc::now().timestamp_millis() + 8 * 60 * 60 * 1000
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    write_login("codex-old-login");
+    let session = openai_session_from_store();
+    assert_eq!(
+        session.resolve_access_token().await.unwrap(),
+        "codex-old-login"
+    );
+
+    write_login("codex-new-login-other-account");
+
+    assert_eq!(
+        session.resolve_access_token().await.unwrap(),
+        "codex-new-login-other-account"
+    );
+}

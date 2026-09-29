@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Mutex as StdMutex;
 
 #[path = "openai_usage_recording.rs"]
 mod openai_usage_recording;
@@ -14,9 +15,78 @@ use self::openai_stream_timeout::{
     effective_https_idle_timeout, effective_ws_completion_timeout_secs,
 };
 
+/// Access tokens this process minted by refreshing a stored credential, mapped
+/// to the stored refresh token they were minted from. Refreshes of jcode-stored
+/// accounts are persisted, but a refresh of an external login (for example
+/// `~/.codex/auth.json`) is not, so the cache legitimately differs from the
+/// store and must not be reverted to the rotated-away stored token.
+static REFRESHED_FROM: LazyLock<StdMutex<HashMap<String, String>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn record_refreshed_from(access_token: &str, stored_refresh_token: &str) {
+    let mut map = REFRESHED_FROM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if map.len() > 64 {
+        map.clear();
+    }
+    map.insert(access_token.to_string(), stored_refresh_token.to_string());
+}
+
+fn was_refreshed_from(access_token: &str, stored_refresh_token: &str) -> bool {
+    REFRESHED_FROM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(access_token)
+        .is_some_and(|origin| origin == stored_refresh_token)
+}
+
+/// Replace this session's cached credential when the stored login changed.
+///
+/// Every provider runtime (one per session, fork, or swarm worker) caches its
+/// own credential, while an account switch, same-label relogin, or external
+/// Codex relogin only rewrites the store and at most notifies one session.
+/// Re-reading the store (local file reads, no network) before each request
+/// makes every live session pick up the new account on its next request or
+/// retry. The cached credential's shape selects the source so an OAuth session
+/// stays on OAuth and an API-key session stays on its API key.
+pub(super) async fn sync_with_stored_credentials(credentials: &Arc<RwLock<CodexCredentials>>) {
+    let (cached_access, cached_is_oauth) = {
+        let cached = credentials.read().await;
+        (
+            cached.access_token.clone(),
+            !cached.refresh_token.is_empty() || cached.id_token.is_some(),
+        )
+    };
+    if cached_access.is_empty() {
+        return;
+    }
+    let stored = if cached_is_oauth {
+        jcode_base::auth::codex::load_oauth_credentials()
+    } else {
+        jcode_base::auth::codex::load_api_key_credentials()
+    };
+    let Ok(stored) = stored else {
+        return;
+    };
+    if stored.access_token == cached_access
+        || was_refreshed_from(&cached_access, &stored.refresh_token)
+    {
+        return;
+    }
+    let mut cached = credentials.write().await;
+    if cached.access_token == cached_access {
+        jcode_base::logging::info(
+            "OpenAI stored credentials changed (account switch or relogin); using the new login",
+        );
+        *cached = stored;
+    }
+}
+
 pub(super) async fn openai_access_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
 ) -> anyhow::Result<String> {
+    sync_with_stored_credentials(credentials).await;
     let (access_token, refresh_token, needs_refresh) = {
         let tokens = credentials.read().await;
         if tokens.access_token.is_empty() {
@@ -56,7 +126,29 @@ pub(super) async fn force_refresh_openai_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
     refresh_token: &str,
 ) -> anyhow::Result<String> {
+    // Start from the stored login: if the user swapped accounts since the
+    // rejected request was built, retry with the new account's token instead
+    // of refreshing the old account's refresh token.
+    sync_with_stored_credentials(credentials).await;
+    {
+        let current = credentials.read().await;
+        if current.refresh_token != refresh_token && !current.access_token.is_empty() {
+            return Ok(current.access_token.clone());
+        }
+    }
+    // Chained refreshes of a non-persisted login keep pointing at the stored
+    // refresh token they ultimately came from.
+    let origin = {
+        let current = credentials.read().await;
+        REFRESHED_FROM
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&current.access_token)
+            .cloned()
+            .unwrap_or_else(|| refresh_token.to_string())
+    };
     let refreshed = oauth::refresh_openai_tokens(refresh_token).await?;
+    record_refreshed_from(&refreshed.access_token, &origin);
     let mut tokens = credentials.write().await;
     let account_id = tokens.account_id.clone();
     let id_token = refreshed
