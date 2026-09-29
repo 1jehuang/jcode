@@ -917,3 +917,87 @@ fn contended_overview_data() -> InfoWidgetData {
         ..model_and_context_data()
     }
 }
+
+/// Review #1456: a widget hidden while stuck below the top band has its content
+/// line above the viewport. Re-merge used to reserve rows from that line (row 0
+/// after saturating), not the slot the widget will return to, so Overview could
+/// take the slot and the widget stayed hidden after the text cleared.
+#[test]
+fn remerge_keeps_slot_of_widget_hidden_below_top_band() {
+    let data = contended_data();
+    let scroll_top = 200usize;
+    // Pockets exactly as tall as Overview really draws at full width, so the
+    // re-merge trial can seat it.
+    let ov = calculate_widget_height(WidgetKind::Overview, &data, 40, u16::MAX) as usize;
+    assert!(ov > 2, "precondition: overview has content");
+    let mem_h = (ov + 2) as u16;
+    // The band is taller than the memory box, so the old reservation (rows
+    // from 0, the off-screen line clamped to the top) falls inside the band
+    // and leaves the real slot below it unprotected.
+    let band = mem_h as usize + 2;
+    let rows = band + 5 * (ov + 1);
+    let area = Rect::new(0, 0, 140, rows as u16);
+    // This frame, text leaves gaps of exactly `ov` free rows below the band:
+    // Overview fits, the taller Memory box fits nowhere and hides in place.
+    let widths_with = |covered: bool| -> Vec<u16> {
+        (0..rows)
+            .map(|r| {
+                if r < band || (covered && (r - band) % (ov + 1) == ov) {
+                    0
+                } else {
+                    60
+                }
+            })
+            .collect()
+    };
+    let margins = |covered: bool| Margins {
+        right_widths: widths_with(covered),
+        right_reliable: widths_with(covered),
+        scroll_top,
+        content_start_row: band,
+        ..Default::default()
+    };
+    let memory = WidgetAnchor {
+        placement: WidgetPlacement {
+            kind: WidgetKind::MemoryActivity,
+            rect: Rect::new(100, band as u16, 40, mem_h),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        // Stuck below the band: its own line scrolled above the viewport.
+        content_top: scroll_top - 30,
+    };
+    // A split part further down triggers the Overview re-merge trial.
+    let part_row = band + 3 * (ov + 1);
+    let parts = right_anchor(WidgetKind::ContextUsage, part_row as u16, 3);
+    let hidden = calculate_placements_anchored(area, &margins(true), &data, true, &[memory, parts]);
+    assert_placements_sane("hidden frame", area, &hidden.visible);
+    assert!(
+        !hidden
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::MemoryActivity),
+        "precondition: memory is hidden this frame: {:?}",
+        hidden.visible
+    );
+    let slot = (band, band + mem_h as usize);
+    for p in &hidden.visible {
+        let (start, end) = (p.rect.y as usize, (p.rect.y + p.rect.height) as usize);
+        assert!(
+            end <= slot.0 || start >= slot.1,
+            "{:?} took the hidden memory slot {slot:?}: {:?}",
+            p.kind,
+            p.rect
+        );
+    }
+    // Next frame the text has passed: memory returns to the slot it kept.
+    let cleared =
+        calculate_placements_anchored(area, &margins(false), &data, true, &hidden.anchors);
+    assert_placements_sane("cleared frame", area, &cleared.visible);
+    let back = cleared
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::MemoryActivity)
+        .unwrap_or_else(|| panic!("memory stayed hidden: {:?}", cleared.visible));
+    assert_eq!(back.rect.y as usize, band, "memory came back elsewhere");
+}

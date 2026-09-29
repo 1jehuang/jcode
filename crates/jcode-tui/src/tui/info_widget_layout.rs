@@ -200,7 +200,7 @@ pub(crate) fn calculate_placements_anchored(
     });
     // Rows already taken this frame on each side, so a resident that slides
     // to dodge text never lands on another resident.
-    let mut claimed: Vec<(Side, usize, usize)> = Vec::new();
+    let mut claimed: Vec<(WidgetKind, Side, usize, usize)> = Vec::new();
 
     // Phase 1: hold each anchored widget in its exact recorded slot.
     //
@@ -288,7 +288,7 @@ pub(crate) fn calculate_placements_anchored(
         let free_of_others = |start: usize| {
             claimed
                 .iter()
-                .all(|&(side, s, e)| side != prev.side || start + height <= s || start >= e)
+                .all(|&(_, side, s, e)| side != prev.side || start + height <= s || start >= e)
         };
         let slot = (0..=last_start - first_row)
             .flat_map(|d| {
@@ -353,7 +353,7 @@ pub(crate) fn calculate_placements_anchored(
                 // widget into the slot it will reclaim next frame; otherwise the
                 // returning widget would overlap whatever took its place.
                 reserve_rows(&mut all_rects, prev.side, row_start, row_end);
-                claimed.push((prev.side, row_start, row_end));
+                claimed.push((prev.kind, prev.side, row_start, row_end));
             }
             continue;
         }
@@ -383,7 +383,7 @@ pub(crate) fn calculate_placements_anchored(
         }
 
         reserve_rows(&mut all_rects, prev.side, row_start, row_end);
-        claimed.push((prev.side, row_start, row_end));
+        claimed.push((prev.kind, prev.side, row_start, row_end));
     }
 
     let mut phase = Phase2State {
@@ -411,23 +411,15 @@ pub(crate) fn calculate_placements_anchored(
         if !retired.is_empty() {
             let held: HashSet<WidgetKind> = anchored.difference(&retired).copied().collect();
             let mut freed = candidate_rects(&margin_spaces, messages_area);
-            for a in &phase.next_anchors {
-                if retired.contains(&a.placement.kind) {
-                    continue;
+            // Reserve exactly the rows Phase 1 gave each held widget: where a
+            // visible one is drawn, and the slot a hidden one will return to.
+            // Recomputing them from `content_top` is wrong for residents stuck
+            // at the viewport edge, whose content line is off-screen, and let
+            // Overview take a hidden widget's slot for good.
+            for &(kind, side, start, end) in &claimed {
+                if !retired.contains(&kind) {
+                    reserve_rows(&mut freed, side, start, end);
                 }
-                // Visible residents: the rows they are drawn on. Hidden ones: the
-                // rows they will return to. Content lines can be off-screen now
-                // that residents stick to the viewport edge.
-                let top = match phase.placements.iter().find(|p| p.kind == a.placement.kind) {
-                    Some(p) => p.rect.y.saturating_sub(messages_area.y) as usize,
-                    None => a.content_top.saturating_sub(margins.scroll_top),
-                };
-                reserve_rows(
-                    &mut freed,
-                    a.placement.side,
-                    top,
-                    top + a.placement.rect.height as usize,
-                );
             }
             let mut trial = Phase2State {
                 placements: phase
