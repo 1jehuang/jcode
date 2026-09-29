@@ -81,6 +81,17 @@
               lib.concatMap secretKeys value
             else
               [ ];
+
+          # Only the generated file reaches the store; with manageConfig
+          # disabled the file is the user's own. Reporting the problem through
+          # `assertions` covers home-manager, and refusing at the file source
+          # covers any consumer that reads home.file without evaluating
+          # assertions, so a credential cannot reach the store either way.
+          secretViolation = lib.optionalString (cfg.manageConfig && secretKeys cfg.settings != [ ]) ''
+            programs.jcode.settings contains inline credentials (${lib.concatStringsSep ", " (lib.unique (secretKeys cfg.settings))}).
+            The generated config.toml is a world-readable Nix store path, so those values would be readable by every local user.
+            Use the environment-variable field instead (for example api_key_env), or set programs.jcode.manageConfig = false and keep the file outside the store.
+          '';
         in
         {
           options.programs.jcode = {
@@ -158,21 +169,19 @@
           config = lib.mkIf cfg.enable {
             assertions = [
               {
-                # Only the generated file reaches the store; with
-                # manageConfig disabled the file is the user's own.
-                assertion = !cfg.manageConfig || secretKeys cfg.settings == [ ];
-                message = ''
-                  programs.jcode.settings contains inline credentials (${lib.concatStringsSep ", " (lib.unique (secretKeys cfg.settings))}).
-                  The generated config.toml is a world-readable Nix store path, so those values would be readable by every local user.
-                  Use the environment-variable field instead (for example api_key_env), or set programs.jcode.manageConfig = false and keep the file outside the store.
-                '';
+                assertion = secretViolation == "";
+                message = secretViolation;
               }
             ];
 
             home.packages = [ cfg.package ] ++ cfg.extraPackages;
 
             home.file = lib.mkIf cfg.manageConfig {
-              ".jcode/config.toml".source = toml.generate "jcode-config.toml" cfg.settings;
+              ".jcode/config.toml".source =
+                if secretViolation == "" then
+                  toml.generate "jcode-config.toml" cfg.settings
+                else
+                  throw secretViolation;
             };
           };
         };

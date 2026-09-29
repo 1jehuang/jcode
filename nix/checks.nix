@@ -215,6 +215,20 @@ in
     messages != [ ] && lib.any (m: lib.hasInfix "api_key" m && lib.hasInfix "world-readable" m) messages
   );
 
+  # The file source itself refuses an inline credential, so a consumer that
+  # reads home.file without evaluating assertions still cannot put a secret in
+  # the store.
+  jcode-config-file-source-refuses-inline-credential = check "file-source-refuses-inline-credential" (
+    !(builtins.tryEval (
+      builtins.seq
+        (evalConfig {
+          enable = true;
+          settings.providers.example.api_key = "not-a-real-secret";
+        }).home.file.".jcode/config.toml".source
+        "reached"
+    )).success
+  );
+
   # The same detector catches the other credential-bearing fields in the schema.
   jcode-config-rejects-token = check "rejects-token" (rejected {
     enable = true;
