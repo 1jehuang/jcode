@@ -465,3 +465,155 @@ fn test_failover_prompt_stops_restored_retry_until_fresh_submission() {
         assert_eq!(reopened.restored_retries.len(), 1);
     });
 }
+
+#[test]
+fn test_fresh_prompt_terminal_error_stops_waiting_restored_retries() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let failover = crate::provider::ProviderFailoverPrompt {
+            from_provider: "openai".into(),
+            from_label: "OpenAI".into(),
+            to_provider: "anthropic".into(),
+            to_label: "Anthropic".into(),
+            reason: "unavailable".into(),
+            estimated_input_chars: 11,
+            estimated_input_tokens: 3,
+        };
+        for (case, error) in [
+            ("failover", failover.to_error_message()),
+            ("model", "UnsupportedModel".into()),
+            ("terminal", "Request failed".into()),
+            ("credentials", "HTTP 401 Unauthorized".into()),
+        ] {
+            let id = format!("fresh_terminal_saved_retry_{case}");
+            let mut app = create_test_app();
+            app.remote_session_id = Some(id.clone());
+            app.restored_retries.push(PendingRemoteMessage {
+                content: "saved retry".into(),
+                images: vec![("image/png".into(), "saved image".into())],
+                is_system: false,
+                system_reminder: None,
+                auto_retry: true,
+                retry_attempts: 2,
+                retry_at: None,
+            });
+            app.restored_retries.push(app.restored_retries[0].clone());
+            app.restored_retry_stopped = true;
+            app.save_input_for_reload(&id);
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.set_session_id(id.clone());
+            remote.mark_history_loaded();
+            let fresh_id = rt
+                .block_on(super::remote::begin_remote_send(
+                    &mut app,
+                    &mut remote,
+                    "fresh prompt".into(),
+                    vec![],
+                    false,
+                    None,
+                    false,
+                    0,
+                ))
+                .unwrap();
+            assert!(!app.pending_remote_is_restored_retry);
+            assert!(!app.restored_retry_stopped);
+            app.consecutive_credential_failures = App::CREDENTIAL_FAILURE_BREAKER_THRESHOLD - 1;
+            app.handle_server_event(
+                crate::protocol::ServerEvent::Error {
+                    id: fresh_id,
+                    message: error,
+                    retry_after_secs: None,
+                },
+                &mut remote,
+            );
+            assert!(
+                app.restored_retry_stopped,
+                "{case} must stop waiting retries"
+            );
+            assert!(app.rate_limit_pending_message.is_none());
+            app.handle_server_event(
+                crate::protocol::ServerEvent::Done { id: fresh_id },
+                &mut remote,
+            );
+            rt.block_on(super::remote::process_remote_followups(
+                &mut app,
+                &mut remote,
+            ));
+            assert!(
+                app.restored_retry_delivery.is_none(),
+                "{case} must not dispatch saved work"
+            );
+            assert_eq!(app.restored_retries.len(), 2);
+            // The terminal error checkpoints the stop before graceful-save hooks.
+            drop(app);
+            for _ in 0..2 {
+                let mut reopened = App::new_for_remote(Some(id.clone()));
+                rt.block_on(super::remote::process_remote_followups(
+                    &mut reopened,
+                    &mut remote,
+                ));
+                assert!(
+                    reopened.restored_retry_stopped,
+                    "{case} must remain stopped after reopen"
+                );
+                assert!(reopened.current_message_id.is_none());
+                assert_eq!(reopened.restored_retries.len(), 2);
+                assert_eq!(reopened.restored_retries[0].images[0].1, "saved image");
+                reopened.save_input_for_reload(&id);
+            }
+            let mut reopened = App::new_for_remote(Some(id.clone()));
+            let mut disconnected = crate::tui::backend::RemoteConnection::dummy();
+            disconnected.set_session_id(id.clone());
+            disconnected.mark_history_loaded();
+            drop(disconnected.take_dummy_peer());
+            assert!(
+                rt.block_on(super::remote::begin_remote_send(
+                    &mut reopened,
+                    &mut disconnected,
+                    "failed new prompt".into(),
+                    vec![],
+                    false,
+                    None,
+                    false,
+                    0,
+                ))
+                .is_err()
+            );
+            assert!(
+                reopened.restored_retry_stopped,
+                "a failed socket send cannot release the stop"
+            );
+            let next_id = rt
+                .block_on(super::remote::begin_remote_send(
+                    &mut reopened,
+                    &mut remote,
+                    "new prompt".into(),
+                    vec![],
+                    false,
+                    None,
+                    false,
+                    0,
+                ))
+                .unwrap();
+            assert!(!reopened.restored_retry_stopped);
+            reopened.handle_server_event(
+                crate::protocol::ServerEvent::Done { id: next_id },
+                &mut remote,
+            );
+            rt.block_on(super::remote::process_remote_followups(
+                &mut reopened,
+                &mut remote,
+            ));
+            assert!(reopened.restored_retry_delivery.is_some());
+            assert_eq!(
+                reopened
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .unwrap()
+                    .content,
+                "saved retry"
+            );
+        }
+    });
+}

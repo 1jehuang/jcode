@@ -235,7 +235,7 @@ impl App {
 
         match outcome {
             Err(current_attempts) => {
-                self.clear_pending_remote_retry();
+                self.stop_pending_remote_retry();
                 self.push_display_message(DisplayMessage::error(format!(
                     "{} Auto-retry limit reached after {} attempt{}. Use `/poke` again to retry manually.",
                     reason,
@@ -288,19 +288,32 @@ impl App {
     }
 
     pub(super) fn clear_pending_remote_retry(&mut self) {
-        let stopped_now =
-            self.pending_remote_is_restored_retry && !self.restored_retries.is_empty();
-        if stopped_now {
-            self.restored_retry_stopped = true;
-            self.restored_retry_delivery = None;
+        if self.pending_remote_is_restored_retry {
+            self.stop_restored_retries();
         }
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
-        if stopped_now
-            && let Some(session_id) = self
-                .remote_session_id
-                .as_deref()
-                .or(self.resume_session_id.as_deref())
+    }
+
+    /// A terminal error blocks all waiting saved work, even when the failed
+    /// request was an independent fresh prompt. Normal completion only clears
+    /// the current request and does not stop the saved queue.
+    pub(super) fn stop_pending_remote_retry(&mut self) {
+        self.stop_restored_retries();
+        self.rate_limit_pending_message = None;
+        self.rate_limit_reset = None;
+    }
+
+    fn stop_restored_retries(&mut self) {
+        if self.restored_retries.is_empty() {
+            return;
+        }
+        self.restored_retry_stopped = true;
+        self.restored_retry_delivery = None;
+        if let Some(session_id) = self
+            .remote_session_id
+            .as_deref()
+            .or(self.resume_session_id.as_deref())
             && let Err(error) = self.checkpoint_restored_followups(session_id)
         {
             self.push_display_message(DisplayMessage::error(format!(
@@ -341,7 +354,7 @@ impl App {
     /// session (one failed turn per resend) until the user noticed.
     pub(super) fn trip_credential_failure_breaker(&mut self, message: &str) {
         let failures = self.consecutive_credential_failures;
-        self.clear_pending_remote_retry();
+        self.stop_pending_remote_retry();
         let cleared_pokes = if self.auto_poke_incomplete_todos {
             super::commands::disable_auto_poke(self)
         } else {

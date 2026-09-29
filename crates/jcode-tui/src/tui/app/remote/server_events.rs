@@ -1411,7 +1411,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // request. Fail fast with an actionable hint instead of burning the
             // auto-retry budget on guaranteed 4xx responses (#387).
             if crate::tui::app::commands::is_fatal_model_endpoint_error(&message) {
-                app.clear_pending_remote_retry();
+                app.stop_pending_remote_retry();
                 if app.auto_poke_incomplete_todos {
                     crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(
                         app, &message,
@@ -1459,11 +1459,11 @@ pub(in crate::tui::app) fn handle_server_event(
             if is_failover_prompt {
                 // The provider is waiting for an explicit failover decision;
                 // a saved retry must not bypass that decision on the next tick.
-                app.clear_pending_remote_retry();
+                app.stop_pending_remote_retry();
                 return false;
             }
             if !app.schedule_pending_remote_retry("⚠ Remote request failed.") {
-                app.clear_pending_remote_retry();
+                app.stop_pending_remote_retry();
                 // No automatic retry will resend this turn, so restore the prompt the
                 // user typed back into the input box instead of dropping it.
                 app.restore_failed_input_to_box();

@@ -185,7 +185,7 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
     }
 
     let cleared = disable_auto_poke(app);
-    app.clear_pending_remote_retry();
+    app.stop_pending_remote_retry();
     app.push_display_message(DisplayMessage::system(format!(
         "🛑 The last request failed in a way that retrying won't fix, so we stopped poking.{} Fix the request or session, then /poke to resume.",
         if cleared == 0 {
