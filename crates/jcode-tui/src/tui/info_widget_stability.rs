@@ -197,6 +197,19 @@ pub fn analyze_frames_with_viewport(
     scroll_tops: &[i64],
     viewport_height: Option<u16>,
 ) -> StabilityReport {
+    let rows = viewport_height.map(|h| 0..h);
+    analyze_frames_with_viewport_rows(frames, scroll_tops, rows)
+}
+
+/// Like [`analyze_frames_with_viewport`], with the viewport given as the
+/// screen rows widgets may occupy (`first..end`). Live frames need this: the
+/// messages area does not start at row 0, and widgets stick below the top
+/// band rather than at the area's first row.
+pub fn analyze_frames_with_viewport_rows(
+    frames: &[Vec<PlacedRect>],
+    scroll_tops: &[i64],
+    viewport_rows: Option<std::ops::Range<u16>>,
+) -> StabilityReport {
     let mut report = StabilityReport {
         frames: frames.len(),
         steps: frames.len().saturating_sub(1),
@@ -284,8 +297,9 @@ pub fn analyze_frames_with_viewport(
                     // is deliberate, so it is not counted as drift. Holding still
                     // anywhere else is real drift against the text.
                     let signed_dy = c.y as i64 - p.y as i64;
-                    let at_edge = viewport_height
-                        .is_some_and(|h| c.y == 0 || c.y.saturating_add(c.height) >= h);
+                    let at_edge = viewport_rows.as_ref().is_some_and(|rows| {
+                        c.y <= rows.start || c.y.saturating_add(c.height) >= rows.end
+                    });
                     let residual = if signed_dy == 0 && at_edge {
                         0
                     } else {
