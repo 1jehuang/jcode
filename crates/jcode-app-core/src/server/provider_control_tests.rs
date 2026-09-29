@@ -1424,3 +1424,45 @@ async fn refresh_models_emits_available_models_updated_after_prefetch() {
             && route.api_method == "mock-auth"
     }));
 }
+
+#[tokio::test]
+async fn notify_auth_changed_broadcasts_credentials_changed_to_all_sessions() {
+    let _guard = EnvGuard::save(&[]);
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    // Subscribe before the request: every connected client's bus forwarder
+    // turns this into ServerEvent::CredentialsChanged (client_lifecycle.rs).
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+    let provider: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let agent = Arc::new(Mutex::new(Agent::new(provider.clone(), Registry::empty())));
+    let session_id = { agent.lock().await.session_id().to_string() };
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([(
+        "test-session".to_string(),
+        Arc::clone(&agent),
+    )])));
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel();
+
+    handle_notify_auth_changed(
+        7,
+        Some("anthropic".to_string()),
+        None,
+        false,
+        &provider,
+        &provider,
+        &sessions,
+        session_id.as_str(),
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, bus_rx.recv())
+            .await
+            .expect("CredentialsChanged must be published after an auth change");
+        if let Ok(crate::bus::BusEvent::CredentialsChanged { .. }) = event {
+            break;
+        }
+    }
+}
