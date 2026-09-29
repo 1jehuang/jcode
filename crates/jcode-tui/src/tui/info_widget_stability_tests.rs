@@ -470,3 +470,32 @@ fn stationary_widget_counts_as_drift_except_at_the_edge() {
     let report = analyze_frames_with_scroll(&middle, &tops);
     assert_eq!(report.total_content_travel, 4, "{report:#?}");
 }
+
+/// Review #1456: the live benchmark's messages area starts below the header
+/// and a pinned top band, so the edges are not row 0 and the frame height.
+/// A widget stuck right under the band or at the area's bottom is edge-stuck;
+/// the same widget one row further in is drift.
+#[test]
+fn stationary_widget_edges_follow_the_live_viewport_rows() {
+    let at = |y: u16| {
+        vec![PlacedRect {
+            kind: "overview",
+            x: 60,
+            y,
+            width: 40,
+            height: 8,
+        }]
+    };
+    let tops: Vec<i64> = (0..5).collect();
+    // Messages area rows 3..33, top band of 2 rows: widgets live in 5..33.
+    let rows = Some(5u16..33);
+    for edge_y in [5u16, 25] {
+        let frames: Vec<_> = (0..5).map(|_| at(edge_y)).collect();
+        let report = analyze_frames_with_viewport_rows(&frames, &tops, rows.clone());
+        assert_eq!(report.total_content_travel, 0, "y={edge_y}: {report:#?}");
+        assert_eq!(report.total_recycles, 0, "y={edge_y}: {report:#?}");
+    }
+    let inside: Vec<_> = (0..5).map(|_| at(6)).collect();
+    let report = analyze_frames_with_viewport_rows(&inside, &tops, rows);
+    assert_eq!(report.total_content_travel, 4, "{report:#?}");
+}
