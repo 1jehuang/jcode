@@ -42,25 +42,34 @@
           # written into `settings` is visible to every local user. The schema
           # names the environment-variable fields with an _env suffix, so
           # api_key_env and friends never match the patterns below.
+          # Names mix separators ("x-api-key", "api_key", "Proxy-Authorization"),
+          # so a credential word only counts at a separator boundary. That keeps
+          # benign names such as keybindings, x-api-version and max_tokens out.
+          credentialWords = [
+            "api_key"
+            "apikey"
+            "key"
+            "token"
+            "secret"
+            "password"
+            "passwd"
+            "cookie"
+            "bearer"
+          ];
+
           looksSecret =
             name:
             let
               # Header names arrive in whatever case the provider uses.
               lower = lib.toLower name;
+              endsWithWord =
+                word: lower == word || lib.hasSuffix "-${word}" lower || lib.hasSuffix "_${word}" lower;
             in
-            builtins.elem lower [
-              "api_key"
-              "password"
-              "authorization"
-              "api-key"
-              "x-api-key"
-            ]
-            || lib.any (suffix: lib.hasSuffix suffix lower) [
-              "_api_key"
-              "_token"
-              "_password"
-              "_secret"
-            ];
+            # `api_key_env` holds the name of a variable, and `*_id` fields are
+            # identifiers rather than secrets.
+            !(lib.hasSuffix "env" lower)
+            && !(lib.hasSuffix "id" lower)
+            && (lib.hasInfix "authorization" lower || lib.any endsWithWord credentialWords);
 
           secretKeys =
             value:

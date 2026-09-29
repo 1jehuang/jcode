@@ -233,6 +233,29 @@ in
     settings.providers.example.headers.Authorization = "Bearer not-a-real-secret";
   });
 
+  jcode-config-rejects-proxy-authorization = check "rejects-proxy-authorization" (rejected {
+    enable = true;
+    settings.providers.example.headers."Proxy-Authorization" = "Bearer not-a-real-secret";
+  });
+
+  # Credential words only match at a separator boundary, so ordinary
+  # configuration must keep working: the auth enum value, a benign header, a
+  # variable name field and an identifier field.
+  jcode-config-accepts-non-credential-strings = check "accepts-non-credential-strings" (
+    !(rejected {
+      enable = true;
+      settings = {
+        providers.example.auth = "api-key";
+        providers.example.headers."X-Api-Version" = "2024-01-01";
+        providers.example.headers."X-Title" = "jcode";
+        providers.example.api_key_env = "EXAMPLE_API_KEY";
+        safety.jade_relay_token_id = "abcd";
+        compaction.max_context_tokens = 200000;
+        keybindings.side_panel_toggle = "ctrl+b";
+      };
+    })
+  );
+
   # Environment-variable names are the supported way to reference credentials,
   # and the flag-style field must not trip the detector.
   jcode-config-accepts-credential-references = check "accepts-credential-references" (

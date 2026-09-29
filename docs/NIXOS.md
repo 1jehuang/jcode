@@ -112,11 +112,18 @@ Two further points worth knowing:
 
 The file lands in the world-readable Nix store, so credentials belong in the
 environment-variable field, `api_key_env`. To make that hard to get wrong,
-evaluation fails when `settings` contains an inline credential: a key named
-`api_key`, `password` or an authorization header, or any string-valued key
-ending in `_api_key`, `_token`, `_password` or `_secret`. The error names the
-offending keys and points at `api_key_env`. Environment-variable fields are
-unaffected, since `api_key_env` ends in `_env` rather than a credential suffix.
+evaluation fails when `settings` contains an inline credential. A string-valued
+key counts as one when its name ends in a credential word at a separator
+boundary (`_key`, `-api-key`, `_token`, `_password`, `_secret`, `-cookie`,
+`_bearer`) or contains `authorization`, so `api_key`, `bing_api_key`,
+`telegram_bot_token`, `email_password`, `Authorization` and
+`Proxy-Authorization` all fail. The error names the offending keys and points
+at `api_key_env`.
+
+Names that only look similar are unaffected: `api_key_env` and other fields
+ending in `_env` hold variable names, `_id` fields hold identifiers, and
+separator boundaries keep `keybindings`, `max_context_tokens`, `auth = "api-key"`
+and headers such as `X-Api-Version` working.
 
 The assertion only applies while the module generates the file. With
 `programs.jcode.manageConfig = false` nothing is written to the store, so
