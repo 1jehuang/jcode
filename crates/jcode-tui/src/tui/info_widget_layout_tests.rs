@@ -770,3 +770,150 @@ fn remerge_keeps_split_part_when_higher_priority_widget_takes_the_pocket() {
         "context information vanished: {kinds:?}"
     );
 }
+
+/// Scroll the viewport over a ragged transcript like a mouse wheel does (a few
+/// lines per step) and record what the right-hand box looks like each frame.
+fn scroll_frames(
+    data: &InfoWidgetData,
+    area: Rect,
+    margins_at: impl Fn(usize) -> Margins,
+    scroll_tops: impl Iterator<Item = usize>,
+) -> Vec<Vec<WidgetPlacement>> {
+    let mut anchors: Vec<WidgetAnchor> = Vec::new();
+    let mut frames = Vec::new();
+    for scroll_top in scroll_tops {
+        let out =
+            calculate_placements_anchored(area, &margins_at(scroll_top), data, true, &anchors);
+        assert_placements_sane(&format!("scroll {scroll_top}"), area, &out.visible);
+        anchors = out.anchors;
+        frames.push(out.visible);
+    }
+    frames
+}
+
+/// Reported bug: scrolling the chat broke the right-hand box apart. The box
+/// rode its transcript line until that line scrolled past the viewport edge,
+/// was dropped, and was re-homed from scratch into whatever pocket had settled
+/// that frame, which usually only fit its parts. It came back as separate
+/// Context / KV cache / Model boxes. Residents now stop at the viewport edge.
+#[test]
+fn scrolling_up_keeps_overview_whole_instead_of_splitting_it() {
+    let data = contended_overview_data();
+    let area = Rect::new(0, 0, 140, 40);
+    // What the live trace showed: the text leaves room for the whole box
+    // (long lines every 13 rows), but the settled space a *new* widget may be
+    // placed in is scarce (pockets of 5 rows), which fits only the parts.
+    let margins_at = |scroll_top: usize| {
+        let wall = |r: usize, period: usize| (scroll_top + r).is_multiple_of(period);
+        Margins {
+            right_widths: (0..40).map(|r| if wall(r, 13) { 4 } else { 60 }).collect(),
+            right_reliable: (0..40).map(|r| if wall(r, 6) { 4 } else { 60 }).collect(),
+            scroll_top,
+            ..Default::default()
+        }
+    };
+    // Settle the box in a roomy frame at the bottom, then wheel up 3 lines at a time.
+    let mut anchors = Vec::new();
+    let roomy = calculate_placements_anchored(area, &roomy_margins_at(600), &data, true, &anchors);
+    anchors = roomy.anchors;
+    assert_eq!(right_kinds(&roomy.visible), vec![WidgetKind::Overview]);
+    let mut scattered = 0;
+    let mut shown = 0;
+    for step in 1..=60 {
+        let scroll_top = 600 - step * 3;
+        let out =
+            calculate_placements_anchored(area, &margins_at(scroll_top), &data, true, &anchors);
+        assert_placements_sane(&format!("wheel {step}"), area, &out.visible);
+        anchors = out.anchors;
+        let kinds = right_kinds(&out.visible);
+        if kinds == vec![WidgetKind::Overview] {
+            shown += 1;
+        } else if !kinds.is_empty() {
+            scattered += 1;
+        }
+    }
+    assert_eq!(
+        scattered, 0,
+        "Overview split into its parts while scrolling"
+    );
+    assert!(
+        shown >= 50,
+        "Overview visible on only {shown}/60 wheel steps"
+    );
+}
+
+/// Guard for edge sticking: scrolling down (toward newer messages) pushes the
+/// box past the bottom edge, and it must stay whole there.
+#[test]
+fn scrolling_down_keeps_overview_whole_at_bottom_edge() {
+    let data = contended_overview_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let frames = scroll_frames(&data, area, roomy_margins_at, (0..40).map(|s| 100 + s * 3));
+    for (i, frame) in frames.iter().enumerate() {
+        assert_eq!(
+            right_kinds(frame),
+            vec![WidgetKind::Overview],
+            "frame {i}: {frame:?}"
+        );
+    }
+}
+
+/// Guard for edge sticking: a resident stuck at an edge must not bounce. An
+/// earlier version of the fix re-bound it to the line it was pushed onto, so
+/// it rode away from the edge and snapped back every frame.
+#[test]
+fn edge_stuck_overview_does_not_saw_tooth() {
+    let data = contended_overview_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let frames = scroll_frames(&data, area, roomy_margins_at, (0..30).map(|s| 900 - s * 3));
+    let ys: Vec<u16> = frames
+        .iter()
+        .skip(15)
+        .map(|f| {
+            f.iter()
+                .find(|p| p.kind == WidgetKind::Overview)
+                .unwrap()
+                .rect
+                .y
+        })
+        .collect();
+    assert!(
+        ys.windows(2).all(|w| w[0] == w[1]),
+        "edge-stuck overview moved: {ys:?}"
+    );
+}
+
+/// Guard for edge sticking: two residents pushed toward the same edge must not
+/// be drawn on top of each other (seen live while developing the fix).
+#[test]
+fn edge_stuck_residents_never_overlap() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let anchors = vec![
+        right_anchor(WidgetKind::KvCache, 30, 5),
+        right_anchor(WidgetKind::ContextUsage, 34, 3),
+    ];
+    let mut prev = anchors;
+    for step in 0..20 {
+        let out =
+            calculate_placements_anchored(area, &roomy_margins_at(step * 3), &data, true, &prev);
+        assert_placements_sane(&format!("step {step}"), area, &out.visible);
+        prev = out.anchors;
+    }
+}
+
+fn roomy_margins_at(scroll_top: usize) -> Margins {
+    Margins {
+        scroll_top,
+        ..roomy_margins()
+    }
+}
+
+/// Model + context + KV cache + git: the Overview is ~8 rows, taller than the
+/// pockets a ragged chat usually leaves, while each part fits on its own.
+fn contended_overview_data() -> InfoWidgetData {
+    InfoWidgetData {
+        todos: vec![todo("t1", "in_progress"), todo("t2", "pending")],
+        ..model_and_context_data()
+    }
+}
