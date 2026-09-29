@@ -318,6 +318,129 @@ fn picker_is_runtime_model_picker(picker: &InlineInteractiveState) -> bool {
             .any(|entry| matches!(entry.action, PickerAction::Model))
 }
 
+/// Split a model-picker filter into `@provider` scopes and free search text.
+/// `@openrouter gpt` keeps OpenRouter routes and fuzzy-matches `gpt`. Only
+/// whitespace-separated tokens that start with `@` are scopes, so the direct
+/// `/model name@provider` syntax still searches as typed.
+pub(crate) fn split_model_picker_filter(filter: &str) -> (Vec<String>, String) {
+    let mut scopes = Vec::new();
+    let mut search = Vec::new();
+    for token in filter.split_whitespace() {
+        match token.strip_prefix('@') {
+            Some(scope) if !scope.is_empty() => {
+                scopes.push(crate::provider::normalize_model_route_provider_label(scope))
+            }
+            Some(_) => {}
+            None => search.push(token),
+        }
+    }
+    (scopes, search.join(" "))
+}
+
+/// Provider a route is grouped under for `@provider` filtering and Ctrl+P
+/// cycling. OpenRouter routes name their upstream (e.g. `Fireworks`), but the
+/// user reaches them through OpenRouter.
+pub(super) fn model_route_provider_group(option: &crate::tui::PickerOption) -> String {
+    if crate::provider::ModelRouteApiMethod::parse(&option.api_method).is_openrouter() {
+        "OpenRouter".to_string()
+    } else {
+        option.provider.clone()
+    }
+}
+
+fn model_route_matches_scopes(option: &crate::tui::PickerOption, scopes: &[String]) -> bool {
+    use crate::provider::normalize_model_route_provider_label as normalize;
+    let group = normalize(&model_route_provider_group(option));
+    let provider = normalize(&option.provider);
+    let method = normalize(&option.api_method);
+    scopes.iter().all(|scope| {
+        group.contains(scope.as_str())
+            || provider.contains(scope.as_str())
+            || method.contains(scope.as_str())
+    })
+}
+
+/// Enter on a model picker with no search text and no explicit row choice
+/// opens the browser instead of switching to whatever model is listed first.
+pub(super) fn picker_enter_should_focus_model_browser(picker: &InlineInteractiveState) -> bool {
+    picker_is_runtime_model_picker(picker)
+        && picker.selected == 0
+        && split_model_picker_filter(&picker.filter).1.is_empty()
+}
+
+/// Distinct provider groups in picker order, used by Ctrl+P.
+pub(super) fn model_picker_provider_groups(picker: &InlineInteractiveState) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut groups = Vec::new();
+    for entry in &picker.entries {
+        if !matches!(entry.action, PickerAction::Model) {
+            continue;
+        }
+        for option in &entry.options {
+            let group = model_route_provider_group(option);
+            if seen.insert(crate::provider::normalize_model_route_provider_label(
+                &group,
+            )) {
+                groups.push(group);
+            }
+        }
+    }
+    groups
+}
+
+/// `@scope` token for a provider group, e.g. `GitHub Copilot` -> `@githubcopilot`.
+fn provider_scope_token(group: &str) -> String {
+    format!(
+        "@{}",
+        crate::provider::normalize_model_route_provider_label(group)
+    )
+}
+
+/// Ctrl+P / Ctrl+Shift+P: step the picker's provider scope through every
+/// provider group, then back to all providers. Keeps the search text.
+pub(super) fn cycle_model_picker_provider(picker: &mut InlineInteractiveState, forward: bool) {
+    let groups = model_picker_provider_groups(picker);
+    if groups.is_empty() {
+        return;
+    }
+    let (scopes, search) = split_model_picker_filter(&picker.filter);
+    let current = match scopes.as_slice() {
+        [scope] => groups.iter().position(|group| {
+            crate::provider::normalize_model_route_provider_label(group) == *scope
+        }),
+        _ => None,
+    };
+    // Positions 0..len are providers, len is "all providers".
+    let slots = groups.len() + 1;
+    let at = current.unwrap_or(groups.len());
+    let next = if forward {
+        (at + 1) % slots
+    } else {
+        (at + slots - 1) % slots
+    };
+    picker.filter = match groups.get(next) {
+        Some(group) if search.is_empty() => format!("{} ", provider_scope_token(group)),
+        Some(group) => format!("{} {}", provider_scope_token(group), search),
+        None => search,
+    };
+    picker.selected = 0;
+    App::apply_inline_interactive_filter(picker);
+}
+
+/// Provider group named by the picker's single `@scope`, for display.
+pub(crate) fn model_picker_active_provider(picker: &InlineInteractiveState) -> Option<String> {
+    let (scopes, _) = split_model_picker_filter(&picker.filter);
+    let [scope] = scopes.as_slice() else {
+        return (!scopes.is_empty()).then(|| scopes.join(", "));
+    };
+    Some(
+        model_picker_provider_groups(picker)
+            .into_iter()
+            .find(|group| crate::provider::normalize_model_route_provider_label(group) == *scope)
+            .unwrap_or_else(|| scope.clone()),
+    )
+}
+
 fn key_char_eq_ignore_ascii_case(code: KeyCode, expected: char) -> bool {
     matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
 }
@@ -2273,6 +2396,19 @@ impl App {
             self.handle_inline_interactive_key(code, modifiers)?;
             return Ok(true);
         }
+        // Ctrl+P filters by provider. The preview's filter is owned by the
+        // typed `/model …` text, so move into the focused browser first and
+        // carry the typed search over.
+        if modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'p') {
+            if let Some(ref mut picker) = self.inline_interactive_state {
+                picker.preview = false;
+                picker.column = 0;
+            }
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.handle_inline_interactive_key(code, modifiers)?;
+            return Ok(true);
+        }
         Ok(false)
     }
 
@@ -2344,6 +2480,15 @@ impl App {
                         && picker.filter.is_empty()
                         && picker.selected == 0
                     {
+                        picker.preview = false;
+                        picker.column = 0;
+                        self.input.clear();
+                        self.cursor_pos = 0;
+                        return Ok(true);
+                    }
+                    // Bare `/model` + Enter (or only `@provider` scopes) is a
+                    // request to browse, not to pick whatever row is first.
+                    if picker_enter_should_focus_model_browser(picker) {
                         picker.preview = false;
                         picker.column = 0;
                         self.input.clear();
@@ -3359,6 +3504,18 @@ impl App {
                     }
                 }
             }
+            KeyCode::PageDown | KeyCode::PageUp | KeyCode::Home | KeyCode::End => {
+                if let Some(ref mut picker) = self.inline_interactive_state {
+                    let max = picker.filtered.len().saturating_sub(1);
+                    picker.column = 0;
+                    picker.selected = match code {
+                        KeyCode::PageDown => (picker.selected + 10).min(max),
+                        KeyCode::PageUp => picker.selected.saturating_sub(10),
+                        KeyCode::Home => 0,
+                        _ => max,
+                    };
+                }
+            }
             KeyCode::Right => {
                 if let Some(ref mut picker) = self.inline_interactive_state {
                     if picker.uses_compact_navigation() {
@@ -3406,7 +3563,10 @@ impl App {
                     if picker.uses_compact_navigation() {
                         return Ok(());
                     }
-                    if picker.column == 0 && !picker.filter.is_empty() {
+                    if picker.column == 0
+                        && !picker.filter.is_empty()
+                        && split_model_picker_filter(&picker.filter).0.is_empty()
+                    {
                         Self::tab_complete_inline_interactive_filter(picker);
                     } else if picker.column < picker.max_navigable_column()
                         && let Some(&idx) = picker.filtered.get(picker.selected)
@@ -3414,6 +3574,20 @@ impl App {
                     {
                         picker.column += 1;
                     }
+                }
+            }
+            code if modifiers.contains(KeyModifiers::CONTROL)
+                && key_char_eq_ignore_ascii_case(code, 'p')
+                && self
+                    .inline_interactive_state
+                    .as_ref()
+                    .is_some_and(picker_is_runtime_model_picker) =>
+            {
+                if let Some(ref mut picker) = self.inline_interactive_state {
+                    let forward = !modifiers.contains(KeyModifiers::SHIFT)
+                        && !matches!(code, KeyCode::Char('P'));
+                    cycle_model_picker_provider(picker, forward);
+                    picker.column = 0;
                 }
             }
             code if modifiers.contains(KeyModifiers::CONTROL)
@@ -3862,18 +4036,46 @@ impl App {
     }
 
     pub(super) fn apply_inline_interactive_filter(picker: &mut InlineInteractiveState) {
-        if picker.filter.is_empty() {
-            picker.filtered = (0..picker.entries.len()).collect();
+        // Runtime model pickers accept `@provider` scopes next to the search
+        // text. Scope each entry to its first matching route so the row shows
+        // (and Enter selects) that provider's route.
+        let (scopes, search) = if picker_is_runtime_model_picker(picker) {
+            split_model_picker_filter(&picker.filter)
         } else {
-            let query = picker.filter.trim();
+            (Vec::new(), picker.filter.clone())
+        };
+        let mut scoped: Option<Vec<usize>> = None;
+        if !scopes.is_empty() {
+            let mut keep = Vec::new();
+            for (index, entry) in picker.entries.iter_mut().enumerate() {
+                if let Some(option_index) = entry
+                    .options
+                    .iter()
+                    .position(|option| model_route_matches_scopes(option, &scopes))
+                {
+                    if !entry
+                        .active_option()
+                        .is_some_and(|option| model_route_matches_scopes(option, &scopes))
+                    {
+                        entry.selected_option = option_index;
+                    }
+                    keep.push(index);
+                }
+            }
+            scoped = Some(keep);
+        }
+        let candidates: Vec<usize> = scoped.unwrap_or_else(|| (0..picker.entries.len()).collect());
+        if search.trim().is_empty() {
+            picker.filtered = candidates;
+        } else {
+            let query = search.trim();
             // Prepare the query once per keystroke instead of re-parsing and
             // re-lowercasing it for every entry.
-            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&picker.filter);
-            let mut scored: Vec<(usize, bool, i32)> = picker
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(i, m)| {
+            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&search);
+            let mut scored: Vec<(usize, bool, i32)> = candidates
+                .into_iter()
+                .filter_map(|i| {
+                    let m = &picker.entries[i];
                     let filter_text = picker.filter_text(m);
                     prepared.score(&filter_text).map(|s| {
                         let usage_bonus = m.usage_score.min(i32::MAX as u32) as i32;

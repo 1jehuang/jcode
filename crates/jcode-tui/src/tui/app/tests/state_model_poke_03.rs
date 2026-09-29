@@ -1881,7 +1881,7 @@ fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_
     let gpt_text = render_filtered(&mut app, "gpt-oss-120b-medium");
 
     assert!(
-        claude_text.contains("▸ Claude Sonnet 4.6") && claude_text.contains("↑↓ choose"),
+        claude_text.contains("▸ Claude Sonnet 4.6") && claude_text.contains("Search: claude-sonnet-4-6"),
         "rendered /model suggestions should show the selected row and navigation, got:
 {}",
         claude_text
@@ -1952,7 +1952,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     let openrouter_openai_text = render_filtered(&mut app, "openai/gpt-5.5");
 
     assert!(
-        openai_text.contains("▸ GPT-5.4") && openai_text.contains("↑↓ choose"),
+        openai_text.contains("▸ GPT-5.4") && openai_text.contains("type to search"),
         "rendered /model suggestions should show the selected row and navigation, got:\n{}",
         openai_text
     );
@@ -1966,7 +1966,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let glm_row = comtegra_text
         .lines()
-        .find(|line| line.contains("glm-51-nvfp4"))
+        .find(|line| !line.starts_with("Search:") && line.contains("glm-51-nvfp4"))
         .unwrap_or("");
     assert!(
         glm_row.contains("Comtegra GPU Cloud")
@@ -1995,11 +1995,11 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let deepseek_auto_row = deepseek_text
         .lines()
-        .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("auto"))
+        .find(|line| !line.starts_with("Search:") && line.contains("deepseek/deepseek-v4-pro") && line.contains("auto"))
         .unwrap_or("");
     let deepseek_provider_row = deepseek_text
         .lines()
-        .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("DeepSeek"))
+        .find(|line| !line.starts_with("Search:") && line.contains("deepseek/deepseek-v4-pro") && line.contains("DeepSeek"))
         .unwrap_or("");
     assert!(
         !deepseek_auto_row.contains('★'),
@@ -2015,7 +2015,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let kimi25_row = kimi_text
         .lines()
-        .find(|line| line.contains("moonshotai/kimi-k2.5"))
+        .find(|line| !line.starts_with("Search:") && line.contains("moonshotai/kimi-k2.5"))
         .unwrap_or("");
     assert!(
         !kimi25_row.contains('★'),
@@ -2025,7 +2025,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let openrouter_openai_row = openrouter_openai_text
         .lines()
-        .find(|line| line.contains("openai/gpt-5.5"))
+        .find(|line| !line.starts_with("Search:") && line.contains("openai/gpt-5.5"))
         .unwrap_or("");
     assert!(
         openrouter_openai_row.contains("OpenRou")

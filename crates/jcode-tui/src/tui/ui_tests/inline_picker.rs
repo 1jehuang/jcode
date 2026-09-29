@@ -240,10 +240,11 @@ fn model_suggestions_show_focused_filter_and_route_focus() {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("Filter: gpt"), "{text}");
+    assert!(text.contains("Search: gpt"), "{text}");
+    assert!(text.contains("Provider: all providers"), "{text}");
     assert!(text.contains("↑↓ route"), "{text}");
     assert!(
-        lines[0]
+        lines[1]
             .spans
             .iter()
             .any(|span| span.content.contains("openai")

@@ -73,6 +73,7 @@ mod hotkey_feedback;
 pub(crate) mod idle_animation_repaint;
 mod idle_heap_release;
 mod inline_interactive;
+pub(crate) use inline_interactive::{model_picker_active_provider, split_model_picker_filter};
 mod input;
 mod input_help;
 mod local;
