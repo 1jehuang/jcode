@@ -60,9 +60,15 @@ pub(crate) fn default_effort_index(efforts: &[&'static str]) -> Option<usize> {
 /// from the reasoning-only wrap group.
 ///
 /// `efforts` is the full ladder (reasoning levels followed by `swarm` /
-/// `swarm-deep`). `current` is the currently-selected effort string (or `None`
-/// to default to the highest reasoning level). `direction` is `+1` for up /
-/// higher, `-1` for down / lower.
+/// `swarm-deep`). `current` is the currently-selected effort string.
+/// `direction` is `+1` for up / higher, `-1` for down / lower.
+///
+/// An unset (`None`) or unknown `current` is treated as "not yet on the
+/// ladder", never as an explicit `max`. From there, up selects the highest
+/// reasoning level (`max`) and down selects the level just below it, so the
+/// first press always lands on a reasoning level and never enters swarm
+/// mode. Such a move always reports `changed`. Only an explicitly selected
+/// `max` moves up into `swarm`.
 pub(crate) fn cycle_effort_index(
     efforts: &[&'static str],
     current: Option<&str>,
@@ -72,9 +78,21 @@ pub(crate) fn cycle_effort_index(
 
     let default_index = default_effort_index(efforts).expect("non-empty ladder");
 
-    let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
-        .unwrap_or(default_index);
+    let Some(current_index) = current.and_then(|c| efforts.iter().position(|e| *e == c)) else {
+        // Unset or unknown: enter the reasoning sub-ladder at its top.
+        let index = if reasoning.is_empty() {
+            default_index
+        } else if direction > 0 || reasoning.len() == 1 {
+            reasoning.len() - 1
+        } else {
+            reasoning.len() - 2
+        };
+        return CycledEffort {
+            index,
+            effort: efforts[index],
+            changed: true,
+        };
+    };
 
     let next_index = if direction > 0 {
         cycle_up(current_index, efforts, reasoning, swarm)
@@ -299,11 +317,38 @@ mod tests {
     }
 
     #[test]
-    fn current_not_in_ladder_defaults_to_max_reasoning() {
+    fn unset_effort_up_selects_max_not_swarm() {
         let ladder = ladder();
-        let r = cycle_effort_index(&ladder, Some("unknown"), 1);
-        // Default is "max" (last reasoning), so up goes to "swarm".
+        let r = cycle_effort_index(&ladder, None, 1);
+        assert_eq!(r.effort, "max");
+        assert_eq!(r.index, 6);
+        assert!(r.changed);
+    }
+
+    #[test]
+    fn unset_effort_down_selects_level_below_max() {
+        let ladder = ladder();
+        let r = cycle_effort_index(&ladder, None, -1);
+        assert_eq!(r.effort, "xhigh");
+        assert!(r.changed);
+    }
+
+    #[test]
+    fn explicit_max_up_still_enters_swarm() {
+        let ladder = ladder();
+        let r = cycle_effort_index(&ladder, Some("max"), 1);
         assert_eq!(r.effort, "swarm");
         assert!(r.changed);
+    }
+
+    #[test]
+    fn unknown_effort_behaves_like_unset() {
+        let ladder = ladder();
+        let up = cycle_effort_index(&ladder, Some("unknown"), 1);
+        assert_eq!(up.effort, "max");
+        assert!(up.changed);
+        let down = cycle_effort_index(&ladder, Some("unknown"), -1);
+        assert_eq!(down.effort, "xhigh");
+        assert!(down.changed);
     }
 }
