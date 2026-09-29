@@ -110,8 +110,17 @@ Two further points worth knowing:
   notion of a Nix-managed install. Set `features.check_updates = false` if the
   user should only receive updates through Nix.
 
-The file lands in the world-readable Nix store, so credentials belong in
-`api_key_env` and never inline in `api_key`.
+The file lands in the world-readable Nix store, so credentials belong in the
+environment-variable field, `api_key_env`. To make that hard to get wrong,
+evaluation fails when `settings` contains an inline credential: a key named
+`api_key`, `password` or an authorization header, or any string-valued key
+ending in `_api_key`, `_token`, `_password` or `_secret`. The error names the
+offending keys and points at `api_key_env`. Environment-variable fields are
+unaffected, since `api_key_env` ends in `_env` rather than a credential suffix.
+
+The assertion only applies while the module generates the file. With
+`programs.jcode.manageConfig = false` nothing is written to the store, so
+`settings` may hold anything and the user owns the file.
 
 ## NixOS
 

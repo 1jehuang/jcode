@@ -24,6 +24,10 @@ let
               type = lib.types.listOf lib.types.raw;
               default = [ ];
             };
+            assertions = lib.mkOption {
+              type = lib.types.listOf lib.types.raw;
+              default = [ ];
+            };
           };
         }
         { _module.args.pkgs = pkgs; }
@@ -32,6 +36,15 @@ let
 
   parse =
     cfg: builtins.fromTOML (builtins.readFile (evalConfig cfg).home.file.".jcode/config.toml".source);
+
+  # Home Manager enforces assertions itself (modules/default.nix collects
+  # `config.assertions` and throws "Failed assertions"), so a bare evalModules
+  # does not run them. Inspecting the list is how this check sees what a real
+  # home-manager build would reject.
+  failedAssertions =
+    cfg: map (a: a.message) (lib.filter (a: !a.assertion) (evalConfig cfg).assertions);
+
+  rejected = cfg: failedAssertions cfg != [ ];
 
   # Every value shape jcode's config.toml uses, including the ones that are easy
   # to get wrong: arrays of tables, floats, negative integers, empty containers,
@@ -189,4 +202,58 @@ in
       (nixosEval { enable = true; }).environment.systemPackages
     && (nixosEval { }).environment.systemPackages == [ ]
   );
+
+  # A generated config lands in the world-readable store, so an inline
+  # credential there must stop the build instead of being published.
+  jcode-config-rejects-inline-credential = check "rejects-inline-credential" (
+    let
+      messages = failedAssertions {
+        enable = true;
+        settings.providers.example.api_key = "not-a-real-secret";
+      };
+    in
+    messages != [ ] && lib.any (m: lib.hasInfix "api_key" m && lib.hasInfix "world-readable" m) messages
+  );
+
+  # The same detector catches the other credential-bearing fields in the schema.
+  jcode-config-rejects-token = check "rejects-token" (rejected {
+    enable = true;
+    settings.telegram_bot_token = "not-a-real-secret";
+  });
+
+  jcode-config-rejects-password = check "rejects-password" (rejected {
+    enable = true;
+    settings.safety.email_password = "not-a-real-secret";
+  });
+
+  # Header names arrive in any case, and a bearer token in a header leaks just
+  # like an inline api_key.
+  jcode-config-rejects-authorization-header = check "rejects-authorization-header" (rejected {
+    enable = true;
+    settings.providers.example.headers.Authorization = "Bearer not-a-real-secret";
+  });
+
+  # Environment-variable names are the supported way to reference credentials,
+  # and the flag-style field must not trip the detector.
+  jcode-config-accepts-credential-references = check "accepts-credential-references" (
+    !(rejected {
+      enable = true;
+      settings = {
+        providers.example.api_key_env = "EXAMPLE_API_KEY";
+        providers.example.requires_api_key = true;
+      };
+    })
+  );
+
+  # With manageConfig disabled nothing is written to the store, so credentials
+  # in settings are not published and the user keeps their own file.
+  jcode-config-accepts-credentials-without-config-management =
+    check "accepts-credentials-without-config-management"
+      (
+        !(rejected {
+          enable = true;
+          manageConfig = false;
+          settings.providers.example.api_key = "not-a-real-secret";
+        })
+      );
 }
