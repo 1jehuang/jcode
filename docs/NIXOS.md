@@ -113,17 +113,19 @@ Two further points worth knowing:
 The file lands in the world-readable Nix store, so credentials belong in the
 environment-variable field, `api_key_env`. To make that hard to get wrong,
 evaluation fails when `settings` contains an inline credential. A string-valued
-key counts as one when its name ends in a credential word at a separator
-boundary (`_key`, `-api-key`, `_token`, `_password`, `_secret`, `-cookie`,
-`_bearer`) or contains `authorization`, so `api_key`, `bing_api_key`,
-`telegram_bot_token`, `email_password`, `Authorization` and
-`Proxy-Authorization` all fail. The error names the offending keys and points
-at `api_key_env`.
+key counts as one when its name contains `authorization` or one of its words
+(split on `-`, `_`, `.` and spaces) is `key`, `apikey`, `token`, `secret`,
+`password`, `passwd`, `cookie` or `bearer`. That catches `api_key`,
+`bing_api_key`, `telegram_bot_token`, `email_password`, `Authorization`,
+`Proxy-Authorization`, `X-Api-Key-Env` and `Set-Cookie`, and the error names
+the offending keys.
 
-Names that only look similar are unaffected: `api_key_env` and other fields
-ending in `_env` hold variable names, `_id` fields hold identifiers, and
-separator boundaries keep `keybindings`, `max_context_tokens`, `auth = "api-key"`
-and headers such as `X-Api-Version` working.
+Names that only look similar are unaffected, because whole words are compared:
+`keybindings`, `max_context_tokens` and headers such as `X-Api-Version` or
+`X-Title` pass, as does the `auth = "api-key"` enum value. The only exemptions
+are the schema's variable-name fields ending in `_env` and identifier fields
+ending in `_id`, so `api_key_env` and `jade_relay_token_id` are accepted while
+a literal header such as `X-Authorization-Env` is still rejected.
 
 The assertion only applies while the module generates the file. With
 `programs.jcode.manageConfig = false` nothing is written to the store, so

@@ -238,6 +238,18 @@ in
     settings.providers.example.headers."Proxy-Authorization" = "Bearer not-a-real-secret";
   });
 
+  # The exemption for variable-name fields must not cover a literal header that
+  # merely ends in "env".
+  jcode-config-rejects-authorization-env-header = check "rejects-authorization-env-header" (rejected {
+    enable = true;
+    settings.providers.example.headers."X-Authorization-Env" = "Bearer not-a-real-secret";
+  });
+
+  jcode-config-rejects-api-key-env-header = check "rejects-api-key-env-header" (rejected {
+    enable = true;
+    settings.providers.example.headers."X-Api-Key-Env" = "not-a-real-secret";
+  });
+
   # Credential words only match at a separator boundary, so ordinary
   # configuration must keep working: the auth enum value, a benign header, a
   # variable name field and an identifier field.

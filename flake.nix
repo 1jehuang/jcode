@@ -43,18 +43,17 @@
           # names the environment-variable fields with an _env suffix, so
           # api_key_env and friends never match the patterns below.
           # Names mix separators ("x-api-key", "api_key", "Proxy-Authorization"),
-          # so a credential word only counts at a separator boundary. That keeps
-          # benign names such as keybindings, x-api-version and max_tokens out.
+          # so compare whole words: that keeps benign names such as keybindings,
+          # x-api-version and max_context_tokens out of the match.
           credentialWords = [
-            "api_key"
             "apikey"
-            "key"
-            "token"
-            "secret"
-            "password"
-            "passwd"
-            "cookie"
             "bearer"
+            "cookie"
+            "key"
+            "passwd"
+            "password"
+            "secret"
+            "token"
           ];
 
           looksSecret =
@@ -62,14 +61,14 @@
             let
               # Header names arrive in whatever case the provider uses.
               lower = lib.toLower name;
-              endsWithWord =
-                word: lower == word || lib.hasSuffix "-${word}" lower || lib.hasSuffix "_${word}" lower;
+              words = lib.splitString "-" (lib.replaceStrings [ "_" "." " " ] [ "-" "-" "-" ] lower);
             in
-            # `api_key_env` holds the name of a variable, and `*_id` fields are
-            # identifiers rather than secrets.
-            !(lib.hasSuffix "env" lower)
-            && !(lib.hasSuffix "id" lower)
-            && (lib.hasInfix "authorization" lower || lib.any endsWithWord credentialWords);
+            # Only the schema's variable-name fields (`*_env`) and identifier
+            # fields (`*_id`) are exempt; a header such as X-Authorization-Env
+            # carries a literal and must not slip through the exemption.
+            !(lib.hasSuffix "_env" lower)
+            && !(lib.hasSuffix "_id" lower)
+            && (lib.hasInfix "authorization" lower || lib.any (word: builtins.elem word credentialWords) words);
 
           secretKeys =
             value:
