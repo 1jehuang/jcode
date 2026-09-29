@@ -13,7 +13,7 @@ pub(super) fn set_active_usage_key(key: Option<String>) {
 }
 
 /// Usage cache key for whichever Claude login requests would use right now.
-fn current_anthropic_usage_key() -> Option<String> {
+pub(super) fn current_anthropic_usage_key() -> Option<String> {
     let creds = auth::claude::load_credentials().ok()?;
     let label =
         auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
@@ -91,8 +91,14 @@ async fn fetch_usage() -> Result<(UsageData, String)> {
 async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
     match fetch_usage().await {
         Ok((new_data, key)) => {
-            *usage.write().await = new_data;
-            set_active_usage_key(Some(key));
+            let mut data = usage.write().await;
+            // The login may have switched while the fetch was in flight. The
+            // result is already cached under `key`; only publish it as the
+            // active snapshot when that login is still the active one.
+            if current_anthropic_usage_key().as_deref() == Some(key.as_str()) {
+                *data = new_data;
+                set_active_usage_key(Some(key));
+            }
         }
         Err(e) => {
             let err_msg = e.to_string();
