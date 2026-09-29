@@ -1466,3 +1466,60 @@ async fn notify_auth_changed_broadcasts_credentials_changed_to_all_sessions() {
         }
     }
 }
+
+/// The one-shot path (`jcode login` on a fresh socket) has no requesting
+/// session. It must still refresh every idle session now and every busy one
+/// once idle, and must not auto-switch any session's model.
+#[tokio::test]
+async fn one_shot_auth_change_refreshes_every_session_without_model_switch() {
+    let _guard = EnvGuard::save(&[]);
+    crate::bus::reset_models_updated_publish_state_for_tests();
+    let template: Arc<dyn Provider> = Arc::new(AuthChangeMockProvider::new());
+    let idle_provider = Arc::new(AuthChangeMockProvider::new());
+    let idle_state = Arc::clone(&idle_provider.state);
+    *idle_state.selected_model.write().unwrap() = Some("pinned-model".to_string());
+    let busy_provider = Arc::new(AuthChangeMockProvider::new());
+    let busy_state = Arc::clone(&busy_provider.state);
+    let idle_agent = Arc::new(Mutex::new(Agent::new(idle_provider, Registry::empty())));
+    let busy_agent = Arc::new(Mutex::new(Agent::new(busy_provider, Registry::empty())));
+    let busy_guard = busy_agent.lock().await;
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::from([
+        ("idle".to_string(), Arc::clone(&idle_agent)),
+        ("busy".to_string(), Arc::clone(&busy_agent)),
+    ])));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    handle_notify_auth_changed_process_wide(
+        11,
+        Some("claude".to_string()),
+        None,
+        &template,
+        &sessions,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        client_event_rx.try_recv(),
+        Ok(ServerEvent::Done { id: 11 })
+    ));
+    assert!(
+        *idle_state.logged_in.read().unwrap(),
+        "idle session refreshed"
+    );
+    assert_eq!(
+        idle_state.selected_model.read().unwrap().as_deref(),
+        Some("pinned-model"),
+        "one-shot notice must not switch a session's model"
+    );
+    assert!(!*busy_state.logged_in.read().unwrap());
+    drop(busy_guard);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !*busy_state.logged_in.read().unwrap() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "busy session was not refreshed once idle"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}

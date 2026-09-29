@@ -268,6 +268,69 @@ fn spawn_deferred_auth_refreshes(agents: Vec<Arc<Mutex<Agent>>>) {
     }
 }
 
+/// Apply an auth change sent on a one-shot connection (`jcode login`, the SDK
+/// login flow) that never subscribed to a session.
+///
+/// This does the process-wide half of [`handle_notify_auth_changed`]: drop
+/// cached auth state, refresh the template and every live session's provider
+/// (busy sessions once they are idle), clear usage/unavailability state from
+/// the previous login, and tell every connected client that credentials
+/// changed. There is no requesting session, so no automatic model switch.
+/// `Done` is sent only after the refresh ran, so the caller can report
+/// success honestly.
+pub(super) async fn handle_notify_auth_changed_process_wide(
+    id: u64,
+    provider_hint: Option<String>,
+    auth: Option<AuthChanged>,
+    provider_template: &Arc<dyn Provider>,
+    sessions: &SessionAgents,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    crate::auth::AuthStatus::invalidate_cache();
+    let activation_request = AuthActivationRequest::new(provider_hint, auth);
+    let activation = crate::auth::lifecycle::activate_auth_change(&activation_request);
+    crate::usage::invalidate_active_anthropic_usage();
+    crate::provider::clear_all_provider_unavailability_for_account();
+    crate::auth::AuthStatus::check_fast().log_snapshot("auth_changed_one_shot");
+
+    provider_template.on_auth_changed();
+    let agents: Vec<Arc<Mutex<Agent>>> = {
+        let sessions_guard = sessions.read().await;
+        sessions_guard.values().cloned().collect()
+    };
+    let mut refreshed: Vec<Arc<dyn Provider>> = vec![Arc::clone(provider_template)];
+    let mut deferred_agents = Vec::new();
+    for agent in agents {
+        let Ok(agent_guard) = agent.try_lock() else {
+            deferred_agents.push(agent);
+            continue;
+        };
+        let provider = agent_guard.provider_handle();
+        drop(agent_guard);
+        if refreshed
+            .iter()
+            .any(|existing| Arc::ptr_eq(existing, &provider))
+        {
+            continue;
+        }
+        provider.on_auth_changed_preserve_current_provider();
+        refreshed.push(provider);
+    }
+
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
+        provider: activation.provider_id.clone(),
+    });
+    crate::bus::Bus::global().publish_models_updated();
+    spawn_deferred_auth_refreshes(deferred_agents);
+    let sessions_refreshed = (refreshed.len() - 1).to_string();
+    crate::logging::auth_event(
+        "auth_changed_one_shot_applied",
+        activation.provider_id.as_deref().unwrap_or("all"),
+        &[("sessions_refreshed", sessions_refreshed.as_str())],
+    );
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
 async fn apply_auth_runtime_model_to_agent(
     activation: &AuthActivationResult,
     model: Option<&str>,
