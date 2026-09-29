@@ -459,6 +459,11 @@ struct CachedCredentials {
     access_token: String,
     refresh_token: String,
     expires_at: i64,
+    /// Access/refresh token pair of the stored credential this cache entry
+    /// was derived from. The cache is only reused while the stored credential
+    /// still matches, so a relogin, account switch, or external Claude Code
+    /// login is picked up by every live session on its next request.
+    source: (String, String),
 }
 
 /// Direct Anthropic API provider
@@ -1012,101 +1017,7 @@ impl AnthropicProvider {
     }
 
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
-        // Check cached credentials
-        {
-            let cached = self.credentials.read().await;
-            if let Some(ref creds) = *cached {
-                let now = chrono::Utc::now().timestamp_millis();
-                // Return cached token if not expired (with 5 min buffer)
-                if creds.expires_at > now + 300_000 {
-                    return Ok((creds.access_token.clone(), true));
-                }
-            }
-        }
-
-        // Load fresh credentials or refresh expired ones
-        let fresh_creds =
-            auth::claude::load_credentials().context("Failed to load Claude credentials")?;
-
-        if !fresh_creds.scopes.is_empty()
-            && !oauth::claude_scopes_have_inference(&fresh_creds.scopes)
-        {
-            anyhow::bail!(
-                "Claude OAuth credentials are missing the required user:inference scope (scopes: {}). Run `jcode login --provider claude` to mint a fresh Claude.ai OAuth token, or import/use a fresh Claude Code login.",
-                fresh_creds.scopes.join(" ")
-            );
-        }
-
-        let now = chrono::Utc::now().timestamp_millis();
-
-        // Check if token needs refresh (expired or expiring within 5 minutes)
-        if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
-            // A refresh token the provider already rejected as unrecoverable
-            // cannot start working again. Retrying it added a doomed network
-            // round-trip to the critical path of every single turn, so fail
-            // straight through to the caller's API-key fallback instead.
-            if auth::refresh_state::refresh_token_is_known_rejected(
-                "claude",
-                &fresh_creds.refresh_token,
-            ) {
-                anyhow::bail!(
-                    "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
-                );
-            }
-
-            jcode_base::logging::info(
-                "OAuth token expired or expiring soon, attempting refresh...",
-            );
-
-            let active_label = auth::claude::active_account_label()
-                .unwrap_or_else(auth::claude::primary_account_label);
-            match oauth::refresh_claude_tokens_for_account(
-                &fresh_creds.refresh_token,
-                &active_label,
-            )
-            .await
-            {
-                Ok(refreshed) => {
-                    jcode_base::logging::info("OAuth token refreshed successfully");
-
-                    // Cache the refreshed credentials
-                    let mut cached = self.credentials.write().await;
-                    *cached = Some(CachedCredentials {
-                        access_token: refreshed.access_token.clone(),
-                        refresh_token: refreshed.refresh_token,
-                        expires_at: refreshed.expires_at,
-                    });
-
-                    return Ok((refreshed.access_token, true));
-                }
-                Err(e) => {
-                    jcode_base::logging::error(&format!("OAuth token refresh failed: {}", e));
-                    // A still-unexpired token may remain usable until its
-                    // actual expiry even when a proactive refresh fails. Once
-                    // expired, however, returning it only guarantees a 401 and
-                    // prevents Auto mode from trying its API-key fallback.
-                    if fresh_creds.expires_at <= now {
-                        anyhow::bail!("Claude OAuth token is expired and refresh failed: {e:#}");
-                    }
-                }
-            }
-        }
-
-        if fresh_creds.expires_at <= now {
-            anyhow::bail!(
-                "Claude OAuth token is expired and no usable refresh token is available. Run `jcode login --provider claude` to refresh OAuth credentials"
-            );
-        }
-
-        // Cache and return the still-usable loaded credentials.
-        let mut cached = self.credentials.write().await;
-        *cached = Some(CachedCredentials {
-            access_token: fresh_creds.access_token.clone(),
-            refresh_token: fresh_creds.refresh_token,
-            expires_at: fresh_creds.expires_at,
-        });
-
-        Ok((fresh_creds.access_token, true))
+        resolve_oauth_access_token(&self.credentials).await
     }
 
     pub(crate) fn set_credential_mode(&self, mode: AnthropicCredentialMode) -> Result<()> {
@@ -1756,6 +1667,14 @@ async fn run_stream_with_retries(
                 attempt + 1,
                 MAX_RETRIES
             ));
+            // The user may have swapped Claude accounts while this request was
+            // failing (often because the old account hit its usage limit).
+            // Re-resolve so the retry uses the currently stored credential
+            // instead of the token captured when the turn started.
+            if is_oauth && let Ok((current, true)) = resolve_oauth_access_token(&credentials).await
+            {
+                token = current;
+            }
         }
 
         // Track whether this attempt streams replay-visible output so a
@@ -1980,26 +1899,137 @@ async fn run_stream_with_retries(
     }
 }
 
+/// Resolve the Claude OAuth access token for a request.
+///
+/// The stored credential is re-read on every call (a few small local file
+/// reads, no network). The in-memory cache is only reused while it was
+/// derived from the credential that is stored right now, so a same-label
+/// relogin, `/account switch`, or an external Claude Code relogin reaches
+/// every live session, fork, and retry without a restart.
+async fn resolve_oauth_access_token(
+    credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+) -> Result<(String, bool)> {
+    let fresh_creds =
+        auth::claude::load_credentials().context("Failed to load Claude credentials")?;
+    let source = (
+        fresh_creds.access_token.clone(),
+        fresh_creds.refresh_token.clone(),
+    );
+    {
+        let cached = credentials.read().await;
+        if let Some(ref creds) = *cached {
+            let now = chrono::Utc::now().timestamp_millis();
+            // Reuse the cached token (e.g. one we refreshed ourselves) only
+            // while it still belongs to the stored credential and is not
+            // about to expire.
+            if creds.source == source && creds.expires_at > now + 300_000 {
+                return Ok((creds.access_token.clone(), true));
+            }
+        }
+    }
+
+    if !fresh_creds.scopes.is_empty() && !oauth::claude_scopes_have_inference(&fresh_creds.scopes) {
+        anyhow::bail!(
+            "Claude OAuth credentials are missing the required user:inference scope (scopes: {}). Run `jcode login --provider claude` to mint a fresh Claude.ai OAuth token, or import/use a fresh Claude Code login.",
+            fresh_creds.scopes.join(" ")
+        );
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // Check if token needs refresh (expired or expiring within 5 minutes)
+    if fresh_creds.expires_at < now + 300_000 && !fresh_creds.refresh_token.is_empty() {
+        // A refresh token the provider already rejected as unrecoverable
+        // cannot start working again. Retrying it added a doomed network
+        // round-trip to the critical path of every single turn, so fail
+        // straight through to the caller's API-key fallback instead.
+        if auth::refresh_state::refresh_token_is_known_rejected(
+            "claude",
+            &fresh_creds.refresh_token,
+        ) {
+            anyhow::bail!(
+                "Claude OAuth refresh token was previously rejected by Anthropic and cannot be refreshed. Run `jcode login --provider claude` to mint a fresh token."
+            );
+        }
+
+        jcode_base::logging::info("OAuth token expired or expiring soon, attempting refresh...");
+
+        let active_label = auth::claude::active_account_label()
+            .unwrap_or_else(auth::claude::primary_account_label);
+        match oauth::refresh_claude_tokens_for_account(&fresh_creds.refresh_token, &active_label)
+            .await
+        {
+            Ok(refreshed) => {
+                jcode_base::logging::info("OAuth token refreshed successfully");
+
+                // Cache the refreshed credentials
+                let mut cached = credentials.write().await;
+                *cached = Some(CachedCredentials {
+                    access_token: refreshed.access_token.clone(),
+                    refresh_token: refreshed.refresh_token,
+                    expires_at: refreshed.expires_at,
+                    source,
+                });
+
+                return Ok((refreshed.access_token, true));
+            }
+            Err(e) => {
+                jcode_base::logging::error(&format!("OAuth token refresh failed: {}", e));
+                // A still-unexpired token may remain usable until its
+                // actual expiry even when a proactive refresh fails. Once
+                // expired, however, returning it only guarantees a 401 and
+                // prevents Auto mode from trying its API-key fallback.
+                if fresh_creds.expires_at <= now {
+                    anyhow::bail!("Claude OAuth token is expired and refresh failed: {e:#}");
+                }
+            }
+        }
+    }
+
+    if fresh_creds.expires_at <= now {
+        anyhow::bail!(
+            "Claude OAuth token is expired and no usable refresh token is available. Run `jcode login --provider claude` to refresh OAuth credentials"
+        );
+    }
+
+    // Cache and return the still-usable loaded credentials.
+    let mut cached = credentials.write().await;
+    *cached = Some(CachedCredentials {
+        access_token: fresh_creds.access_token.clone(),
+        refresh_token: fresh_creds.refresh_token,
+        expires_at: fresh_creds.expires_at,
+        source,
+    });
+
+    Ok((fresh_creds.access_token, true))
+}
+
 async fn force_refresh_oauth_token(
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
 ) -> Result<String> {
+    // Always start from the stored credential: after a relogin or account
+    // switch the cache still holds the previous account's refresh token, and
+    // refreshing that would mint a token for the wrong account.
+    let loaded = auth::claude::load_credentials()
+        .context("Failed to load Claude credentials for forced refresh")?;
+    let source = (loaded.access_token.clone(), loaded.refresh_token.clone());
+    // A token we refreshed ourselves (e.g. from an external source that is not
+    // rewritten on refresh) rotates the refresh token, so prefer the cached one
+    // only while it still derives from the stored credential.
     let refresh_from_cache = {
         let cached = credentials.read().await;
         cached
             .as_ref()
+            .filter(|c| c.source == source)
             .map(|c| c.refresh_token.clone())
             .filter(|t| !t.is_empty())
     };
-
-    let refresh_token = if let Some(token) = refresh_from_cache {
-        token
-    } else {
-        let loaded = auth::claude::load_credentials()
-            .context("Failed to load Claude credentials for forced refresh")?;
-        if loaded.refresh_token.is_empty() {
+    let refresh_token = match refresh_from_cache {
+        Some(token) => token,
+        None if loaded.refresh_token.is_empty() => {
             anyhow::bail!("No refresh token available in Claude credentials");
         }
-        loaded.refresh_token
+        None => loaded.refresh_token,
     };
 
     let active_label =
@@ -2018,6 +2048,7 @@ async fn force_refresh_oauth_token(
             access_token: refreshed.access_token.clone(),
             refresh_token: refreshed.refresh_token,
             expires_at: refreshed.expires_at,
+            source,
         });
     }
 
