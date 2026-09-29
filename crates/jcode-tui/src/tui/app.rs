@@ -1234,6 +1234,9 @@ pub struct App {
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
     remote_reasoning_effort: Option<String>,
+    /// Effort shown before an optimistic remote effort change. Restored when
+    /// the server rejects the request so the UI never keeps a rejected level.
+    remote_reasoning_effort_before_request: Option<Option<String>>,
     remote_service_tier: Option<String>,
     remote_transport: Option<String>,
     remote_compaction_mode: Option<crate::config::CompactionMode>,

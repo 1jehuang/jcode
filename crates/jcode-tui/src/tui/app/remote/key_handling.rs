@@ -62,7 +62,7 @@ pub(in crate::tui::app) async fn reload_stale_remote_server_before_update(
     Ok(true)
 }
 
-async fn apply_remote_effort_direction(
+pub(super) async fn apply_remote_effort_direction(
     app: &mut App,
     remote: &mut RemoteConnection,
     direction: i8,
@@ -91,6 +91,7 @@ async fn apply_remote_effort_direction(
             if direction > 0 { "max" } else { "min" }
         ));
     } else {
+        app.remember_remote_effort_before_request();
         app.remote_reasoning_effort = Some(next_effort.to_string());
         app.invalidate_model_picker_cache();
         app.set_status_notice(format!(
@@ -1282,6 +1283,7 @@ async fn handle_remote_key_internal(
                         provider_model.as_deref(),
                     );
                     if efforts.contains(&level) {
+                        app.remember_remote_effort_before_request();
                         app.remote_reasoning_effort = Some(level.to_string());
                         app.invalidate_model_picker_cache();
                         app.set_status_notice(format!(

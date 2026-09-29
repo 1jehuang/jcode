@@ -1314,3 +1314,77 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
         "the prompt should be queued for the remote tick loop"
     );
 }
+
+/// Effort cycling updates the remote chip optimistically. When the server
+/// rejects the level (for example a model that does not support it), the
+/// chip must fall back to the effort that was active before the request.
+#[test]
+fn remote_effort_cycle_restores_previous_effort_when_server_rejects() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("openai".to_string());
+    app.remote_provider_model = Some("gpt-5-pro".to_string());
+    app.remote_reasoning_effort = Some("high".to_string());
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    // Two quick presses: both are optimistic, neither is confirmed yet.
+    rt.block_on(super::key_handling::apply_remote_effort_direction(
+        &mut app,
+        &mut remote,
+        1,
+    ))
+    .expect("effort up should send");
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("xhigh"));
+    rt.block_on(super::key_handling::apply_remote_effort_direction(
+        &mut app,
+        &mut remote,
+        1,
+    ))
+    .expect("effort up should send");
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("max"));
+
+    app.handle_server_event(
+        ServerEvent::ReasoningEffortChanged {
+            id: 1,
+            effort: None,
+            error: Some("unsupported reasoning effort".to_string()),
+        },
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_reasoning_effort.as_deref(),
+        Some("high"),
+        "a rejected effort change must restore the last confirmed effort"
+    );
+
+    // A confirmed change clears the saved value, so a later rejection of an
+    // unrelated request does not roll back past the confirmed level.
+    rt.block_on(super::key_handling::apply_remote_effort_direction(
+        &mut app,
+        &mut remote,
+        -1,
+    ))
+    .expect("effort down should send");
+    app.handle_server_event(
+        ServerEvent::ReasoningEffortChanged {
+            id: 3,
+            effort: Some("medium".to_string()),
+            error: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("medium"));
+    app.handle_server_event(
+        ServerEvent::ReasoningEffortChanged {
+            id: 4,
+            effort: None,
+            error: Some("late failure".to_string()),
+        },
+        &mut remote,
+    );
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("medium"));
+}

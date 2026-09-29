@@ -2418,11 +2418,18 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::ReasoningEffortChanged { effort, error, .. } => {
             if let Some(err) = error {
+                // The server rejected the change: drop the optimistic value
+                // and restore what was shown before the request.
+                if let Some(previous) = app.remote_reasoning_effort_before_request.take() {
+                    app.remote_reasoning_effort = previous;
+                    app.invalidate_model_picker_cache();
+                }
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to set effort: {}",
                     err
                 )));
             } else {
+                app.remote_reasoning_effort_before_request = None;
                 app.remote_reasoning_effort = effort.clone();
                 let label = effort
                     .as_deref()

@@ -114,6 +114,16 @@ impl App {
         (provider, model)
     }
 
+    /// Save the effort shown before an optimistic remote change so a server
+    /// rejection can restore it. When a change is already in flight, keep the
+    /// earlier value: it is the last one the server actually confirmed.
+    pub(super) fn remember_remote_effort_before_request(&mut self) {
+        if self.remote_reasoning_effort_before_request.is_none() {
+            self.remote_reasoning_effort_before_request =
+                Some(self.remote_reasoning_effort.clone());
+        }
+    }
+
     /// Best-known current reasoning effort for the remote session. Falls back
     /// to the configured provider-family default when the server has not
     /// reported one yet, so pre-settle effort cycling starts from the value the
