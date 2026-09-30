@@ -14,7 +14,7 @@ fn base_timeout_ms(state: &PersistedAwaitMembersState) -> u64 {
 /// Mirror of the watcher's re-arm decision. Kept in sync with comm_await.rs;
 /// if the real logic moves, these tests move with it.
 fn should_rearm(state: &PersistedAwaitMembersState) -> Result<u64, &'static str> {
-    let now_ms = 10_000_000u64;
+    let _now_ms = 10_000_000u64;
     let wait_started_ms = state
         .last_progress_ms
         .map(|_| state.deadline_unix_ms.saturating_sub(base_timeout_ms(state)))
