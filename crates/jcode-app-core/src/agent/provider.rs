@@ -275,6 +275,16 @@ impl Agent {
         }
         self.provider
             .set_account_failover(self.session.account_failover);
+        self.record_observed_account_pins();
+    }
+
+    /// Remember what the provider reports now, so the next post-stream sync
+    /// only reacts to moves the provider made on its own.
+    fn record_observed_account_pins(&mut self) {
+        for kind in crate::provider::AccountProviderKind::ALL {
+            self.observed_account_pins
+                .insert(kind, self.provider.account_pin(kind));
+        }
     }
 
     /// Pin (or unpin with `None`) this session to one stored account. Only
@@ -297,6 +307,7 @@ impl Agent {
             }
         }
         self.session.account_failover_home.remove(&key);
+        self.record_observed_account_pins();
         self.log_env_snapshot("set_account_pin");
         self.session.save()?;
         Ok(())
@@ -365,7 +376,13 @@ impl Agent {
                 }
                 changed = true;
             }
-            if provider_pin == session_pin {
+            // Only a change from what the provider reported last is a move.
+            // A provider without pin support always reports `None`; that must
+            // not erase the session's pin.
+            let observed = self.observed_account_pins.get(&kind).cloned().flatten();
+            self.observed_account_pins
+                .insert(kind, provider_pin.clone());
+            if provider_pin == observed || provider_pin == session_pin {
                 continue;
             }
             let from = session_pin
@@ -416,6 +433,8 @@ impl Agent {
         }
         for kind in moved {
             let key = kind.key();
+            self.observed_account_pins
+                .insert(kind, self.provider.account_pin(kind));
             match self.provider.account_pin(kind) {
                 Some(pin) => {
                     self.session.account_pins.insert(key.to_string(), pin);

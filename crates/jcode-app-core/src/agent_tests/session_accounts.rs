@@ -252,6 +252,70 @@ async fn failover_pin_persisted_after_error_exit() {
     );
 }
 
+/// Provider without per-account support (the trait defaults): `set_account_pin`
+/// is a no-op and `account_pin` is always `None`.
+struct PinlessProvider;
+
+#[async_trait]
+impl Provider for PinlessProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::TextDelta("ok".to_string()))).await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd { stop_reason: None }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+    fn name(&self) -> &str {
+        "pinless"
+    }
+    fn model(&self) -> String {
+        "pinless-model".to_string()
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(PinlessProvider)
+    }
+}
+
+/// Live regression: a provider that cannot report pins must not look like a
+/// failover move, or the post-stream sync erases the user's pin after the
+/// first turn.
+#[tokio::test]
+async fn pin_kept_after_turn_on_provider_without_pin_support() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+    store_claude_accounts();
+    let provider: Arc<dyn Provider> = Arc::new(PinlessProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent
+        .set_account_pin(AccountProviderKind::Claude, Some(fox_pin()))
+        .expect("pin");
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.run_turn_streaming_mpsc(tx).await.expect("turn");
+    assert_eq!(agent.account_pins().get("claude"), Some(&fox_pin()));
+    while let Ok(event) = rx.try_recv() {
+        assert!(
+            !matches!(event, ServerEvent::SessionAccountChanged { .. }),
+            "no account move happened: {event:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn swarm_child_inherits_pins() {
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
