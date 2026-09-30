@@ -434,13 +434,13 @@ pub(super) fn draw_messages(
     // top border and one column right of the left border.
     set_pinned_todo_more_area(pinned_todo_band.more_line.map(|line| {
         Rect {
-            x: text_render_area.x.saturating_add(1),
+            x: text_render_area.x.saturating_add(2),
             y: render_area
                 .y
                 .saturating_add(prompt_preview_lines)
                 .saturating_add(1)
                 .saturating_add(line as u16),
-            width: text_render_area.width.saturating_sub(2),
+            width: text_render_area.width.saturating_sub(4),
             height: 1,
         }
     }));
@@ -1407,18 +1407,15 @@ impl PinnedTodoBand {
     }
 }
 
-fn pinned_todo_border_color() -> Color {
-    rgb(130, 115, 175)
-}
-
 fn render_pinned_todo_band(frame: &mut Frame, area: Rect, band: PinnedTodoBand) {
     let card_height = band.card_height().min(area.height);
     if card_height > 0 {
-        let border_style = Style::default().fg(pinned_todo_border_color());
+        let border_style = Style::default().fg(super::messages::todo_border_color());
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(border_style)
+            .padding(ratatui::widgets::Padding::horizontal(1))
             .title(Span::styled(
                 band.title,
                 border_style.add_modifier(Modifier::BOLD),
@@ -1452,8 +1449,8 @@ fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) 
         .iter()
         .map(|task| active_background_task_line(task, width))
         .collect();
-    // Card content lives inside the border, so render it two columns narrower.
-    let inner_width = width.saturating_sub(2);
+    // Card content lives inside the border plus one column of padding per side.
+    let inner_width = width.saturating_sub(4);
     let mut title = String::from(" Todos ");
     let card_lines = if crate::config::config().display.pin_todos {
         app.pinned_todos_payload()
@@ -1461,13 +1458,8 @@ fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) 
                 if let Some((done, total)) = super::messages::todo_payload_counts(payload) {
                     title = format!(" Todos {}/{} ", done, total);
                 }
-                let msg = crate::tui::DisplayMessage::todos(payload.to_string());
-                super::messages::get_cached_message_lines(
-                    &msg,
-                    inner_width,
-                    app.diff_mode(),
-                    super::messages::render_todos_message,
-                )
+                // Unboxed body: the band draws its own border below.
+                super::messages::render_todo_card_body(payload, inner_width).unwrap_or_default()
             })
             .unwrap_or_default()
     } else {
@@ -1487,7 +1479,7 @@ fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) 
         card.extend(card_lines.into_iter().take(shown));
         more_line = Some(card.len());
         card.push(Line::from(Span::styled(
-            format!("  … +{} more (todo)", hidden),
+            format!("… +{} more (todo)", hidden),
             Style::default().fg(dim_color()),
         )));
     } else {
