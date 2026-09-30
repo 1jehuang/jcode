@@ -819,3 +819,108 @@ async fn handle_get_model_catalog_busy_unsaved_session_keeps_account_labels() {
     assert_eq!(account_labels[0].label.as_deref(), Some("claude-otter"));
     assert!(account_labels[0].is_default);
 }
+
+/// Provider holding one live Claude pin, as a window started with `--account`.
+struct PinnedProvider(std::sync::Mutex<Option<crate::provider::AccountPin>>);
+
+#[async_trait]
+impl Provider for PinnedProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("not called"))
+    }
+    fn name(&self) -> &str {
+        "pinned"
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(std::sync::Mutex::new(self.0.lock().unwrap().clone())))
+    }
+    fn account_pin(
+        &self,
+        kind: crate::provider::AccountProviderKind,
+    ) -> Option<crate::provider::AccountPin> {
+        (kind == crate::provider::AccountProviderKind::Claude)
+            .then(|| self.0.lock().unwrap().clone())
+            .flatten()
+    }
+    fn set_account_pin(
+        &self,
+        kind: crate::provider::AccountProviderKind,
+        pin: Option<crate::provider::AccountPin>,
+    ) -> Result<()> {
+        if kind == crate::provider::AccountProviderKind::Claude {
+            *self.0.lock().unwrap() = pin;
+        }
+        Ok(())
+    }
+}
+
+/// A window pinned with `--account` before its session is saved: the busy
+/// fallback must report the live pin, not the stored default.
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test intentionally keeps the agent busy lock held to exercise model-catalog fallback"
+)]
+#[tokio::test]
+async fn handle_get_model_catalog_busy_unsaved_session_reports_live_pin() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    std::fs::write(
+        temp_home.path().join("auth.json"),
+        r#"{"anthropic_accounts":[{"label":"claude-otter","access":"a","refresh":"r","expires":1},{"label":"claude-fox","access":"b","refresh":"s","expires":1}],"active_anthropic_account":"claude-otter"}"#,
+    )
+    .expect("write auth file");
+
+    let session_id = "session_busy_unsaved_pinned_catalog";
+    let session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    let provider: Arc<dyn Provider> = Arc::new(PinnedProvider(std::sync::Mutex::new(None)));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    // `--account` pins the live provider; nothing is saved yet.
+    provider
+        .set_account_pin(
+            crate::provider::AccountProviderKind::Claude,
+            Some(crate::provider::AccountPin::new("claude-fox", None)),
+        )
+        .expect("pin");
+    let busy_guard = agent.lock().await;
+
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+    handle_get_model_catalog(45, session_id, &agent, &provider, &writer)
+        .await
+        .expect("catalog fallback");
+    drop(busy_guard);
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b.read_to_end(&mut bytes).await.expect("read");
+    let mut line = String::new();
+    std::io::Cursor::new(bytes).read_line(&mut line).expect("line");
+    let event: crate::protocol::ServerEvent = serde_json::from_str(line.trim()).expect("decode");
+    let crate::protocol::ServerEvent::History { account_labels, .. } = event else {
+        panic!("expected history event");
+    };
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    assert_eq!(account_labels.len(), 1, "account_labels: {account_labels:?}");
+    assert_eq!(account_labels[0].label.as_deref(), Some("claude-fox"));
+    assert!(account_labels[0].pinned);
+    assert!(!account_labels[0].is_default);
+}

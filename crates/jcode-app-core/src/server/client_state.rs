@@ -276,12 +276,21 @@ pub(super) async fn handle_get_model_catalog(
                     // A brand-new session may not be on disk yet. Its pins are
                     // then empty, but stored accounts still apply. An empty list
                     // here would erase the window's account badge (#1613 flake).
-                    crate::session_accounts::account_infos_from_pins(
-                        &persisted
+                    // `provider` is the handle the agent streams with (it is
+                    // never replaced), so its live pins win: a window pinned
+                    // with `--account` before its first save has none on disk.
+                    crate::session_accounts::account_infos_from_pins(&{
+                        let mut pins = persisted
                             .as_ref()
                             .map(|session| session.account_pins.clone())
-                            .unwrap_or_default(),
-                    ),
+                            .unwrap_or_default();
+                        for kind in crate::provider::AccountProviderKind::ALL {
+                            if let Some(pin) = provider.account_pin(kind) {
+                                pins.insert(kind.key().to_string(), pin);
+                            }
+                        }
+                        pins
+                    }),
                     "fallback",
                 )
             }
