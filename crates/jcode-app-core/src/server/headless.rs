@@ -49,6 +49,7 @@ pub(super) async fn create_headless_session(
     provider_key_override: Option<String>,
     route_api_method_override: Option<String>,
     effort_override: Option<String>,
+    accounts: crate::session_accounts::AccountInheritance,
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
     memory_scope: HeadlessMemoryScope,
@@ -157,6 +158,9 @@ pub(super) async fn create_headless_session(
             effort, e
         ));
     }
+
+    // Workers bill the same subscription as their coordinator.
+    new_agent.apply_account_inheritance(&accounts);
 
     new_agent.set_debug(true);
 

@@ -7,14 +7,29 @@
 //! email/id), never tokens: routine token refresh rewrites the auth file and
 //! must not look like an account swap.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct CredentialIdentity {
+    /// Identity the default (unpinned) route uses, external logins included.
     anthropic: Option<String>,
     openai: Option<String>,
+    /// Every stored account: label -> email/id plus refresh fingerprint. A
+    /// pinned session uses exactly one of these, so a relogin of that label
+    /// must reach it even when the default is unchanged.
+    anthropic_accounts: BTreeMap<String, String>,
+    openai_accounts: BTreeMap<String, String>,
+}
+
+/// One credential change to publish: the provider, and the stored account
+/// label when the change is to one account (`None` = the default route).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CredentialChange {
+    pub provider: &'static str,
+    pub account_label: Option<String>,
 }
 
 /// Short, non-reversible fingerprint of a secret. Never log or store the
@@ -110,11 +125,122 @@ fn openai_identity() -> Option<String> {
     }
 }
 
+/// Stored-account identity: the email (or OpenAI account id) when known, so a
+/// routine token refresh is not a change. Without one, fall back to a refresh
+/// token fingerprint, the only thing that tells two logins apart.
+fn stored_account_identity(profile: [Option<&str>; 2], refresh: &str) -> String {
+    let known: Vec<&str> = profile
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+    if known.is_empty() {
+        format!("refresh|{}", secret_fingerprint(refresh))
+    } else {
+        known.join("|")
+    }
+}
+
+/// Per-label identity of every stored Claude account.
+fn anthropic_account_identities() -> BTreeMap<String, String> {
+    crate::auth::claude::load_auth_file()
+        .map(|auth| {
+            auth.anthropic_accounts
+                .into_iter()
+                .map(|account| {
+                    let identity =
+                        stored_account_identity([account.email.as_deref(), None], &account.refresh);
+                    (account.label, identity)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Per-label identity of every stored OpenAI account.
+fn openai_account_identities() -> BTreeMap<String, String> {
+    crate::auth::codex::load_auth_file()
+        .map(|auth| {
+            auth.openai_accounts
+                .into_iter()
+                .map(|account| {
+                    let identity = stored_account_identity(
+                        [account.email.as_deref(), account.account_id.as_deref()],
+                        &account.refresh_token,
+                    );
+                    (account.label, identity)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(super) fn current_identity() -> CredentialIdentity {
     CredentialIdentity {
         anthropic: anthropic_identity(),
         openai: openai_identity(),
+        anthropic_accounts: anthropic_account_identities(),
+        openai_accounts: openai_account_identities(),
     }
+}
+
+/// Labels whose stored account identity was added, removed, or changed.
+fn changed_labels(
+    before: &BTreeMap<String, String>,
+    after: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut labels: Vec<String> = before
+        .iter()
+        .filter(|(label, identity)| after.get(*label) != Some(*identity))
+        .map(|(label, _)| label.clone())
+        .collect();
+    for label in after.keys() {
+        if !before.contains_key(label) {
+            labels.push(label.clone());
+        }
+    }
+    labels.sort();
+    labels.dedup();
+    labels
+}
+
+/// Every change between two snapshots: one per changed stored account label,
+/// plus one label-less change when the default route's identity moved.
+pub(super) fn changed_credentials(
+    before: &CredentialIdentity,
+    after: &CredentialIdentity,
+) -> Vec<CredentialChange> {
+    let mut changes = Vec::new();
+    for (provider, default_changed, before_accounts, after_accounts) in [
+        (
+            "anthropic",
+            before.anthropic != after.anthropic,
+            &before.anthropic_accounts,
+            &after.anthropic_accounts,
+        ),
+        (
+            "openai",
+            before.openai != after.openai,
+            &before.openai_accounts,
+            &after.openai_accounts,
+        ),
+    ] {
+        let labels = changed_labels(before_accounts, after_accounts);
+        if default_changed {
+            changes.push(CredentialChange {
+                provider,
+                account_label: None,
+            });
+        }
+        for label in labels {
+            changes.push(CredentialChange {
+                provider,
+                account_label: Some(label),
+            });
+        }
+    }
+    changes
 }
 
 /// Providers whose account identity differs between two snapshots.
@@ -122,13 +248,11 @@ pub(super) fn changed_providers(
     before: &CredentialIdentity,
     after: &CredentialIdentity,
 ) -> Vec<&'static str> {
-    let mut changed = Vec::new();
-    if before.anthropic != after.anthropic {
-        changed.push("anthropic");
-    }
-    if before.openai != after.openai {
-        changed.push("openai");
-    }
+    let mut changed: Vec<&'static str> = changed_credentials(before, after)
+        .into_iter()
+        .map(|change| change.provider)
+        .collect();
+    changed.dedup();
     changed
 }
 
@@ -156,10 +280,25 @@ pub(super) fn providers_to_publish(
     now: &CredentialIdentity,
     announced: Option<Option<&str>>,
 ) -> Vec<&'static str> {
-    let suppressed = announced.map(announced_watch_providers).unwrap_or_default();
-    changed_providers(last, now)
+    let mut providers: Vec<&'static str> = changes_to_publish(last, now, announced)
         .into_iter()
-        .filter(|provider| !suppressed.contains(provider))
+        .map(|change| change.provider)
+        .collect();
+    providers.dedup();
+    providers
+}
+
+/// Changes that must be published after taking snapshot `now`, one per
+/// changed account label. See `providers_to_publish` for `announced`.
+pub(super) fn changes_to_publish(
+    last: &CredentialIdentity,
+    now: &CredentialIdentity,
+    announced: Option<Option<&str>>,
+) -> Vec<CredentialChange> {
+    let suppressed = announced.map(announced_watch_providers).unwrap_or_default();
+    changed_credentials(last, now)
+        .into_iter()
+        .filter(|change| !suppressed.contains(&change.provider))
         .collect()
 }
 
@@ -168,17 +307,33 @@ pub(super) fn providers_to_publish(
 /// whose login changed: a relogin often reuses the label, so the old login's
 /// usage snapshot and usage-limit marker would otherwise gate the new one.
 fn apply_external_change(provider: &'static str) {
+    apply_external_credential_change(&CredentialChange {
+        provider,
+        account_label: None,
+    });
+}
+
+fn apply_external_credential_change(change: &CredentialChange) {
+    let provider = change.provider;
+    let account_label = change.account_label.clone();
     crate::logging::info(&format!(
-        "Credential identity changed on disk for {provider}; notifying clients"
+        "Credential identity changed on disk for {provider} (account {}); notifying clients",
+        account_label.as_deref().unwrap_or("default")
     ));
     crate::auth::AuthStatus::invalidate_cache();
     match provider {
         "anthropic" => {
-            crate::usage::invalidate_active_anthropic_usage();
-            crate::provider::clear_claude_provider_unavailability_for_account_label(None);
+            if account_label.is_none() {
+                crate::usage::invalidate_active_anthropic_usage();
+            }
+            crate::provider::clear_claude_provider_unavailability_for_account_label(
+                account_label.as_deref(),
+            );
         }
         "openai" => {
-            let label = crate::auth::codex::active_account_label();
+            let label = account_label
+                .clone()
+                .or_else(crate::auth::codex::active_account_label);
             crate::provider::clear_openai_provider_unavailability_for_account_label(
                 label.as_deref(),
             );
@@ -188,6 +343,7 @@ fn apply_external_change(provider: &'static str) {
     }
     crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
         provider: Some(provider.to_string()),
+        account_label,
     });
 }
 
@@ -196,10 +352,7 @@ pub(super) fn spawn() {
         let mut bus_rx = crate::bus::Bus::global().subscribe();
         let mut last = tokio::task::spawn_blocking(current_identity)
             .await
-            .unwrap_or(CredentialIdentity {
-                anthropic: None,
-                openai: None,
-            });
+            .unwrap_or_default();
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await;
@@ -207,7 +360,7 @@ pub(super) fn spawn() {
             let announced: Option<Option<String>> = tokio::select! {
                 _ = interval.tick() => None,
                 event = bus_rx.recv() => match event {
-                    Ok(crate::bus::BusEvent::CredentialsChanged { provider }) => Some(provider),
+                    Ok(crate::bus::BusEvent::CredentialsChanged { provider, .. }) => Some(provider),
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
                 },
@@ -219,8 +372,8 @@ pub(super) fn spawn() {
             // change, so only that provider is skipped. Changes to other
             // providers in the same window are still published.
             let announced = announced.as_ref().map(|provider| provider.as_deref());
-            for provider in providers_to_publish(&last, &now, announced) {
-                apply_external_change(provider);
+            for change in changes_to_publish(&last, &now, announced) {
+                apply_external_credential_change(&change);
             }
             last = now;
         }
@@ -235,6 +388,7 @@ mod tests {
         CredentialIdentity {
             anthropic: anthropic.map(str::to_string),
             openai: openai.map(str::to_string),
+            ..Default::default()
         }
     }
 
@@ -333,6 +487,63 @@ mod tests {
         assert_eq!(
             changed_providers(&first, &current_identity()),
             vec!["anthropic"]
+        );
+    }
+
+    /// A pinned window uses one stored account, not the default. A relogin
+    /// of that account (same label, different subscription) must be reported
+    /// with its label, even though the default route's identity is unchanged.
+    /// A token refresh of any stored account is not a change.
+    #[test]
+    fn credential_watch_reports_changed_label() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        let _ = &sandbox;
+        let account =
+            |label: &str, access: &str, email: &str| crate::auth::claude::AnthropicAccount {
+                label: label.to_string(),
+                access: access.to_string(),
+                refresh: format!("refresh-{access}"),
+                expires: 1,
+                email: Some(email.to_string()),
+                subscription_type: Some("max".to_string()),
+                scopes: Vec::new(),
+            };
+        crate::auth::claude::upsert_account(account("claude-otter", "o1", "otter@x"))
+            .expect("save");
+        crate::auth::claude::upsert_account(account("claude-fox", "f1", "fox@x")).expect("save");
+        let first = current_identity();
+
+        // Token refresh of the non-default account: nothing to report.
+        crate::auth::claude::upsert_account(account("claude-fox", "f2", "fox@x")).expect("save");
+        assert!(changed_credentials(&first, &current_identity()).is_empty());
+
+        // Relogin of claude-fox to another subscription. otter is still the
+        // default, so only the fox label changed.
+        crate::auth::claude::upsert_account(account("claude-fox", "f3", "new-fox@x"))
+            .expect("save");
+        assert_eq!(
+            changes_to_publish(&first, &current_identity(), None),
+            vec![CredentialChange {
+                provider: "anthropic",
+                account_label: Some("claude-fox".to_string()),
+            }]
+        );
+        // The provider-level summary still reports Claude.
+        assert_eq!(
+            providers_to_publish(&first, &current_identity(), None),
+            vec!["anthropic"]
+        );
+
+        // Adding a third account reports that label only.
+        let before_add = current_identity();
+        crate::auth::claude::upsert_account(account("claude-panda", "p1", "panda@x"))
+            .expect("save");
+        assert_eq!(
+            changed_credentials(&before_add, &current_identity()),
+            vec![CredentialChange {
+                provider: "anthropic",
+                account_label: Some("claude-panda".to_string()),
+            }]
         );
     }
 

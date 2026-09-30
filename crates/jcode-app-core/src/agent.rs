@@ -593,6 +593,7 @@ impl Agent {
             agent.session.model = Some(agent.provider_model());
         }
         agent.restore_reasoning_effort_from_session();
+        agent.restore_account_pins_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
         agent.seed_compaction_from_session();

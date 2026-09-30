@@ -473,6 +473,8 @@ pub enum BusEvent {
     /// so turns held on the previous account's limit resend promptly.
     CredentialsChanged {
         provider: Option<String>,
+        /// Stored account label whose credentials changed. `None` = unknown/any.
+        account_label: Option<String>,
     },
     /// A background provider setup task selected a model for this session.
     ProviderModelActivated {

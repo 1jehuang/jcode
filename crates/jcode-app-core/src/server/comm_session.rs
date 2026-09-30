@@ -70,6 +70,7 @@ fn create_visible_spawn_session(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    accounts: &crate::session_accounts::AccountInheritance,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
     let cwd = working_dir
@@ -96,6 +97,9 @@ fn create_visible_spawn_session(
         // headed client attaches to this session.
         session.reasoning_effort = Some(effort.to_string());
     }
+    // Restored by `restore_account_pins_from_session` when the headed client
+    // attaches, like the model and effort above.
+    accounts.apply_to_session(&mut session);
     if selfdev_requested {
         session.set_canary("self-dev");
     }
@@ -215,6 +219,8 @@ pub(super) struct CoordinatorSpawnIdentity {
     pub provider_key: Option<String>,
     pub route_api_method: Option<String>,
     pub is_canary: bool,
+    /// Account pins and failover toggle the worker inherits.
+    pub accounts: crate::session_accounts::AccountInheritance,
 }
 
 /// The resolved model + auth route a spawned swarm agent should be created
@@ -247,6 +253,7 @@ async fn resolve_coordinator_spawn_identity(
             provider_key: agent_guard.session_provider_key(),
             route_api_method: agent_guard.session_route_api_method(),
             is_canary: agent_guard.is_canary(),
+            accounts: agent_guard.account_inheritance(),
         };
     }
 
@@ -259,6 +266,7 @@ async fn resolve_coordinator_spawn_identity(
                 provider_key: session.provider_key.clone(),
                 route_api_method: session.route_api_method.clone(),
                 is_canary: session.is_canary,
+                accounts: crate::session_accounts::AccountInheritance::from_session(&session),
             };
             crate::logging::info(&format!(
                 "Swarm spawn: coordinator {} agent busy/unavailable, inheriting identity from persisted session (model={:?} provider_key={:?} route={:?} canary={})",
@@ -434,6 +442,7 @@ fn prepare_visible_spawn_session<F>(
     provider_key_override: Option<&str>,
     route_api_method_override: Option<&str>,
     effort_override: Option<&str>,
+    accounts: &crate::session_accounts::AccountInheritance,
     selfdev_requested: bool,
     startup_message: Option<&str>,
     launch_visible: F,
@@ -448,6 +457,7 @@ where
         provider_key.as_deref(),
         route_api_method_override,
         effort_override,
+        accounts,
         selfdev_requested,
     )?;
 
@@ -651,6 +661,7 @@ pub(super) async fn spawn_swarm_agent(
             spawn_provider_key.as_deref(),
             spawn_route_api_method.as_deref(),
             spawn_effort.as_deref(),
+            &coordinator.accounts,
             coordinator_is_canary,
             startup_message.as_deref(),
             |session_id, cwd, selfdev_requested, provider_key| {
@@ -694,6 +705,7 @@ pub(super) async fn spawn_swarm_agent(
                 spawn_provider_key.clone(),
                 spawn_route_api_method.clone(),
                 spawn_effort.clone(),
+                coordinator.accounts.clone(),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
                 super::headless::HeadlessMemoryScope::RealProject,
