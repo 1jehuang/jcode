@@ -303,6 +303,10 @@ impl Agent {
             // model. Compare against this after the stream so we can emit a
             // `ModelChanged` and resync the UI/context-limit.
             let model_at_request_start = provider.model().to_string();
+            // Out-of-credit failover can move the turn to another
+            // OpenAI-compatible profile serving the same model id, so the
+            // model alone does not reveal the switch.
+            let provider_at_request_start = provider.display_name();
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
             let kv_request = kv_cache_request_event(
@@ -1206,11 +1210,17 @@ impl Agent {
             // notify clients with a `ModelChanged` so the header, picker, and
             // context budget all reflect the model that actually served.
             let model_after_stream = self.provider.model();
-            if model_after_stream != model_at_request_start {
-                let provider_name = self.provider.display_name();
+            let provider_after_stream = self.provider.display_name();
+            if model_after_stream != model_at_request_start
+                || provider_after_stream != provider_at_request_start
+            {
+                let provider_name = provider_after_stream;
                 logging::warn(&format!(
-                    "Provider switched model mid-request: '{}' -> '{}' (resyncing session/UI)",
-                    model_at_request_start, model_after_stream
+                    "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
+                    model_at_request_start,
+                    provider_at_request_start,
+                    model_after_stream,
+                    provider_name
                 ));
                 self.session.model = Some(self.provider_model());
                 self.provider_runtime_state.apply(

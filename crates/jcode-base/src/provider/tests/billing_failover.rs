@@ -189,6 +189,11 @@ fn billing_402_on_compatible_profile_resends_to_sibling_serving_same_model() {
             notices.to_ascii_lowercase().contains("credit"),
             "notice must say why in plain words: {notices}"
         );
+        assert!(
+            notices.contains("Switched this session to prof-b")
+                && !notices.contains("next few minutes"),
+            "notice must say the session moved and not promise a return: {notices}"
+        );
 
         // A later turn that explicitly goes back to A skips it while A is
         // marked out of credit.

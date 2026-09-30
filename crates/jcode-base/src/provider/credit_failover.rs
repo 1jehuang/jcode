@@ -253,7 +253,7 @@ impl MultiProvider {
             match peek_for_out_of_credit(stream).await {
                 Peeked::Stream(stream) => {
                     let notice = format!(
-                        "{from_profile} is {reason}. Resent this turn to {to_profile}, which serves the same model {model}. {from_profile} is skipped for the next few minutes."
+                        "{from_profile} is {reason}. Switched this session to {to_profile} (same model {model}) and resent the turn. Use /model to pick another route."
                     );
                     crate::logging::info(&format!("Out-of-credit failover: {notice}"));
                     self.startup_notices
