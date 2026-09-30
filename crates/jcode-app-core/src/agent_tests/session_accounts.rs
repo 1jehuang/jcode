@@ -361,3 +361,119 @@ async fn swarm_child_inherits_pins() {
     assert_eq!(child_session.account_pins.get("claude"), Some(&fox_pin()));
     assert_eq!(child_session.account_failover, Some(false));
 }
+
+/// Rewrite the stored Claude accounts as (label, email) pairs.
+fn restore_claude_accounts_as(accounts: &[(&str, &str)]) {
+    let mut auth = crate::auth::claude::load_auth_file().expect("auth file");
+    auth.anthropic_accounts = accounts
+        .iter()
+        .map(|(label, email)| crate::auth::claude::AnthropicAccount {
+            label: label.to_string(),
+            access: format!("access-{email}"),
+            refresh: format!("refresh-{email}"),
+            expires: chrono::Utc::now().timestamp_millis() + 3_600_000,
+            email: Some(email.to_string()),
+            subscription_type: Some("max".to_string()),
+            scopes: Vec::new(),
+        })
+        .collect();
+    auth.active_anthropic_account = Some(accounts[0].0.to_string());
+    crate::auth::claude::save_auth_file(&auth).expect("save auth");
+}
+
+/// Greptile "Reused label defeats saved pin": the saved pin's label now
+/// belongs to another login. Restore must resolve by identity, re-pin to the
+/// identity's new label, or drop the pin and tell the user. It must never
+/// keep a pin whose label names a different identity.
+#[tokio::test]
+async fn restore_rejects_reused_label_and_follows_identity() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+    store_claude_accounts();
+
+    // Fox was removed and its label reused by a different subscription.
+    restore_claude_accounts_as(&[
+        ("claude-otter", "otter@example.com"),
+        ("claude-fox", "wolf@example.com"),
+    ]);
+    let mut saved = Session::create(None, None);
+    saved.account_pins.insert("claude".to_string(), fox_pin());
+    saved.save_prepared().expect("persist session");
+
+    let provider = PinProvider::new(None);
+    let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+    agent.restore_session(&saved.id).expect("resume");
+    assert_eq!(
+        provider
+            .pins
+            .lock()
+            .unwrap()
+            .get(&AccountProviderKind::Claude),
+        None,
+        "a pin whose label now names another login must be dropped"
+    );
+    assert!(agent.account_pins().is_empty());
+    let notices = agent.take_account_notices();
+    let reason = notices
+        .iter()
+        .find_map(|event| match event {
+            ServerEvent::SessionAccountChanged {
+                provider, reason, ..
+            } if provider == "claude" => reason.clone(),
+            _ => None,
+        })
+        .expect("the user is told the pin was dropped");
+    assert!(
+        reason.contains("claude-fox") && reason.contains("default claude-otter"),
+        "{reason}"
+    );
+    assert!(agent.take_account_notices().is_empty(), "announced once");
+
+    // Fox's login now lives at another label: the window follows it there.
+    restore_claude_accounts_as(&[
+        ("claude-otter", "otter@example.com"),
+        ("claude-fox", "wolf@example.com"),
+        ("claude-panda", "fox@example.com"),
+    ]);
+    let mut saved = Session::create(None, None);
+    saved.account_pins.insert("claude".to_string(), fox_pin());
+    saved.save_prepared().expect("persist session");
+    let provider = PinProvider::new(None);
+    let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+    agent.restore_session(&saved.id).expect("resume");
+    let expected = AccountPin::new("claude-panda", Some("fox@example.com".to_string()));
+    assert_eq!(
+        provider
+            .pins
+            .lock()
+            .unwrap()
+            .get(&AccountProviderKind::Claude),
+        Some(&expected)
+    );
+    assert_eq!(agent.account_pins().get("claude"), Some(&expected));
+}
+
+/// A weak (refresh-hash) identity rotates with every refresh, so a label
+/// match still counts.
+#[tokio::test]
+async fn weak_identity_pin_still_accepts_label_match() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+    crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+        label: "claude-otter".to_string(),
+        access: "access".to_string(),
+        refresh: "refresh-now".to_string(),
+        expires: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        email: None,
+        subscription_type: None,
+        scopes: Vec::new(),
+    })
+    .expect("store");
+    let pin = AccountPin::new("claude-otter", Some("rt:0123456789abcdef".to_string()));
+    assert_eq!(
+        crate::session_accounts::resolve_pin(AccountProviderKind::Claude, &pin).as_deref(),
+        Some("claude-otter")
+    );
+}

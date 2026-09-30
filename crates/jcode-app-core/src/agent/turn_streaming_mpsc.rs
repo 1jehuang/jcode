@@ -194,6 +194,10 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        // Pins restore dropped (account removed or relabeled) not yet announced.
+        for notice in self.take_account_notices() {
+            let _ = event_tx.send(notice);
+        }
         // Return to the preferred account after its reset, at turn start only.
         self.return_account_home_at_turn_start(Some(&event_tx));
 

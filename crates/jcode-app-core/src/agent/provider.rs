@@ -252,10 +252,18 @@ impl Agent {
                         }
                     }
                     None => {
+                        let reason = crate::session_accounts::dropped_pin_reason(kind, &pin);
                         logging::warn(&format!(
-                            "Session {} was pinned to {key} account '{}', which no longer exists; using the default account",
+                            "Session {} was pinned to {key} account '{}': {reason}",
                             self.session.id, pin.label
                         ));
+                        // Never keep a pin whose label now names another
+                        // login: unpin the provider too, so it cannot carry
+                        // a stale pin from an earlier session.
+                        if self.provider.account_pin(kind).is_some() {
+                            let _ = self.provider.set_account_pin(kind, None);
+                        }
+                        self.pending_account_notices.push((kind, reason));
                         dropped.push(key.to_string());
                     }
                 },
@@ -276,6 +284,22 @@ impl Agent {
         self.provider
             .set_account_failover(self.session.account_failover);
         self.record_observed_account_pins();
+    }
+
+    /// `SessionAccountChanged` events for pins that restore had to drop (the
+    /// account was removed, or its label now names another login). Drained
+    /// once, by whoever can reach the client first.
+    pub fn take_account_notices(&mut self) -> Vec<ServerEvent> {
+        std::mem::take(&mut self.pending_account_notices)
+            .into_iter()
+            .map(|(kind, reason)| {
+                crate::session_accounts::account_changed_event(
+                    self.provider.as_ref(),
+                    kind,
+                    Some(reason),
+                )
+            })
+            .collect()
     }
 
     /// Remember what the provider reports now, so the next post-stream sync

@@ -1865,6 +1865,7 @@ pub(super) async fn handle_client(
                 // drives (new or resumed). An explicit request overrides a
                 // resumed session's stored pin.
                 apply_subscribe_account_pins(&agent, &requested_account_pins).await;
+                send_pending_account_notices(&agent, &client_event_tx);
                 client_subscribed = true;
                 provisional_session = false;
             }
@@ -2014,6 +2015,7 @@ pub(super) async fn handle_client(
                 if client_session_id != pre_resume_session_id {
                     provisional_session = false;
                 }
+                send_pending_account_notices(&agent, &client_event_tx);
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,
@@ -3859,6 +3861,19 @@ fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent>
         available_models: available_models.clone(),
         available_model_routes: Vec::new(),
     })
+}
+
+/// Tell the client about account pins restore had to drop for the session it
+/// now drives. A busy agent keeps them; its next turn announces them.
+fn send_pending_account_notices(
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    if let Ok(mut agent_guard) = agent.try_lock() {
+        for notice in agent_guard.take_account_notices() {
+            let _ = client_event_tx.send(notice);
+        }
+    }
 }
 
 fn queue_soft_interrupt(

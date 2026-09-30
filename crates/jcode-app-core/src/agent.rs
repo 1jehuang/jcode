@@ -288,6 +288,8 @@ pub struct Agent {
         crate::provider::AccountProviderKind,
         Option<crate::provider::AccountPin>,
     >,
+    /// Account pins restore dropped, with the reason to show the user.
+    pending_account_notices: Vec<(crate::provider::AccountProviderKind, String)>,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
     /// Transient reminder injected into provider requests for the current turn only.
@@ -417,6 +419,7 @@ impl Agent {
             last_connection_type: None,
             last_status_detail: None,
             observed_account_pins: std::collections::BTreeMap::new(),
+            pending_account_notices: Vec::new(),
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),

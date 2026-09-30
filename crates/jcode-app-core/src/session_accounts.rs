@@ -44,14 +44,16 @@ impl AccountInheritance {
     }
 }
 
-/// Stored (label, identity) pairs for one provider family.
+/// Stored (label, identity) pairs for one provider family. The identity is
+/// the same one credential loading checks (`auth::*::account_identity`), so a
+/// pin built here is one the provider will accept.
 fn stored_accounts(kind: AccountProviderKind) -> Vec<(String, Option<String>)> {
     match kind {
         AccountProviderKind::Claude => crate::auth::claude::list_accounts()
             .unwrap_or_default()
             .into_iter()
             .map(|account| {
-                let identity = claude_identity(&account);
+                let identity = crate::auth::claude::account_identity(&account);
                 (account.label, identity)
             })
             .collect(),
@@ -59,70 +61,62 @@ fn stored_accounts(kind: AccountProviderKind) -> Vec<(String, Option<String>)> {
             .unwrap_or_default()
             .into_iter()
             .map(|account| {
-                let identity = openai_identity(&account);
+                let identity = crate::auth::codex::account_identity(&account);
                 (account.label, identity)
             })
             .collect(),
     }
 }
 
-fn secret_fingerprint(secret: &str) -> Option<String> {
-    use sha2::{Digest, Sha256};
-    let secret = secret.trim();
-    if secret.is_empty() {
-        return None;
-    }
-    Some(format!("{:x}", Sha256::digest(secret.as_bytes()))[..16].to_string())
-}
-
-fn non_empty(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn claude_identity(account: &crate::auth::claude::AnthropicAccount) -> Option<String> {
-    non_empty(account.email.as_deref()).or_else(|| secret_fingerprint(&account.refresh))
-}
-
-fn openai_identity(account: &crate::auth::codex::OpenAiAccount) -> Option<String> {
-    non_empty(account.email.as_deref())
-        .or_else(|| non_empty(account.account_id.as_deref()))
-        .or_else(|| secret_fingerprint(&account.refresh_token))
+/// Stored labels for one provider family, in stored order.
+pub fn stored_labels(kind: AccountProviderKind) -> Vec<String> {
+    stored_accounts(kind)
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect()
 }
 
 /// Build a pin for a stored account label. Fails when no such account exists.
 pub fn pin_for_label(kind: AccountProviderKind, label: &str) -> Result<AccountPin> {
     let label = label.trim();
-    stored_accounts(kind)
-        .into_iter()
-        .find(|(stored, _)| stored == label)
-        .map(|(label, identity)| AccountPin::new(label, identity))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No {} account with label '{}' found",
-                provider_display(kind),
-                label
-            )
-        })
+    match kind {
+        AccountProviderKind::Claude => crate::auth::claude::pin_for_label(label),
+        AccountProviderKind::OpenAi => crate::auth::codex::pin_for_label(label),
+    }
 }
 
-/// Current label of the account a pin names: identity first (labels are
-/// positional and move when an earlier account is removed), then label.
+/// Current label of the account a pin names. Identity wins (labels are
+/// positional and move when an earlier account is removed). A label match is
+/// accepted only when the identities cannot tell the accounts apart (no
+/// identity, or a rotating refresh-token hash). A pin whose identity is gone
+/// while another subscription holds its label resolves to `None`, exactly as
+/// credential loading does.
 pub fn resolve_pin(kind: AccountProviderKind, pin: &AccountPin) -> Option<String> {
-    let accounts = stored_accounts(kind);
-    if let Some(identity) = pin.identity.as_deref()
-        && let Some((label, _)) = accounts
-            .iter()
-            .find(|(_, stored)| stored.as_deref() == Some(identity))
-    {
-        return Some(label.clone());
+    match kind {
+        AccountProviderKind::Claude => crate::auth::claude::resolve_pin(pin),
+        AccountProviderKind::OpenAi => crate::auth::codex::resolve_pin(pin),
     }
-    accounts
-        .into_iter()
-        .find(|(label, _)| *label == pin.label)
-        .map(|(label, _)| label)
+}
+
+/// Why a restored pin was dropped, for the user: "claude-fox was removed,
+/// this window uses the default claude-otter".
+pub fn dropped_pin_reason(kind: AccountProviderKind, pin: &AccountPin) -> String {
+    let relabeled = stored_accounts(kind)
+        .iter()
+        .any(|(label, _)| *label == pin.label);
+    let what = if relabeled {
+        format!(
+            "{} now belongs to a different {} login",
+            pin.label,
+            provider_display(kind)
+        )
+    } else {
+        format!("{} was removed", pin.label)
+    };
+    match default_label(kind) {
+        Some(default) => format!("{what}, this window uses the default {default}"),
+        None => format!("{what}, this window uses the default account"),
+    }
 }
 
 /// Stored default account (`active_*_account`, else the first account). Never
