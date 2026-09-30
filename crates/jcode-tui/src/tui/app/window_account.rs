@@ -109,6 +109,36 @@ pub(crate) enum PendingAccountRequest {
     SetDefault { family: String, label: String },
     Unpin { family: String },
     Failover { enabled: Option<bool> },
+    /// A newer request of the same scope was already answered, so this
+    /// one's answer is stale and must not change what the window shows.
+    Superseded,
+}
+
+impl PendingAccountRequest {
+    /// Requests that override each other: the window pin (use/unpin) or the
+    /// default, per family.
+    fn scope(&self) -> Option<(&str, bool)> {
+        match self {
+            Self::UseInWindow { family, .. } | Self::Unpin { family } => Some((family, true)),
+            Self::SetDefault { family, .. } => Some((family, false)),
+            _ => None,
+        }
+    }
+
+    /// Whether `SessionAccountChanged` for `family` with this label/pin is
+    /// the server applying this request.
+    fn produces(&self, family: &str, label: Option<&str>, pinned: bool) -> bool {
+        match self {
+            Self::UseInWindow { family: f, label: l } => {
+                f == family && pinned && label == Some(l.as_str())
+            }
+            Self::Unpin { family: f } => f == family && !pinned,
+            Self::SetDefault { family: f, label: l } => {
+                f == family && !pinned && label == Some(l.as_str())
+            }
+            _ => false,
+        }
+    }
 }
 
 /// "This window now uses X. The default for new windows is still Y (...)."
@@ -253,6 +283,12 @@ impl App {
         self.window_accounts = accounts;
     }
 
+    /// A new connection: requests sent on the old one will never be
+    /// answered, and the bootstrap History is authoritative.
+    pub(crate) fn reset_account_requests_for_new_connection(&mut self) {
+        self.pending_account_requests.clear();
+    }
+
     /// Server says this window's account changed. A `reason` means the server
     /// moved it (failover, return home, removed account), so tell the user.
     pub(crate) fn handle_session_account_changed(
@@ -276,15 +312,10 @@ impl App {
         });
         crate::auth::AuthStatus::invalidate_cache();
         // The answer to this window's own request: its Done announces it.
-        let requested_here = self.pending_account_requests.values().any(|request| {
-            matches!(
-                request,
-                PendingAccountRequest::UseInWindow { family, .. }
-                    | PendingAccountRequest::SetDefault { family, .. }
-                    | PendingAccountRequest::Unpin { family }
-                    if *family == provider
-            )
-        });
+        let requested_here = self
+            .pending_account_requests
+            .values()
+            .any(|request| request.produces(&provider, label.as_deref(), pinned));
         if requested_here {
             return;
         }
@@ -637,6 +668,18 @@ impl App {
         let Some(request) = self.pending_account_requests.remove(&id) else {
             return false;
         };
+        if request == PendingAccountRequest::Superseded {
+            return true;
+        }
+        // Answers can arrive out of order: older requests of the same scope
+        // are now stale and must not overwrite this newer result.
+        if let Some(scope) = request.scope() {
+            for (other_id, other) in self.pending_account_requests.iter_mut() {
+                if *other_id < id && other.scope() == Some(scope) {
+                    *other = PendingAccountRequest::Superseded;
+                }
+            }
+        }
         if let Err(message) = result {
             let what = match &request {
                 PendingAccountRequest::UseInWindow { label, .. } => {
@@ -651,6 +694,7 @@ impl App {
                 PendingAccountRequest::Failover { .. } => {
                     "Could not change account failover".to_string()
                 }
+                PendingAccountRequest::Superseded => unreachable!("returned above"),
             };
             self.push_display_message(DisplayMessage::error(format!("{what}: {message}")));
             self.set_status_notice("Account change failed");
@@ -718,6 +762,7 @@ impl App {
                     failover_word(self.effective_account_failover())
                 ));
             }
+            PendingAccountRequest::Superseded => {}
         }
         true
     }

@@ -332,3 +332,82 @@ fn remote_account_switch_applies_on_done() {
         assert_eq!(announcements, 1, "announced once, on Done");
     });
 }
+
+fn pending_use(app: &mut App, id: u64, label: &str) {
+    app.pending_account_requests.insert(
+        id,
+        super::window_account::PendingAccountRequest::UseInWindow {
+            family: "claude".to_string(),
+            label: label.to_string(),
+        },
+    );
+}
+
+fn account_changed(label: &str, reason: Option<&str>) -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::SessionAccountChanged {
+        provider: "claude".to_string(),
+        label: Some(label.to_string()),
+        pinned: true,
+        is_default: false,
+        reason: reason.map(str::to_string),
+    }
+}
+
+/// Switch to fox then otter: a late Done for fox must not put fox back.
+#[test]
+fn stale_account_done_does_not_regress_display() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.replace_window_accounts(vec![claude_window("claude-owl", false)]);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        pending_use(&mut app, 1, "claude-fox");
+        pending_use(&mut app, 2, "claude-otter");
+        app.handle_server_event(account_changed("claude-fox", None), &mut remote);
+        app.handle_server_event(account_changed("claude-otter", None), &mut remote);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 2 }, &mut remote);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 1 }, &mut remote);
+        assert_eq!(
+            app.window_account_label("claude").as_deref(),
+            Some("claude-otter"),
+            "stale Done regressed the badge"
+        );
+        let last = app.display_messages().last().unwrap().content.clone();
+        assert!(!last.contains("now uses claude-fox"), "stale Done announced: {last}");
+    });
+}
+
+/// A pending request for fox must not hide an automatic move to otter.
+#[test]
+fn unrelated_pending_request_does_not_silence_failover() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.replace_window_accounts(vec![claude_window("claude-owl", true)]);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        pending_use(&mut app, 7, "claude-fox");
+        app.handle_server_event(
+            account_changed("claude-otter", Some("claude-owl is out of usage")),
+            &mut remote,
+        );
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|m| m.content.contains("moved from claude-owl to claude-otter")),
+            "failover notice was suppressed"
+        );
+    });
+}
+
+/// A new connection drops requests the old one never answered.
+#[test]
+fn reconnect_clears_pending_account_requests() {
+    let mut app = create_test_app();
+    pending_use(&mut app, 3, "claude-fox");
+    app.reset_account_requests_for_new_connection();
+    assert!(app.pending_account_requests.is_empty());
+}
