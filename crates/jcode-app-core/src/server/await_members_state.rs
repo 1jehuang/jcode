@@ -42,6 +42,22 @@ pub struct PersistedAwaitMembersState {
     /// Wake an idle requesting agent on completion (or soft-interrupt if busy).
     #[serde(default = "default_true")]
     pub wake: bool,
+    /// Fork auto-rearm (2026-09-30): how many times the timeout path has
+    /// re-armed this wait itself. 0 = the wait came from an explicit tool call.
+    /// Cap: MAX_AUTO_REARMS; beyond that the wait finalizes as a timeout.
+    #[serde(default)]
+    pub auto_rearm_count: u32,
+    /// Fork auto-rearm: base timeout in seconds (the caller's original request).
+    /// Backoff = base * 2^auto_rearm_count, capped at 1h.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_timeout_secs: Option<u64>,
+    /// Fork auto-rearm: monotonic progress probe. Set to now_ms each time a
+    /// swarm event for this swarm is observed while watching. A timeout with
+    /// last_progress_ms <= rearm_started_ms means the worker made NO progress
+    /// during the whole wait -> finalize instead of re-arming (hung-worker
+    /// guard, prevents infinite wake loops).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_progress_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_response: Option<PersistedAwaitMembersResult>,
 }
@@ -201,6 +217,9 @@ pub(super) fn ensure_pending_state(
         background,
         notify,
         wake,
+        auto_rearm_count: 0,
+        base_timeout_secs: None,
+        last_progress_ms: None,
         final_response: None,
     };
     save_state(&state);
