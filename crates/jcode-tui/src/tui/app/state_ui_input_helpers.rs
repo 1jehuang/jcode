@@ -917,10 +917,22 @@ impl App {
         if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
             let mut suggestions = vec![
                 ("/account list".into(), "Open all provider/account actions"),
-                ("/account switch".into(), "Use a saved account in this window"),
-                ("/account default".into(), "Set the default account for new windows"),
-                ("/account unpin".into(), "This window follows the default account"),
-                ("/account failover".into(), "Per-window account failover on|off|status"),
+                (
+                    "/account switch".into(),
+                    "Use a saved account in this window",
+                ),
+                (
+                    "/account default".into(),
+                    "Set the default account for new windows",
+                ),
+                (
+                    "/account unpin".into(),
+                    "This window follows the default account",
+                ),
+                (
+                    "/account failover".into(),
+                    "Per-window account failover on|off|status",
+                ),
                 (
                     "/account default-provider".into(),
                     "Set preferred default provider",

@@ -637,3 +637,30 @@ fn queued_switch_after_failover_still_confirms() {
         );
     });
 }
+
+#[test]
+fn automatic_move_onto_overtaken_request_is_explained() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.replace_window_accounts(vec![claude_window("claude-owl", true)]);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        pending_use(&mut app, 1, "claude-fox");
+        app.handle_server_event(account_changed("claude-otter", Some("failover")), &mut remote);
+        app.handle_server_event(
+            account_changed("claude-fox", Some("claude-otter is out of usage")),
+            &mut remote,
+        );
+        let last = app.display_messages().last().unwrap().content.clone();
+        assert!(
+            last.contains('⚡') && last.contains("claude-otter is out of usage"),
+            "automatic move to fox not explained: {last}"
+        );
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 1 }, &mut remote);
+        assert_eq!(app.window_account_label("claude").as_deref(), Some("claude-fox"));
+        let last = app.display_messages().last().unwrap().content.clone();
+        assert!(!last.contains("otter") || last.contains("out of usage"), "contradicts badge: {last}");
+    });
+}

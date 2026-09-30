@@ -1974,7 +1974,10 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
             .as_deref()
             .and_then(overscroll_short_reasoning)
             .map(str::to_string),
-        account: data.window_account.as_ref().map(|account| account.display()),
+        account: data
+            .window_account
+            .as_ref()
+            .map(|account| account.display()),
     };
 
     let alignment = if app.centered_mode() {

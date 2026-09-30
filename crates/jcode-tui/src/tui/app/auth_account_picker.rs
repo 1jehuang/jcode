@@ -522,7 +522,10 @@ impl App {
                 name: account_display_name("Claude", &account.label, claude_accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
-                    api_method: self.account_row_badge("claude", &account.label).0.to_string(),
+                    api_method: self
+                        .account_row_badge("claude", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!(
                         "{} - {} - {} - plan {}",
@@ -573,7 +576,10 @@ impl App {
                 name: account_display_name("OpenAI", &account.label, openai_accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
-                    api_method: self.account_row_badge("openai", &account.label).0.to_string(),
+                    api_method: self
+                        .account_row_badge("openai", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,
@@ -798,7 +804,10 @@ impl App {
                 name: account_display_name("Claude", &account.label, accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
-                    api_method: self.account_row_badge("claude", &account.label).0.to_string(),
+                    api_method: self
+                        .account_row_badge("claude", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!(
                         "{} - {} - {} - plan {}",
@@ -951,7 +960,10 @@ impl App {
                 name: account_display_name("OpenAI", &account.label, accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
-                    api_method: self.account_row_badge("openai", &account.label).0.to_string(),
+                    api_method: self
+                        .account_row_badge("openai", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,

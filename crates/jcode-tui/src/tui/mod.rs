@@ -1441,12 +1441,25 @@ impl PickerKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountPickerAction {
     /// Use this saved account in this window (pins the session).
-    Switch { provider_id: String, label: String },
+    Switch {
+        provider_id: String,
+        label: String,
+    },
     /// Make this saved account the default for new windows.
-    SetDefault { provider_id: String, label: String },
-    Add { provider_id: String },
-    Replace { provider_id: String, label: String },
-    OpenCenter { provider_filter: Option<String> },
+    SetDefault {
+        provider_id: String,
+        label: String,
+    },
+    Add {
+        provider_id: String,
+    },
+    Replace {
+        provider_id: String,
+        label: String,
+    },
+    OpenCenter {
+        provider_filter: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1538,9 +1551,7 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
         PickerAction::Account(
             AccountPickerAction::Switch { provider_id, label }
             | AccountPickerAction::SetDefault { provider_id, label },
-        ) => {
-            provider_id.capacity() + label.capacity()
-        }
+        ) => provider_id.capacity() + label.capacity(),
         PickerAction::Account(AccountPickerAction::Add { provider_id }) => provider_id.capacity(),
         PickerAction::Account(AccountPickerAction::Replace { provider_id, label }) => {
             provider_id.capacity() + label.capacity()

@@ -2395,10 +2395,9 @@ pub(in crate::tui::app) fn handle_server_event(
             provider,
             account_label,
         } => {
-            if !app.credential_change_is_for_this_window(
-                provider.as_deref(),
-                account_label.as_deref(),
-            ) {
+            if !app
+                .credential_change_is_for_this_window(provider.as_deref(), account_label.as_deref())
+            {
                 crate::logging::info(&format!(
                     "Credentials changed for {:?} ({:?}), not this window's account; keeping hold",
                     provider, account_label

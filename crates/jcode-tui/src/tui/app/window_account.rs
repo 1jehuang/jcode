@@ -140,8 +140,17 @@ impl PendingAccountRequest {
     }
 
     /// Whether `SessionAccountChanged` for `family` with this label/pin is
-    /// the server applying this request.
-    fn produces(&self, family: &str, label: Option<&str>, pinned: bool) -> bool {
+    /// the server applying this request. An overtaken request only claims
+    /// an event without a reason, or with the reason the server attaches when
+    /// it applies a pin request: any other reason marks a server-initiated
+    /// move (failover, return home) whose explanation must stay visible.
+    fn produces(
+        &self,
+        family: &str,
+        label: Option<&str>,
+        pinned: bool,
+        reason: Option<&str>,
+    ) -> bool {
         match self {
             Self::UseInWindow {
                 family: f,
@@ -152,7 +161,14 @@ impl PendingAccountRequest {
                 family: f,
                 label: l,
             } => f == family && !pinned && label == Some(l.as_str()),
-            Self::Overtaken(inner) => inner.produces(family, label, pinned),
+            Self::Overtaken(inner) => {
+                let applied = match label.filter(|_| pinned) {
+                    Some(l) => format!("this window now uses {l}"),
+                    None => "this window follows the default account".to_string(),
+                };
+                reason.is_none_or(|r| r.trim().is_empty() || r == applied)
+                    && inner.produces(family, label, pinned, reason)
+            }
             _ => false,
         }
     }
@@ -327,10 +343,9 @@ impl App {
         });
         crate::auth::AuthStatus::invalidate_cache();
         // The answer to this window's own request: its Done announces it.
-        let requested_here = self
-            .pending_account_requests
-            .values()
-            .any(|request| request.produces(&provider, label.as_deref(), pinned));
+        let requested_here = self.pending_account_requests.values().any(|request| {
+            request.produces(&provider, label.as_deref(), pinned, reason.as_deref())
+        });
         if requested_here {
             return;
         }

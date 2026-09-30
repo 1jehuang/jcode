@@ -385,10 +385,8 @@ pub(crate) fn infer_account_provider(label: &str) -> Result<(String, String), St
 }
 
 fn use_in_window_for_label(label: &str) -> Result<AccountCommand, String> {
-    infer_account_provider(label.trim()).map(|(provider_id, label)| AccountCommand::UseInWindow {
-        provider_id,
-        label,
-    })
+    infer_account_provider(label.trim())
+        .map(|(provider_id, label)| AccountCommand::UseInWindow { provider_id, label })
 }
 
 fn set_default_for_label(label: &str) -> Result<AccountCommand, String> {
@@ -424,10 +422,11 @@ fn parse_failover(value: &str) -> Result<AccountCommand, String> {
 /// True when both inputs are valid `/account` commands with the same action,
 /// so a differently spelled suggestion need not replace what was typed.
 pub(crate) fn same_account_command(input: &str, suggestion: &str) -> bool {
-    match (parse_account_command(input), parse_account_command(suggestion)) {
-        (Some(Ok(typed)), Some(Ok(suggested))) => {
-            format!("{typed:?}") == format!("{suggested:?}")
-        }
+    match (
+        parse_account_command(input),
+        parse_account_command(suggestion),
+    ) {
+        (Some(Ok(typed)), Some(Ok(suggested))) => format!("{typed:?}") == format!("{suggested:?}"),
         _ => false,
     }
 }
@@ -1261,7 +1260,10 @@ mod tests {
             assert!(out.contains("claude-fox"), "{input} -> {out}");
         }
         let out = parsed("/account openai switch openai-otter");
-        assert!(out.contains("UseInWindow") && out.contains("\"openai\""), "{out}");
+        assert!(
+            out.contains("UseInWindow") && out.contains("\"openai\""),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1271,7 +1273,10 @@ mod tests {
         assert!(out.contains("claude-fox"), "{out}");
         assert!(!out.contains("UseInWindow"), "{out}");
         let out = parsed("/account openai default openai-fox");
-        assert!(out.contains("SetDefault {") && out.contains("openai-fox"), "{out}");
+        assert!(
+            out.contains("SetDefault {") && out.contains("openai-fox"),
+            "{out}"
+        );
         // Existing global-default commands keep their meaning.
         assert!(parsed("/account default-provider claude").contains("SetDefaultProvider"));
         assert!(parsed("/account default-model gpt-5").contains("SetDefaultModel"));
@@ -1283,9 +1288,15 @@ mod tests {
         let out = parsed("/account unpin");
         assert!(out.contains("Unpin { provider_id: None }"), "{out}");
         let out = parsed("/account unpin openai");
-        assert!(out.contains("Unpin { provider_id: Some(\"openai\") }"), "{out}");
+        assert!(
+            out.contains("Unpin { provider_id: Some(\"openai\") }"),
+            "{out}"
+        );
         let out = parsed("/account claude unpin");
-        assert!(out.contains("Unpin { provider_id: Some(\"claude\") }"), "{out}");
+        assert!(
+            out.contains("Unpin { provider_id: Some(\"claude\") }"),
+            "{out}"
+        );
     }
 
     #[test]

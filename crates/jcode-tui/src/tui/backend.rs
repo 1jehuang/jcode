@@ -1138,7 +1138,11 @@ impl RemoteConnection {
 
     /// Pin this session (window) to `label`, or unpin it with `None`.
     /// Returns the request id; the server answers it with Done or Error.
-    pub async fn set_session_account(&mut self, provider: &str, label: Option<&str>) -> Result<u64> {
+    pub async fn set_session_account(
+        &mut self,
+        provider: &str,
+        label: Option<&str>,
+    ) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::SetSessionAccount {
