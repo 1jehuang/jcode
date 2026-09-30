@@ -244,8 +244,16 @@ fn test_same_provider_account_candidates_include_other_openai_accounts() {
         })
         .unwrap();
 
-        crate::auth::codex::set_active_account("openai-otter").unwrap();
-        let candidates = MultiProvider::same_provider_account_candidates(ActiveProvider::OpenAI);
+        let labels: Vec<String> =
+            account_failover::stored_accounts(jcode_provider_core::AccountProviderKind::OpenAi)
+                .into_iter()
+                .map(|(label, _)| label)
+                .collect();
+        let candidates = account_failover::account_rotation(
+            jcode_provider_core::AccountProviderKind::OpenAi,
+            Some("openai-otter"),
+            &labels,
+        );
         assert_eq!(candidates, vec!["openai-fox".to_string()]);
     });
 }

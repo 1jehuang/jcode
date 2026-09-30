@@ -319,6 +319,7 @@ pub(super) async fn handle_notify_auth_changed_process_wide(
 
     crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
         provider: activation.provider_id.clone(),
+        account_label: None,
     });
     crate::bus::Bus::global().publish_models_updated();
     spawn_deferred_auth_refreshes(deferred_agents);
@@ -1121,6 +1122,7 @@ pub(super) async fn handle_notify_auth_changed(
         // can resend a turn held on the previous account's limit.
         crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
             provider: activation.provider_id.clone(),
+            account_label: None,
         });
 
         // Auth refresh is global so every live session learns about newly
@@ -1307,50 +1309,304 @@ pub(super) async fn handle_notify_auth_changed(
 #[path = "provider_control_tests.rs"]
 mod provider_control_tests;
 
+/// Legacy `switch_anthropic_account` (old clients): pin the sender's session
+/// only. It never changes the stored default, the process-global override, or
+/// any other session. The default changes only via `set_default_account`.
 pub(super) async fn handle_switch_anthropic_account(
     id: u64,
     label: String,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    supports_session_accounts: bool,
 ) {
-    match crate::auth::claude::set_active_account(&label) {
-        Ok(()) => {
-            crate::auth::AuthStatus::invalidate_cache();
-            spawn_account_switch_refresh(
-                id,
-                "anthropic",
-                Arc::clone(agent),
-                client_event_tx.clone(),
-            );
-        }
-        Err(e) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!("Failed to switch Anthropic account: {}", e),
-                retry_after_secs: None,
-            });
-        }
-    }
+    handle_set_session_account(
+        id,
+        crate::provider::AccountProviderKind::Claude,
+        Some(label),
+        agent,
+        client_event_tx,
+        supports_session_accounts,
+    )
+    .await;
 }
 
+/// Legacy `switch_openai_account`: pin the sender's session only.
 pub(super) async fn handle_switch_openai_account(
     id: u64,
     label: String,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    supports_session_accounts: bool,
 ) {
-    match crate::auth::codex::set_active_account(&label) {
-        Ok(()) => {
-            crate::auth::AuthStatus::invalidate_cache();
-            spawn_account_switch_refresh(id, "openai", Arc::clone(agent), client_event_tx.clone());
+    handle_set_session_account(
+        id,
+        crate::provider::AccountProviderKind::OpenAi,
+        Some(label),
+        agent,
+        client_event_tx,
+        supports_session_accounts,
+    )
+    .await;
+}
+
+fn parse_account_kind(
+    id: u64,
+    provider: &str,
+    label: Option<&str>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) -> Option<crate::provider::AccountProviderKind> {
+    let kind = crate::session_accounts::kind_for_request(provider, label);
+    if kind.is_none() {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Unknown account provider '{provider}' (expected claude or openai)"),
+            retry_after_secs: None,
+        });
+    }
+    kind
+}
+
+/// `set_session_account`: pin (or unpin) the sender's session. Wire entry.
+pub(super) async fn handle_set_session_account_request(
+    id: u64,
+    provider: String,
+    label: Option<String>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    supports_session_accounts: bool,
+) {
+    let label = label
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty());
+    let Some(kind) = parse_account_kind(id, &provider, label.as_deref(), client_event_tx) else {
+        return;
+    };
+    handle_set_session_account(
+        id,
+        kind,
+        label,
+        agent,
+        client_event_tx,
+        supports_session_accounts,
+    )
+    .await;
+}
+
+/// Pin this session to `label` (or unpin with `None`). Only this session's
+/// provider instance and persisted session change. Never calls
+/// `auth::*::set_active_account` or the runtime override.
+async fn handle_set_session_account(
+    id: u64,
+    kind: crate::provider::AccountProviderKind,
+    label: Option<String>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    send_account_event: bool,
+) {
+    let pin = match label.as_deref() {
+        Some(label) => match crate::session_accounts::pin_for_label(kind, label) {
+            Ok(pin) => Some(pin),
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!(
+                        "Failed to switch {} account: {error}",
+                        crate::session_accounts::provider_display(kind)
+                    ),
+                    retry_after_secs: None,
+                });
+                return;
+            }
+        },
+        None => None,
+    };
+    let pinned_label = pin.as_ref().map(|pin| pin.label.clone());
+    let reason = Some(match &pin {
+        Some(pin) => format!("this window now uses {}", pin.label),
+        None => "this window follows the default account".to_string(),
+    });
+    let apply = move |agent_guard: &mut Agent,
+                      client_event_tx: &mpsc::UnboundedSender<ServerEvent>|
+          -> bool {
+        match agent_guard.set_account_pin(kind, pin) {
+            Ok(()) => {
+                if send_account_event {
+                    let provider = agent_guard.provider_handle();
+                    let _ = client_event_tx.send(crate::session_accounts::account_changed_event(
+                        provider.as_ref(),
+                        kind,
+                        reason,
+                    ));
+                }
+                true
+            }
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!(
+                        "Failed to switch {} account: {error}",
+                        crate::session_accounts::provider_display(kind)
+                    ),
+                    retry_after_secs: None,
+                });
+                false
+            }
         }
-        Err(e) => {
-            let _ = client_event_tx.send(ServerEvent::Error {
-                id,
-                message: format!("Failed to switch OpenAI account: {}", e),
-                retry_after_secs: None,
-            });
+    };
+    let applied = if let Ok(mut agent_guard) = agent.try_lock() {
+        apply(&mut agent_guard, client_event_tx)
+    } else {
+        // A busy session gets its pin once the current turn releases the
+        // agent. The refresh below waits for the same lock, so Done follows.
+        let agent_for_apply = Arc::clone(agent);
+        let tx = client_event_tx.clone();
+        let queued_at = log_provider_control_deferred("set_session_account", id);
+        let (applied_tx, applied_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut agent_guard = agent_for_apply.lock().await;
+            log_provider_control_lock_acquired("set_session_account", id, queued_at);
+            let applied = apply(&mut agent_guard, &tx);
+            log_provider_control_completed("set_session_account", id, queued_at);
+            let _ = applied_tx.send(applied);
+        });
+        let agent = Arc::clone(agent);
+        let tx = client_event_tx.clone();
+        tokio::spawn(async move {
+            if applied_rx.await.unwrap_or(false) {
+                spawn_account_switch_refresh(
+                    id,
+                    crate::session_accounts::runtime_provider_name(kind),
+                    pinned_label,
+                    agent,
+                    tx,
+                );
+            }
+        });
+        return;
+    };
+    if applied {
+        spawn_account_switch_refresh(
+            id,
+            crate::session_accounts::runtime_provider_name(kind),
+            pinned_label,
+            Arc::clone(agent),
+            client_event_tx.clone(),
+        );
+    }
+}
+
+/// `set_default_account`: change the stored default used by new and unpinned
+/// sessions. Pinned sessions (including this one, if pinned) keep their pin.
+pub(super) async fn handle_set_default_account(
+    id: u64,
+    provider: String,
+    label: String,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    supports_session_accounts: bool,
+) {
+    let label = label.trim().to_string();
+    let Some(kind) = parse_account_kind(id, &provider, Some(&label), client_event_tx) else {
+        return;
+    };
+    if let Err(error) = crate::session_accounts::set_default_label(kind, &label) {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!(
+                "Failed to set default {} account: {error}",
+                crate::session_accounts::provider_display(kind)
+            ),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    if supports_session_accounts && let Ok(agent_guard) = agent.try_lock() {
+        let provider = agent_guard.provider_handle();
+        let _ = client_event_tx.send(crate::session_accounts::account_changed_event(
+            provider.as_ref(),
+            kind,
+            Some(format!("{label} is now the default account")),
+        ));
+    }
+    // Unpinned sessions everywhere follow the default, so their credential
+    // caches must be dropped (the watcher and the refresh both announce it).
+    spawn_account_switch_refresh(
+        id,
+        crate::session_accounts::runtime_provider_name(kind),
+        Some(label),
+        Arc::clone(agent),
+        client_event_tx.clone(),
+    );
+}
+
+/// Apply `Subscribe.account_pins` (`--account`) to the session this
+/// connection drives. Unknown providers or labels are logged and skipped so a
+/// stale flag never blocks attaching.
+pub(super) async fn apply_subscribe_account_pins(
+    agent: &Arc<Mutex<Agent>>,
+    requested: &[(String, String)],
+) {
+    if requested.is_empty() {
+        return;
+    }
+    let mut pins = Vec::new();
+    for (provider, label) in requested {
+        let Some(kind) = crate::session_accounts::kind_for_request(provider, Some(label)) else {
+            crate::logging::warn(&format!(
+                "Subscribe account pin ignored: unknown provider '{provider}'"
+            ));
+            continue;
+        };
+        match crate::session_accounts::pin_for_label(kind, label) {
+            Ok(pin) => pins.push((kind, pin)),
+            Err(error) => {
+                crate::logging::warn(&format!("Subscribe account pin ignored: {error}"));
+            }
         }
+    }
+    if pins.is_empty() {
+        return;
+    }
+    let mut agent_guard = agent.lock().await;
+    for (kind, pin) in pins {
+        if let Err(error) = agent_guard.set_account_pin(kind, Some(pin)) {
+            crate::logging::warn(&format!("Subscribe account pin failed: {error}"));
+        }
+    }
+}
+
+/// `set_account_failover`: per-session same-provider failover toggle.
+pub(super) async fn handle_set_account_failover(
+    id: u64,
+    enabled: Option<bool>,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let apply = move |agent_guard: &mut Agent,
+                      client_event_tx: &mpsc::UnboundedSender<ServerEvent>| {
+        match agent_guard.set_account_failover(enabled) {
+            Ok(()) => {
+                let _ = client_event_tx.send(ServerEvent::Done { id });
+            }
+            Err(error) => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: format!("Failed to set account failover: {error}"),
+                    retry_after_secs: None,
+                });
+            }
+        }
+    };
+    if let Ok(mut agent_guard) = agent.try_lock() {
+        apply(&mut agent_guard, client_event_tx);
+    } else {
+        spawn_deferred_agent_mutation(
+            "set_account_failover",
+            id,
+            Arc::clone(agent),
+            client_event_tx.clone(),
+            apply,
+        );
     }
 }
 
@@ -1379,6 +1635,7 @@ pub(super) async fn handle_invalidate_anthropic_usage(
 fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,
+    account_label: Option<String>,
     agent: Arc<Mutex<Agent>>,
     client_event_tx: mpsc::UnboundedSender<ServerEvent>,
 ) {
@@ -1411,6 +1668,7 @@ fn spawn_account_switch_refresh(
         crate::provider::clear_all_model_unavailability_for_account();
         crate::bus::Bus::global().publish(crate::bus::BusEvent::CredentialsChanged {
             provider: Some(provider_kind.to_string()),
+            account_label,
         });
 
         match provider_kind {

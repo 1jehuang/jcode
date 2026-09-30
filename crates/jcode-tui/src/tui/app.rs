@@ -101,6 +101,7 @@ mod state_ui_input_helpers;
 mod update_sim;
 mod usage_reset;
 mod voice_input;
+pub(crate) mod window_account;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -1506,6 +1507,11 @@ pub struct App {
     pending_startup_prompt_echo: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
+    /// Account this window uses per provider family ("claude" | "openai"),
+    /// from History / SessionAccountChanged (remote) or the local pin.
+    window_accounts: Vec<crate::protocol::SessionAccountInfo>,
+    /// Per-window same-provider failover override (`None` = config default).
+    window_account_failover: Option<bool>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching

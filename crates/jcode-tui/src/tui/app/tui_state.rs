@@ -1545,6 +1545,7 @@ impl crate::tui::TuiState for App {
         let route = self.widget_route_info(model.as_deref());
         let auth_method = self.widget_auth_method(route);
         let usage_info = self.widget_usage_info(route, auth_method);
+        let window_account = self.widget_window_account(auth_method);
 
         let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
             self.compute_streaming_tps()
@@ -1686,6 +1687,7 @@ impl crate::tui::TuiState for App {
             },
             git_info: gather_git_info(),
             agent_edited: self.agent_edited_paths(),
+            window_account,
         }
     }
 

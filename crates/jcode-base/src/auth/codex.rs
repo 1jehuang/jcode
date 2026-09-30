@@ -332,6 +332,101 @@ pub fn load_oauth_credentials() -> Result<CodexCredentials> {
     load_oauth_credentials_internal(true)
 }
 
+/// Stable identity of a stored account (see [`crate::auth::AccountPin`]).
+pub fn account_identity(account: &OpenAiAccount) -> Option<String> {
+    let account_id = account
+        .account_id
+        .clone()
+        .or_else(|| account.id_token.as_deref().and_then(extract_account_id));
+    let email = account
+        .email
+        .clone()
+        .or_else(|| account.id_token.as_deref().and_then(extract_email));
+    crate::auth::account_store::account_identity(
+        email.as_deref(),
+        account_id.as_deref(),
+        &account.refresh_token,
+    )
+}
+
+/// Load OAuth credentials for `scope`, returning the jcode account label they
+/// came from (`None` when a legacy/external source served them).
+///
+/// `Default` behaves exactly like [`load_oauth_credentials`]. `Pinned` reads
+/// only the jcode-stored account the pin resolves to and fails with
+/// [`crate::auth::account_store::PinnedAccountMissing`] when it is gone.
+pub fn load_oauth_credentials_scoped(
+    scope: crate::auth::AccountScope<'_>,
+) -> Result<(CodexCredentials, Option<String>)> {
+    match scope {
+        crate::auth::AccountScope::Default => {
+            let creds = load_oauth_credentials()?;
+            let label = load_auth_file().ok().and_then(|auth| {
+                auth.openai_accounts
+                    .iter()
+                    .find(|account| {
+                        account.refresh_token == creds.refresh_token
+                            && account.access_token == creds.access_token
+                    })
+                    .map(|account| account.label.clone())
+            });
+            Ok((creds, label))
+        }
+        crate::auth::AccountScope::Pinned(pin) => {
+            let auth = load_auth_file()?;
+            let label = resolve_pin_in(pin, &auth).ok_or_else(|| {
+                anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
+                    pin.label.clone(),
+                ))
+            })?;
+            let account = auth
+                .openai_accounts
+                .iter()
+                .find(|account| account.label == label)
+                .context("pinned OpenAI account disappeared")?;
+            Ok((credentials_from_account(account), Some(label)))
+        }
+    }
+}
+
+fn resolve_pin_in(pin: &crate::auth::AccountPin, auth: &JcodeOpenAiAuthFile) -> Option<String> {
+    crate::auth::account_store::resolve_pin(
+        pin,
+        &auth.openai_accounts,
+        |account| account.label.as_str(),
+        account_identity,
+    )
+}
+
+/// Current label of the stored account a pin names (identity first, then label).
+pub fn resolve_pin(pin: &crate::auth::AccountPin) -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    resolve_pin_in(pin, &auth)
+}
+
+/// Stored default account (persisted active, else first). Unlike
+/// [`active_account_label`] this ignores the one-shot runtime override.
+pub fn default_account_label() -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    crate::auth::account_store::default_account_label(
+        auth.active_openai_account.as_deref(),
+        &auth.openai_accounts,
+        |account| account.label.as_str(),
+    )
+}
+
+/// Build a pin (label plus identity) for the stored account at `label`.
+pub fn pin_for_label(label: &str) -> Result<crate::auth::AccountPin> {
+    let auth = load_auth_file()?;
+    crate::auth::account_store::pin_for_label(
+        label,
+        &auth.openai_accounts,
+        |account| account.label.as_str(),
+        account_identity,
+        "No OpenAI account with label '{}' found",
+    )
+}
+
 fn load_oauth_credentials_internal(return_expired: bool) -> Result<CodexCredentials> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut expired_candidates: Vec<(&str, CodexCredentials)> = Vec::new();
@@ -429,7 +524,21 @@ pub fn upsert_account_from_tokens(
         expires_at,
     };
     let email = creds.id_token.as_deref().and_then(extract_email);
-    upsert_account(account_from_credentials(label, &creds, email))
+    let mut account = account_from_credentials(label, &creds, email);
+    // A refresh response without an id_token must not erase the identity
+    // (email/account id) that per-session account pins resolve against.
+    if let Some(existing) = load_auth_file()
+        .ok()
+        .and_then(|auth| auth.openai_accounts.into_iter().find(|a| a.label == label))
+    {
+        if account.email.is_none() {
+            account.email = existing.email;
+        }
+        if account.account_id.is_none() {
+            account.account_id = existing.account_id;
+        }
+    }
+    upsert_account(account)
 }
 
 fn load_jcode_credentials() -> Result<CodexCredentials> {

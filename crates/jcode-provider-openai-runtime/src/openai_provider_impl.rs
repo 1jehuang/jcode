@@ -24,6 +24,65 @@ impl Provider for OpenAIProvider {
         OpenAIProvider::set_credential_mode(self, mode)
     }
 
+    fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        (kind == AccountProviderKind::OpenAi)
+            .then(|| self.account_pin.get())
+            .flatten()
+    }
+
+    fn set_account_pin(
+        &self,
+        kind: AccountProviderKind,
+        pin: Option<AccountPin>,
+    ) -> anyhow::Result<()> {
+        if kind != AccountProviderKind::OpenAi || !self.account_pin.set(pin) {
+            return Ok(());
+        }
+        // A socket (and its previous_response_id chain) opened with the old
+        // account's bearer must never carry the next request, and the cached
+        // credential belongs to the old account.
+        self.clear_persistent_ws_try("session account pin changed");
+        let mode = self
+            .credential_mode
+            .try_read()
+            .map(|mode| *mode)
+            .unwrap_or(OpenAICredentialMode::Auto);
+        if !matches!(mode, OpenAICredentialMode::ApiKey)
+            && let Ok(credentials) = super::load_credentials_for_mode(mode, &self.account_pin)
+        {
+            match self.credentials.try_write() {
+                Ok(mut guard) => *guard = credentials,
+                Err(_) => {
+                    // A request holds the lock. `sync_with_stored_credentials`
+                    // re-resolves from the pin before the next request anyway;
+                    // apply eagerly once the lock frees.
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        let slot = Arc::clone(&self.credentials);
+                        handle.spawn(async move {
+                            *slot.write().await = credentials;
+                        });
+                    }
+                }
+            }
+        }
+        jcode_base::auth::credential_signal::bump();
+        Ok(())
+    }
+
+    fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+        if kind != AccountProviderKind::OpenAi {
+            return None;
+        }
+        self.account_pin
+            .resolved_label()
+            .or_else(|| {
+                self.account_pin
+                    .get()
+                    .and_then(|pin| jcode_base::auth::codex::resolve_pin(&pin))
+            })
+            .or_else(jcode_base::auth::codex::default_account_label)
+    }
+
     async fn prewarm(&self, tools: &[ToolDefinition], system: &str) {
         if self.is_browser_only()
             || is_chatgpt_web_model(&self.model())
@@ -99,7 +158,11 @@ impl Provider for OpenAIProvider {
         // Pick up an account switch or relogin before anything reads the
         // cached credential, so a persistent websocket bound to the previous
         // account is dropped by its identity check instead of reused.
-        super::openai_stream_runtime::sync_with_stored_credentials(&self.credentials).await;
+        super::openai_stream_runtime::sync_with_stored_credentials(
+            &self.credentials,
+            &self.account_pin,
+        )
+        .await;
         let request = self.response_request(&input, tools, system).await;
         let model_id = openai_request_model(&request);
         let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
@@ -258,6 +321,7 @@ impl Provider for OpenAIProvider {
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
         let credentials = Arc::clone(&self.credentials);
+        let account_pin = self.account_pin.clone();
         let transport_mode = transport_mode_snapshot;
         let websocket_cooldowns = Arc::clone(&self.websocket_cooldowns);
         let websocket_failure_streaks = Arc::clone(&self.websocket_failure_streaks);
@@ -449,6 +513,7 @@ impl Provider for OpenAIProvider {
                     let result = if use_websocket {
                         stream_response_websocket_persistent(
                             Arc::clone(&credentials),
+                            account_pin.clone(),
                             request.clone(),
                             attempt_tx,
                             Arc::clone(&persistent_ws),
@@ -472,6 +537,7 @@ impl Provider for OpenAIProvider {
                         stream_response(
                             attempt_client,
                             Arc::clone(&credentials),
+                            account_pin.clone(),
                             request.clone(),
                             if force_https_for_request {
                                 let reason = last_error
@@ -859,7 +925,7 @@ impl Provider for OpenAIProvider {
         // user with only an OPENAI_API_KEY loads an API-key-shaped credential
         // while the mode stays Auto; routing by mode would send that platform
         // key to the ChatGPT/Codex endpoint and get a 401.
-        let account_label = jcode_base::auth::codex::active_account_label();
+        let account_label = self.resolved_account_label(AccountProviderKind::OpenAi);
         let (access_token, is_chatgpt_mode, credential_identity) = {
             let creds = self.credentials.read().await;
             (
@@ -869,7 +935,7 @@ impl Provider for OpenAIProvider {
             )
         };
         let catalog = if is_chatgpt_mode {
-            let access_token = openai_access_token(&self.credentials).await?;
+            let access_token = openai_access_token(&self.credentials, &self.account_pin).await?;
             match jcode_base::provider::fetch_openai_model_catalog(&access_token).await {
                 Ok(catalog) => catalog,
                 // The server can reject a token that still looks fresh by its
@@ -891,6 +957,7 @@ impl Provider for OpenAIProvider {
                     );
                     let refreshed = super::openai_stream_runtime::force_refresh_openai_token(
                         &self.credentials,
+                        &self.account_pin,
                         &refresh_token,
                     )
                     .await
@@ -911,7 +978,7 @@ impl Provider for OpenAIProvider {
             Self::catalog_credential_identity(&credentials)
         };
         if current_credential_identity != credential_identity
-            || jcode_base::auth::codex::active_account_label() != account_label
+            || self.resolved_account_label(AccountProviderKind::OpenAi) != account_label
         {
             jcode_base::logging::info(
                 "Discarding OpenAI model catalog fetched for credentials that are no longer active",
@@ -1120,7 +1187,7 @@ impl Provider for OpenAIProvider {
             );
         }
 
-        let access_token = openai_access_token(&self.credentials).await?;
+        let access_token = openai_access_token(&self.credentials, &self.account_pin).await?;
         let creds = self.credentials.read().await;
         let is_chatgpt_mode = Self::is_chatgpt_mode(&creds);
         let account_id = creds.account_id.clone();
@@ -1226,10 +1293,52 @@ impl Provider for OpenAIProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.fork_concrete())
+    }
+
+    async fn invalidate_credentials(&self) {
+        let mode = *self.credential_mode.read().await;
+        if let Ok(credentials) = super::load_credentials_for_mode(mode, &self.account_pin) {
+            let mut guard = self.credentials.write().await;
+            *guard = credentials;
+            self.browser_only.store(false, AtomicOrdering::Release);
+            drop(guard);
+            self.reload_cached_reasoning_efforts();
+        }
+
+        self.clear_persistent_ws("credentials invalidated").await;
+    }
+}
+
+impl OpenAIProvider {
+    /// Independent runtime for another session: same settings and pin value,
+    /// its own credential cache, pin slot, and websocket.
+    pub(crate) fn fork_concrete(&self) -> OpenAIProvider {
         let model = self.model();
-        Arc::new(OpenAIProvider {
+        OpenAIProvider {
             client: self.client.clone(),
-            credentials: Arc::clone(&self.credentials),
+            // Each fork is its own session with its own credential cache and
+            // pin. Sharing the slot let one session's account switch or
+            // refresh rewrite another session's bearer.
+            credentials: Arc::new(RwLock::new(
+                self.credentials
+                    .try_read()
+                    .map(|creds| creds.clone())
+                    .unwrap_or_else(|_| {
+                        super::load_credentials_for_mode(
+                            self.credential_mode_snapshot(),
+                            &self.account_pin,
+                        )
+                        .unwrap_or_else(|_| CodexCredentials {
+                            access_token: String::new(),
+                            refresh_token: String::new(),
+                            id_token: None,
+                            account_id: None,
+                            expires_at: None,
+                        })
+                    }),
+            )),
+            account_pin: self.account_pin.fork(),
             credential_mode: Arc::clone(&self.credential_mode),
             model: Arc::new(RwLock::new(model)),
             prompt_cache_key: self.prompt_cache_key.clone(),
@@ -1255,19 +1364,6 @@ impl Provider for OpenAIProvider {
             prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::clone(&self.browser_only),
-        })
-    }
-
-    async fn invalidate_credentials(&self) {
-        let mode = *self.credential_mode.read().await;
-        if let Ok(credentials) = super::load_credentials_for_mode(mode) {
-            let mut guard = self.credentials.write().await;
-            *guard = credentials;
-            self.browser_only.store(false, AtomicOrdering::Release);
-            drop(guard);
-            self.reload_cached_reasoning_efforts();
         }
-
-        self.clear_persistent_ws("credentials invalidated").await;
     }
 }

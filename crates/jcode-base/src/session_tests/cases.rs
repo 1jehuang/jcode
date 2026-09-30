@@ -2815,3 +2815,52 @@ fn first_visible_user_prompt_becomes_the_generated_title() {
     session.rename_title(Some("Custom".into()));
     assert_eq!(session.display_title(), Some("Custom"));
 }
+
+#[test]
+fn account_pins_persist_through_snapshot_and_journal() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-account-pins-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_account_pins_roundtrip";
+    let mut session = Session::create_with_id(session_id.to_string(), None, None);
+    session.save_prepared()?;
+
+    // Second save goes through the journal meta path.
+    let fox = AccountPin::new("claude-fox", Some("fox@example.com".to_string()));
+    session
+        .account_pins
+        .insert("claude".to_string(), fox.clone());
+    session.account_failover = Some(false);
+    session
+        .account_failover_home
+        .insert("claude".to_string(), AccountPin::new("claude-otter", None));
+    session.save_prepared()?;
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(loaded.account_pins.get("claude"), Some(&fox));
+    assert_eq!(loaded.account_failover, Some(false));
+    assert_eq!(
+        loaded
+            .account_failover_home
+            .get("claude")
+            .map(|p| p.label.as_str()),
+        Some("claude-otter")
+    );
+
+    let remote = Session::load_for_remote_startup(session_id)?;
+    assert_eq!(remote.account_pins.get("claude"), Some(&fox));
+    assert_eq!(remote.account_failover, Some(false));
+
+    // Old session JSON without the fields still loads with empty defaults.
+    let old: Session = serde_json::from_str(
+        r#"{"id":"old","parent_id":null,"title":null,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","messages":[]}"#,
+    )?;
+    assert!(old.account_pins.is_empty());
+    assert_eq!(old.account_failover, None);
+    assert!(old.account_failover_home.is_empty());
+    Ok(())
+}

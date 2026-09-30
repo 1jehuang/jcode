@@ -1,3 +1,4 @@
+pub mod account_pin;
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
@@ -14,10 +15,15 @@ pub mod reasoning;
 pub mod retry_after;
 pub mod selection;
 pub mod transport;
+pub mod usage_limit;
 
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
+pub use usage_limit::{
+    AccountUsageLimit, account_usage_limit_marker, classify_account_usage_limit,
+};
 
+pub use account_pin::{AccountPin, AccountPinSlot, AccountProviderKind, AccountScope};
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
     AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
@@ -368,6 +374,41 @@ pub trait Provider: Send + Sync {
     /// by another process). Providers with in-memory credential caches override
     /// this; the default is a no-op.
     fn reload_credentials(&self) {}
+
+    /// Account pin for this provider instance (one per session fork).
+    /// `None` means the instance follows the default account.
+    fn account_pin(&self, _kind: AccountProviderKind) -> Option<AccountPin> {
+        None
+    }
+
+    /// Pin (or unpin with `None`) this instance to one stored account. Affects
+    /// only this instance, never other sessions or the stored default.
+    fn set_account_pin(&self, _kind: AccountProviderKind, _pin: Option<AccountPin>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Account label the last request used (the pin, or the default account).
+    fn resolved_account_label(&self, _kind: AccountProviderKind) -> Option<String> {
+        None
+    }
+
+    /// Per-session same-provider account failover toggle. None = config default.
+    fn set_account_failover(&self, _enabled: Option<bool>) {}
+
+    /// Preferred pin to return to after an automatic failover move.
+    fn account_failover_home(&self, _kind: AccountProviderKind) -> Option<AccountPin> {
+        None
+    }
+
+    /// Restore the home pin (from the session on resume, or None to clear it).
+    fn set_account_failover_home(&self, _kind: AccountProviderKind, _home: Option<AccountPin>) {}
+
+    /// Called by the agent at turn start. When a home account's recorded reset
+    /// has passed (local check, config account_failover_return_home), re-pin
+    /// it, clear the home, and return the kinds that moved.
+    fn return_account_home_if_reset(&self) -> Vec<AccountProviderKind> {
+        Vec::new()
+    }
 
     /// Human-facing label for the runtime backing this provider instance.
     /// Unlike `display_name`, this reflects instance state (e.g. which

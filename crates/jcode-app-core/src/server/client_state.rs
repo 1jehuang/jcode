@@ -234,6 +234,7 @@ pub(super) async fn handle_get_model_catalog(
         resolved_credential,
         service_tier,
         reasoning_effort,
+        account_labels,
         source,
     ) = {
         match agent.try_lock() {
@@ -245,6 +246,7 @@ pub(super) async fn handle_get_model_catalog(
                 agent_guard.active_resolved_credential(),
                 agent_guard.provider_handle().service_tier(),
                 agent_guard.provider_handle().reasoning_effort(),
+                crate::session_accounts::account_infos(agent_guard.provider_handle().as_ref()),
                 "live",
             ),
             Err(_) => {
@@ -271,6 +273,12 @@ pub(super) async fn handle_get_model_catalog(
                     provider.active_resolved_credential(),
                     provider.service_tier(),
                     provider.reasoning_effort(),
+                    persisted
+                        .as_ref()
+                        .map(|session| {
+                            crate::session_accounts::account_infos_from_pins(&session.account_pins)
+                        })
+                        .unwrap_or_default(),
                     "fallback",
                 )
             }
@@ -310,6 +318,7 @@ pub(super) async fn handle_get_model_catalog(
         // authoritative. Omitting it falsely turns off /fast status and its badge.
         service_tier,
         subagent_model: None,
+        account_labels,
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: Default::default(),
@@ -574,6 +583,7 @@ async fn send_history_from_persisted_session(
         .reasoning_effort
         .clone()
         .or_else(|| provider.reasoning_effort());
+    let account_labels = crate::session_accounts::account_infos_from_pins(&session.account_pins);
     drop(session);
 
     let messages = rendered_messages
@@ -626,6 +636,7 @@ async fn send_history_from_persisted_session(
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
         service_tier: provider.service_tier(),
+        account_labels,
         compaction_mode: crate::config::config().compaction.mode.clone(),
         activity,
         side_panel,
@@ -655,6 +666,8 @@ async fn send_history_with_guard(
     supports_pdf_panels: bool,
 ) -> Result<()> {
     let history_start = Instant::now();
+    let account_labels =
+        crate::session_accounts::account_infos(agent_guard.provider_handle().as_ref());
     let (
         messages,
         images,
@@ -819,6 +832,7 @@ async fn send_history_with_guard(
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
+        account_labels,
         autoreview_enabled,
         autojudge_enabled,
         available_models,

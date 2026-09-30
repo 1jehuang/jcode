@@ -1493,6 +1493,8 @@ impl RawClient {
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             terminal_env: Vec::new(),
+            account_pins: Vec::new(),
+            supports_session_accounts: false,
         })
         .await?;
         self.read_until(

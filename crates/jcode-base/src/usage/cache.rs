@@ -135,6 +135,21 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
     (!cached.is_stale()).then_some(cached)
 }
 
+/// Fresh cached usage for a Claude account label (any credential under it).
+pub(super) fn cached_anthropic_usage_for_label(label: &str) -> Option<UsageData> {
+    let prefix = anthropic_label_key_prefix(label);
+    let map = anthropic_usage_cache().lock().ok()?;
+    map.iter()
+        .filter(|(key, data)| key.starts_with(&prefix) && !data.is_stale())
+        .max_by_key(|(_, data)| data.fetched_at)
+        .map(|(_, data)| data.clone())
+}
+
+/// Fresh cached usage for an OpenAI account label.
+pub(super) fn cached_openai_usage_for_label(label: &str) -> Option<OpenAIUsageData> {
+    cached_openai_usage(&openai_usage_cache_key("", Some(label)))
+}
+
 pub(super) fn store_anthropic_usage(cache_key: String, data: UsageData) {
     if let Ok(mut map) = anthropic_usage_cache().lock() {
         map.insert(cache_key, data);

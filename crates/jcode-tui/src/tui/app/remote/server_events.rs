@@ -1590,8 +1590,10 @@ pub(in crate::tui::app) fn handle_server_event(
             activity,
             token_usage_totals,
             side_panel,
+            account_labels,
             ..
         } => {
+            app.replace_window_accounts(account_labels);
             let prev_session_id = app.remote_session_id.clone();
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
@@ -2377,12 +2379,35 @@ pub(in crate::tui::app) fn handle_server_event(
             app.invalidate_model_picker_cache();
             true
         }
-        ServerEvent::CredentialsChanged { provider } => {
+        ServerEvent::CredentialsChanged {
+            provider,
+            account_label,
+        } => {
+            if !app.credential_change_is_for_this_window(
+                provider.as_deref(),
+                account_label.as_deref(),
+            ) {
+                crate::logging::info(&format!(
+                    "Credentials changed for {:?} ({:?}), not this window's account; keeping hold",
+                    provider, account_label
+                ));
+                return false;
+            }
             crate::logging::info(&format!(
                 "Credentials changed on server (provider={:?}); releasing any rate-limit hold",
                 provider
             ));
             app.release_rate_limit_hold_after_credentials_changed(provider.as_deref())
+        }
+        ServerEvent::SessionAccountChanged {
+            provider,
+            label,
+            pinned,
+            is_default,
+            reason,
+        } => {
+            app.handle_session_account_changed(provider, label, pinned, is_default, reason);
+            true
         }
         ServerEvent::AvailableModelsUpdated {
             provider_name,

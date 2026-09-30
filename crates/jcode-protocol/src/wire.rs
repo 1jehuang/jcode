@@ -32,6 +32,23 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Account a session uses for one provider family, as reported to clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionAccountInfo {
+    /// "claude" | "openai"
+    pub provider: String,
+    /// Label the session currently resolves to (pin or default). `None` when
+    /// no stored account exists for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// True when this session is pinned to `label`; false when it follows the default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+    /// True when `label` is also the stored default account.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_default: bool,
+}
+
 /// SDK-owned session tool declaration. Parameters is a JSON schema object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionToolDefinition {
@@ -185,6 +202,12 @@ pub enum Request {
         /// to the client's terminal instead of its own stale startup env (#405).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         terminal_env: Vec<(String, String)>,
+        /// Account pins for a new session (`--account`), as (provider, label).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        account_pins: Vec<(String, String)>,
+        /// Opt in to per-session account events (`session_account_changed`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_session_accounts: bool,
     },
 
     /// Declare that this client is intentionally detaching before its transport
@@ -445,6 +468,33 @@ pub enum Request {
     /// This keeps account overrides and provider credential caches in sync.
     #[serde(rename = "switch_openai_account")]
     SwitchOpenAiAccount { id: u64, label: String },
+
+    /// Pin this session to one stored account (`label: None` unpins it so the
+    /// session follows the default again). Never changes other sessions.
+    #[serde(rename = "set_session_account")]
+    SetSessionAccount {
+        id: u64,
+        /// "claude" | "openai"
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
+    /// Change the stored default account used by new and unpinned sessions.
+    #[serde(rename = "set_default_account")]
+    SetDefaultAccount {
+        id: u64,
+        provider: String,
+        label: String,
+    },
+
+    /// Per-session same-provider account failover toggle. `None` = config default.
+    #[serde(rename = "set_account_failover")]
+    SetAccountFailover {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+    },
 
     /// Invalidate daemon-local usage and quota cooldown state after a banked reset.
     /// This never redeems a reset or switches accounts. `None` pins the default
@@ -1349,6 +1399,10 @@ pub enum ServerEvent {
         /// Service tier override for OpenAI models
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<String>,
+        /// Per-provider account this session uses (pin or default). Old
+        /// clients ignore it.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        account_labels: Vec<SessionAccountInfo>,
         /// Session-scoped preferred model for subagents.
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent_model: Option<String>,
@@ -1494,6 +1548,26 @@ pub enum ServerEvent {
     CredentialsChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        /// Account label whose credentials changed. `None` = unknown/any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account_label: Option<String>,
+    },
+
+    /// The account this session uses changed (pin, unpin, failover, return
+    /// home, or a removed pinned account). Sent only to clients that set
+    /// `supports_session_accounts`.
+    #[serde(rename = "session_account_changed")]
+    SessionAccountChanged {
+        /// "claude" | "openai"
+        provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pinned: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_default: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 
     /// Available models updated (pushed after auth changes)

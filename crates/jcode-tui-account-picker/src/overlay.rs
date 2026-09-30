@@ -359,6 +359,24 @@ impl AccountPicker {
                 }
                 return Ok(OverlayAction::Close);
             }
+            // `d` on a saved account makes it the default. Only while no
+            // filter is typed, so `d` still works as a filter character.
+            KeyCode::Char('d')
+                if self.filter.is_empty()
+                    && !modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(AccountPickerCommand::Switch { provider, label }) =
+                    self.selected_item().map(|item| &item.command)
+                {
+                    return Ok(OverlayAction::Execute(AccountPickerCommand::SetDefault {
+                        provider: provider.clone(),
+                        label: label.clone(),
+                    }));
+                }
+                self.filter.push('d');
+                self.apply_filter();
+            }
             KeyCode::Char(c)
                 if !modifiers.contains(KeyModifiers::CONTROL)
                     && !modifiers.contains(KeyModifiers::ALT) =>
@@ -555,9 +573,13 @@ impl AccountPicker {
                 };
                 let (icon, icon_color) = action_icon(item);
                 let title = compact_item_title(item);
-                let meta_width = list_inner.width.saturating_sub(16) as usize;
+                let badges = render_support::account_badges(item);
+                let badge_text: String = badges.iter().map(|badge| format!(" [{badge}]")).collect();
+                let meta_width = (list_inner.width as usize)
+                    .saturating_sub(16)
+                    .saturating_sub(badge_text.chars().count());
                 let meta = truncate_with_ellipsis(&item.subtitle, meta_width);
-                lines.push(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(
                         if selected { "> " } else { "  " },
                         row_style.fg(Color::White),
@@ -567,9 +589,16 @@ impl AccountPicker {
                         truncate_with_ellipsis(&title, 22),
                         row_style.fg(Color::White),
                     ),
-                    Span::styled(" - ", row_style.fg(MUTED_DARK)),
-                    Span::styled(meta, row_style.fg(MUTED)),
-                ]));
+                ];
+                if !badge_text.is_empty() {
+                    spans.push(Span::styled(
+                        badge_text,
+                        row_style.fg(Color::Rgb(110, 214, 158)),
+                    ));
+                }
+                spans.push(Span::styled(" - ", row_style.fg(MUTED_DARK)));
+                spans.push(Span::styled(meta, row_style.fg(MUTED)));
+                lines.push(Line::from(spans));
             }
         }
 
@@ -853,9 +882,12 @@ fn estimate_command_bytes(command: &AccountPickerCommand) -> usize {
                 + status_notice.capacity()
         }
         AccountPickerCommand::Switch { label, .. }
+        | AccountPickerCommand::SetDefault { label, .. }
         | AccountPickerCommand::Login { label, .. }
         | AccountPickerCommand::Remove { label, .. } => label.capacity(),
-        AccountPickerCommand::PromptNew { .. } => 0,
+        AccountPickerCommand::PromptNew { .. }
+        | AccountPickerCommand::Unpin { .. }
+        | AccountPickerCommand::ToggleFailover => 0,
     }
 }
 
@@ -882,6 +914,77 @@ fn estimate_summary_bytes(summary: &AccountPickerSummary) -> usize {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+
+    #[test]
+    fn saved_account_enter_uses_in_window_and_d_sets_default() {
+        let item = AccountPickerItem::action(
+            "claude",
+            "Claude",
+            "Switch account `claude-fox`",
+            "saved",
+            AccountPickerCommand::Switch {
+                provider: AccountProviderKind::Anthropic,
+                label: "claude-fox".into(),
+            },
+        );
+        let mut picker = AccountPicker::new("Accounts", vec![item.clone()]);
+        assert!(matches!(
+            picker.handle_overlay_key(KeyCode::Char('d'), KeyModifiers::empty()).unwrap(),
+            OverlayAction::Execute(AccountPickerCommand::SetDefault {
+                provider: AccountProviderKind::Anthropic,
+                ref label,
+            }) if label == "claude-fox"
+        ));
+        let mut picker = AccountPicker::new("Accounts", vec![item]);
+        assert!(matches!(
+            picker.handle_overlay_key(KeyCode::Enter, KeyModifiers::empty()).unwrap(),
+            OverlayAction::Execute(AccountPickerCommand::Switch { ref label, .. })
+                if label == "claude-fox"
+        ));
+        // With a filter typed, `d` keeps editing the filter.
+        let mut picker = AccountPicker::new(
+            "Accounts",
+            vec![AccountPickerItem::action(
+                "claude",
+                "Claude",
+                "Switch account `claude-fox`",
+                "saved default",
+                AccountPickerCommand::Switch {
+                    provider: AccountProviderKind::Anthropic,
+                    label: "claude-fox".into(),
+                },
+            )],
+        );
+        picker
+            .handle_overlay_key(KeyCode::Char('f'), KeyModifiers::empty())
+            .unwrap();
+        assert!(matches!(
+            picker.handle_overlay_key(KeyCode::Char('d'), KeyModifiers::empty()).unwrap(),
+            OverlayAction::Continue
+        ));
+    }
+
+    #[test]
+    fn saved_account_badges_mark_window_default_and_pinned() {
+        let item = |subtitle: &str| {
+            AccountPickerItem::action(
+                "claude",
+                "Claude",
+                "Switch account `claude-fox`",
+                subtitle,
+                AccountPickerCommand::Switch {
+                    provider: AccountProviderKind::Anthropic,
+                    label: "claude-fox".into(),
+                },
+            )
+        };
+        assert_eq!(
+            render_support::account_badges(&item("a@b - this window - pinned - default")),
+            vec!["this window", "pinned", "default"]
+        );
+        assert!(render_support::account_badges(&item("a@b - valid")).is_empty());
+        assert!(account_is_active(&item("a@b - this window")));
+    }
 
     #[test]
     fn account_usage_details_wrap_without_changing_switch_action() {

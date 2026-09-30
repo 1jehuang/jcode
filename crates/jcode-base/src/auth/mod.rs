@@ -42,6 +42,7 @@ pub use status_types::{
 };
 
 pub use active_method::{ActiveCredential, ResolvedProviderAuth, resolve_dual_credential_auth};
+pub use jcode_provider_core::{AccountPin, AccountProviderKind, AccountScope};
 
 use crate::provider_catalog::LoginProviderAuthStateKey;
 use crate::provider_catalog::LoginProviderDescriptor;
@@ -1694,3 +1695,7 @@ fn api_key_available(env_key: &str, file_name: &str) -> bool {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "account_pin_tests.rs"]
+mod account_pin_tests;

@@ -19,6 +19,7 @@ mod reasoning_request;
 
 use jcode_base::auth;
 use jcode_base::auth::oauth;
+use jcode_provider_core::{AccountPin, AccountPinSlot, AccountProviderKind, AccountScope};
 use jcode_provider_core::{EventStream, NativeToolResultSender, Provider};
 fn oauth_beta_headers(model: &str) -> &'static str {
     jcode_provider_core::anthropic_oauth_beta_headers(model)
@@ -535,9 +536,10 @@ fn anthropic_status_error(
             None => usage_limit_body,
         };
         if far {
+            let now = chrono::Utc::now();
             let detail = match reset_in {
                 Some(secs) => {
-                    let at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+                    let at = now + chrono::Duration::seconds(secs as i64);
                     format!(
                         " Usage limit reached for this Claude account; resets in {} ({} UTC).",
                         format_reset_duration(secs),
@@ -546,8 +548,13 @@ fn anthropic_status_error(
                 }
                 None => " Usage limit reached for this Claude account.".to_string(),
             };
+            // Stable marker so same-provider account failover can detect the
+            // exhaustion without matching the wording above.
+            let marker = jcode_provider_core::account_usage_limit_marker(
+                reset_in.map(|secs| now.timestamp() + secs as i64),
+            );
             return anyhow::Error::new(UsageLimitExhausted {
-                message: format!("{message}{detail}"),
+                message: format!("{message}{detail} {marker}"),
             });
         }
     }
@@ -566,6 +573,7 @@ async fn sleep_until_retry_or_credential_swap(
     is_oauth: bool,
     current_token: &str,
     credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+    account_pin: &AccountPinSlot,
 ) -> Option<String> {
     if !is_oauth {
         tokio::time::sleep(delay).await;
@@ -579,7 +587,8 @@ async fn sleep_until_retry_or_credential_swap(
                 generation = auth::credential_signal::generation();
                 // Unrelated auth changes also bump the signal. Only cut the
                 // wait short when the Claude credential really changed.
-                if let Ok((token, true)) = resolve_oauth_access_token(credentials).await
+                if let Ok((token, true)) =
+                    resolve_oauth_access_token(credentials, account_pin).await
                     && token != current_token
                 {
                     jcode_base::logging::info(
@@ -613,6 +622,10 @@ pub struct AnthropicProvider {
     service_tier: Arc<std::sync::RwLock<Option<String>>>,
     /// Cached OAuth credentials (None if using API key)
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
+    /// Per-session account pin. Read on every credential resolution
+    /// (including inside the spawned stream task and its retry waits) so a
+    /// pin change takes effect on the next request or retry.
+    account_pin: AccountPinSlot,
     credential_mode: Arc<RwLock<AnthropicCredentialMode>>,
     /// Explicit `JCODE_ANTHROPIC_MAX_TOKENS` override. When unset, the output
     /// budget is derived per model so newer generations are not clamped to the
@@ -751,7 +764,11 @@ impl AnthropicProvider {
             match jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await {
                 Ok(catalog) => catalog,
                 Err(err) if is_oauth_catalog_auth_error(&err.to_string()) => {
-                    let token = force_refresh_oauth_token(Arc::clone(&self.credentials)).await?;
+                    let token = force_refresh_oauth_token(
+                        Arc::clone(&self.credentials),
+                        self.account_pin.clone(),
+                    )
+                    .await?;
                     jcode_base::provider::fetch_anthropic_model_catalog_oauth(&token).await?
                 }
                 Err(err) => return Err(err),
@@ -804,6 +821,7 @@ impl AnthropicProvider {
             reasoning_effort: Arc::new(std::sync::RwLock::new(reasoning_effort)),
             service_tier: Arc::new(std::sync::RwLock::new(None)),
             credentials: Arc::new(RwLock::new(None)),
+            account_pin: AccountPinSlot::default(),
             credential_mode: Arc::new(RwLock::new(AnthropicCredentialMode::from_runtime_env(
                 jcode_provider_core::DualAuthProvider::Anthropic,
             ))),
@@ -1156,7 +1174,34 @@ impl AnthropicProvider {
     }
 
     async fn get_oauth_access_token(&self) -> Result<(String, bool)> {
-        resolve_oauth_access_token(&self.credentials).await
+        resolve_oauth_access_token(&self.credentials, &self.account_pin).await
+    }
+
+    /// Independent copy for a new session: same settings, same pin value,
+    /// but its own pin and credential cache.
+    fn fork_concrete(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            model: Arc::new(std::sync::RwLock::new(
+                self.model
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )),
+            reasoning_effort: Arc::new(std::sync::RwLock::new(self.stored_reasoning_effort())),
+            service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
+            credentials: Arc::new(RwLock::new(None)),
+            account_pin: self.account_pin.fork(),
+            credential_mode: Arc::clone(&self.credential_mode),
+            max_tokens_override: self.max_tokens_override,
+            oauth_session_id: self.oauth_session_id.clone(),
+            oauth_preflight_done: Arc::new(AtomicBool::new(
+                self.oauth_preflight_done.load(Ordering::Relaxed),
+            )),
+            direct_transport: self.direct_transport.clone(),
+            profile_api_key: self.profile_api_key.clone(),
+            profile_models: self.profile_models.clone(),
+        }
     }
 
     pub(crate) fn set_credential_mode(&self, mode: AnthropicCredentialMode) -> Result<()> {
@@ -1349,6 +1394,7 @@ impl Provider for AnthropicProvider {
         // Clone what we need for the async task
         let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
+        let account_pin = self.account_pin.clone();
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
@@ -1373,6 +1419,7 @@ impl Provider for AnthropicProvider {
                 request,
                 tx,
                 credentials,
+                account_pin,
                 model,
                 oauth_session_id,
                 model_state,
@@ -1618,27 +1665,42 @@ impl Provider for AnthropicProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self {
-            client: self.client.clone(),
-            model: Arc::new(std::sync::RwLock::new(
-                self.model
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone(),
-            )),
-            reasoning_effort: Arc::new(std::sync::RwLock::new(self.stored_reasoning_effort())),
-            service_tier: Arc::new(std::sync::RwLock::new(self.service_tier())),
-            credentials: Arc::new(RwLock::new(None)),
-            credential_mode: Arc::clone(&self.credential_mode),
-            max_tokens_override: self.max_tokens_override,
-            oauth_session_id: self.oauth_session_id.clone(),
-            oauth_preflight_done: Arc::new(AtomicBool::new(
-                self.oauth_preflight_done.load(Ordering::Relaxed),
-            )),
-            direct_transport: self.direct_transport.clone(),
-            profile_api_key: self.profile_api_key.clone(),
-            profile_models: self.profile_models.clone(),
-        })
+        Arc::new(self.fork_concrete())
+    }
+
+    fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        (kind == AccountProviderKind::Claude)
+            .then(|| self.account_pin.get())
+            .flatten()
+    }
+
+    fn set_account_pin(&self, kind: AccountProviderKind, pin: Option<AccountPin>) -> Result<()> {
+        if kind != AccountProviderKind::Claude {
+            return Ok(());
+        }
+        if self.account_pin.set(pin) {
+            // The cached bearer belongs to the previous account. The next
+            // request (or a retry already waiting) re-resolves from the pin.
+            if let Ok(mut cached) = self.credentials.try_write() {
+                *cached = None;
+            }
+            auth::credential_signal::bump();
+        }
+        Ok(())
+    }
+
+    fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+        if kind != AccountProviderKind::Claude {
+            return None;
+        }
+        self.account_pin
+            .resolved_label()
+            .or_else(|| {
+                self.account_pin
+                    .get()
+                    .and_then(|pin| auth::claude::resolve_pin(&pin))
+            })
+            .or_else(auth::claude::default_account_label)
     }
 
     async fn invalidate_credentials(&self) {
@@ -1721,6 +1783,7 @@ impl Provider for AnthropicProvider {
         // Clone what we need for the async task
         let client = self.client.clone();
         let credentials = Arc::clone(&self.credentials);
+        let account_pin = self.account_pin.clone();
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
@@ -1744,6 +1807,7 @@ impl Provider for AnthropicProvider {
                 request,
                 tx,
                 credentials,
+                account_pin,
                 model,
                 oauth_session_id,
                 model_state,
@@ -1768,6 +1832,7 @@ async fn run_stream_with_retries(
     mut request: ApiRequest,
     tx: mpsc::Sender<Result<StreamEvent>>,
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
+    account_pin: AccountPinSlot,
     model_name: String,
     oauth_session_id: String,
     model_state: Arc<std::sync::RwLock<String>>,
@@ -1809,6 +1874,7 @@ async fn run_stream_with_retries(
                 is_oauth,
                 &token,
                 &credentials,
+                &account_pin,
             )
             .await;
             jcode_base::logging::info(&format!(
@@ -1824,7 +1890,8 @@ async fn run_stream_with_retries(
             if let Some(swapped) = swapped_token {
                 token = swapped;
             } else if is_oauth
-                && let Ok((current, true)) = resolve_oauth_access_token(&credentials).await
+                && let Ok((current, true)) =
+                    resolve_oauth_access_token(&credentials, &account_pin).await
             {
                 token = current;
             }
@@ -1881,7 +1948,8 @@ async fn run_stream_with_retries(
                     && e.chain()
                         .any(|source| source.downcast_ref::<UsageLimitExhausted>().is_some())
                 {
-                    if let Ok((current, true)) = resolve_oauth_access_token(&credentials).await
+                    if let Ok((current, true)) =
+                        resolve_oauth_access_token(&credentials, &account_pin).await
                         && current != token
                         && attempt + 1 < MAX_RETRIES
                     {
@@ -1911,7 +1979,9 @@ async fn run_stream_with_retries(
                             phase: jcode_message_types::ConnectionPhase::Authenticating,
                         }))
                         .await;
-                    match force_refresh_oauth_token(Arc::clone(&credentials)).await {
+                    match force_refresh_oauth_token(Arc::clone(&credentials), account_pin.clone())
+                        .await
+                    {
                         Ok(refreshed_token) => {
                             jcode_base::logging::info(
                                 "Forced OAuth token refresh succeeded, retrying request.",
@@ -2090,9 +2160,9 @@ async fn run_stream_with_retries(
 /// every live session, fork, and retry without a restart.
 async fn resolve_oauth_access_token(
     credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+    account_pin: &AccountPinSlot,
 ) -> Result<(String, bool)> {
-    let fresh_creds =
-        auth::claude::load_credentials().context("Failed to load Claude credentials")?;
+    let (fresh_creds, refresh_label) = load_scoped_claude_credentials(account_pin)?;
     let source = (
         fresh_creds.access_token.clone(),
         fresh_creds.refresh_token.clone(),
@@ -2142,15 +2212,13 @@ async fn resolve_oauth_access_token(
 
         jcode_base::logging::info("OAuth token expired or expiring soon, attempting refresh...");
 
-        let active_label = auth::claude::active_account_label()
-            .unwrap_or_else(auth::claude::primary_account_label);
-        match oauth::refresh_claude_tokens_for_account(&fresh_creds.refresh_token, &active_label)
+        match oauth::refresh_claude_tokens_for_account(&fresh_creds.refresh_token, &refresh_label)
             .await
         {
             Ok(refreshed) => {
                 jcode_base::logging::info("OAuth token refreshed successfully");
                 return Ok((
-                    commit_claude_refresh(credentials, source, refreshed).await,
+                    commit_claude_refresh(credentials, account_pin, source, refreshed).await,
                     true,
                 ));
             }
@@ -2187,11 +2255,12 @@ async fn resolve_oauth_access_token(
 
 async fn force_refresh_oauth_token(
     credentials: Arc<RwLock<Option<CachedCredentials>>>,
+    account_pin: AccountPinSlot,
 ) -> Result<String> {
     // Always start from the stored credential: after a relogin or account
     // switch the cache still holds the previous account's refresh token, and
     // refreshing that would mint a token for the wrong account.
-    let loaded = auth::claude::load_credentials()
+    let (loaded, refresh_label) = load_scoped_claude_credentials(&account_pin)
         .context("Failed to load Claude credentials for forced refresh")?;
     let source = (loaded.access_token.clone(), loaded.refresh_token.clone());
     // A token we refreshed ourselves (e.g. from an external source that is not
@@ -2213,17 +2282,56 @@ async fn force_refresh_oauth_token(
         None => loaded.refresh_token,
     };
 
-    let active_label =
-        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
     let refreshed =
-        match oauth::refresh_claude_tokens_for_account(&refresh_token, &active_label).await {
+        match oauth::refresh_claude_tokens_for_account(&refresh_token, &refresh_label).await {
             Ok(refreshed) => refreshed,
             Err(err) => {
                 anyhow::bail!("OAuth refresh endpoint rejected the refresh token: {err:#}");
             }
         };
 
-    Ok(commit_claude_refresh(&credentials, source, refreshed).await)
+    Ok(commit_claude_refresh(&credentials, &account_pin, source, refreshed).await)
+}
+
+/// Load the Claude credential this provider instance should use right now:
+/// the pinned jcode account when pinned, otherwise the default resolution
+/// (identical to [`auth::claude::load_credentials`]). Returns the label a
+/// refresh must persist to, and records the resolved label on the slot.
+///
+/// A pin whose account no longer exists is dropped (the session follows the
+/// default again) so the next request still works. The caller that persists
+/// session pins notices the change and tells the user.
+fn load_scoped_claude_credentials(
+    account_pin: &AccountPinSlot,
+) -> Result<(auth::claude::ClaudeCredentials, String)> {
+    if let Some(pin) = account_pin.get() {
+        match auth::claude::load_credentials_scoped(AccountScope::Pinned(&pin)) {
+            Ok((creds, Some(label))) => {
+                account_pin.set_resolved_label(Some(label.clone()));
+                return Ok((creds, label));
+            }
+            Ok((_, None)) => unreachable!("pinned scope always resolves a label"),
+            Err(err)
+                if err
+                    .downcast_ref::<auth::account_store::PinnedAccountMissing>()
+                    .is_some() =>
+            {
+                jcode_base::logging::warn(&format!(
+                    "{err}; this session falls back to the default Claude account"
+                ));
+                account_pin.set(None);
+            }
+            Err(err) => return Err(err.context("Failed to load pinned Claude credentials")),
+        }
+    }
+    let (creds, label) = auth::claude::load_credentials_scoped(AccountScope::Default)
+        .context("Failed to load Claude credentials")?;
+    account_pin.set_resolved_label(label.or_else(auth::claude::default_account_label));
+    // Default scope keeps the legacy refresh target (active label, which a
+    // one-shot CLI `--account` override may still set).
+    let refresh_label =
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
+    Ok((creds, refresh_label))
 }
 
 /// Write a finished Claude refresh into the session cache and return the
@@ -2237,11 +2345,12 @@ async fn force_refresh_oauth_token(
 /// and return that login's token instead of the old account's bearer.
 async fn commit_claude_refresh(
     credentials: &Arc<RwLock<Option<CachedCredentials>>>,
+    account_pin: &AccountPinSlot,
     source: (String, String),
     refreshed: oauth::OAuthTokens,
 ) -> String {
     let mut cached = credentials.write().await;
-    if let Ok(stored) = auth::claude::load_credentials() {
+    if let Ok((stored, _)) = load_scoped_claude_credentials(account_pin) {
         let still_source = stored.access_token == source.0 && stored.refresh_token == source.1;
         let persisted_refresh = stored.access_token == refreshed.access_token;
         if !still_source && !persisted_refresh && !stored.access_token.is_empty() {

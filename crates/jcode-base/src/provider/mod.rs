@@ -28,15 +28,12 @@ mod routing;
 mod selection;
 mod startup;
 mod state;
+mod stream_peek;
 mod stream_timeout;
 
 use crate::auth;
 use crate::message::{Message, ToolDefinition};
-use account_failover::{
-    account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
-    same_provider_account_candidates, same_provider_account_failover_enabled,
-    set_account_override_for_provider,
-};
+use account_failover::maybe_annotate_limit_summary;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
@@ -64,6 +61,7 @@ pub use jcode_provider_core::{
     inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
     provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
 };
+pub use jcode_provider_core::{AccountPin, AccountProviderKind, AccountScope};
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
     normalize_model_route_provider_label, pick_next_fallback_route,
@@ -308,7 +306,8 @@ pub use self::models::{
     clear_all_provider_unavailability_for_account,
     clear_claude_provider_unavailability_for_account_label, clear_model_unavailable_for_account,
     clear_openai_provider_unavailability_for_account_label, clear_provider_unavailable_for_account,
-    context_limit_for_model, context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
+    clear_provider_unavailable_for_label, context_limit_for_model,
+    context_limit_for_model_with_provider, fetch_anthropic_model_catalog,
     fetch_anthropic_model_catalog_oauth, fetch_openai_api_key_model_catalog,
     fetch_openai_context_limits, fetch_openai_model_catalog,
     finish_anthropic_model_catalog_refresh_for_scope, finish_openai_model_catalog_refresh,
@@ -321,8 +320,9 @@ pub use self::models::{
     populate_account_models, populate_anthropic_models, populate_anthropic_models_for_scope,
     populate_context_limits, populate_context_limits_from_config,
     populate_context_limits_from_config_value, provider_for_model, provider_for_model_with_hint,
-    provider_unavailability_detail_for_account, record_model_unavailable_for_account,
-    record_provider_unavailable_for_account, refresh_openai_model_catalog_in_background,
+    provider_unavailability_detail_for_account, provider_unavailability_detail_for_label,
+    record_model_unavailable_for_account, record_provider_unavailable_for_account,
+    record_provider_unavailable_for_label, refresh_openai_model_catalog_in_background,
     resolve_model_capabilities, should_refresh_anthropic_model_catalog,
     should_refresh_anthropic_model_catalog_for_scope, should_refresh_openai_model_catalog,
 };
@@ -390,6 +390,9 @@ pub struct MultiProvider {
     /// Shared by forks so the server can wait for real work rather than sleeping
     /// through a fixed quiet period after login.
     post_auth_refreshes_pending: Arc<std::sync::atomic::AtomicUsize>,
+    /// Same-provider account failover state of this session: the per-session
+    /// toggle and the preferred ("home") pin to return to after a move.
+    account_failover: account_failover::SessionAccountFailover,
 }
 
 /// Memoized route catalog with the inputs that decide its freshness: build
@@ -601,11 +604,6 @@ impl MultiProvider {
         entry
     }
 
-    #[cfg(test)]
-    fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
-        account_failover::same_provider_account_candidates(provider)
-    }
-
     async fn complete_with_failover(
         &self,
         messages: &[Message],
@@ -679,7 +677,23 @@ impl MultiProvider {
                 continue;
             }
 
-            if let Some(detail) = provider_unavailability_detail_for_account(key) {
+            // Claude/OpenAI unavailability is per account label (this
+            // session's account), so one window's exhausted account does not
+            // block every window on that provider.
+            let session_label = account_failover::account_kind(candidate)
+                .and_then(|kind| self.session_account_label(kind));
+            let unavailable = match session_label.as_deref() {
+                Some(label) => provider_unavailability_detail_for_label(key, label),
+                None => provider_unavailability_detail_for_account(key),
+            };
+            // With account failover, a marked account means "rotate", not
+            // "skip the provider".
+            let account_failover = (candidate == active)
+                .then(|| self.account_failover_labels(candidate))
+                .flatten();
+            if let Some(detail) = unavailable.clone()
+                && account_failover.is_none()
+            {
                 let note = format!("{}: {}", label, detail);
                 if candidate == active {
                     crate::logging::warn(&format!(
@@ -694,6 +708,55 @@ impl MultiProvider {
                 continue;
             }
 
+            // Same-provider account failover: only this session moves to
+            // another stored account, and only before any output streamed.
+            if let Some(accounts) = account_failover {
+                match self
+                    .complete_with_account_failover(
+                        candidate,
+                        accounts,
+                        unavailable,
+                        messages,
+                        tools,
+                        mode,
+                        resume_session_id,
+                        &mut notes,
+                    )
+                    .await
+                {
+                    multi_provider::AccountAttempt::Stream(stream) => {
+                        self.record_provider_activity(candidate);
+                        return Ok(stream);
+                    }
+                    multi_provider::AccountAttempt::Exhausted(reason) => {
+                        crate::logging::warn(&format!(
+                            "Failover{}: {} has no account left - {}",
+                            mode.log_suffix(),
+                            label,
+                            reason
+                        ));
+                        notes.push(format!("{}: {}", label, reason));
+                        failover_reason = Some(reason);
+                        continue;
+                    }
+                    multi_provider::AccountAttempt::Error(err) => {
+                        let summary = Self::summarize_error(&err);
+                        let decision = Self::classify_failover_error(&err);
+                        notes.push(format!("{}: {}", label, summary));
+                        if !decision.should_failover() {
+                            return Err(err);
+                        }
+                        if decision.should_mark_provider_unavailable()
+                            && let Some(session_label) = session_label.as_deref()
+                        {
+                            record_provider_unavailable_for_label(key, session_label, &summary);
+                        }
+                        failover_reason = Some(summary);
+                        continue;
+                    }
+                }
+            }
+
             if let Some(reason) = self.provider_precheck_unavailable_reason(candidate) {
                 let note = format!("{}: {}", label, reason);
                 if candidate == active {
@@ -706,7 +769,12 @@ impl MultiProvider {
                     failover_reason = Some(reason.clone());
                 }
                 notes.push(note);
-                record_provider_unavailable_for_account(key, &reason);
+                match session_label.as_deref() {
+                    Some(session_label) => {
+                        record_provider_unavailable_for_label(key, session_label, &reason)
+                    }
+                    None => record_provider_unavailable_for_account(key, &reason),
+                }
                 continue;
             }
 
@@ -728,7 +796,12 @@ impl MultiProvider {
 
             match attempt {
                 Ok(stream) => {
-                    clear_provider_unavailable_for_account(key);
+                    match session_label.as_deref() {
+                        Some(session_label) => {
+                            clear_provider_unavailable_for_label(key, session_label)
+                        }
+                        None => clear_provider_unavailable_for_account(key),
+                    }
                     self.record_provider_activity(candidate);
                     if candidate != active {
                         self.set_active_provider(candidate);
@@ -765,16 +838,14 @@ impl MultiProvider {
                     notes.push(format!("{}: {}", label, summary));
                     if decision.should_failover() {
                         if decision.should_mark_provider_unavailable() {
-                            record_provider_unavailable_for_account(key, &summary);
-                        }
-                        if candidate == active
-                            && let Some(stream) = self
-                                .try_same_provider_account_failover(
-                                    candidate, messages, tools, mode, &summary, &mut notes,
-                                )
-                                .await?
-                        {
-                            return Ok(stream);
+                            match session_label.as_deref() {
+                                Some(session_label) => record_provider_unavailable_for_label(
+                                    key,
+                                    session_label,
+                                    &summary,
+                                ),
+                                None => record_provider_unavailable_for_account(key, &summary),
+                            }
                         }
                         if candidate == active {
                             failover_reason = Some(summary);
@@ -821,7 +892,9 @@ impl MultiProvider {
                 if uses_api_key {
                     "claude:api-key".to_string()
                 } else {
-                    let label = crate::auth::claude::active_account_label()
+                    let label = self
+                        .resolved_account_label(AccountProviderKind::Claude)
+                        .or_else(crate::auth::claude::active_account_label)
                         .unwrap_or_else(|| "default".to_string());
                     format!("claude:oauth:{}", label)
                 }
@@ -840,7 +913,9 @@ impl MultiProvider {
                 if uses_api_key {
                     "openai:api-key".to_string()
                 } else {
-                    let label = crate::auth::codex::active_account_label()
+                    let label = self
+                        .resolved_account_label(AccountProviderKind::OpenAi)
+                        .or_else(crate::auth::codex::active_account_label)
                         .unwrap_or_else(|| "default".to_string());
                     format!("openai:oauth:{}", label)
                 }
@@ -1875,6 +1950,46 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        self.account_runtime(kind)
+            .and_then(|provider| provider.account_pin(kind))
+    }
+
+    fn set_account_pin(&self, kind: AccountProviderKind, pin: Option<AccountPin>) -> Result<()> {
+        match self.account_runtime(kind) {
+            Some(provider) => provider.set_account_pin(kind, pin),
+            None if pin.is_none() => Ok(()),
+            None => Err(anyhow!(
+                "{} provider is not configured",
+                match kind {
+                    AccountProviderKind::Claude => "Anthropic",
+                    AccountProviderKind::OpenAi => "OpenAI",
+                }
+            )),
+        }
+    }
+
+    fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+        self.account_runtime(kind)
+            .and_then(|provider| provider.resolved_account_label(kind))
+    }
+
+    fn set_account_failover(&self, enabled: Option<bool>) {
+        self.account_failover.set_enabled(enabled);
+    }
+
+    fn account_failover_home(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        self.account_failover.home(kind)
+    }
+
+    fn set_account_failover_home(&self, kind: AccountProviderKind, home: Option<AccountPin>) {
+        self.account_failover.set_home(kind, home);
+    }
+
+    fn return_account_home_if_reset(&self) -> Vec<AccountProviderKind> {
+        self.return_home_if_reset()
+    }
+
     fn credential_mode(&self) -> CredentialMode {
         let active = self.active_provider();
         match active {
@@ -2855,12 +2970,26 @@ impl Provider for MultiProvider {
             initial_provider: self.initial_provider,
             routes_memo: Mutex::new(None),
             post_auth_refreshes_pending: Arc::clone(&self.post_auth_refreshes_pending),
+            account_failover: self.account_failover.copy(),
         };
 
         provider.spawn_anthropic_catalog_refresh_if_needed();
         provider.spawn_openai_catalog_refresh_if_needed();
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
+        // A fork continues this session, so it keeps this session's accounts.
+        // `fork_for_new_session` deliberately does not: a new window starts on
+        // the default account.
+        for kind in AccountProviderKind::ALL {
+            if let Some(pin) = self.account_pin(kind)
+                && let Err(err) = provider.set_account_pin(kind, Some(pin))
+            {
+                crate::logging::warn(&format!(
+                    "Failed to carry the {} account pin into a fork: {err:#}",
+                    kind.key()
+                ));
+            }
+        }
         Arc::new(provider)
     }
 
@@ -2920,7 +3049,6 @@ impl Provider for MultiProvider {
             );
         }
         self.set_active_provider(target);
-        self.auto_select_multi_account_for_provider(target);
         Ok(())
     }
 }

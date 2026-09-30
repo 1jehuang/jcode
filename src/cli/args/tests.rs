@@ -480,6 +480,7 @@ fn login_no_browser_flag_parses() {
             no_validate,
             flow_id,
             cancel,
+            ..
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
@@ -765,6 +766,7 @@ fn run_json_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(json);
             assert!(!ndjson);
@@ -782,6 +784,7 @@ fn run_ndjson_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(!json);
             assert!(ndjson);
@@ -1043,4 +1046,63 @@ fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
             "stdio must not silently ignore an API socket override"
         );
     }
+}
+
+#[test]
+fn account_flag_is_repeatable_for_tui_and_run() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "--account",
+        "claude-fox",
+        "--account",
+        "openai-otter",
+    ])
+    .unwrap();
+    assert_eq!(args.account, vec!["claude-fox", "openai-otter"]);
+
+    let args = Args::try_parse_from(["jcode", "run", "--account", "claude-fox", "hi"]).unwrap();
+    let Some(Command::Run { account, .. }) = args.command else {
+        panic!("expected run");
+    };
+    assert_eq!(account, vec!["claude-fox"]);
+
+    // `jcode login --account` keeps naming the login target, and `--default`
+    // makes the new login the default.
+    let args = Args::try_parse_from([
+        "jcode", "login", "claude", "--account", "claude-fox", "--default",
+    ])
+    .unwrap();
+    let Some(Command::Login {
+        account,
+        make_default,
+        ..
+    }) = args.command
+    else {
+        panic!("expected login");
+    };
+    assert_eq!(account.as_deref(), Some("claude-fox"));
+    assert!(make_default);
+}
+
+#[test]
+fn account_pins_infer_provider_from_label_prefix() {
+    let pins = crate::cli::account_pins::resolve_account_pins(&[
+        "claude-fox".to_string(),
+        "openai-otter".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+        pins,
+        vec![
+            ("claude".to_string(), "claude-fox".to_string()),
+            ("openai".to_string(), "openai-otter".to_string()),
+        ]
+    );
+    let err = crate::cli::account_pins::resolve_account_pins(&[
+        "claude-fox".to_string(),
+        "claude-otter".to_string(),
+    ])
+    .unwrap_err();
+    assert!(err.to_string().contains("one --account per provider"), "{err}");
+    assert!(crate::cli::account_pins::resolve_account_pins(&["nobody".to_string()]).is_err());
 }

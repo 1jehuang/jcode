@@ -2591,6 +2591,7 @@ async fn start_oauth_stream(provider: &AnthropicProvider) -> mpsc::Receiver<Resu
         minimal_oauth_request(),
         tx,
         Arc::clone(&provider.credentials),
+        provider.account_pin.clone(),
         "claude-opus-4-8".to_string(),
         provider.oauth_session_id.clone(),
         Arc::clone(&provider.model),
@@ -2750,6 +2751,22 @@ fn short_429_keeps_retry_after_and_far_usage_limit_is_terminal() {
     assert!(far.downcast_ref::<UsageLimitExhausted>().is_some());
     assert!(far.to_string().contains("resets in 5h"), "{far}");
 
+    // Account failover detects exhaustion through the stable marker only.
+    let far_limit = jcode_provider_core::classify_account_usage_limit(&format!("{far:#}"))
+        .expect("far usage limit must carry the account-usage-limit marker");
+    let resets_at = far_limit.resets_at.expect("marker carries resets_at");
+    assert!((resets_at - (now + 5 * 3600 + 60)).abs() <= 2, "{far}");
+    assert_eq!(
+        jcode_provider_core::classify_account_usage_limit(&format!("{near:#}")),
+        None,
+        "a reset within 120 s is a short 429, not exhaustion"
+    );
+    assert_eq!(
+        jcode_provider_core::classify_account_usage_limit(&format!("{short:#}")),
+        None,
+        "a plain retry-after 429 is not exhaustion"
+    );
+
     // No unified headers, but the body names a usage limit.
     let body_only = anthropic_status_error(
         reqwest::StatusCode::TOO_MANY_REQUESTS,
@@ -2757,6 +2774,10 @@ fn short_429_keeps_retry_after_and_far_usage_limit_is_terminal() {
         "You have reached your usage limit",
     );
     assert!(body_only.downcast_ref::<UsageLimitExhausted>().is_some());
+    assert_eq!(
+        jcode_provider_core::classify_account_usage_limit(&format!("{body_only:#}")),
+        Some(jcode_provider_core::AccountUsageLimit { resets_at: None })
+    );
 
     // Other statuses are untouched.
     let server = anthropic_status_error(
@@ -2817,6 +2838,7 @@ async fn claude_refresh_finishing_after_account_switch_keeps_new_login() {
     jcode_base::auth::claude::set_active_account(&second).unwrap();
     let bearer = commit_claude_refresh(
         &credentials,
+        &AccountPinSlot::default(),
         source,
         refreshed_claude_tokens("first-account-refreshed", "first-account-rotated"),
     )
@@ -2857,6 +2879,7 @@ async fn claude_refresh_without_account_switch_updates_cache() {
     // External-style: the store still holds the source credential.
     let bearer = commit_claude_refresh(
         &credentials,
+        &AccountPinSlot::default(),
         source.clone(),
         refreshed_claude_tokens("account-refreshed-1", "account-rotated-1"),
     )
@@ -2872,6 +2895,7 @@ async fn claude_refresh_without_account_switch_updates_cache() {
     .unwrap();
     let bearer = commit_claude_refresh(
         &credentials,
+        &AccountPinSlot::default(),
         source,
         refreshed_claude_tokens("account-refreshed-2", "account-rotated-2"),
     )
@@ -2882,4 +2906,129 @@ async fn claude_refresh_without_account_switch_updates_cache() {
         "account-refreshed-2"
     );
     jcode_base::auth::claude::set_active_account_override(None);
+}
+
+fn seed_two_pinnable_claude_accounts() -> (AccountPin, AccountPin) {
+    let mut otter = oauth_account("claude-1", "token-otter", "refresh-otter");
+    otter.email = Some("otter@example.com".to_string());
+    let mut fox = oauth_account("claude-2", "token-fox", "refresh-fox");
+    fox.email = Some("fox@example.com".to_string());
+    let otter_label = jcode_base::auth::claude::upsert_account(otter).unwrap();
+    let fox_label = jcode_base::auth::claude::upsert_account(fox).unwrap();
+    jcode_base::auth::claude::set_active_account(&otter_label).unwrap();
+    jcode_base::auth::claude::set_active_account_override(None);
+    (
+        jcode_base::auth::claude::pin_for_label(&otter_label).unwrap(),
+        jcode_base::auth::claude::pin_for_label(&fox_label).unwrap(),
+    )
+}
+
+/// Two sessions (forks) pinned to different accounts send different bearers
+/// at the same time, and neither changes the stored default.
+#[tokio::test]
+async fn two_anthropic_forks_with_different_pins_send_different_bearers() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+    let (url, seen) = spawn_fake_messages_api(60).await;
+    let _url = OAuthUrlOverride::set(&url);
+    let (_otter, fox) = seed_two_pinnable_claude_accounts();
+
+    let window_a = AnthropicProvider::new();
+    let window_b = window_a.fork_concrete();
+    window_b
+        .set_account_pin(AccountProviderKind::Claude, Some(fox.clone()))
+        .unwrap();
+
+    let mut rx_a = start_oauth_stream(&window_a).await;
+    let mut rx_b = start_oauth_stream(&window_b).await;
+    let (a, b) = tokio::join!(drain_stream(&mut rx_a), drain_stream(&mut rx_b));
+    assert_eq!(a.1, None);
+    assert_eq!(b.1, None);
+
+    let mut seen = seen.lock().unwrap().clone();
+    seen.sort();
+    assert_eq!(seen, vec!["token-fox", "token-otter"]);
+    assert_eq!(
+        window_b
+            .resolved_account_label(AccountProviderKind::Claude)
+            .as_deref(),
+        Some("claude-fox")
+    );
+    assert_eq!(
+        window_a
+            .resolved_account_label(AccountProviderKind::Claude)
+            .as_deref(),
+        Some("claude-otter")
+    );
+    assert_eq!(
+        jcode_base::auth::claude::default_account_label().as_deref(),
+        Some("claude-otter"),
+        "pinning one window must not change the default"
+    );
+    // A fork copies the pin value but not the slot.
+    let fork_of_b = window_b.fork_concrete();
+    assert_eq!(
+        fork_of_b.account_pin(AccountProviderKind::Claude),
+        Some(fox)
+    );
+    fork_of_b
+        .set_account_pin(AccountProviderKind::Claude, None)
+        .unwrap();
+    assert!(window_b.account_pin(AccountProviderKind::Claude).is_some());
+}
+
+/// A turn held on otter's usage limit is waiting to retry when this window is
+/// pinned to fox. The retry must wake and finish on fox.
+#[tokio::test]
+async fn anthropic_retry_after_pin_change_uses_new_account() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "claude");
+    jcode_base::auth::claude::set_active_account_override(None);
+    let (url, seen) = spawn_fake_messages_api(60).await;
+    let _url = OAuthUrlOverride::set(&url);
+
+    let mut otter = oauth_account("claude-1", "token-otter-LIMITED", "refresh-otter");
+    otter.email = Some("otter@example.com".to_string());
+    let mut fox = oauth_account("claude-2", "token-fox-HEALTHY", "refresh-fox");
+    fox.email = Some("fox@example.com".to_string());
+    let otter_label = jcode_base::auth::claude::upsert_account(otter).unwrap();
+    let fox_label = jcode_base::auth::claude::upsert_account(fox).unwrap();
+    jcode_base::auth::claude::set_active_account(&otter_label).unwrap();
+    jcode_base::auth::claude::set_active_account_override(None);
+    let fox_pin = jcode_base::auth::claude::pin_for_label(&fox_label).unwrap();
+
+    let provider = AnthropicProvider::new();
+    let mut rx = start_oauth_stream(&provider).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while seen.lock().unwrap().is_empty() {
+        assert!(std::time::Instant::now() < deadline, "no first request");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let pinned_at = std::time::Instant::now();
+    provider
+        .set_account_pin(AccountProviderKind::Claude, Some(fox_pin))
+        .unwrap();
+
+    let (text, error) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), drain_stream(&mut rx))
+            .await
+            .expect("the held retry must wake on a pin change");
+    assert_eq!(error, None);
+    assert_eq!(text, "hi from B");
+    assert!(pinned_at.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        vec!["token-otter-LIMITED", "token-fox-HEALTHY"]
+    );
+    assert_eq!(
+        jcode_base::auth::claude::default_account_label().as_deref(),
+        Some("claude-otter")
+    );
 }

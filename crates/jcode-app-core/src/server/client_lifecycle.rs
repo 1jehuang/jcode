@@ -40,6 +40,10 @@ use super::comm_sync::{
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
 use super::provider_control::{
+    apply_subscribe_account_pins, handle_set_account_failover, handle_set_default_account,
+    handle_set_session_account_request,
+};
+use super::provider_control::{
     handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
     handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
     handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort, handle_set_route,
@@ -591,6 +595,9 @@ pub(super) async fn handle_client(
     let mut continue_on_disconnect = false;
     let mut model_usage_updates_enabled = false;
     let mut supports_pdf_panels = false;
+    // Old clients count unknown events against a stray-line budget, so
+    // `session_account_changed` goes only to clients that opted in.
+    let supports_session_accounts = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
@@ -708,8 +715,14 @@ pub(super) async fn handle_client(
     let writer_clone = Arc::clone(&writer);
     let client_connection_id_for_events = client_connection_id.clone();
     let client_connections_for_events = Arc::clone(&client_connections);
+    let supports_session_accounts_for_events = Arc::clone(&supports_session_accounts);
     let event_handle = tokio::spawn(async move {
         while let Some(event) = client_event_rx.recv().await {
+            if matches!(event, ServerEvent::SessionAccountChanged { .. })
+                && !supports_session_accounts_for_events.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                continue;
+            }
             {
                 let mut connections = client_connections_for_events.write().await;
                 if let Some(info) = connections.get_mut(&client_connection_id_for_events) {
@@ -945,8 +958,14 @@ pub(super) async fn handle_client(
                         let _ = client_event_tx.send(event);
                         last_available_models_snapshot = Some(dedup_key);
                     }
-                    Ok(BusEvent::CredentialsChanged { provider }) => {
-                        let _ = client_event_tx.send(ServerEvent::CredentialsChanged { provider });
+                    Ok(BusEvent::CredentialsChanged {
+                        provider,
+                        account_label,
+                    }) => {
+                        let _ = client_event_tx.send(ServerEvent::CredentialsChanged {
+                            provider,
+                            account_label,
+                        });
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
@@ -1642,6 +1661,8 @@ pub(super) async fn handle_client(
                 crash_on_disconnect: _,
                 continue_on_disconnect: requested_continuation,
                 terminal_env,
+                account_pins: requested_account_pins,
+                supports_session_accounts: requested_session_accounts,
             } => {
                 if let Err(message) =
                     validated_subscribe_working_dir(
@@ -1669,6 +1690,10 @@ pub(super) async fn handle_client(
                 // rather than retaining a prior pane's values.
                 continue_on_disconnect = requested_continuation;
                 supports_pdf_panels = requested_pdf_panels;
+                supports_session_accounts.store(
+                    requested_session_accounts,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
@@ -1836,6 +1861,10 @@ pub(super) async fn handle_client(
                         last_available_models_snapshot = Some(snapshot);
                     }
                 }
+                // `--account` pins apply to the session this connection now
+                // drives (new or resumed). An explicit request overrides a
+                // resumed session's stored pin.
+                apply_subscribe_account_pins(&agent, &requested_account_pins).await;
                 client_subscribed = true;
                 provisional_session = false;
             }
@@ -2164,11 +2193,61 @@ pub(super) async fn handle_client(
             }
 
             Request::SwitchAnthropicAccount { id, label } => {
-                handle_switch_anthropic_account(id, label, &agent, &client_event_tx).await;
+                handle_switch_anthropic_account(
+                    id,
+                    label,
+                    &agent,
+                    &client_event_tx,
+                    supports_session_accounts.load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .await;
             }
 
             Request::SwitchOpenAiAccount { id, label } => {
-                handle_switch_openai_account(id, label, &agent, &client_event_tx).await;
+                handle_switch_openai_account(
+                    id,
+                    label,
+                    &agent,
+                    &client_event_tx,
+                    supports_session_accounts.load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .await;
+            }
+
+            Request::SetSessionAccount {
+                id,
+                provider,
+                label,
+            } => {
+                handle_set_session_account_request(
+                    id,
+                    provider,
+                    label,
+                    &agent,
+                    &client_event_tx,
+                    supports_session_accounts.load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .await;
+            }
+
+            Request::SetDefaultAccount {
+                id,
+                provider,
+                label,
+            } => {
+                handle_set_default_account(
+                    id,
+                    provider,
+                    label,
+                    &agent,
+                    &client_event_tx,
+                    supports_session_accounts.load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .await;
+            }
+
+            Request::SetAccountFailover { id, enabled } => {
+                handle_set_account_failover(id, enabled, &agent, &client_event_tx).await;
             }
 
             Request::InvalidateOpenAiUsage { id, account_label } => {
@@ -3901,3 +3980,7 @@ mod tests;
 #[cfg(test)]
 #[path = "client_target_attach_tests.rs"]
 mod target_attach_tests;
+
+#[cfg(test)]
+#[path = "session_accounts_tests.rs"]
+mod session_accounts_tests;

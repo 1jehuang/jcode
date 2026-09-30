@@ -15,9 +15,8 @@
 //! the conversation and tools away from another endpoint until the user had
 //! the chance to press Esc.
 
+use super::stream_peek::{Peeked, peek_before_output};
 use super::*;
-use crate::message::{ConnectionPhase, StreamEvent};
-use futures::StreamExt;
 
 const COMPATIBLE_API_METHOD_PREFIX: &str = "openai-compatible:";
 
@@ -29,80 +28,6 @@ pub(super) fn compatible_profile_unavailability_key(profile_id: &str) -> String 
 
 fn compatible_profile_unavailable_detail(profile_id: &str) -> Option<String> {
     provider_unavailability_detail_for_account(&compatible_profile_unavailability_key(profile_id))
-}
-
-enum Peeked {
-    /// The response started (or the stream ended) without a pre-response error.
-    Stream(EventStream),
-    /// The request failed before any model output. `out_of_credit` is true
-    /// for billing exhaustion (HTTP 402 or credit wording without a reset time).
-    Failed {
-        error: anyhow::Error,
-        out_of_credit: bool,
-        /// The exact stream as the runtime produced it, for callers that do
-        /// not fail over and must surface the error unchanged.
-        replay: EventStream,
-    },
-}
-
-/// Read the stream up to the HTTP response (connection bookkeeping events
-/// only). An error at that point means the request never reached the model,
-/// so the caller may offer another profile. Errors come either as `Err` items
-/// (non-2xx HTTP status) or as `StreamEvent::Error` (an HTTP 200 SSE stream
-/// whose first event is an error payload).
-async fn peek_before_output(mut stream: EventStream) -> Peeked {
-    let mut buffered: Vec<Result<StreamEvent>> = Vec::new();
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(StreamEvent::Error {
-                message,
-                retry_after_secs,
-            }) => {
-                let out_of_credit =
-                    jcode_provider_core::is_billing_exhausted_error_message(&message);
-                let error = anyhow::anyhow!(message.clone());
-                buffered.push(Ok(StreamEvent::Error {
-                    message,
-                    retry_after_secs,
-                }));
-                return Peeked::Failed {
-                    error,
-                    out_of_credit,
-                    replay: Box::pin(futures::stream::iter(buffered).chain(stream)),
-                };
-            }
-            Ok(event) => {
-                let still_connecting = matches!(
-                    event,
-                    StreamEvent::ConnectionType { .. }
-                        | StreamEvent::StatusDetail { .. }
-                        | StreamEvent::UpstreamProvider { .. }
-                        | StreamEvent::ConnectionPhase {
-                            phase: ConnectionPhase::Authenticating
-                                | ConnectionPhase::Connecting
-                                | ConnectionPhase::SendingRequest
-                                | ConnectionPhase::WaitingForResponse
-                                | ConnectionPhase::Retrying { .. }
-                        }
-                );
-                buffered.push(Ok(event));
-                if !still_connecting {
-                    break;
-                }
-            }
-            Err(error) => {
-                let text = format!("{error:#}");
-                let out_of_credit = jcode_provider_core::is_billing_exhausted_error_message(&text);
-                buffered.push(Err(error));
-                return Peeked::Failed {
-                    error: anyhow::anyhow!(text),
-                    out_of_credit,
-                    replay: Box::pin(futures::stream::iter(buffered).chain(stream)),
-                };
-            }
-        }
-    }
-    Peeked::Stream(Box::pin(futures::stream::iter(buffered).chain(stream)))
 }
 
 /// Short plain-words reason, e.g. `out of credit (HTTP 402: Insufficient credits)`.
@@ -282,6 +207,7 @@ impl MultiProvider {
                         error,
                         out_of_credit,
                         replay,
+                        ..
                     } => {
                         let reason = if out_of_credit {
                             out_of_credit_reason(&error)
