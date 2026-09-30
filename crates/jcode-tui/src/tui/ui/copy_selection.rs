@@ -245,6 +245,16 @@ pub(super) fn link_target_from_snapshot(
     link_target_for_display_column(raw_text, raw_point.column)
 }
 
+/// `(raw_line, display_column)` of a selection point in the snapshot's
+/// unwrapped (logical) lines. For the composer these are the `\n`-separated
+/// lines of the input, so soft wraps and the prompt prefix are already gone.
+pub(super) fn raw_line_column_from_snapshot(
+    snapshot: &CopyViewportSnapshot,
+    point: crate::tui::CopySelectionPoint,
+) -> Option<(usize, usize)> {
+    raw_selection_point(snapshot, point).map(|raw| (raw.raw_line, raw.column))
+}
+
 fn raw_selection_point(
     snapshot: &CopyViewportSnapshot,
     point: crate::tui::CopySelectionPoint,

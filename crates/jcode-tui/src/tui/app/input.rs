@@ -1136,6 +1136,19 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
     // to reconcile the transcript viewport.
     app.follow_chat_bottom_for_typing();
 
+    // Typing or pasting over a composer selection replaces it. Record a single
+    // undo step for the whole replacement so one Ctrl+Z restores the original.
+    let replaced_selection = if let Some((start, end)) = app.input_selection() {
+        app.remember_input_undo_state();
+        app.input.drain(start..end);
+        app.cursor_pos = start;
+        app.clear_input_selection();
+        true
+    } else {
+        app.clear_input_selection();
+        false
+    };
+
     let at_end = app.cursor_pos == app.input.len();
 
     // A habitual space typed after an auto-inserted picker separator would
@@ -1146,7 +1159,9 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
         return;
     }
 
-    app.remember_input_undo_state();
+    if !replaced_selection {
+        app.remember_input_undo_state();
+    }
 
     // After a picker command is fully typed (or completed without a trailing
     // space), the next printable character starts its filter. Insert the
@@ -3095,6 +3110,12 @@ impl App {
         }
 
         if self.handle_onboarding_continue_prompt_key(code) {
+            return Ok(());
+        }
+
+        // Composer text selection (copy/cut/delete/extend) takes priority over
+        // the whole-line Ctrl+X, the Ctrl+C clear/quit, and plain arrow moves.
+        if super::input_selection::handle_input_selection_key(self, code, modifiers) {
             return Ok(());
         }
 

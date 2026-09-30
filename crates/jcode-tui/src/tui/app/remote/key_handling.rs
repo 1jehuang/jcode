@@ -369,6 +369,13 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // Composer text selection (copy/cut/delete/extend) takes priority over
+    // the whole-line Ctrl+X, the Ctrl+C interrupt/quit, and plain arrow moves.
+    // Mirrors the local path in `input.rs` `handle_key_core`.
+    if crate::tui::app::input_selection::handle_input_selection_key(app, code, modifiers) {
+        return Ok(());
+    }
+
     // Inline hotkey feedback: when a known-but-rarely-used chord is pressed,
     // show "you just pressed X → does Y". Placed after the overlay handlers so
     // overlay-local keys stay silent. Unknown chords are reported at the

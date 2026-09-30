@@ -1742,6 +1742,7 @@ impl App {
     }
 
     pub(super) fn undo_input_change(&mut self) {
+        self.input_selection_anchor = None;
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
             // The composer now holds a restored draft, so the copy stashed by a
             // history jump is stale: a later Down must not resurrect it.
