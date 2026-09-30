@@ -331,3 +331,96 @@ fn test_credentials_changed_scope_local_openai_account_switch_keeps_claude_turn_
     assert!(app.release_rate_limit_hold_after_credentials_changed(Some("anthropic")));
     assert_eq!(account_changed_notices(&app), 1);
 }
+
+#[test]
+fn test_credentials_changed_for_another_label_does_not_resend_held_turn() {
+    let mut app = held_on_rate_limit_app(Duration::from_secs(3 * 3600));
+    app.set_window_account_from_info(&crate::protocol::SessionAccountInfo {
+        provider: "claude".to_string(),
+        label: Some("claude-otter".to_string()),
+        pinned: true,
+        is_default: false,
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // Another window's account (same provider) re-logged in: this window's
+    // otter is still exhausted, so the hold must stay.
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: Some("anthropic".to_string()),
+            account_label: Some("claude-fox".to_string()),
+        },
+        &mut remote,
+    );
+    let reset = app.rate_limit_reset.expect("hold kept");
+    assert!(reset > Instant::now(), "another label must not release the hold");
+    assert_eq!(account_changed_notices(&app), 0);
+
+    // This window's own label changed: resend.
+    app.handle_server_event(
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: Some("anthropic".to_string()),
+            account_label: Some("claude-otter".to_string()),
+        },
+        &mut remote,
+    );
+    assert!(app.rate_limit_reset.expect("armed") <= Instant::now());
+    assert_eq!(account_changed_notices(&app), 1);
+}
+
+#[test]
+fn test_session_account_changed_updates_window_account_and_explains_moves() {
+    let mut app = create_test_app();
+    app.remote_provider_name = Some("Claude".to_string());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.set_window_account_from_info(&crate::protocol::SessionAccountInfo {
+        provider: "claude".to_string(),
+        label: Some("claude-otter".to_string()),
+        pinned: false,
+        is_default: true,
+    });
+    let before = app.display_messages().len();
+    app.handle_server_event(
+        crate::protocol::ServerEvent::SessionAccountChanged {
+            provider: "claude".to_string(),
+            label: Some("claude-fox".to_string()),
+            pinned: true,
+            is_default: false,
+            reason: Some("otter resets 14:05".to_string()),
+        },
+        &mut remote,
+    );
+    let account = app
+        .window_account("claude")
+        .expect("window account stored");
+    assert_eq!(account.label.as_deref(), Some("claude-fox"));
+    assert!(account.pinned);
+    let last = app.display_messages().last().unwrap().content.clone();
+    assert_eq!(app.display_messages().len(), before + 1);
+    assert!(
+        last.contains("⚡ This window moved from claude-otter to claude-fox (otter resets 14:05)"),
+        "{last}"
+    );
+
+    // Without a reason (a reply to this window's own command) there is no
+    // extra transcript line.
+    app.handle_server_event(
+        crate::protocol::ServerEvent::SessionAccountChanged {
+            provider: "claude".to_string(),
+            label: Some("claude-otter".to_string()),
+            pinned: false,
+            is_default: true,
+            reason: None,
+        },
+        &mut remote,
+    );
+    assert_eq!(app.display_messages().len(), before + 1);
+    let widget = app.info_widget_data().window_account.expect("widget account");
+    assert_eq!(widget.label, "claude-otter");
+    assert!(widget.is_default && !widget.pinned);
+}

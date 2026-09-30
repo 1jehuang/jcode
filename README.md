@@ -690,6 +690,8 @@ The above image is the first page of provider logins
 
 Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second. 
 
+Accounts are per window: `/account switch claude-fox` (or Enter in the `/account` picker) moves only this window, so two windows can use two subscriptions of the same provider at once. `/account default claude-fox` (or `d` in the picker) sets the account new windows start with, `/account unpin` returns this window to the default, and `/account failover on|off|status` controls automatic moves to the next saved account when this window's account runs out. From the command line, `jcode --account claude-fox` and `jcode run --account openai-otter ...` pick the account for that window or run, and `jcode login claude --default` makes a new login the default.
+
 ---
 
 ## Customizability / Self-Dev

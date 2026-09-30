@@ -2380,23 +2380,23 @@ impl App {
             return;
         }
         match action {
-            AccountPickerAction::Switch { provider_id, label } => {
+            action @ (AccountPickerAction::Switch { .. }
+            | AccountPickerAction::SetDefault { .. }) => {
                 if self.is_remote {
-                    self.pending_account_picker_action = Some(AccountPickerAction::Switch {
-                        provider_id: provider_id.clone(),
-                        label: label.clone(),
+                    self.set_status_notice(match &action {
+                        AccountPickerAction::Switch { label, .. } => {
+                            format!("Account → {label} (this window)")
+                        }
+                        AccountPickerAction::SetDefault { label, .. } => {
+                            format!("Default account → {label}")
+                        }
+                        _ => String::new(),
                     });
-                    self.set_status_notice(format!("Account → {} ({})", label, provider_id));
+                    self.pending_account_picker_action = Some(action);
                     return;
                 }
-
-                match provider_id.as_str() {
-                    "claude" => self.switch_account(&label),
-                    "openai" => self.switch_openai_account(&label),
-                    _ => self.push_display_message(DisplayMessage::error(format!(
-                        "Provider `{}` does not support account switching.",
-                        provider_id
-                    ))),
+                if let Some(command) = super::auth::account_command_from_inline_action(&action) {
+                    self.execute_window_account_command_local(command);
                 }
             }
             AccountPickerAction::Add { provider_id } => match provider_id.as_str() {
@@ -3296,6 +3296,26 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        // Account picker: `d` on a saved account makes it the default for
+        // new windows (Enter uses it in this window). Only with an empty
+        // filter, so `d` still types into the filter otherwise.
+        if matches!(code, KeyCode::Char('d'))
+            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && let Some(picker) = self.inline_interactive_state.as_ref()
+            && picker.kind == crate::tui::PickerKind::Account
+            && picker.filter.is_empty()
+            && let Some(&idx) = picker.filtered.get(picker.selected)
+            && let PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) =
+                &picker.entries[idx].action
+        {
+            let action = AccountPickerAction::SetDefault {
+                provider_id: provider_id.clone(),
+                label: label.clone(),
+            };
+            self.inline_interactive_state = None;
+            self.handle_account_picker_selection(action);
+            return Ok(());
+        }
         match code {
             KeyCode::Esc => {
                 if let Some(ref mut picker) = self.inline_interactive_state

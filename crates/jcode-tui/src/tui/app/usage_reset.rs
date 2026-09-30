@@ -123,7 +123,7 @@ impl App {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let account = crate::auth::codex::active_account_label();
+        let account = self.window_account_label("openai");
         let (sender, receiver) = oneshot::channel();
         self.usage_reset.quota_refresh = Some(receiver);
         runtime.spawn(async move {
