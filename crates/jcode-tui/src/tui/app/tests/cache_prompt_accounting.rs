@@ -359,3 +359,105 @@ fn cache_yield_fresh_session_ignores_warm_prefix_first_read() {
     let summary = kv_cache_summary(&app);
     assert!(summary.contains("yield 80%"), "{summary}");
 }
+
+fn cache_usage_event(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+    input: u64,
+    read: u64,
+) {
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input,
+            output: 100,
+            cache_read_input: Some(read),
+            cache_creation_input: Some(0),
+        },
+        remote,
+    );
+}
+
+#[test]
+fn cache_yield_follows_later_usage_snapshots_for_same_request() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut app = cache_accounting_openai_app();
+    // First request primes a 10k baseline.
+    cache_usage_event(&mut app, &mut remote, 10_000, 0);
+    // Second request reports 4k reads, then 6k for the same request.
+    app.kv_cache.current_api_usage_recorded = false;
+    app.streaming.streaming_cache_read_tokens = None;
+    app.streaming.streaming_cache_creation_tokens = None;
+    cache_usage_event(&mut app, &mut remote, 10_000, 4_000);
+    cache_usage_event(&mut app, &mut remote, 10_000, 6_000);
+    assert_eq!(app.token_accounting.total_cache_optimal_read_tokens, 6_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 60%"), "{summary}");
+    let stats = cache_accounting_stats(&mut app);
+    assert!(
+        stats.contains("cache_read_pct_of_optimal_input: 60%"),
+        "{stats}"
+    );
+}
+
+#[test]
+fn history_refresh_same_session_clears_optimal_baseline() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut app = cache_accounting_openai_app();
+    let history = || crate::protocol::ServerEvent::History {
+        id: 1,
+        session_id: "session_same".to_string(),
+        messages: vec![],
+        images: vec![],
+        provider_name: Some("OpenAI".to_string()),
+        provider_model: Some("gpt-5.6".to_string()),
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: Some(crate::protocol::TokenUsageTotals {
+            input_tokens: 10_000,
+            cache_reported_input_tokens: 10_000,
+            ..Default::default()
+        }),
+        all_sessions: vec![],
+        client_count: None,
+        is_canary: None,
+        reload_recovery: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+        service_tier: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        applets: Default::default(),
+    };
+    app.handle_server_event(history(), &mut remote);
+    record_live_cache_request(&mut app, 10_000, 0);
+    assert!(app.token_accounting.cache_next_optimal_input_tokens.is_some());
+    // Reconnect: History for the same session refreshes usage.
+    app.handle_server_event(history(), &mut remote);
+    assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, None);
+    // First request after refresh has no baseline: no yield yet.
+    record_live_cache_request(&mut app, 10_000, 8_000);
+    assert_eq!(app.token_accounting.total_cache_optimal_input_tokens, 0);
+    assert!(!kv_cache_summary(&app).contains("yield 80%"));
+    // Second request starts a clean measurement.
+    record_live_cache_request(&mut app, 10_000, 5_000);
+    assert!(kv_cache_summary(&app).contains("yield 50%"));
+}

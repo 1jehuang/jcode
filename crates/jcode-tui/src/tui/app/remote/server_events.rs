@@ -886,13 +886,21 @@ pub(in crate::tui::app) fn handle_server_event(
                         .token_accounting
                         .total_cache_reported_input_tokens
                         .saturating_add(reported_delta);
-                    app.token_accounting.total_cache_read_tokens =
-                        app.token_accounting.total_cache_read_tokens.saturating_add(
-                            app.streaming
-                                .streaming_cache_read_tokens
-                                .unwrap_or(0)
-                                .saturating_sub(previous_cache_read.unwrap_or(0)),
-                        );
+                    let read_delta = app
+                        .streaming
+                        .streaming_cache_read_tokens
+                        .unwrap_or(0)
+                        .saturating_sub(previous_cache_read.unwrap_or(0));
+                    app.token_accounting.total_cache_read_tokens = app
+                        .token_accounting
+                        .total_cache_read_tokens
+                        .saturating_add(read_delta);
+                    if app.token_accounting.current_request_has_optimal {
+                        app.token_accounting.total_cache_optimal_read_tokens = app
+                            .token_accounting
+                            .total_cache_optimal_read_tokens
+                            .saturating_add(read_delta);
+                    }
                     app.token_accounting.total_cache_creation_tokens = app
                         .token_accounting
                         .total_cache_creation_tokens
@@ -1696,6 +1704,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.last_cache_creation_tokens = None;
                 app.token_accounting.last_cache_optimal_input_tokens = None;
                 app.token_accounting.cache_next_optimal_input_tokens = None;
+                app.token_accounting.current_request_has_optimal = false;
                 app.kv_cache.kv_cache_baseline = None;
                 app.kv_cache.pending_kv_cache_request = None;
                 app.kv_cache.kv_cache_turn_number = None;
@@ -1812,6 +1821,11 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
                 app.token_accounting.total_cache_optimal_read_tokens = 0;
+                // Restart the yield window: a baseline from before the refresh
+                // must not become the denominator of the next request.
+                app.token_accounting.cache_next_optimal_input_tokens = None;
+                app.token_accounting.last_cache_optimal_input_tokens = None;
+                app.token_accounting.current_request_has_optimal = false;
                 // Token totals are restored from history above, but the dollar
                 // cost was never reconstructed, so resumed sessions showed `$0`
                 // in the cost widget until a new call happened. Price the
