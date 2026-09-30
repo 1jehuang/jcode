@@ -298,6 +298,78 @@ fn search_part_texts(json: &str) -> Vec<String> {
     out
 }
 
+/// Ids among `session_ids` whose parts could match a search, so only those
+/// histories get loaded. A session qualifies when at least `min_term_matches`
+/// of `terms` occur somewhere in its searchable parts (a superset of the
+/// per-message matcher, which needs the same terms inside one message).
+/// Matching is ASCII case-insensitive in SQLite, so a term with non-ASCII
+/// characters is treated as present to never drop a real match.
+pub fn sessions_matching_terms(
+    path: &Path,
+    session_ids: &[String],
+    terms: &[String],
+    min_term_matches: usize,
+    include_tools: bool,
+) -> Result<std::collections::HashSet<String>> {
+    let mut matched = std::collections::HashSet::new();
+    if session_ids.is_empty() {
+        return Ok(matched);
+    }
+    let assumed = terms.iter().filter(|t| !t.is_ascii()).count();
+    let checked: Vec<String> = terms
+        .iter()
+        .filter(|t| t.is_ascii())
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    let needed = min_term_matches.saturating_sub(assumed);
+    if needed == 0 {
+        matched.extend(session_ids.iter().cloned());
+        return Ok(matched);
+    }
+    if checked.is_empty() {
+        return Ok(matched);
+    }
+    let field = if include_tools {
+        "p.data"
+    } else {
+        "json_extract(p.data, '$.text')"
+    };
+    let types = if include_tools {
+        "('text', 'reasoning', 'tool')"
+    } else {
+        "('text')"
+    };
+    let hits = (0..checked.len())
+        .map(|i| format!("MAX(instr(lower({field}), ?{}) > 0)", i + 1))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let offset = checked.len();
+    let ids = (0..session_ids.len())
+        .map(|i| format!("?{}", offset + i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT p.session_id, {hits} FROM part p \
+         WHERE p.session_id IN ({ids}) AND json_extract(p.data, '$.type') IN {types} \
+         GROUP BY p.session_id"
+    );
+    let db = open(path)?;
+    let mut stmt = db.prepare(&sql)?;
+    let values: Vec<&dyn rusqlite::ToSql> = checked
+        .iter()
+        .map(|t| t as &dyn rusqlite::ToSql)
+        .chain(session_ids.iter().map(|id| id as &dyn rusqlite::ToSql))
+        .collect();
+    let mut rows = stmt.query(values.as_slice())?;
+    while let Some(row) = rows.next()? {
+        let hits: i64 = row.get(1)?;
+        if hits.max(0) as usize >= needed {
+            matched.insert(row.get(0)?);
+        }
+    }
+    Ok(matched)
+}
+
 #[cfg(test)]
 #[path = "opencode_db_tests.rs"]
 mod tests;

@@ -1336,6 +1336,12 @@ enum OpenCodeCandidate {
     Legacy(PathBuf),
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Number of OpenCode database histories loaded by session search.
+    static OPENCODE_DB_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn collect_opencode_external_sessions(
     records: &mut Vec<ExternalSessionRecord>,
     report: &mut SearchReport,
@@ -1388,13 +1394,46 @@ fn collect_opencode_external_sessions(
         report.truncated = true;
     }
 
+    // Only load database histories whose parts can match the query.
+    let db_ids: Vec<String> = candidates
+        .iter()
+        .filter(|(_, _, c)| matches!(c, OpenCodeCandidate::Db(_)))
+        .map(|(_, id, _)| id.clone())
+        .collect();
+    let db_matches = match db.as_deref() {
+        Some(db) if !db_ids.is_empty() => {
+            let mut matched = std::collections::HashSet::new();
+            let mut failed = false;
+            for chunk in db_ids.chunks(500) {
+                match crate::opencode_db::sessions_matching_terms(
+                    db,
+                    chunk,
+                    &query.terms,
+                    query.min_term_matches,
+                    options.include_tools,
+                ) {
+                    Ok(ids) => matched.extend(ids),
+                    Err(_) => failed = true,
+                }
+            }
+            if failed {
+                report.parse_errors += 1;
+            }
+            matched
+        }
+        _ => std::collections::HashSet::new(),
+    };
+
     let messages_base = crate::storage::user_home_path(".local/share/opencode/storage/message");
     let parts_base = crate::storage::user_home_path(".local/share/opencode/storage/part");
-    for (_, _, candidate) in candidates {
+    for (_, id, candidate) in candidates {
         match candidate {
             OpenCodeCandidate::Db(row) => {
                 let Some(db) = db.as_deref() else { continue };
-                match load_opencode_db_external_session(db, row, options.include_tools) {
+                // Title/metadata matches still need a record, but no history.
+                let load_history = db_matches.contains(&id);
+                match load_opencode_db_external_session(db, row, load_history, options.include_tools)
+                {
                     Ok(record) => records.push(record),
                     Err(_) => report.parse_errors += 1,
                 }
@@ -1422,18 +1461,25 @@ fn collect_opencode_external_sessions(
 fn load_opencode_db_external_session(
     db: &Path,
     row: crate::opencode_db::OpenCodeDbSession,
+    load_history: bool,
     include_tools: bool,
 ) -> Result<ExternalSessionRecord> {
-    let messages = crate::opencode_db::load_search_messages(db, &row.id, include_tools)?
-        .into_iter()
-        .filter(|msg| !msg.text.trim().is_empty())
-        .map(|msg| jcode_import_core::ExternalMessageRecord {
-            role: msg.role,
-            text: msg.text,
-            timestamp: msg.created_at,
-            id: Some(msg.id),
-        })
-        .collect();
+    let messages = if load_history {
+        #[cfg(test)]
+        OPENCODE_DB_LOADS.with(|loads| loads.set(loads.get() + 1));
+        crate::opencode_db::load_search_messages(db, &row.id, include_tools)?
+            .into_iter()
+            .filter(|msg| !msg.text.trim().is_empty())
+            .map(|msg| jcode_import_core::ExternalMessageRecord {
+                role: msg.role,
+                text: msg.text,
+                timestamp: msg.created_at,
+                id: Some(msg.id),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let short = jcode_core::util::truncate_str(&row.id, 8).to_string();
     Ok(ExternalSessionRecord {
         source: "opencode",

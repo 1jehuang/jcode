@@ -747,6 +747,48 @@ fn opencode_sqlite_tool_output_is_searchable_with_include_tools() {
 }
 
 #[test]
+fn opencode_sqlite_search_loads_only_matching_histories() {
+    with_temp_home(|home| {
+        let f = opencode_db_fixture(home);
+        for i in 0..12 {
+            let id = format!("ses_{i:02}");
+            let msg = format!("msg_{i:02}");
+            let text = if i == 7 {
+                "the Unique-Needle lives here".to_string()
+            } else {
+                format!("ordinary chatter number {i}")
+            };
+            f.session(&id, None, "Chat", "/tmp/c", "p", "m", 3_000_000 + i, None)
+                .message(&id, &msg, "user", 100)
+                .text(&id, &msg, &format!("prt_{i:02}"), &text);
+        }
+        // Only a tool part matches: must not load without include_tools.
+        f.part(
+            "ses_03",
+            "msg_03",
+            "prt_03t",
+            json!({"type": "tool", "state": {"output": "unique-needle in tool"}}),
+        );
+        drop(f);
+        let mut options = SearchOptions::for_test("current-session");
+        options.source_filter = Some("opencode".to_string());
+        OPENCODE_DB_LOADS.with(|loads| loads.set(0));
+        let results = run_search(home, "unique-needle", &options);
+        assert!(results.iter().any(|r| r.session_id == "opencode:ses_07"));
+        assert_eq!(OPENCODE_DB_LOADS.with(|loads| loads.get()), 1);
+
+        OPENCODE_DB_LOADS.with(|loads| loads.set(0));
+        assert!(run_search(home, "nothing-matches-this", &options).is_empty());
+        assert_eq!(OPENCODE_DB_LOADS.with(|loads| loads.get()), 0);
+
+        options.include_tools = true;
+        OPENCODE_DB_LOADS.with(|loads| loads.set(0));
+        run_search(home, "unique-needle", &options);
+        assert_eq!(OPENCODE_DB_LOADS.with(|loads| loads.get()), 2);
+    });
+}
+
+#[test]
 fn opencode_sources_share_one_scan_allowance_and_keep_cursor_matches() {
     with_temp_home(|home| {
         let f = opencode_db_fixture(home);
