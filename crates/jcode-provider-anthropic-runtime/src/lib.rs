@@ -557,6 +557,12 @@ fn anthropic_status_error(
     )
 }
 
+/// Attach the reset time to a far usage-limit error in machine-readable form.
+/// Not implemented yet.
+fn tag_usage_limit_reset(error: anyhow::Error, _headers: &HeaderMap) -> anyhow::Error {
+    error
+}
+
 /// Sleep before a retry, but wake early when the stored Claude credential
 /// changes (a swap announced through the process-wide credential signal).
 /// Returns the new token when one is now stored, so the retry uses it.
@@ -2974,3 +2980,7 @@ mod context_window;
 #[allow(clippy::await_holding_lock)]
 #[path = "anthropic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "usage_limit_reset_tests.rs"]
+mod usage_limit_reset_tests;

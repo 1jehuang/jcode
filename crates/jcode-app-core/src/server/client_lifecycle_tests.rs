@@ -2252,3 +2252,108 @@ async fn lone_notify_auth_changed_is_applied_without_subscribe() {
     assert!(client_connections.read().await.is_empty());
     assert!(sessions.read().await.is_empty());
 }
+
+/// Fails every request with the Anthropic fail-fast usage-limit error.
+struct UsageLimitedStreamProvider;
+
+#[async_trait]
+impl Provider for UsageLimitedStreamProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let error = jcode_provider_core::usage_limit_resume::with_usage_limit_reset(
+            anyhow::anyhow!(
+                "Anthropic API error (429 Too Many Requests): rate_limit_error Usage limit reached for this Claude account; resets in 40m (2026-09-30 13:30 UTC)."
+            ),
+            Some(Duration::from_secs(40 * 60)),
+        );
+        Ok(Box::pin(stream::iter(vec![Err(error)])))
+    }
+
+    fn name(&self) -> &str {
+        "usage-limited"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+/// The client's own turn gets `retry_after_secs` for a usage limit, so it can
+/// hold the turn and resend at the reset without parsing the message text.
+#[tokio::test]
+async fn client_turn_usage_limit_error_carries_retry_after_secs() {
+    let _guard = crate::storage::lock_test_env();
+    let _runtime = IsolatedRuntimeDir::new();
+    let session_id = "session_usage_limit_retry_after";
+
+    let provider: Arc<dyn Provider> = Arc::new(UsageLimitedStreamProvider);
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let (client_tx, mut client_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+    let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let (processing_done_tx, _processing_done_rx) = mpsc::unbounded_channel();
+    let mut client_is_processing = false;
+    let mut processing_message_id = None;
+    let mut processing_session_id = None;
+    let mut processing_task = None;
+
+    start_processing_message(
+        ProcessingMessage {
+            id: 91,
+            content: "hello".to_string(),
+            images: Vec::new(),
+            system_reminder: None,
+            active_skill: None,
+        },
+        session_id,
+        &mut ProcessingState {
+            client_is_processing: &mut client_is_processing,
+            message_id: &mut processing_message_id,
+            session_id: &mut processing_session_id,
+            task: &mut processing_task,
+        },
+        &agent,
+        &client_tx,
+        &processing_done_tx,
+        Vec::new(),
+        &SwarmStatusRefs {
+            members: &swarm_members,
+            swarms_by_id: &swarms_by_id,
+            event_history: &event_history,
+            event_counter: &event_counter,
+            event_tx: &swarm_event_tx,
+        },
+    )
+    .await;
+
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), client_rx.recv())
+            .await
+            .expect("terminal event")
+            .expect("channel open");
+        if let ServerEvent::Error {
+            id,
+            message,
+            retry_after_secs,
+        } = event
+        {
+            assert_eq!(id, 91);
+            assert!(message.contains("Usage limit reached"), "{message}");
+            let secs = retry_after_secs.expect("usage limit must carry retry_after_secs");
+            assert!((40 * 60 - 5..=40 * 60).contains(&secs), "{secs}");
+            break;
+        }
+    }
+}
