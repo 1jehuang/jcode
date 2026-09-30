@@ -947,9 +947,14 @@ impl SessionPicker {
             ResumeTarget::PiSession { session_path } => {
                 loading::load_pi_preview_from_path(std::path::Path::new(&session_path))
             }
-            ResumeTarget::OpenCodeSession { .. } => external_path.as_deref().and_then(|path| {
-                loading::load_opencode_preview_from_path(std::path::Path::new(path))
-            }),
+            ResumeTarget::OpenCodeSession { session_id, .. } => {
+                external_path.as_deref().and_then(|path| {
+                    loading::load_opencode_preview_from_path(
+                        std::path::Path::new(path),
+                        &session_id,
+                    )
+                })
+            }
             ResumeTarget::CursorSession { .. } => external_path.as_deref().and_then(|path| {
                 loading::load_cursor_preview_from_path(std::path::Path::new(path))
             }),

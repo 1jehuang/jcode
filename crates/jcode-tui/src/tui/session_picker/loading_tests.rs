@@ -1562,3 +1562,103 @@ mod external_session_opt_out {
         assert!(jcode_config_types::DisplayConfig::default().external_sessions);
     }
 }
+
+fn write_legacy_opencode_session(home: &Path, id: &str, title: &str, updated: i64) {
+    let dir = home.join("external/.local/share/opencode/storage/session/global");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{id}.json")),
+        serde_json::json!({
+            "id": id,
+            "title": title,
+            "directory": "/tmp/oc-legacy",
+            "time": {"created": updated - 10, "updated": updated}
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn opencode_sqlite_sessions_listed_in_picker() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let db = temp
+        .path()
+        .join("external/.local/share/opencode/opencode.db");
+    drop(crate::opencode_db::fixture::standard(&db));
+
+    let sessions = load_external_opencode_sessions(100);
+    let ids: Vec<_> = sessions.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, vec!["opencode:ses_main", "opencode:ses_old"]);
+    let main = &sessions[0];
+    assert_eq!(main.title, "Main task");
+    assert_eq!(main.working_dir.as_deref(), Some("/tmp/oc-main"));
+    assert_eq!(main.provider_key.as_deref(), Some("anthropic"));
+    assert_eq!(main.model.as_deref(), Some("claude-x"));
+    assert_eq!(main.message_count, 2);
+    assert_eq!(main.last_message_time.timestamp_millis(), 3_000_000);
+    assert_eq!(main.source, SessionSource::OpenCode);
+    assert_eq!(
+        main.resume_target,
+        ResumeTarget::OpenCodeSession {
+            session_id: "ses_main".to_string(),
+            session_path: db.to_string_lossy().to_string(),
+        }
+    );
+
+    let preview = load_opencode_preview_from_path(&db, "ses_main").expect("preview");
+    let got: Vec<_> = preview
+        .iter()
+        .map(|m| (m.role.as_str(), m.content.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("user", "hello opencode"),
+            ("assistant", "hi from assistant")
+        ]
+    );
+}
+
+#[test]
+fn opencode_sqlite_and_legacy_json_are_merged_and_deduped() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let db = temp
+        .path()
+        .join("external/.local/share/opencode/opencode.db");
+    drop(crate::opencode_db::fixture::standard(&db));
+    write_legacy_opencode_session(temp.path(), "ses_main", "Stale JSON title", 1_000);
+    write_legacy_opencode_session(temp.path(), "ses_legacy", "Legacy only", 2_000);
+
+    let sessions = load_external_opencode_sessions(100);
+    let mut ids: Vec<_> = sessions.iter().map(|s| s.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec![
+            "opencode:ses_legacy",
+            "opencode:ses_main",
+            "opencode:ses_old"
+        ]
+    );
+    let main = sessions
+        .iter()
+        .find(|s| s.id == "opencode:ses_main")
+        .unwrap();
+    assert_eq!(main.title, "Main task", "database row must win over JSON");
+}
+
+#[test]
+fn opencode_legacy_json_store_still_listed_without_db() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    write_legacy_opencode_session(temp.path(), "ses_legacy", "Legacy only", 2_000);
+    let sessions = load_external_opencode_sessions(100);
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].title, "Legacy only");
+}
