@@ -142,7 +142,18 @@ impl ScheduledQueue {
             let is_ready = item.scheduled_for <= now;
             let is_direct_target = item.target.is_direct_delivery();
             if is_ready && is_direct_target {
-                ready_direct.push(item);
+                ready_direct.push(item.clone());
+                // Structural self-rearm (fork, 2026-09-30): mirrors pop_ready.
+                // Without this, a session-targeted recurring item (e.g. a
+                // per-session guardian) is consumed silently on first fire -
+                // live-caught 2026-09-30 with smoke item sched_d9eae4bf.
+                if let Some(mins) = item.recurse_minutes {
+                    if mins > 0 {
+                        let mut next = item;
+                        next.scheduled_for = now + chrono::Duration::minutes(mins);
+                        remaining.push(next);
+                    }
+                }
             } else {
                 remaining.push(item);
             }
@@ -325,5 +336,40 @@ mod fork_recurse_tests {
         let ready = q.pop_ready();
         assert!(ready.is_empty());
         assert_eq!(q.items.len(), 1, "future item must not be cloned");
+    }
+
+    #[test]
+    fn direct_delivery_recurring_item_is_rearmed() {
+        // Session-targeted (direct delivery) recurring items must re-arm too,
+        // else they die after one fire (live-caught 2026-09-30, smoke item
+        // sched_d9eae4bf targeted a session and was silently consumed).
+        let (mut q, _d) = temp_queue();
+        let mut it = item("direct-g", 5, Some(2));
+        it.target = ScheduleTarget::Session {
+            session_id: "sess-x".to_string(),
+        };
+        q.push(it);
+
+        let ready = q.take_ready_direct_items();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "direct-g");
+
+        let pending: Vec<_> = q.items.iter().filter(|i| i.id == "direct-g").collect();
+        assert_eq!(pending.len(), 1, "direct recurring item must re-arm once");
+        let delta = pending[0].scheduled_for - Utc::now();
+        assert!(delta.num_minutes() >= 1 && delta.num_minutes() <= 2);
+
+        // Second pop delivers the re-armed copy; one-shot counterpart drains.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut it2 = item("direct-oneshot", 0, None);
+        it2.target = ScheduleTarget::Session {
+            session_id: "sess-x".to_string(),
+        };
+        // ensure it's due
+        it2.scheduled_for = Utc::now();
+        q.push(it2);
+        let ready2 = q.take_ready_direct_items();
+        assert_eq!(ready2.len(), 1, "only the one-shot should be due now");
+        assert_eq!(ready2[0].id, "direct-oneshot");
     }
 }
