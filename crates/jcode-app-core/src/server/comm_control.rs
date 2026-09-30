@@ -893,15 +893,104 @@ fn spawn_assigned_task_run(
             &assignment_text,
             vec![],
             None,
-            event_tx,
+            event_tx.clone(),
         )
         .await;
-        let completion_report = if result.is_ok() {
-            let agent = agent_arc.lock().await;
-            agent.latest_assistant_text_after(start_message_index)
-        } else {
-            None
+        // A usage limit that resets later keeps the task in progress: wait
+        // for the reset (the heartbeat keeps the task from going stale) and
+        // continue the same turn. Other errors fail the task as before.
+        let (result, completion_report) = match result {
+            Err(error) => {
+                let on_wait = {
+                    let swarm_id = swarm_id.clone();
+                    let task_id = task_id.clone();
+                    let target_session = target_session.clone();
+                    let swarm_members = Arc::clone(&swarm_members);
+                    let swarms_by_id = Arc::clone(&swarms_by_id);
+                    let swarm_plans = Arc::clone(&swarm_plans);
+                    let swarm_coordinators = Arc::clone(&swarm_coordinators);
+                    move |plan: &super::usage_limit_resume::UsageLimitResumePlan| {
+                        let detail = plan.status_detail();
+                        let swarm_id = swarm_id.clone();
+                        let task_id = task_id.clone();
+                        let target_session = target_session.clone();
+                        let swarm_members = Arc::clone(&swarm_members);
+                        let swarms_by_id = Arc::clone(&swarms_by_id);
+                        let swarm_plans = Arc::clone(&swarm_plans);
+                        let swarm_coordinators = Arc::clone(&swarm_coordinators);
+                        Box::pin(async move {
+                            touch_swarm_task_progress(
+                                &swarm_id,
+                                &task_id,
+                                Some(&target_session),
+                                Some(detail.clone()),
+                                Some(detail),
+                                &swarm_members,
+                                &swarms_by_id,
+                                &swarm_plans,
+                                &swarm_coordinators,
+                            )
+                            .await;
+                            broadcast_swarm_plan(
+                                &swarm_id,
+                                Some("task_rate_limited".to_string()),
+                                &swarm_plans,
+                                &swarm_members,
+                                &swarms_by_id,
+                            )
+                            .await;
+                        }) as futures::future::BoxFuture<'static, ()>
+                    }
+                };
+                let swarm_ctx = super::live_turn::LiveTurnSwarmContext::new(
+                    &swarm_members,
+                    &swarms_by_id,
+                    &event_history,
+                    &event_counter,
+                    &swarm_event_tx,
+                );
+                match super::usage_limit_resume::resume_turn_after_usage_limit(
+                    Arc::clone(&agent_arc),
+                    None,
+                    &target_session,
+                    error,
+                    None,
+                    &event_tx,
+                    &swarm_ctx,
+                    &on_wait,
+                )
+                .await
+                {
+                    super::usage_limit_resume::ResumeOutcome::NotUsageLimit { error, .. }
+                    | super::usage_limit_resume::ResumeOutcome::Failed { error, .. } => {
+                        (Err(error), None)
+                    }
+                    super::usage_limit_resume::ResumeOutcome::Completed {
+                        guard,
+                        completion_report,
+                    } => {
+                        drop(guard);
+                        (Ok(()), completion_report)
+                    }
+                    super::usage_limit_resume::ResumeOutcome::Superseded => {
+                        // The user took the worker over. Leave the task in
+                        // progress; if nobody finishes it, it goes stale and
+                        // the normal salvage path reassigns it.
+                        let _ = heartbeat_stop_tx.send(true);
+                        let _ = heartbeat_task.await;
+                        return;
+                    }
+                }
+            }
+            Ok(()) => {
+                let agent = agent_arc.lock().await;
+                (
+                    Ok(()),
+                    agent.latest_assistant_text_after(start_message_index),
+                )
+            }
         };
+        drop(event_tx);
         let _ = heartbeat_stop_tx.send(true);
         let _ = heartbeat_task.await;
 

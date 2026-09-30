@@ -557,10 +557,16 @@ fn anthropic_status_error(
     )
 }
 
-/// Attach the reset time to a far usage-limit error in machine-readable form.
-/// Not implemented yet.
-fn tag_usage_limit_reset(error: anyhow::Error, _headers: &HeaderMap) -> anyhow::Error {
-    error
+/// Attach the reset time to a far usage-limit error in machine-readable form,
+/// so a server-initiated turn can schedule its resume at the reset and
+/// clients receive `retry_after_secs`. Other errors pass through unchanged.
+fn tag_usage_limit_reset(error: anyhow::Error, headers: &HeaderMap) -> anyhow::Error {
+    if error.downcast_ref::<UsageLimitExhausted>().is_none() {
+        return error;
+    }
+    let reset_in = unified_limit_reset_in(headers, chrono::Utc::now().timestamp())
+        .map(std::time::Duration::from_secs);
+    jcode_provider_core::usage_limit_resume::with_usage_limit_reset(error, reset_in)
 }
 
 /// Sleep before a retry, but wake early when the stored Claude credential
@@ -2388,7 +2394,8 @@ async fn stream_response(
         let status = response.status();
         let headers = response.headers().clone();
         let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
-        return Err(anthropic_status_error(status, &headers, &error_text));
+        let error = anthropic_status_error(status, &headers, &error_text);
+        return Err(tag_usage_limit_reset(error, &headers));
     }
 
     let _ = tx

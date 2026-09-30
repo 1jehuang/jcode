@@ -62,7 +62,7 @@ use crate::tool::Registry;
 use crate::transport::Stream;
 use anyhow::Result;
 use futures::FutureExt;
-use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource, StreamError};
+use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
@@ -1269,6 +1269,9 @@ pub(super) async fn handle_client(
                     .await;
                     continue;
                 }
+                // The user's message supersedes a server-initiated turn that
+                // is waiting for a usage-limit reset.
+                super::usage_limit_resume::cancel_pending_resume(&client_session_id);
                 if !client_is_processing {
                     // A live resume cannot replace stdin routing while the old
                     // turn owns the agent. Restore it when this client starts a
@@ -3331,9 +3334,7 @@ async fn record_processing_completion(
                 )
                 .await;
             }
-            let retry_after_secs = e
-                .downcast_ref::<StreamError>()
-                .and_then(|se| se.retry_after_secs);
+            let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&e);
             if retry_after_secs.is_some() {
                 crate::telemetry::record_error(crate::telemetry::ErrorCategory::RateLimited);
             } else {
@@ -3539,9 +3540,9 @@ async fn start_processing_message(
             Err(error) => ServerEvent::Error {
                 id,
                 message: crate::util::format_error_chain(error),
-                retry_after_secs: error
-                    .downcast_ref::<StreamError>()
-                    .and_then(|stream_error| stream_error.retry_after_secs),
+                // A usage limit carries its reset so the client holds the
+                // turn and resends at the reset.
+                retry_after_secs: super::usage_limit_resume::error_retry_after_secs(error),
             },
         };
         let _ = tx.send(terminal_event);
