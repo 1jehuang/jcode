@@ -124,18 +124,25 @@ pub(super) fn account_failover_return_home_config() -> bool {
 }
 
 /// Stored account of `kind`: (label, identity) in stored order. The identity
-/// is the email, else the OpenAI account id, so a pin survives relabeling.
+/// is the one credential loading compares (`auth::*::account_identity`), so
+/// a pin built here survives relabeling and is accepted by the provider.
 pub(super) fn stored_accounts(kind: AccountProviderKind) -> Vec<(String, Option<String>)> {
     match kind {
         AccountProviderKind::Claude => crate::auth::claude::list_accounts()
             .unwrap_or_default()
             .into_iter()
-            .map(|account| (account.label, account.email))
+            .map(|account| {
+                let identity = crate::auth::claude::account_identity(&account);
+                (account.label, identity)
+            })
             .collect(),
         AccountProviderKind::OpenAi => crate::auth::codex::list_accounts()
             .unwrap_or_default()
             .into_iter()
-            .map(|account| (account.label, account.email.or(account.account_id)))
+            .map(|account| {
+                let identity = crate::auth::codex::account_identity(&account);
+                (account.label, identity)
+            })
             .collect(),
     }
 }
@@ -182,12 +189,17 @@ pub(super) fn account_rotation(
 /// exhausted.
 const UNKNOWN_RESET_EXHAUSTION_SECS: i64 = 30 * 60;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct AccountExhaustion {
     /// Reset time reported by the provider.
     resets_at: Option<i64>,
     /// When it was recorded (used when `resets_at` is unknown).
     recorded_at: i64,
+    /// Credential fingerprint of the login that ran out (see
+    /// [`account_fingerprint`]). A different login later stored under the
+    /// same label (relogin, relabel) is another subscription and must not
+    /// inherit this mark.
+    fingerprint: Option<String>,
 }
 
 impl AccountExhaustion {
@@ -207,11 +219,31 @@ fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Fingerprint of the login currently stored at `label`: the account
+/// identity (email, else provider account id, else a refresh-token hash).
+/// Usage limits belong to the subscription, so a token refresh keeps the
+/// fingerprint while a login to another subscription changes it.
+fn account_fingerprint(kind: AccountProviderKind, label: &str) -> Option<String> {
+    match kind {
+        AccountProviderKind::Claude => crate::auth::claude::list_accounts()
+            .ok()?
+            .iter()
+            .find(|account| account.label == label)
+            .and_then(crate::auth::claude::account_identity),
+        AccountProviderKind::OpenAi => crate::auth::codex::list_accounts()
+            .ok()?
+            .iter()
+            .find(|account| account.label == label)
+            .and_then(crate::auth::codex::account_identity),
+    }
+}
+
 pub(crate) fn record_account_exhausted(
     kind: AccountProviderKind,
     label: &str,
     resets_at: Option<i64>,
 ) {
+    let fingerprint = account_fingerprint(kind, label);
     ACCOUNT_EXHAUSTION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -220,6 +252,7 @@ pub(crate) fn record_account_exhausted(
             AccountExhaustion {
                 resets_at,
                 recorded_at: now_unix(),
+                fingerprint,
             },
         );
 }
@@ -231,29 +264,36 @@ pub(crate) fn clear_account_exhausted(kind: AccountProviderKind, label: &str) {
         .remove(&(kind, label.to_string()));
 }
 
-/// `Some(until)` while `label` is known to be out of usage (unix seconds of
-/// the reset, or of the end of the unknown-reset window). `None` once reset.
-pub(crate) fn account_exhausted(kind: AccountProviderKind, label: &str) -> Option<i64> {
+/// Live ledger entry for `label`: dropped once its reset passed, or when the
+/// login stored at `label` is no longer the one that ran out.
+fn live_exhaustion(kind: AccountProviderKind, label: &str) -> Option<AccountExhaustion> {
+    let fingerprint = account_fingerprint(kind, label);
     let mut ledger = ACCOUNT_EXHAUSTION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let key = (kind, label.to_string());
-    let until = ledger.get(&key)?.until();
-    if until <= now_unix() {
+    let entry = ledger.get(&key)?.clone();
+    // Strict comparison. An email/account-id fingerprint is stable across
+    // token refreshes. A weak refresh-hash one rotates on refresh, which only
+    // drops the mark early (one request re-learns it); inheriting a mark
+    // would block a fresh subscription until the old one's reset.
+    if entry.until() <= now_unix() || entry.fingerprint != fingerprint {
         ledger.remove(&key);
         return None;
     }
-    Some(until)
+    Some(entry)
+}
+
+/// `Some(until)` while `label` is known to be out of usage (unix seconds of
+/// the reset, or of the end of the unknown-reset window). `None` once reset,
+/// or once another login took over the label.
+pub(crate) fn account_exhausted(kind: AccountProviderKind, label: &str) -> Option<i64> {
+    live_exhaustion(kind, label).map(|entry| entry.until())
 }
 
 /// Reported reset time of `label`, if recorded and still in the future.
 pub(crate) fn account_resets_at(kind: AccountProviderKind, label: &str) -> Option<i64> {
-    account_exhausted(kind, label)?;
-    ACCOUNT_EXHAUSTION
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&(kind, label.to_string()))
-        .and_then(|entry| entry.resets_at)
+    live_exhaustion(kind, label).and_then(|entry| entry.resets_at)
 }
 
 #[cfg(test)]

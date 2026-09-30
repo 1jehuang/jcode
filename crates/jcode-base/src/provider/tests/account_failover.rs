@@ -670,3 +670,61 @@ fn unavailability_is_per_label() {
         assert!(provider_unavailability_detail_for_label("claude", "claude-fox").is_none());
     });
 }
+
+/// Greptile "Relogin inherits exhausted status": a new subscription logged in
+/// under a label that ran out must not inherit its exhausted mark. A token
+/// refresh of the same login keeps it.
+#[test]
+fn relogin_under_exhausted_label_is_not_exhausted() {
+    with_account_failover_env(|| {
+        let labels = store_claude_accounts(2);
+        let otter = labels[0].clone();
+        let now = chrono::Utc::now().timestamp();
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::Claude,
+            &otter,
+            Some(now + 3600),
+        );
+        assert!(
+            crate::provider::account_failover::account_exhausted(AccountProviderKind::Claude, &otter)
+                .is_some()
+        );
+
+        // Same login, refreshed tokens: still exhausted.
+        let mut auth = crate::auth::claude::load_auth_file().unwrap();
+        let account = auth
+            .anthropic_accounts
+            .iter_mut()
+            .find(|account| account.label == otter)
+            .unwrap();
+        account.access = "sk-ant-oat01-REFRESHED".to_string();
+        account.refresh = "refresh-rotated".to_string();
+        crate::auth::claude::save_auth_file(&auth).unwrap();
+        assert!(
+            crate::provider::account_failover::account_exhausted(AccountProviderKind::Claude, &otter)
+                .is_some(),
+            "a token refresh is the same subscription"
+        );
+
+        // Another subscription logged in under the same label.
+        let mut auth = crate::auth::claude::load_auth_file().unwrap();
+        let account = auth
+            .anthropic_accounts
+            .iter_mut()
+            .find(|account| account.label == otter)
+            .unwrap();
+        account.email = Some("new-subscription@example.com".to_string());
+        account.access = "sk-ant-oat01-NEWLOGIN".to_string();
+        account.refresh = "refresh-newlogin".to_string();
+        crate::auth::claude::save_auth_file(&auth).unwrap();
+        assert_eq!(
+            crate::provider::account_failover::account_exhausted(AccountProviderKind::Claude, &otter),
+            None,
+            "a new login under the label must not inherit the old exhaustion"
+        );
+        assert_eq!(
+            crate::provider::account_failover::account_resets_at(AccountProviderKind::Claude, &otter),
+            None
+        );
+    });
+}
