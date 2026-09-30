@@ -1348,7 +1348,7 @@ fn collect_opencode_external_sessions(
         match crate::opencode_db::list_sessions(&db, options.max_scan_sessions) {
             Ok(rows) => {
                 for row in rows {
-                    match load_opencode_db_external_session(&db, row) {
+                    match load_opencode_db_external_session(&db, row, options.include_tools) {
                         Ok(record) => {
                             seen.insert(record.session_id.clone());
                             records.push(record);
@@ -1396,8 +1396,9 @@ fn collect_opencode_external_sessions(
 fn load_opencode_db_external_session(
     db: &Path,
     row: crate::opencode_db::OpenCodeDbSession,
+    include_tools: bool,
 ) -> Result<ExternalSessionRecord> {
-    let messages = crate::opencode_db::load_messages(db, &row.id, None)?
+    let messages = crate::opencode_db::load_search_messages(db, &row.id, include_tools)?
         .into_iter()
         .filter(|msg| !msg.text.trim().is_empty())
         .map(|msg| jcode_import_core::ExternalMessageRecord {

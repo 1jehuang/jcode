@@ -190,6 +190,26 @@ pub fn load_messages(
     session_id: &str,
     limit: Option<usize>,
 ) -> Result<Vec<OpenCodeDbMessage>> {
+    load_messages_with(path, session_id, limit, false)
+}
+
+/// Like [`load_messages`] without a limit, but for session search: with
+/// `include_tools` the text also carries `reasoning` parts and `tool` part
+/// input and output, exactly like the legacy JSON store's search text.
+pub fn load_search_messages(
+    path: &Path,
+    session_id: &str,
+    include_tools: bool,
+) -> Result<Vec<OpenCodeDbMessage>> {
+    load_messages_with(path, session_id, None, include_tools)
+}
+
+fn load_messages_with(
+    path: &Path,
+    session_id: &str,
+    limit: Option<usize>,
+    include_tools: bool,
+) -> Result<Vec<OpenCodeDbMessage>> {
     let db = open(path)?;
     let limit = limit.map(|n| n.min(i64::MAX as usize) as i64).unwrap_or(-1);
     let mut stmt = db.prepare(
@@ -197,21 +217,25 @@ pub fn load_messages(
                 json_extract(m.data, '$.role'), \
                 json_extract(m.data, '$.providerID'), \
                 json_extract(m.data, '$.modelID'), \
-                json_extract(p.data, '$.text') \
+                json_extract(p.data, '$.type'), \
+                CASE WHEN json_extract(p.data, '$.type') = 'text' \
+                     THEN json_extract(p.data, '$.text') ELSE p.data END \
          FROM (SELECT id, time_created, data FROM message \
                WHERE session_id = ?1 \
                  AND json_extract(data, '$.role') IN ('user', 'assistant') \
                ORDER BY time_created DESC, id DESC LIMIT ?2) m \
          LEFT JOIN part p ON p.message_id = m.id \
-              AND json_extract(p.data, '$.type') = 'text' \
+              AND (json_extract(p.data, '$.type') = 'text' \
+                   OR (?3 AND json_extract(p.data, '$.type') IN ('reasoning', 'tool'))) \
               AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0 \
          ORDER BY m.time_created, m.id, p.id",
     )?;
-    let mut rows = stmt.query(params![session_id, limit])?;
+    let mut rows = stmt.query(params![session_id, limit, include_tools])?;
     let mut messages: Vec<OpenCodeDbMessage> = Vec::new();
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
-        let text: Option<String> = row.get(5)?;
+        let part_type: Option<String> = row.get(5)?;
+        let payload: Option<String> = row.get(6)?;
         if messages.last().map(|m| m.id.as_str()) != Some(id.as_str()) {
             messages.push(OpenCodeDbMessage {
                 id,
@@ -222,16 +246,56 @@ pub fn load_messages(
                 model_id: row.get(4)?,
             });
         }
-        if let Some(text) = text.filter(|t| !t.trim().is_empty())
-            && let Some(message) = messages.last_mut()
-        {
+        let texts = match (part_type.as_deref(), payload) {
+            (Some("text"), Some(text)) => vec![text],
+            (Some(_), Some(json)) => search_part_texts(&json),
+            _ => Vec::new(),
+        };
+        let Some(message) = messages.last_mut() else {
+            continue;
+        };
+        for text in texts {
+            let text = if include_tools { text.trim() } else { text.as_str() };
+            if text.trim().is_empty() {
+                continue;
+            }
             if !message.text.is_empty() {
                 message.text.push('\n');
             }
-            message.text.push_str(&text);
+            message.text.push_str(text);
         }
     }
     Ok(messages)
+}
+
+/// Searchable text of a `reasoning` or `tool` part, mirroring
+/// `jcode_import_core::extract_opencode_part_text` for the legacy store.
+fn search_part_texts(json: &str) -> Vec<String> {
+    let Ok(part) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    match part.get("type").and_then(|v| v.as_str()) {
+        Some("reasoning") => {
+            if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                out.push(text.to_string());
+            }
+        }
+        Some("tool") => {
+            if let Some(state) = part.get("state") {
+                if let Some(input) = state.get("input") {
+                    out.push(jcode_import_core::extract_external_text_from_json(
+                        input, true,
+                    ));
+                }
+                if let Some(output) = state.get("output").and_then(|v| v.as_str()) {
+                    out.push(output.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 #[cfg(test)]
