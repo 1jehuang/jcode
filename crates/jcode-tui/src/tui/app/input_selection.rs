@@ -109,14 +109,38 @@ pub(crate) fn line_range_at(text: &str, byte: usize) -> (usize, usize) {
     (start, end)
 }
 
+/// Anchor end of the composer selection, bound to the exact draft it was made
+/// on. Many paths replace `App::input` wholesale (history recall, transcripts,
+/// reload/prompt restore, submit, queued-message edit, slash commands); rather
+/// than trusting each of them to drop the anchor, the selection validates
+/// itself: once the draft text differs from the one the anchor was taken on,
+/// the selection is gone and can never delete unrelated text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InputSelectionAnchor {
+    byte: usize,
+    draft: u64,
+}
+
+fn draft_fingerprint(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl App {
+    /// Anchor byte of a selection that still belongs to the current draft.
+    fn valid_input_selection_anchor(&self) -> Option<usize> {
+        let anchor = self.input_selection_anchor?;
+        (anchor.byte <= self.input.len()
+            && self.input.is_char_boundary(anchor.byte)
+            && anchor.draft == draft_fingerprint(&self.input))
+        .then_some(anchor.byte)
+    }
+
     /// The active composer selection as an ordered, non-empty byte range.
     pub(crate) fn input_selection(&self) -> Option<(usize, usize)> {
-        let anchor = self.input_selection_anchor?;
-        let len = self.input.len();
-        if anchor > len || !self.input.is_char_boundary(anchor) {
-            return None;
-        }
+        let anchor = self.valid_input_selection_anchor()?;
         let head = super::input::floor_char_boundary(&self.input, self.cursor_pos);
         (anchor != head).then(|| (anchor.min(head), anchor.max(head)))
     }
@@ -131,7 +155,27 @@ impl App {
         let anchor = super::input::floor_char_boundary(&self.input, anchor);
         let head = super::input::floor_char_boundary(&self.input, head);
         self.cursor_pos = head;
-        self.input_selection_anchor = (anchor != head).then_some(anchor);
+        self.input_selection_anchor = (anchor != head).then(|| InputSelectionAnchor {
+            byte: anchor,
+            draft: draft_fingerprint(&self.input),
+        });
+    }
+
+    /// Resolve the composer selection before inserting something at the
+    /// caret: the selected text is removed (recording one undo step) and the
+    /// anchor is dropped either way. Returns true when an undo step was
+    /// recorded, so the caller must not record another for the same edit.
+    pub(crate) fn replace_input_selection_for_insert(&mut self) -> bool {
+        let replaced = if let Some((start, end)) = self.input_selection() {
+            self.remember_input_undo_state();
+            self.input.drain(start..end);
+            self.cursor_pos = start;
+            true
+        } else {
+            false
+        };
+        self.clear_input_selection();
+        replaced
     }
 
     pub(crate) fn input_selection_text(&self) -> Option<String> {
@@ -182,7 +226,7 @@ impl App {
     fn extend_input_selection_to(&mut self, head: usize) {
         let anchor = self
             .input_selection()
-            .and(self.input_selection_anchor)
+            .and(self.valid_input_selection_anchor())
             .unwrap_or(self.cursor_pos.min(self.input.len()));
         self.set_input_selection(anchor, head);
     }

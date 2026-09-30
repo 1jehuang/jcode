@@ -873,7 +873,11 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
         insert_input_text(app, &text);
         return;
     }
-    if expand_matching_paste(app, &text) {
+    // Pasting over a selection replaces it (in `insert_input_text` below).
+    // Re-pasting identical text normally expands its earlier placeholder, but
+    // that edits text elsewhere in the draft and would leave the selection
+    // live, so a selection always takes the plain placeholder path.
+    if app.input_selection().is_none() && expand_matching_paste(app, &text) {
         return;
     }
 
@@ -1138,16 +1142,7 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
 
     // Typing or pasting over a composer selection replaces it. Record a single
     // undo step for the whole replacement so one Ctrl+Z restores the original.
-    let replaced_selection = if let Some((start, end)) = app.input_selection() {
-        app.remember_input_undo_state();
-        app.input.drain(start..end);
-        app.cursor_pos = start;
-        app.clear_input_selection();
-        true
-    } else {
-        app.clear_input_selection();
-        false
-    };
+    let replaced_selection = app.replace_input_selection_for_insert();
 
     let at_end = app.cursor_pos == app.input.len();
 
@@ -3000,7 +2995,11 @@ fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     let size_kb = base64_data.len() / 1024;
     app.pending_images.push((media_type.clone(), base64_data));
     let placeholder = format!("[image {}]", app.pending_images.len());
-    app.remember_input_undo_state();
+    // An image pasted over a selection replaces it, as text does. Deleting the
+    // selection records the undo step for the whole replacement.
+    if !app.replace_input_selection_for_insert() {
+        app.remember_input_undo_state();
+    }
     app.input.insert_str(app.cursor_pos, &placeholder);
     app.cursor_pos += placeholder.len();
     app.sync_model_picker_preview_from_input();

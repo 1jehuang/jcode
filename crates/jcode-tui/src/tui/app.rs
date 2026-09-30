@@ -1552,7 +1552,7 @@ pub struct App {
     input_undo_stack: Vec<(String, usize)>,
     /// Anchor (byte offset into `input`) of the editable composer selection;
     /// the other end is `cursor_pos`. `None` means no selection.
-    input_selection_anchor: Option<usize>,
+    input_selection_anchor: Option<input_selection::InputSelectionAnchor>,
     /// Derives double/triple clicks for word/line selection in the composer.
     input_selection_clicks: input_selection::ClickCounter,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),

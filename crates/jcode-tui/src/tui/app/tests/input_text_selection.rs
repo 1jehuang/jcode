@@ -314,3 +314,125 @@ fn test_remote_input_selection_cut_and_copy() {
         .unwrap();
     assert_eq!(app.input, "y  world");
 }
+
+fn clipboard_paste_result(
+    app: &App,
+    content: crate::bus::ClipboardPasteContent,
+) -> crate::bus::ClipboardPasteCompleted {
+    crate::bus::ClipboardPasteCompleted {
+        session_id: app.active_client_session_id().expect("session id").to_string(),
+        kind: crate::bus::ClipboardPasteKind::Smart,
+        content,
+    }
+}
+
+#[test]
+fn test_input_image_paste_replaces_selection_with_one_undo_step() {
+    let mut app = create_test_app();
+    app.input = "hello big world".to_string();
+    app.set_input_selection(6, 9);
+
+    let result = clipboard_paste_result(
+        &app,
+        crate::bus::ClipboardPasteContent::Image {
+            media_type: "image/png".to_string(),
+            base64_data: "AAAA".to_string(),
+        },
+    );
+    assert!(app.handle_clipboard_paste_completed(result));
+
+    assert_eq!(app.input, "hello [image 1] world");
+    assert_eq!(app.cursor_pos, "hello [image 1]".len());
+    assert_eq!(app.input_selection(), None);
+
+    // The next typed character must not delete anything.
+    app.handle_key(KeyCode::Char('!'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "hello [image 1]! world");
+
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "hello big world", "one undo step per paste");
+}
+
+#[test]
+fn test_input_matching_multiline_paste_replaces_selection_not_other_placeholder() {
+    let mut app = create_test_app();
+    let text = "one\ntwo\nthree\nfour\nfive".to_string();
+    super::input::handle_text_paste(&mut app, text.clone());
+    let placeholder = app.input.clone();
+    assert!(placeholder.starts_with("[pasted 5 lines"), "{placeholder}");
+
+    app.input.push_str(" keep big");
+    let big = app.input.len() - 3;
+    app.set_input_selection(big, app.input.len());
+
+    super::input::handle_text_paste(&mut app, text.clone());
+
+    assert_eq!(
+        app.input,
+        format!("{placeholder} keep {placeholder}"),
+        "the paste replaces the selection; the earlier placeholder is untouched"
+    );
+    assert_eq!(app.input_selection(), None);
+    assert_eq!(app.pasted_contents.len(), 2);
+
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, format!("{placeholder} keep big"));
+}
+
+#[test]
+fn test_input_transcript_update_drops_stale_selection() {
+    let mut app = create_test_app();
+    app.input = "hello big world".to_string();
+    app.set_input_selection(6, 9);
+
+    super::remote::apply_transcript_event(
+        &mut app,
+        " dictated".to_string(),
+        crate::protocol::TranscriptMode::Append,
+    );
+    assert_eq!(app.input, "hello big world dictated");
+    assert_eq!(app.input_selection(), None);
+
+    app.handle_key(KeyCode::Char('!'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "hello big world dictated!");
+
+    app.set_input_selection(0, 5);
+    super::remote::apply_transcript_event(
+        &mut app,
+        "replacement text".to_string(),
+        crate::protocol::TranscriptMode::Replace,
+    );
+    assert_eq!(app.input_selection(), None);
+    app.handle_key(KeyCode::Char('!'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "replacement text!");
+}
+
+#[test]
+fn test_input_history_recall_drops_stale_selection() {
+    let mut app = create_test_app();
+    app.persisted_prompt_history = Some(vec!["an older prompt".to_string()]);
+    app.input = "hello big world".to_string();
+    app.set_input_selection(6, 9);
+
+    // Call the recall directly: any code path that swaps the draft (not just
+    // the Ctrl+Up key, whose catch-all already drops the selection) must not
+    // leave a stale anchor pointing into the new text.
+    assert!(super::input::handle_prompt_history_navigation(
+        &mut app,
+        KeyCode::Up,
+        KeyModifiers::CONTROL,
+    ));
+    assert_eq!(app.input, "an older prompt");
+    assert_eq!(app.input_selection(), None);
+
+    app.handle_key(KeyCode::Char('!'), KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "an older prompt!");
+}
