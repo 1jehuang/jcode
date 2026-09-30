@@ -278,6 +278,31 @@ pub fn account_changed_event(
     }
 }
 
+/// A manual account choice (or unpin with `None`): pin the provider and the
+/// session, and clear the automatic return-home target on BOTH so a later
+/// reset of the old account cannot undo the choice. Shared by the server
+/// agent and local TUI windows. The caller saves the session.
+pub fn apply_manual_pin(
+    provider: &dyn Provider,
+    session: &mut Session,
+    kind: AccountProviderKind,
+    pin: Option<AccountPin>,
+) -> Result<()> {
+    provider.set_account_pin(kind, pin.clone())?;
+    provider.set_account_failover_home(kind, None);
+    let key = kind.key().to_string();
+    match pin {
+        Some(pin) => {
+            session.account_pins.insert(key.clone(), pin);
+        }
+        None => {
+            session.account_pins.remove(&key);
+        }
+    }
+    session.account_failover_home.remove(&key);
+    Ok(())
+}
+
 /// Per-provider pin the provider reported after the last pin change or sync.
 /// Only a change from this baseline is a move the provider made itself.
 pub type ObservedPins = BTreeMap<AccountProviderKind, Option<AccountPin>>;

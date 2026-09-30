@@ -419,19 +419,15 @@ impl App {
     fn apply_local_pin(&mut self, family: &str, label: Option<&str>) -> Result<(), String> {
         let kind = AccountProviderKind::from_key(family).ok_or("unknown provider")?;
         let pin = label.map(|label| AccountPin::new(label, pin_identity(family, label)));
-        self.provider
-            .set_account_pin(kind, pin.clone())
-            .map_err(|e| e.to_string())?;
-        match pin {
-            Some(pin) => {
-                self.session.account_pins.insert(family.to_string(), pin);
-            }
-            None => {
-                self.session.account_pins.remove(family);
-            }
-        }
-        // A manual choice replaces any automatic "return home" target.
-        self.session.account_failover_home.remove(family);
+        // A manual choice replaces any automatic "return home" target, on the
+        // provider as well as the session (same helper as the server agent).
+        crate::session_accounts::apply_manual_pin(
+            self.provider.as_ref(),
+            &mut self.session,
+            kind,
+            pin,
+        )
+        .map_err(|e| e.to_string())?;
         let _ = self.session.save();
         let provider = self.provider.clone();
         tokio::spawn(async move { provider.invalidate_credentials().await });

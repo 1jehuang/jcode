@@ -321,18 +321,12 @@ impl Agent {
         kind: crate::provider::AccountProviderKind,
         pin: Option<crate::provider::AccountPin>,
     ) -> Result<()> {
-        self.provider.set_account_pin(kind, pin.clone())?;
-        self.provider.set_account_failover_home(kind, None);
-        let key = kind.key().to_string();
-        match pin {
-            Some(pin) => {
-                self.session.account_pins.insert(key.clone(), pin);
-            }
-            None => {
-                self.session.account_pins.remove(&key);
-            }
-        }
-        self.session.account_failover_home.remove(&key);
+        crate::session_accounts::apply_manual_pin(
+            self.provider.as_ref(),
+            &mut self.session,
+            kind,
+            pin,
+        )?;
         self.record_observed_account_pins();
         self.log_env_snapshot("set_account_pin");
         self.session.save()?;
