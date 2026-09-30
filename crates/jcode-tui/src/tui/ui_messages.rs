@@ -4478,3 +4478,13 @@ fn tool_output_token_badge(content: &str) -> ToolOutputTokenBadge {
 #[cfg(test)]
 #[path = "ui_messages/tests.rs"]
 mod tests;
+
+/// `(done, total)` todo counts for a todo-card payload, used by the pinned
+/// band's border title. Returns `None` for unparseable payloads.
+pub(crate) fn todo_payload_counts(content: &str) -> Option<(usize, usize)> {
+    let (todos, _, _) = serde_json::from_str::<TodoCardPayload>(content)
+        .ok()?
+        .into_parts();
+    let done = todos.iter().filter(|t| t.status == "completed").count();
+    Some((done, todos.len()))
+}
