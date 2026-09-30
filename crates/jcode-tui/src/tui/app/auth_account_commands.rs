@@ -1196,6 +1196,61 @@ mod tests {
         ));
     }
 
+    fn parsed(input: &str) -> String {
+        format!("{:?}", parse_account_command(input))
+    }
+
+    #[test]
+    fn parse_account_switch_pins_this_window() {
+        for input in [
+            "/account switch claude-fox",
+            "/account use claude-fox",
+            "/account claude switch claude-fox",
+            "/account claude claude-fox",
+            "/account claude-fox",
+        ] {
+            let out = parsed(input);
+            assert!(out.contains("UseInWindow"), "{input} -> {out}");
+            assert!(out.contains("claude-fox"), "{input} -> {out}");
+        }
+        let out = parsed("/account openai switch openai-otter");
+        assert!(out.contains("UseInWindow") && out.contains("\"openai\""), "{out}");
+    }
+
+    #[test]
+    fn parse_account_default_label_sets_default_not_provider_fallthrough() {
+        let out = parsed("/account default claude-fox");
+        assert!(out.contains("SetDefault {"), "{out}");
+        assert!(out.contains("claude-fox"), "{out}");
+        assert!(!out.contains("UseInWindow"), "{out}");
+        let out = parsed("/account openai default openai-fox");
+        assert!(out.contains("SetDefault {") && out.contains("openai-fox"), "{out}");
+        // Existing global-default commands keep their meaning.
+        assert!(parsed("/account default-provider claude").contains("SetDefaultProvider"));
+        assert!(parsed("/account default-model gpt-5").contains("SetDefaultModel"));
+        assert!(parsed("/account default").contains("Err"));
+    }
+
+    #[test]
+    fn parse_account_unpin() {
+        let out = parsed("/account unpin");
+        assert!(out.contains("Unpin { provider_id: None }"), "{out}");
+        let out = parsed("/account unpin openai");
+        assert!(out.contains("Unpin { provider_id: Some(\"openai\") }"), "{out}");
+        let out = parsed("/account claude unpin");
+        assert!(out.contains("Unpin { provider_id: Some(\"claude\") }"), "{out}");
+    }
+
+    #[test]
+    fn parse_account_failover_modes() {
+        assert!(parsed("/account failover on").contains("Failover(On)"));
+        assert!(parsed("/account failover off").contains("Failover(Off)"));
+        assert!(parsed("/account failover default").contains("Failover(Default)"));
+        assert!(parsed("/account failover status").contains("Failover(Status)"));
+        assert!(parsed("/account failover").contains("Failover(Status)"));
+        assert!(parsed("/account failover sideways").contains("Err"));
+    }
+
     #[test]
     fn render_auth_doctor_markdown_includes_recovery_steps() {
         let _guard = crate::storage::lock_test_env();

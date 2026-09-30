@@ -1528,6 +1528,19 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[test]
+    fn cli_account_pins_fill_first_subscribe_only() {
+        let _guard = crate::storage::lock_test_env();
+        set_startup_account_pins(vec![("claude".to_string(), "claude-fox".to_string())]);
+        let (pins, supports) = take_subscribe_account_fields();
+        assert_eq!(pins, vec![("claude".to_string(), "claude-fox".to_string())]);
+        assert!(supports, "the TUI handles session_account_changed");
+        // A reconnect must not re-pin a window the user has since switched.
+        let (pins, supports) = take_subscribe_account_fields();
+        assert!(pins.is_empty());
+        assert!(supports);
+    }
+
     #[tokio::test]
     async fn detached_auth_changed_notification_does_not_wait_for_writer_lock() {
         let mut remote = RemoteConnection::dummy();
