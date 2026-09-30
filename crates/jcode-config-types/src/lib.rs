@@ -816,7 +816,7 @@ pub struct TerminalConfig {
     pub focus_hook: Option<String>,
     /// Terminal used by the macOS Cmd+; launch hotkey and in-app session spawns.
     ///
-    /// One of: `ghostty`, `iterm2`, `wezterm`, `warp`, `alacritty`, `vscode`,
+    /// One of: `ghostty`, `iterm2`, `wezterm`, `warp`, `alacritty`, `kitty`, `vscode`,
     /// `terminal` (Apple Terminal). When set, this is the source of truth for
     /// which terminal jcode launches into and is preferred over the legacy
     /// `~/.jcode/preferred_terminal.json` file. Re-run `jcode setup-hotkey`

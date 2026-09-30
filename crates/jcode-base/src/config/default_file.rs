@@ -564,7 +564,7 @@ swarm_max_concurrent_agents = 32
 # focus_hook = ""
 #
 # macOS only: terminal that the Cmd+; launch hotkey and in-app session spawns
-# open jcode into. One of: ghostty, iterm2, wezterm, warp, alacritty, vscode,
+# open jcode into. One of: ghostty, iterm2, wezterm, warp, alacritty, kitty, vscode,
 # terminal (Apple Terminal). Preferred over the legacy
 # ~/.jcode/preferred_terminal.json file. After changing this, re-run
 # `jcode setup-hotkey` so the generated launcher script (Cmd+;) picks it up.
