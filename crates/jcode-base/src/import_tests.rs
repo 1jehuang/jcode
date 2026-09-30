@@ -1142,3 +1142,64 @@ fn test_import_cursor_session_creates_jcode_snapshot() {
         }
     );
 }
+
+fn opencode_text_messages(session: &Session) -> Vec<(Role, String)> {
+    session
+        .messages
+        .iter()
+        .map(|m| {
+            let text = m
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (m.role.clone(), text)
+        })
+        .collect()
+}
+
+#[test]
+fn test_import_opencode_sqlite_session() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let db = temp
+        .path()
+        .join("external/.local/share/opencode/opencode.db");
+    drop(crate::opencode_db::fixture::standard(&db));
+
+    let imported = import_opencode_session("ses_main").unwrap();
+    assert_eq!(imported.id, imported_opencode_session_id("ses_main"));
+    assert_eq!(imported.provider_key.as_deref(), Some("anthropic"));
+    assert_eq!(imported.model.as_deref(), Some("claude-x"));
+    assert_eq!(imported.working_dir.as_deref(), Some("/tmp/oc-main"));
+    assert_eq!(imported.title.as_deref(), Some("Main task"));
+    assert_eq!(
+        opencode_text_messages(&imported),
+        vec![
+            (Role::User, "hello opencode".to_string()),
+            (Role::Assistant, "hi from assistant".to_string()),
+        ]
+    );
+
+    // Resume targets pointing at the database path route to the DB loader.
+    let target = jcode_session_types::ResumeTarget::OpenCodeSession {
+        session_id: "ses_old".to_string(),
+        session_path: db.to_string_lossy().to_string(),
+    };
+    let resolved = resolve_resume_target_to_jcode(&target).unwrap();
+    assert_eq!(
+        resolved,
+        jcode_session_types::ResumeTarget::JcodeSession {
+            session_id: imported_opencode_session_id("ses_old")
+        }
+    );
+    assert_eq!(
+        import_external_resume_id("ses_main").unwrap(),
+        Some(imported_opencode_session_id("ses_main"))
+    );
+}
