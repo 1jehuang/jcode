@@ -61,3 +61,37 @@ fn opencode_db_opens_wal_db_without_shm() {
     assert_eq!(sessions.len(), 2);
     assert!(!shm.exists(), "reader must not create -shm");
 }
+
+/// Live check against a copy of a real OpenCode database. Run with
+/// `OPENCODE_DB_LIVE=/path/to/copy/opencode.db cargo test -p jcode-base --lib -- --ignored opencode_db_live`.
+#[test]
+#[ignore]
+fn opencode_db_live_snapshot() {
+    let Some(path) = std::env::var_os("OPENCODE_DB_LIVE").map(PathBuf::from) else {
+        return;
+    };
+    let start = std::time::Instant::now();
+    let sessions = list_sessions(&path, 10_000).unwrap();
+    let list_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let start = std::time::Instant::now();
+    let _ = list_sessions(&path, 100).unwrap();
+    let list100_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let pick = sessions.iter().max_by_key(|s| s.message_count).unwrap();
+    let start = std::time::Instant::now();
+    let session = crate::import::import_opencode_db_session(&path, &pick.id).unwrap();
+    let import_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let messages = load_messages(&path, &pick.id, None).unwrap();
+    let with_text = messages
+        .iter()
+        .filter(|m| !m.text.trim().is_empty())
+        .count();
+    eprintln!(
+        "LIVE listed={} list_ms={list_ms:.1} list100_ms={list100_ms:.1} session={} db_message_count={} loaded_user_assistant={} imported_messages={} with_text={} import_ms={import_ms:.1}",
+        sessions.len(),
+        pick.id,
+        pick.message_count,
+        messages.len(),
+        session.messages.len(),
+        with_text
+    );
+}
