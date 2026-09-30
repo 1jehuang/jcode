@@ -228,6 +228,236 @@ impl Agent {
         );
     }
 
+    /// Push the session's per-provider account pins, failover toggle, and
+    /// failover home onto the provider instance. Pins whose account no longer
+    /// exists are dropped (the session falls back to the default account).
+    /// Kinds without a pin are unpinned, since a restored session may reuse a
+    /// provider instance that carried another session's pin.
+    pub fn restore_account_pins_from_session(&mut self) {
+        use crate::provider::AccountProviderKind;
+        let mut dropped = Vec::new();
+        for kind in AccountProviderKind::ALL {
+            let key = kind.key();
+            match self.session.account_pins.get(key).cloned() {
+                Some(pin) => match crate::session_accounts::resolve_pin(kind, &pin) {
+                    Some(label) => {
+                        let pin = crate::provider::AccountPin::new(label, pin.identity.clone());
+                        if let Err(e) = self.provider.set_account_pin(kind, Some(pin.clone())) {
+                            logging::warn(&format!(
+                                "Failed to restore {key} account pin '{}': {e}",
+                                pin.label
+                            ));
+                        } else {
+                            self.session.account_pins.insert(key.to_string(), pin);
+                        }
+                    }
+                    None => {
+                        logging::warn(&format!(
+                            "Session {} was pinned to {key} account '{}', which no longer exists; using the default account",
+                            self.session.id, pin.label
+                        ));
+                        dropped.push(key.to_string());
+                    }
+                },
+                None => {
+                    if self.provider.account_pin(kind).is_some() {
+                        let _ = self.provider.set_account_pin(kind, None);
+                    }
+                }
+            }
+            self.provider.set_account_failover_home(
+                kind,
+                self.session.account_failover_home.get(key).cloned(),
+            );
+        }
+        for key in dropped {
+            self.session.account_pins.remove(&key);
+        }
+        self.provider
+            .set_account_failover(self.session.account_failover);
+        self.record_observed_account_pins();
+    }
+
+    /// Remember what the provider reports now, so the next post-stream sync
+    /// only reacts to moves the provider made on its own.
+    fn record_observed_account_pins(&mut self) {
+        for kind in crate::provider::AccountProviderKind::ALL {
+            self.observed_account_pins
+                .insert(kind, self.provider.account_pin(kind));
+        }
+    }
+
+    /// Pin (or unpin with `None`) this session to one stored account. Only
+    /// this session's provider instance changes; the stored default and other
+    /// sessions are untouched. A user choice clears the failover home.
+    pub fn set_account_pin(
+        &mut self,
+        kind: crate::provider::AccountProviderKind,
+        pin: Option<crate::provider::AccountPin>,
+    ) -> Result<()> {
+        self.provider.set_account_pin(kind, pin.clone())?;
+        self.provider.set_account_failover_home(kind, None);
+        let key = kind.key().to_string();
+        match pin {
+            Some(pin) => {
+                self.session.account_pins.insert(key.clone(), pin);
+            }
+            None => {
+                self.session.account_pins.remove(&key);
+            }
+        }
+        self.session.account_failover_home.remove(&key);
+        self.record_observed_account_pins();
+        self.log_env_snapshot("set_account_pin");
+        self.session.save()?;
+        Ok(())
+    }
+
+    /// Per-session same-provider account failover toggle (`None` = config).
+    pub fn set_account_failover(&mut self, enabled: Option<bool>) -> Result<()> {
+        self.provider.set_account_failover(enabled);
+        self.session.account_failover = enabled;
+        self.log_env_snapshot("set_account_failover");
+        self.session.save()?;
+        Ok(())
+    }
+
+    pub fn account_pins(&self) -> &std::collections::BTreeMap<String, crate::provider::AccountPin> {
+        &self.session.account_pins
+    }
+
+    pub fn account_failover(&self) -> Option<bool> {
+        self.session.account_failover
+    }
+
+    /// Account state a child session inherits from this one.
+    pub fn account_inheritance(&self) -> crate::session_accounts::AccountInheritance {
+        crate::session_accounts::AccountInheritance::from_session(&self.session)
+    }
+
+    /// Adopt a parent's account pins and failover toggle (swarm workers).
+    pub fn apply_account_inheritance(
+        &mut self,
+        inheritance: &crate::session_accounts::AccountInheritance,
+    ) {
+        if inheritance.is_empty() {
+            return;
+        }
+        inheritance.apply_to_session(&mut self.session);
+        self.restore_account_pins_from_session();
+        self.persist_session_best_effort("inherited account pins");
+    }
+
+    /// Persist account moves the provider made on its own (same-provider
+    /// failover) and tell clients. Runs after every stream, on success and on
+    /// every error exit, because a failed turn can still leave the provider on
+    /// another account.
+    pub(super) fn sync_account_pins_after_stream(
+        &mut self,
+        event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
+    ) {
+        use crate::provider::AccountProviderKind;
+        let mut changed = false;
+        for kind in AccountProviderKind::ALL {
+            let key = kind.key();
+            let provider_pin = self.provider.account_pin(kind);
+            let session_pin = self.session.account_pins.get(key).cloned();
+            let provider_home = self.provider.account_failover_home(kind);
+            if provider_home != self.session.account_failover_home.get(key).cloned() {
+                match provider_home {
+                    Some(home) => {
+                        self.session
+                            .account_failover_home
+                            .insert(key.to_string(), home);
+                    }
+                    None => {
+                        self.session.account_failover_home.remove(key);
+                    }
+                }
+                changed = true;
+            }
+            // Only a change from what the provider reported last is a move.
+            // A provider without pin support always reports `None`; that must
+            // not erase the session's pin.
+            let observed = self.observed_account_pins.get(&kind).cloned().flatten();
+            self.observed_account_pins
+                .insert(kind, provider_pin.clone());
+            if provider_pin == observed || provider_pin == session_pin {
+                continue;
+            }
+            let from = session_pin
+                .as_ref()
+                .map(|pin| pin.label.clone())
+                .or_else(|| crate::session_accounts::default_label(kind))
+                .unwrap_or_else(|| "default".to_string());
+            let to = provider_pin
+                .as_ref()
+                .map(|pin| pin.label.clone())
+                .or_else(|| crate::session_accounts::default_label(kind))
+                .unwrap_or_else(|| "default".to_string());
+            logging::info(&format!(
+                "Session {} {key} account moved during the request: {from} -> {to}",
+                self.session.id
+            ));
+            match provider_pin {
+                Some(pin) => {
+                    self.session.account_pins.insert(key.to_string(), pin);
+                }
+                None => {
+                    self.session.account_pins.remove(key);
+                }
+            }
+            changed = true;
+            if let Some(event_tx) = event_tx {
+                let _ = event_tx.send(crate::session_accounts::account_changed_event(
+                    self.provider.as_ref(),
+                    kind,
+                    Some(format!("{from} is out of usage, this window moved to {to}")),
+                ));
+            }
+        }
+        if changed {
+            self.persist_session_best_effort("account failover");
+        }
+    }
+
+    /// At turn start, return to the preferred account once its usage limit
+    /// has reset (the provider decides, locally). Never runs mid-turn.
+    pub(super) fn return_account_home_at_turn_start(
+        &mut self,
+        event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
+    ) {
+        let moved = self.provider.return_account_home_if_reset();
+        if moved.is_empty() {
+            return;
+        }
+        for kind in moved {
+            let key = kind.key();
+            self.observed_account_pins
+                .insert(kind, self.provider.account_pin(kind));
+            match self.provider.account_pin(kind) {
+                Some(pin) => {
+                    self.session.account_pins.insert(key.to_string(), pin);
+                }
+                None => {
+                    self.session.account_pins.remove(key);
+                }
+            }
+            self.session.account_failover_home.remove(key);
+            if let Some(event_tx) = event_tx {
+                let label = crate::session_accounts::account_info(self.provider.as_ref(), kind)
+                    .label
+                    .unwrap_or_else(|| "the preferred account".to_string());
+                let _ = event_tx.send(crate::session_accounts::account_changed_event(
+                    self.provider.as_ref(),
+                    kind,
+                    Some(format!("{label} reset, back to preferred account")),
+                ));
+            }
+        }
+        self.persist_session_best_effort("account return home");
+    }
+
     pub fn set_reasoning_effort(&mut self, effort: &str) -> Result<Option<String>> {
         self.provider.set_reasoning_effort(effort)?;
         let current = self.provider.reasoning_effort();

@@ -388,6 +388,20 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Per-session same-provider account failover toggle. None = config default.
+    fn set_account_failover(&self, _enabled: Option<bool>) {}
+    /// Preferred pin to return to after an automatic failover move.
+    fn account_failover_home(&self, _kind: AccountProviderKind) -> Option<AccountPin> {
+        None
+    }
+    /// Restore the home pin (from the session on resume, or None to clear it).
+    fn set_account_failover_home(&self, _kind: AccountProviderKind, _home: Option<AccountPin>) {}
+    /// Called by the agent at turn start. When a home account's recorded reset has passed (local check,
+    /// config account_failover_return_home), re-pin it, clear the home, and return the kinds that moved.
+    fn return_account_home_if_reset(&self) -> Vec<AccountProviderKind> {
+        Vec::new()
+    }
+
     /// Human-facing label for the runtime backing this provider instance.
     /// Unlike `display_name`, this reflects instance state (e.g. which
     /// OpenAI-compatible profile an aggregator runtime currently serves).

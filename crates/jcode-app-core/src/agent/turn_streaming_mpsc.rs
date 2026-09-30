@@ -137,6 +137,9 @@ impl Agent {
         model_at_request_start: &str,
         provider_at_request_start: &str,
     ) {
+        // Same-provider account failover can move this session's pin during
+        // the request. Persist and announce it on every exit path too.
+        self.sync_account_pins_after_stream(Some(event_tx));
         let model_after_stream = self.provider.model();
         let provider_after_stream = self.provider.display_name();
         if model_after_stream == model_at_request_start
@@ -191,6 +194,8 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        // Return to the preferred account after its reset, at turn start only.
+        self.return_account_home_at_turn_start(Some(&event_tx));
 
         loop {
             // Never open a new provider request after a cancel. Several paths

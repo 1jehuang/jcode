@@ -51,6 +51,14 @@ impl Agent {
     }
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
+        self.return_account_home_at_turn_start(None);
+        let result = self.run_turn_inner(print_output).await;
+        // Persist an account move made by failover, on success and on error.
+        self.sync_account_pins_after_stream(None);
+        result
+    }
+
+    async fn run_turn_inner(&mut self, print_output: bool) -> Result<String> {
         self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();

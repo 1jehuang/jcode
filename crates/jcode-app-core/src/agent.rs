@@ -281,6 +281,13 @@ pub struct Agent {
     last_connection_type: Option<String>,
     /// Last provider-supplied human-readable transport detail for this session
     last_status_detail: Option<String>,
+    /// Per-provider account pin the provider reported after the last pin
+    /// change or post-stream sync. Only a change from this baseline is a move
+    /// made by the provider itself (failover).
+    observed_account_pins: std::collections::BTreeMap<
+        crate::provider::AccountProviderKind,
+        Option<crate::provider::AccountPin>,
+    >,
     /// Pending swarm alerts to inject into the next turn
     pending_alerts: Vec<String>,
     /// Transient reminder injected into provider requests for the current turn only.
@@ -409,6 +416,7 @@ impl Agent {
             last_upstream_provider: None,
             last_connection_type: None,
             last_status_detail: None,
+            observed_account_pins: std::collections::BTreeMap::new(),
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
             tool_call_ids: HashSet::new(),
@@ -593,6 +601,7 @@ impl Agent {
             agent.session.model = Some(agent.provider_model());
         }
         agent.restore_reasoning_effort_from_session();
+        agent.restore_account_pins_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
         agent.seed_compaction_from_session();
