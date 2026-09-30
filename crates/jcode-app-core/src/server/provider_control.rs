@@ -1540,16 +1540,18 @@ pub(super) async fn handle_set_default_account(
 }
 
 /// Apply `Subscribe.account_pins` (`--account`) to the session this
-/// connection drives. Unknown providers or labels are logged and skipped so a
-/// stale flag never blocks attaching.
+/// connection drives. An unknown provider or label never blocks attaching:
+/// the window keeps its account and the client is told why.
 pub(super) async fn apply_subscribe_account_pins(
     agent: &Arc<Mutex<Agent>>,
     requested: &[(String, String)],
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     if requested.is_empty() {
         return;
     }
     let mut pins = Vec::new();
+    let mut rejected = Vec::new();
     for (provider, label) in requested {
         let Some(kind) = crate::session_accounts::kind_for_request(provider, Some(label)) else {
             crate::logging::warn(&format!(
@@ -1561,17 +1563,34 @@ pub(super) async fn apply_subscribe_account_pins(
             Ok(pin) => pins.push((kind, pin)),
             Err(error) => {
                 crate::logging::warn(&format!("Subscribe account pin ignored: {error}"));
+                rejected.push((kind, label.clone()));
             }
         }
-    }
-    if pins.is_empty() {
-        return;
     }
     let mut agent_guard = agent.lock().await;
     for (kind, pin) in pins {
         if let Err(error) = agent_guard.set_account_pin(kind, Some(pin)) {
             crate::logging::warn(&format!("Subscribe account pin failed: {error}"));
         }
+    }
+    for (kind, label) in rejected {
+        let known = crate::session_accounts::stored_labels(kind);
+        let info = crate::session_accounts::account_info(agent_guard.provider_handle().as_ref(), kind);
+        let uses = info
+            .label
+            .as_deref()
+            .map(|current| format!("this window uses {current}"))
+            .unwrap_or_else(|| "this window uses the default account".to_string());
+        let saved = if known.is_empty() {
+            format!("no {} accounts are saved on the server", crate::session_accounts::provider_display(kind))
+        } else {
+            format!("saved: {}", known.join(", "))
+        };
+        let _ = client_event_tx.send(crate::session_accounts::account_changed_event(
+            agent_guard.provider_handle().as_ref(),
+            kind,
+            Some(format!("--account {label} was not found on the server ({saved}), {uses}")),
+        ));
     }
 }
 

@@ -1864,7 +1864,7 @@ pub(super) async fn handle_client(
                 // `--account` pins apply to the session this connection now
                 // drives (new or resumed). An explicit request overrides a
                 // resumed session's stored pin.
-                apply_subscribe_account_pins(&agent, &requested_account_pins).await;
+                apply_subscribe_account_pins(&agent, &requested_account_pins, &client_event_tx).await;
                 send_pending_account_notices(&agent, &client_event_tx);
                 client_subscribed = true;
                 provisional_session = false;

@@ -467,3 +467,36 @@ async fn subscribe_account_pins_pin_the_new_session_and_history_reports_it() {
     );
     crate::env::remove_var("JCODE_RUNTIME_DIR");
 }
+
+/// `--account` naming no account on the server: attaching still works, the
+/// window keeps its account, and the client is told why.
+#[tokio::test]
+async fn subscribe_account_pin_not_found_is_reported_to_client() {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+    let runtime = tempfile::TempDir::new().expect("runtime");
+    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+    store_three_claude_accounts();
+    let server = test_server(Arc::new(PinRecordingProvider::new()));
+
+    let (_t1, s1) = (server.connect)();
+    let mut c1 = TestClient::new(s1);
+    c1.send(serde_json::json!({
+        "type": "subscribe", "id": 10, "working_dir": sandbox.root(),
+        "supports_session_accounts": true,
+        "account_pins": [["claude", "claude-zebra"]],
+    }))
+    .await;
+    let ServerEvent::SessionAccountChanged { reason, label, .. } = c1
+        .until(|e| matches!(e, ServerEvent::SessionAccountChanged { .. }))
+        .await
+    else {
+        unreachable!()
+    };
+    let reason = reason.expect("reason");
+    assert!(
+        reason.contains("claude-zebra") && reason.contains("not found") && reason.contains("claude-otter"),
+        "{reason}"
+    );
+    assert_eq!(label.as_deref(), Some("claude-otter"));
+    crate::env::remove_var("JCODE_RUNTIME_DIR");
+}
