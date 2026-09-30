@@ -136,9 +136,55 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     FailoverDecision::None
 }
 
+/// True when an error means "this account is out of credit / payment
+/// required" (HTTP 402 or billing wording) and will not recover by itself.
+///
+/// A usage-window 402 that carries a reset instant (`resets_at`/`reset_at`,
+/// e.g. Openference's "1500 requests per 5 hours") is excluded: jcode holds
+/// and auto-resumes those instead of switching provider.
+pub fn is_billing_exhausted_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("resets_at") || lower.contains("reset_at") {
+        return false;
+    }
+    contains_independent_status_code(&lower, "402")
+        || [
+            "payment required",
+            "insufficient credit",
+            "insufficient balance",
+            "insufficient_balance",
+            "credit balance",
+            "credits have run out",
+            "out of credit",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn billing_exhausted_detects_402_and_credit_wording() {
+        let body = "OpenAI-compatible chat request failed\n  status: 402 Payment Required\n  response: {\"error\":{\"message\":\"Insufficient credits\",\"type\":\"insufficient_quota\",\"code\":402}}";
+        assert!(is_billing_exhausted_error_message(body));
+        assert!(is_billing_exhausted_error_message(
+            "Your credit balance is too low"
+        ));
+    }
+
+    #[test]
+    fn billing_exhausted_skips_usage_window_402_with_reset_time() {
+        let body = "status: 402 Payment Required\n  response: {\"error\":\"Request limit exceeded (1500 per 5 hours)\",\"type\":\"insufficient_quota\",\"code\":\"window_quota_exceeded\",\"resets_at\":\"2026-09-24T09:00:00.000Z\"}";
+        assert!(!is_billing_exhausted_error_message(body));
+    }
+
+    #[test]
+    fn billing_exhausted_ignores_rate_limits_and_embedded_digits() {
+        assert!(!is_billing_exhausted_error_message("429 Too Many Requests"));
+        assert!(!is_billing_exhausted_error_message("model 4021 failed"));
+    }
 
     #[test]
     fn failover_prompt_roundtrips_from_error_message() {

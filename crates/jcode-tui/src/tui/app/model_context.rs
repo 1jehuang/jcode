@@ -60,8 +60,14 @@ impl App {
         &mut self,
         prompt: &crate::provider::ProviderFailoverPrompt,
     ) -> anyhow::Result<String> {
-        self.provider
-            .switch_active_provider_to(&prompt.to_provider)?;
+        // Profile-scoped targets (`<profile>:<model>`, from out-of-credit
+        // failover between OpenAI-compatible profiles) are model specs.
+        if prompt.to_provider.contains(':') {
+            self.provider.set_model(&prompt.to_provider)?;
+        } else {
+            self.provider
+                .switch_active_provider_to(&prompt.to_provider)?;
+        }
         let active_model = self.provider.model();
         Ok(self.finalize_model_switch(&active_model))
     }
