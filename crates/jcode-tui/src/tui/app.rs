@@ -764,6 +764,8 @@ struct TokenAccounting {
     total_cache_read_tokens: u64,
     total_cache_creation_tokens: u64,
     total_cache_optimal_input_tokens: u64,
+    /// Cache reads only from requests that also contributed an optimal denominator.
+    total_cache_optimal_read_tokens: u64,
     last_cache_reported_input_tokens: Option<u64>,
     last_cache_prompt_tokens: Option<u64>,
     last_cache_read_tokens: Option<u64>,
@@ -2131,6 +2133,10 @@ impl App {
                 .token_accounting
                 .total_cache_optimal_input_tokens
                 .saturating_add(optimal);
+            self.token_accounting.total_cache_optimal_read_tokens = self
+                .token_accounting
+                .total_cache_optimal_read_tokens
+                .saturating_add(self.streaming.streaming_cache_read_tokens.unwrap_or(0));
         }
         self.token_accounting.total_cache_read_tokens = self
             .token_accounting
@@ -2185,7 +2191,7 @@ impl App {
         let session_optimal_read_pct = if self.token_accounting.total_cache_optimal_input_tokens > 0
         {
             Some(ratio_pct(
-                self.token_accounting.total_cache_read_tokens,
+                self.token_accounting.total_cache_optimal_read_tokens,
                 self.token_accounting.total_cache_optimal_input_tokens,
             ))
         } else {

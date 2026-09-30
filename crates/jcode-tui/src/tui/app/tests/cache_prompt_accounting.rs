@@ -329,3 +329,33 @@ fn cache_yield_new_session_single_request_is_priming() {
     record_live_cache_request(&mut app, 10_000, 8_000);
     assert!(kv_cache_summary(&app).contains("yield 80%"));
 }
+
+#[test]
+fn cache_yield_after_resume_ignores_first_warm_read_without_optimal() {
+    let mut app = cache_accounting_openai_app();
+    app.remote_token_usage_totals = Some(crate::protocol::TokenUsageTotals {
+        cache_prompt_tokens: Some(10_000),
+        input_tokens: 10_000,
+        cache_reported_input_tokens: 10_000,
+        cache_read_input_tokens: 7_000,
+        ..Default::default()
+    });
+    record_live_cache_request(&mut app, 10_000, 9_000);
+    record_live_cache_request(&mut app, 10_000, 5_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 50%"), "{summary}");
+    let stats = cache_accounting_stats(&mut app);
+    assert!(
+        stats.contains("cache_read_pct_of_optimal_input: 50%"),
+        "{stats}"
+    );
+}
+
+#[test]
+fn cache_yield_fresh_session_ignores_warm_prefix_first_read() {
+    let mut app = cache_accounting_openai_app();
+    record_live_cache_request(&mut app, 10_000, 4_000);
+    record_live_cache_request(&mut app, 10_000, 8_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 80%"), "{summary}");
+}

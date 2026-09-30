@@ -1210,8 +1210,12 @@ fn format_cache_stats(app: &App) -> String {
     let read_pct = format_pct(read, effective_reported);
     let write_pct = format_pct(write, effective_reported);
     // Optimal input is live-only, so compare it against live-only reads.
-    let optimal_pct = (optimal > 0)
-        .then(|| cache_ratio_pct(app.token_accounting.total_cache_read_tokens, optimal));
+    let optimal_pct = (optimal > 0).then(|| {
+        cache_ratio_pct(
+            app.token_accounting.total_cache_optimal_read_tokens,
+            optimal,
+        )
+    });
     let cache_totals_source = match (
         remote_usage.is_some(),
         app.token_accounting.total_cache_prompt_tokens > 0,

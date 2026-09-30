@@ -1689,6 +1689,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
+                app.token_accounting.total_cache_optimal_read_tokens = 0;
                 app.token_accounting.last_cache_reported_input_tokens = None;
                 app.token_accounting.last_cache_prompt_tokens = None;
                 app.token_accounting.last_cache_read_tokens = None;
@@ -1810,6 +1811,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
+                app.token_accounting.total_cache_optimal_read_tokens = 0;
                 // Token totals are restored from history above, but the dollar
                 // cost was never reconstructed, so resumed sessions showed `$0`
                 // in the cost widget until a new call happened. Price the

@@ -1572,7 +1572,7 @@ impl crate::tui::TuiState for App {
             // History has no optimal denominator, so the yield uses live-only
             // reads against live-only optimal input.
             optimal_input_tokens: self.token_accounting.total_cache_optimal_input_tokens,
-            optimal_read_tokens: Some(self.token_accounting.total_cache_read_tokens),
+            optimal_read_tokens: Some(self.token_accounting.total_cache_optimal_read_tokens),
             last_reported_input_tokens: self.token_accounting.last_cache_reported_input_tokens,
             last_read_tokens: self.token_accounting.last_cache_read_tokens,
             last_creation_tokens: self.token_accounting.last_cache_creation_tokens,
