@@ -147,3 +147,102 @@ async fn swarm_task_hitting_a_usage_limit_stays_in_progress_and_resumes() {
         None => crate::env::remove_var("JCODE_HOME"),
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn swarm_task_hitting_a_usage_limit_is_requeued_when_the_resume_is_superseded() {
+    let (_env, _runtime) = RuntimeEnvGuard::new();
+    let home = tempfile::TempDir::new().expect("jcode home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let swarm_id = "swarm-usage-limit-sup";
+    let coord = "coord-ul-sup";
+    let worker = "worker-ul-sup";
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(LimitedOnceProvider {
+        calls: Arc::clone(&calls),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        (coord.to_string(), {
+            let mut m = member(coord, swarm_id, "ready");
+            m.role = "coordinator".to_string();
+            m
+        }),
+        (worker.to_string(), owned_member(worker, swarm_id, "queued", coord)),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        HashSet::from([coord.to_string(), worker.to_string()]),
+    )])));
+    let mut plan = VersionedPlan::new();
+    plan.items.push(plan_item("task-1", "queued", "high", &[]));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::from([(swarm_id.to_string(), plan)])));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        coord.to_string(),
+    )])));
+
+    super::spawn_assigned_task_run(
+        Arc::clone(&agent),
+        worker.to_string(),
+        swarm_id.to_string(),
+        "task-1".to_string(),
+        "summarize the logs".to_string(),
+        Arc::clone(&swarm_members),
+        Arc::clone(&swarms_by_id),
+        Arc::clone(&swarm_plans),
+        Arc::clone(&swarm_coordinators),
+        Arc::new(RwLock::new(VecDeque::new())),
+        Arc::new(AtomicU64::new(1)),
+        broadcast::channel(256).0,
+    );
+
+    let mut waited = false;
+    for _ in 0..20_000 {
+        if swarm_members.read().await[worker].status == "rate_limited"
+            && crate::server::usage_limit_resume::has_pending_resume(worker)
+        {
+            waited = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(waited, "worker should wait for the usage-limit reset");
+
+    // A user message takes the worker over; the takeover turn does not
+    // finish the task.
+    assert!(crate::server::usage_limit_resume::cancel_pending_resume(worker));
+
+    let item = |plans: &HashMap<String, VersionedPlan>| {
+        plans[swarm_id]
+            .items
+            .iter()
+            .find(|item| item.id == "task-1")
+            .cloned()
+            .unwrap()
+    };
+    let mut released = false;
+    for _ in 0..20_000 {
+        if item(&*swarm_plans.read().await).status == "queued" {
+            released = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let item = item(&*swarm_plans.read().await);
+    assert!(
+        released,
+        "a superseded resume must hand the task back, got status {:?}",
+        item.status
+    );
+    assert_eq!(item.assigned_to, None);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    match prev_home {
+        Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}

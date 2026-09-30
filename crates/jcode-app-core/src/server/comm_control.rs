@@ -973,11 +973,60 @@ fn spawn_assigned_task_run(
                         (Ok(()), completion_report)
                     }
                     super::usage_limit_resume::ResumeOutcome::Superseded => {
-                        // The user took the worker over. Leave the task in
-                        // progress; if nobody finishes it, it goes stale and
-                        // the normal salvage path reassigns it.
+                        // The user (or another turn) took the worker over.
+                        // Release the task back to the queue, like the
+                        // no-artifact requeue path, so the normal assignment
+                        // flow can hand it out again instead of leaving it
+                        // assigned to a worker that is no longer running it.
                         let _ = heartbeat_stop_tx.send(true);
                         let _ = heartbeat_task.await;
+                        let previous_items = {
+                            let plans = swarm_plans.read().await;
+                            plans
+                                .get(&swarm_id)
+                                .map(|plan| plan.items.clone())
+                                .unwrap_or_default()
+                        };
+                        {
+                            let now_ms = now_unix_ms();
+                            let mut plans = swarm_plans.write().await;
+                            if let Some(plan) = plans.get_mut(&swarm_id)
+                                && let Some(item) =
+                                    plan.items.iter_mut().find(|item| item.id == task_id)
+                                && item.status == "running"
+                            {
+                                item.status = "queued".to_string();
+                                item.assigned_to = None;
+                                let progress =
+                                    plan.task_progress.entry(task_id.clone()).or_default();
+                                progress.assigned_session_id = None;
+                                progress.last_heartbeat_unix_ms = Some(now_ms);
+                                progress.last_checkpoint_unix_ms = Some(now_ms);
+                                progress.checkpoint_summary = Some(
+                                    "requeued: usage-limit resume was superseded".to_string(),
+                                );
+                                progress.stale_since_unix_ms = None;
+                                progress.checkpoint_count =
+                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
+                                plan.version += 1;
+                            }
+                        }
+                        let swarm_state = SwarmState {
+                            members: Arc::clone(&swarm_members),
+                            swarms_by_id: Arc::clone(&swarms_by_id),
+                            plans: Arc::clone(&swarm_plans),
+                            coordinators: Arc::clone(&swarm_coordinators),
+                        };
+                        persist_swarm_state_for(&swarm_id, &swarm_state).await;
+                        broadcast_swarm_plan_with_previous(
+                            &swarm_id,
+                            Some("task_requeued_superseded".to_string()),
+                            Some(&previous_items),
+                            &swarm_plans,
+                            &swarm_members,
+                            &swarms_by_id,
+                        )
+                        .await;
                         return;
                     }
                 }
