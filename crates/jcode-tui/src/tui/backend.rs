@@ -1137,7 +1137,8 @@ impl RemoteConnection {
     }
 
     /// Pin this session (window) to `label`, or unpin it with `None`.
-    pub async fn set_session_account(&mut self, provider: &str, label: Option<&str>) -> Result<()> {
+    /// Returns the request id; the server answers it with Done or Error.
+    pub async fn set_session_account(&mut self, provider: &str, label: Option<&str>) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::SetSessionAccount {
@@ -1145,11 +1146,12 @@ impl RemoteConnection {
             provider: provider.to_string(),
             label: label.map(str::to_string),
         })
-        .await
+        .await?;
+        Ok(id)
     }
 
     /// Change the default account for new and unpinned sessions.
-    pub async fn set_default_account(&mut self, provider: &str, label: &str) -> Result<()> {
+    pub async fn set_default_account(&mut self, provider: &str, label: &str) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::SetDefaultAccount {
@@ -1157,15 +1159,17 @@ impl RemoteConnection {
             provider: provider.to_string(),
             label: label.to_string(),
         })
-        .await
+        .await?;
+        Ok(id)
     }
 
     /// Per-session same-provider account failover (`None` = config default).
-    pub async fn set_account_failover(&mut self, enabled: Option<bool>) -> Result<()> {
+    pub async fn set_account_failover(&mut self, enabled: Option<bool>) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
         self.send_request(Request::SetAccountFailover { id, enabled })
-            .await
+            .await?;
+        Ok(id)
     }
 
     /// Read the next event from the server.

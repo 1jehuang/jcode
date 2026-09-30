@@ -102,6 +102,15 @@ fn family_display(family: &str) -> &'static str {
     }
 }
 
+/// An account request sent to the server and not yet answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingAccountRequest {
+    UseInWindow { family: String, label: String },
+    SetDefault { family: String, label: String },
+    Unpin { family: String },
+    Failover { enabled: Option<bool> },
+}
+
 /// "This window now uses X. The default for new windows is still Y (...)."
 pub(crate) fn use_in_window_message(label: &str, default: Option<&str>) -> String {
     match default {
@@ -266,6 +275,19 @@ impl App {
             is_default,
         });
         crate::auth::AuthStatus::invalidate_cache();
+        // The answer to this window's own request: its Done announces it.
+        let requested_here = self.pending_account_requests.values().any(|request| {
+            matches!(
+                request,
+                PendingAccountRequest::UseInWindow { family, .. }
+                    | PendingAccountRequest::SetDefault { family, .. }
+                    | PendingAccountRequest::Unpin { family }
+                    if *family == provider
+            )
+        });
+        if requested_here {
+            return;
+        }
         if let Some(reason) = reason.filter(|r| !r.trim().is_empty()) {
             let to = label.as_deref().unwrap_or("the default account");
             let text = match previous.as_deref() {
@@ -531,6 +553,9 @@ impl App {
         command: AccountCommand,
         remote: &mut crate::tui::backend::RemoteConnection,
     ) -> anyhow::Result<()> {
+        // Nothing changes here until the server answers the request: its
+        // `SessionAccountChanged` updates the window, and the matching Done
+        // or Error settles it (see `settle_account_request`).
         match command {
             AccountCommand::UseInWindow { provider_id, label } => {
                 let Some(family) = account_family(&provider_id) else {
@@ -546,14 +571,106 @@ impl App {
                     )));
                     return Ok(());
                 }
-                remote.set_session_account(family, Some(&label)).await?;
-                let default = stored_default_label(family);
-                self.set_window_account_from_info(&SessionAccountInfo {
-                    provider: family.to_string(),
-                    is_default: default.as_deref() == Some(label.as_str()),
-                    label: Some(label.clone()),
-                    pinned: true,
-                });
+                let id = remote.set_session_account(family, Some(&label)).await?;
+                self.pending_account_requests.insert(
+                    id,
+                    PendingAccountRequest::UseInWindow {
+                        family: family.to_string(),
+                        label: label.clone(),
+                    },
+                );
+                self.set_status_notice(format!("Account: switching this window to {label}..."));
+            }
+            AccountCommand::SetDefault { provider_id, label } => {
+                let Some(family) = account_family(&provider_id) else {
+                    return Ok(());
+                };
+                let id = remote.set_default_account(family, &label).await?;
+                self.pending_account_requests.insert(
+                    id,
+                    PendingAccountRequest::SetDefault {
+                        family: family.to_string(),
+                        label: label.clone(),
+                    },
+                );
+                self.set_status_notice(format!("Default account: setting {label}..."));
+            }
+            AccountCommand::Unpin { provider_id } => {
+                let families: Vec<&str> = match provider_id.as_deref().and_then(account_family) {
+                    Some(family) => vec![family],
+                    None => vec!["claude", "openai"],
+                };
+                for family in &families {
+                    let id = remote.set_session_account(family, None).await?;
+                    self.pending_account_requests.insert(
+                        id,
+                        PendingAccountRequest::Unpin {
+                            family: family.to_string(),
+                        },
+                    );
+                }
+                self.set_status_notice("Account: unpinning...");
+            }
+            AccountCommand::Failover(AccountFailoverMode::Status) => {
+                self.push_display_message(DisplayMessage::system(
+                    self.render_account_failover_status(),
+                ));
+            }
+            AccountCommand::Failover(mode) => {
+                let enabled = match mode {
+                    AccountFailoverMode::On => Some(true),
+                    AccountFailoverMode::Off => Some(false),
+                    _ => None,
+                };
+                let id = remote.set_account_failover(enabled).await?;
+                self.pending_account_requests
+                    .insert(id, PendingAccountRequest::Failover { enabled });
+            }
+            other => super::auth::execute_account_command_local(self, other),
+        }
+        Ok(())
+    }
+
+    /// Server answered an account request this window sent. `Ok` is the
+    /// request's Done, `Err` its Error. Returns false for other request ids.
+    pub(crate) fn settle_account_request(&mut self, id: u64, result: Result<(), &str>) -> bool {
+        let Some(request) = self.pending_account_requests.remove(&id) else {
+            return false;
+        };
+        if let Err(message) = result {
+            let what = match &request {
+                PendingAccountRequest::UseInWindow { label, .. } => {
+                    format!("Could not switch this window to {label}")
+                }
+                PendingAccountRequest::SetDefault { label, .. } => {
+                    format!("Could not make {label} the default account")
+                }
+                PendingAccountRequest::Unpin { family } => {
+                    format!("Could not unpin {}", family_display(family))
+                }
+                PendingAccountRequest::Failover { .. } => {
+                    "Could not change account failover".to_string()
+                }
+            };
+            self.push_display_message(DisplayMessage::error(format!("{what}: {message}")));
+            self.set_status_notice("Account change failed");
+            return true;
+        }
+        match request {
+            PendingAccountRequest::UseInWindow { family, label } => {
+                let default = stored_default_label(&family);
+                // A server without session accounts sends no
+                // SessionAccountChanged; its Done is the confirmation.
+                if self.window_account_label(&family).as_deref() != Some(label.as_str())
+                    || !self.window_account(&family).is_some_and(|w| w.pinned)
+                {
+                    self.set_window_account_from_info(&SessionAccountInfo {
+                        provider: family.clone(),
+                        is_default: default.as_deref() == Some(label.as_str()),
+                        label: Some(label.clone()),
+                        pinned: true,
+                    });
+                }
                 self.context_warning_shown = false;
                 self.push_display_message(DisplayMessage::system(use_in_window_message(
                     &label,
@@ -561,14 +678,9 @@ impl App {
                 )));
                 self.set_status_notice(format!("Account: {label} (this window)"));
             }
-            AccountCommand::SetDefault { provider_id, label } => {
-                let Some(family) = account_family(&provider_id) else {
-                    return Ok(());
-                };
-                let window = self.window_account(family);
-                remote.set_default_account(family, &label).await?;
-                if let Some(info) = self.window_accounts.iter_mut().find(|i| i.provider == family)
-                {
+            PendingAccountRequest::SetDefault { family, label } => {
+                let window = self.window_account(&family);
+                if let Some(info) = self.window_accounts.iter_mut().find(|i| i.provider == family) {
                     if info.pinned {
                         info.is_default = info.label.as_deref() == Some(label.as_str());
                     } else {
@@ -582,38 +694,23 @@ impl App {
                 )));
                 self.set_status_notice(format!("Default account: {label}"));
             }
-            AccountCommand::Unpin { provider_id } => {
-                let families: Vec<&str> = match provider_id.as_deref().and_then(account_family) {
-                    Some(family) => vec![family],
-                    None => vec!["claude", "openai"],
-                };
-                for family in &families {
-                    remote.set_session_account(family, None).await?;
-                    let default = stored_default_label(family);
+            PendingAccountRequest::Unpin { family } => {
+                if self.window_account(&family).is_none_or(|w| w.pinned) {
+                    let default = stored_default_label(&family);
                     self.set_window_account_from_info(&SessionAccountInfo {
-                        provider: family.to_string(),
+                        provider: family.clone(),
                         is_default: default.is_some(),
                         label: default,
                         pinned: false,
                     });
                 }
-                self.push_display_message(DisplayMessage::system(
-                    "This window now follows the default account.".to_string(),
-                ));
+                self.push_display_message(DisplayMessage::system(format!(
+                    "{} in this window now follows the default account.",
+                    family_display(&family)
+                )));
                 self.set_status_notice("Account: following default");
             }
-            AccountCommand::Failover(AccountFailoverMode::Status) => {
-                self.push_display_message(DisplayMessage::system(
-                    self.render_account_failover_status(),
-                ));
-            }
-            AccountCommand::Failover(mode) => {
-                let enabled = match mode {
-                    AccountFailoverMode::On => Some(true),
-                    AccountFailoverMode::Off => Some(false),
-                    _ => None,
-                };
-                remote.set_account_failover(enabled).await?;
+            PendingAccountRequest::Failover { enabled } => {
                 self.window_account_failover = enabled;
                 self.push_display_message(DisplayMessage::system(failover_set_message(enabled)));
                 self.set_status_notice(format!(
@@ -621,9 +718,8 @@ impl App {
                     failover_word(self.effective_account_failover())
                 ));
             }
-            other => super::auth::execute_account_command_local(self, other),
         }
-        Ok(())
+        true
     }
 
     fn effective_account_failover(&self) -> bool {

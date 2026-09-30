@@ -142,3 +142,193 @@ fn local_resume_applies_account_failover_and_pin() {
         cleanup_reload_context_file(&saved.id);
     });
 }
+
+fn claude_window(label: &str, pinned: bool) -> crate::protocol::SessionAccountInfo {
+    crate::protocol::SessionAccountInfo {
+        provider: "claude".to_string(),
+        label: Some(label.to_string()),
+        pinned,
+        is_default: !pinned,
+    }
+}
+
+fn store_two_claude_accounts() -> (String, String) {
+    let account = |n: &str| crate::auth::claude::AnthropicAccount {
+        label: String::new(),
+        access: format!("access-{n}"),
+        refresh: format!("refresh-{n}"),
+        expires: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        email: Some(format!("{n}@example.com")),
+        subscription_type: None,
+        scopes: Vec::new(),
+    };
+    let first = crate::auth::claude::upsert_account(account("first")).unwrap();
+    let second = crate::auth::claude::upsert_account(account("second")).unwrap();
+    (first, second)
+}
+
+/// Greptile "Remote rejection looks successful": remote /account switch,
+/// default and failover change nothing until the server answers that request
+/// id. An Error keeps the old display and is shown.
+#[test]
+fn remote_account_request_rejection_keeps_old_display() {
+    with_temp_jcode_home(|| {
+        let (first, second) = store_two_claude_accounts();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.replace_window_accounts(vec![claude_window(&first, false)]);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let window_label =
+            |app: &App| app.window_account("claude").and_then(|w| w.label);
+
+        // Switch rejected by the server (e.g. the daemon's store differs).
+        let switch_id = remote.next_request_id_for_test();
+        rt.block_on(app.execute_window_account_command_remote(
+            super::auth::AccountCommand::UseInWindow {
+                provider_id: "claude".to_string(),
+                label: second.clone(),
+            },
+            &mut remote,
+        ))
+        .unwrap();
+        assert_eq!(window_label(&app), Some(first.clone()), "not before the reply");
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|m| m.content.contains(&format!("This window now uses {second}"))),
+            "no success announcement on send"
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: switch_id,
+                message: "pin refused".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert_eq!(window_label(&app), Some(first.clone()), "rejected: unchanged");
+        let last = app.display_messages().last().unwrap().content.clone();
+        assert!(
+            last.contains(&format!("Could not switch this window to {second}: pin refused")),
+            "{last}"
+        );
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|m| m.content.contains(&format!("This window now uses {second}"))),
+            "a rejected switch must not be announced"
+        );
+
+        // Failover toggle rejected, then accepted.
+        let failover_id = remote.next_request_id_for_test();
+        rt.block_on(app.execute_window_account_command_remote(
+            super::auth::AccountCommand::Failover(super::auth::AccountFailoverMode::Off),
+            &mut remote,
+        ))
+        .unwrap();
+        assert_eq!(app.window_account_failover, None, "not before the reply");
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: failover_id,
+                message: "session busy".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert_eq!(app.window_account_failover, None, "rejected: unchanged");
+        assert!(app
+            .display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Could not change account failover: session busy"));
+        let failover_id = remote.next_request_id_for_test();
+        rt.block_on(app.execute_window_account_command_remote(
+            super::auth::AccountCommand::Failover(super::auth::AccountFailoverMode::Off),
+            &mut remote,
+        ))
+        .unwrap();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Done { id: failover_id },
+            &mut remote,
+        );
+        assert_eq!(app.window_account_failover, Some(false), "confirmed");
+
+        // Default rejected.
+        let default_id = remote.next_request_id_for_test();
+        rt.block_on(app.execute_window_account_command_remote(
+            super::auth::AccountCommand::SetDefault {
+                provider_id: "claude".to_string(),
+                label: second.clone(),
+            },
+            &mut remote,
+        ))
+        .unwrap();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: default_id,
+                message: "store locked".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert_eq!(window_label(&app), Some(first.clone()));
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|m| m.content.contains(&format!("now use {second}"))),
+            "a rejected default must not be announced"
+        );
+        assert!(app
+            .display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains(&format!("Could not make {second} the default account: store locked")));
+    });
+}
+
+/// A confirmed remote switch updates the window once the server answers.
+#[test]
+fn remote_account_switch_applies_on_done() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.replace_window_accounts(vec![claude_window("claude-otter", false)]);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let id = rt
+            .block_on(remote.set_session_account("claude", Some("claude-fox")))
+            .unwrap();
+        app.pending_account_requests.insert(
+            id,
+            super::window_account::PendingAccountRequest::UseInWindow {
+                family: "claude".to_string(),
+                label: "claude-fox".to_string(),
+            },
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::SessionAccountChanged {
+                provider: "claude".to_string(),
+                label: Some("claude-fox".to_string()),
+                pinned: true,
+                is_default: false,
+                reason: Some("this window now uses claude-fox".to_string()),
+            },
+            &mut remote,
+        );
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote);
+        let window = app.window_account("claude").unwrap();
+        assert_eq!(window.label.as_deref(), Some("claude-fox"));
+        assert!(window.pinned);
+        let announcements = app
+            .display_messages()
+            .iter()
+            .filter(|m| m.content.contains("claude-fox"))
+            .count();
+        assert_eq!(announcements, 1, "announced once, on Done");
+    });
+}

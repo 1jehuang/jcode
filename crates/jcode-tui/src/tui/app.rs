@@ -1512,6 +1512,10 @@ pub struct App {
     window_accounts: Vec<crate::protocol::SessionAccountInfo>,
     /// Per-window same-provider failover override (`None` = config default).
     window_account_failover: Option<bool>,
+    /// Account requests sent to the server, applied only once the server
+    /// answers that request id with Done (an Error leaves the window as is).
+    pending_account_requests:
+        std::collections::HashMap<u64, window_account::PendingAccountRequest>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching

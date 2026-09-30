@@ -560,6 +560,18 @@ pub(in crate::tui::app) fn handle_server_event(
         return true;
     }
 
+    // Replies to this window's account requests (/account switch, default,
+    // unpin, failover). Only these settle the change the user asked for.
+    match &event {
+        ServerEvent::Done { id } if app.settle_account_request(*id, Ok(())) => return true,
+        ServerEvent::Error { id, message, .. }
+            if app.settle_account_request(*id, Err(message.as_str())) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
