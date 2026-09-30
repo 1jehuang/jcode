@@ -14,6 +14,15 @@ struct AccountRecordingProvider {
             >,
         >,
     >,
+    /// Failover homes; `return_account_home_if_reset` treats them as reset.
+    homes: StdArc<
+        StdMutex<
+            std::collections::BTreeMap<
+                jcode_provider_core::AccountProviderKind,
+                jcode_provider_core::AccountPin,
+            >,
+        >,
+    >,
 }
 
 #[async_trait::async_trait]
@@ -53,6 +62,34 @@ impl Provider for AccountRecordingProvider {
     }
     fn set_account_failover(&self, enabled: Option<bool>) {
         self.failover_calls.lock().unwrap().push(enabled);
+    }
+    fn account_failover_home(
+        &self,
+        kind: jcode_provider_core::AccountProviderKind,
+    ) -> Option<jcode_provider_core::AccountPin> {
+        self.homes.lock().unwrap().get(&kind).cloned()
+    }
+    fn set_account_failover_home(
+        &self,
+        kind: jcode_provider_core::AccountProviderKind,
+        home: Option<jcode_provider_core::AccountPin>,
+    ) {
+        let mut homes = self.homes.lock().unwrap();
+        match home {
+            Some(home) => homes.insert(kind, home),
+            None => homes.remove(&kind),
+        };
+    }
+    fn return_account_home_if_reset(&self) -> Vec<jcode_provider_core::AccountProviderKind> {
+        let homes = std::mem::take(&mut *self.homes.lock().unwrap());
+        let mut pins = self.pins.lock().unwrap();
+        homes
+            .into_iter()
+            .map(|(kind, home)| {
+                pins.insert(kind, home);
+                kind
+            })
+            .collect()
     }
 }
 
@@ -451,5 +488,95 @@ fn local_turn_saves_failover_move() {
             "local failover move was not announced"
         );
         assert_eq!(app.window_account_label("claude").as_deref(), Some("claude-otter"));
+    });
+}
+
+/// Greptile r3 "Manual choice gets undone": after a local failover owl ->
+/// otter, a manual switch to fox must also clear the provider's return-home
+/// target, so owl's reset does not move the window back.
+#[test]
+fn local_manual_choice_clears_provider_failover_home() {
+    with_temp_jcode_home(|| {
+        let (_first, fox) = store_two_claude_accounts();
+        let (mut app, provider) = account_recording_app();
+        let kind = jcode_provider_core::AccountProviderKind::Claude;
+        let owl = jcode_provider_core::AccountPin::new("claude-owl", None);
+        provider.pins.lock().unwrap().insert(kind, owl.clone());
+        app.session.account_pins.insert("claude".to_string(), owl.clone());
+        app.replace_window_accounts(vec![claude_window("claude-owl", true)]);
+        app.session.save_prepared().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let observed = app.local_account_turn_start();
+            // Failover owl -> otter, remembering owl as home.
+            provider.pins.lock().unwrap().insert(
+                kind,
+                jcode_provider_core::AccountPin::new("claude-otter", None),
+            );
+            provider.homes.lock().unwrap().insert(kind, owl.clone());
+            app.local_account_turn_end(observed);
+            // The user picks fox by hand.
+            app.execute_window_account_command_local(
+                super::auth::AccountCommand::UseInWindow {
+                    provider_id: "claude".to_string(),
+                    label: fox.clone(),
+                },
+            );
+            // owl resets; next local turn.
+            let observed = app.local_account_turn_start();
+            app.local_account_turn_end(observed);
+        });
+        assert_eq!(
+            provider.pins.lock().unwrap().get(&kind).map(|p| p.label.clone()),
+            Some(fox.clone()),
+            "manual choice undone: provider returned home to owl"
+        );
+        let saved = crate::session::Session::load(&app.session.id).unwrap();
+        assert_eq!(
+            saved.account_pins.get("claude").map(|p| p.label.clone()),
+            Some(fox.clone()),
+            "manual choice undone: saved move back to owl"
+        );
+        assert_eq!(app.window_account_label("claude"), Some(fox));
+    });
+}
+
+/// Greptile r3 "Rejected switch hides confirmation": a rejected newer switch
+/// must not supersede an older pending one that then succeeds.
+#[test]
+fn rejected_switch_does_not_hide_older_confirmation() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.replace_window_accounts(vec![claude_window("claude-otter", false)]);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        pending_use(&mut app, 1, "claude-fox");
+        pending_use(&mut app, 2, "claude-bogus");
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 2,
+                message: "no such account".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        app.handle_server_event(account_changed("claude-fox", None), &mut remote);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 1 }, &mut remote);
+        assert_eq!(app.window_account_label("claude").as_deref(), Some("claude-fox"));
+        let messages: Vec<String> = app
+            .display_messages()
+            .iter()
+            .map(|m| m.content.clone())
+            .collect();
+        let failed = messages
+            .iter()
+            .position(|m| m.contains("Could not switch this window to claude-bogus"))
+            .expect("failure shown");
+        assert!(
+            messages[failed + 1..].iter().any(|m| m.contains("claude-fox")),
+            "older switch success hidden after rejected newer switch: {messages:?}"
+        );
     });
 }

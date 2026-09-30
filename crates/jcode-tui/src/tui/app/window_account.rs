@@ -748,8 +748,10 @@ impl App {
             return true;
         }
         // Answers can arrive out of order: older requests of the same scope
-        // are now stale and must not overwrite this newer result.
-        if let Some(scope) = request.scope() {
+        // are now stale and must not overwrite this newer result. Only a
+        // success supersedes: a rejected request changed nothing, so an older
+        // pending one may still succeed and must still be announced.
+        if let (Ok(()), Some(scope)) = (result, request.scope()) {
             for (other_id, other) in self.pending_account_requests.iter_mut() {
                 if *other_id < id && other.scope() == Some(scope) {
                     *other = PendingAccountRequest::Superseded;
