@@ -6,6 +6,8 @@ use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 
+mod error_correlation;
+
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
@@ -557,6 +559,10 @@ pub(in crate::tui::app) fn handle_server_event(
         app.push_display_message(DisplayMessage::error(format!(
             "Reset result is unchanged, but the daemon usage cache could not be refreshed: {message}. Reconnect to refresh daemon state."
         )));
+        return true;
+    }
+
+    if error_correlation::handle_unrelated_error(app, &event, remote) {
         return true;
     }
 
@@ -1165,17 +1171,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 "Client received Done id={}, current_message_id={:?}",
                 id, app.current_message_id
             ));
-            let has_resumed_turn_evidence = had_remote_resume_activity
-                || app.stream_message_ended
-                || app.has_streaming_footer_stats()
-                || !app.streaming.streaming_text.is_empty()
-                || !app.streaming_tool_calls.is_empty()
-                || matches!(
-                    app.status,
-                    ProcessingStatus::Streaming | ProcessingStatus::RunningTool(_)
-                );
-            let completes_resumed_turn =
-                app.current_message_id.is_none() && app.is_processing && has_resumed_turn_evidence;
+            let completes_resumed_turn = app.current_message_id.is_none()
+                && app.is_processing
+                && error_correlation::has_resumed_turn_evidence(app, had_remote_resume_activity);
             if app.current_message_id == Some(id) || completes_resumed_turn {
                 if !app.stream_buffer.is_empty() {
                     crate::logging::info(&format!(
@@ -2853,10 +2851,12 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::SplitResponse {
+            id,
             new_session_id,
             new_session_name,
             ..
         } => {
+            remote.finish_session_launch(id);
             if app.workspace_client.handle_split_response(&new_session_id) {
                 finish_remote_split_launch(app);
                 app.pending_split_request = false;

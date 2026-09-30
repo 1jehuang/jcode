@@ -617,3 +617,5 @@ fn test_fresh_prompt_terminal_error_stops_waiting_restored_retries() {
         }
     });
 }
+
+include!("restored_retry_unrelated_errors.rs");
