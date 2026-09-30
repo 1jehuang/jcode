@@ -93,12 +93,9 @@ pub(super) enum RemoteEventOutcome {
 pub(super) fn held_user_turn_resend_notice(
     pending: &super::PendingRemoteMessage,
 ) -> Option<String> {
-    (pending.auto_retry && !pending.is_system && pending.retry_attempts > 0).then(|| {
-        format!(
-            "✓ Resending your message (attempt {})...",
-            pending.retry_attempts + 1
-        )
-    })
+    let resends = u16::from(pending.overload_attempts) + u16::from(pending.retry_attempts);
+    (pending.auto_retry && !pending.is_system && resends > 0)
+        .then(|| format!("✓ Resending your message (attempt {})...", resends + 1))
 }
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
@@ -273,6 +270,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 )
             };
             app.push_display_message(DisplayMessage::system(status));
+            let overload_attempts = pending.overload_attempts;
             let _ = begin_remote_send(
                 app,
                 remote,
@@ -284,6 +282,11 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 pending.retry_attempts,
             )
             .await;
+            // The overload budget belongs to this turn: carry it across the
+            // resend so it stops after OVERLOAD_RETRY_MAX_ATTEMPTS resends.
+            if let Some(resent) = app.rate_limit_pending_message.as_mut() {
+                resent.overload_attempts = overload_attempts;
+            }
             return true;
         }
     }

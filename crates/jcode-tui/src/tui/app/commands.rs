@@ -155,14 +155,25 @@ pub(super) fn is_auto_poke_connectivity_error(error: &str) -> bool {
 /// wording providers use for a busy period ("heavy usage", "try again in a
 /// moment"). The provider answered, so this is not a network problem, but
 /// waiting and resending the same turn usually works.
+///
+/// Permanent failures are never an overload, even when their body happens
+/// to use overload wording (a 404 model-not-found saying "temporarily
+/// unavailable"): the statuses the provider runtime refuses to retry
+/// (400, 401, 402, 403, 404, 405, 406, 422) and model/endpoint mismatches are
+/// rejected before the wording is checked.
 pub(super) fn is_provider_overload_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    let status_5xx = lower
+    let status = lower
         .find("status:")
         .map(|idx| lower[idx + "status:".len()..].trim_start())
         .and_then(|rest| rest.get(..3))
-        .and_then(|code| code.parse::<u16>().ok())
-        .is_some_and(|code| (500..=599).contains(&code));
+        .and_then(|code| code.parse::<u16>().ok());
+    if matches!(status, Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422))
+        || is_fatal_model_endpoint_error(error)
+    {
+        return false;
+    }
+    let status_5xx = status.is_some_and(|code| (500..=599).contains(&code));
     status_5xx
         || [
             "overloaded",

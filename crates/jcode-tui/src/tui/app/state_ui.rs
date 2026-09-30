@@ -536,6 +536,7 @@ impl App {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u8,
                     retry_at: None,
+                    overload_attempts: 0,
                 });
             let rate_limit_reset = value
                 .get("rate_limit_reset_in_ms")

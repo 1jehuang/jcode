@@ -630,6 +630,18 @@ pub(in crate::tui::app) fn handle_server_event(
 
     let call_output_tokens_seen = remote.call_output_tokens_seen();
 
+    // Remember that this send already put model output on screen, so an
+    // overload failure after it is not answered with a full-turn resend.
+    if matches!(
+        &event,
+        ServerEvent::TextDelta { .. }
+            | ServerEvent::TextReplace { .. }
+            | ServerEvent::ReasoningDelta { .. }
+            | ServerEvent::ToolStart { .. }
+    ) {
+        app.remote_turn_streamed_output = true;
+    }
+
     match event {
         ServerEvent::TextDelta { text } => {
             if let Some(thought_line) = App::extract_thought_line(&text) {
@@ -1024,6 +1036,8 @@ pub(in crate::tui::app) fn handle_server_event(
                 attempt, max
             ));
             app.rollback_streaming_attempt();
+            // The partial output is gone, so the retried attempt starts clean.
+            app.remote_turn_streamed_output = false;
             remote.clear_pending();
             app.connection_phase_started = Some(Instant::now());
             app.status = ProcessingStatus::Connecting(crate::message::ConnectionPhase::Retrying {
@@ -1370,6 +1384,9 @@ pub(in crate::tui::app) fn handle_server_event(
             // problem, but the same request usually succeeds a little later.
             // Hold the turn and resend it, also for turns the user typed,
             // before any path below can fail it or stop auto-poke.
+            // Only when this attempt streamed nothing: otherwise the resent
+            // answer would be appended to the partial one (the error path
+            // gets no rollback event), so that case fails as before.
             if !is_connectivity_error
                 && crate::tui::app::commands::is_provider_overload_error(&message)
                 && app.schedule_pending_remote_overload_retry(&message)

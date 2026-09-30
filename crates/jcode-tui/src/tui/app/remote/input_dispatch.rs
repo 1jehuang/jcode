@@ -47,6 +47,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.thought_line_inserted = false;
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
+    app.remote_turn_streamed_output = false;
     app.rate_limit_pending_message = Some(PendingRemoteMessage {
         content,
         images,
@@ -55,6 +56,7 @@ pub(in crate::tui::app) async fn begin_remote_send(
         auto_retry,
         retry_attempts,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.autoreview_after_current_turn = !is_system;
     app.autojudge_after_current_turn = !is_system;

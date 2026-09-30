@@ -149,6 +149,10 @@ struct PendingRemoteMessage {
     auto_retry: bool,
     retry_attempts: u8,
     retry_at: Option<Instant>,
+    /// Turn-level resends after a provider overload. Kept apart from
+    /// `retry_attempts` so ordinary retries never use up the overload
+    /// schedule. Starts at 0 for every new turn.
+    overload_attempts: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -1058,6 +1062,11 @@ pub struct App {
     // many trailing assistant messages; reset whenever a new API attempt's
     // output starts cleanly or the turn ends.
     attempt_committed_assistant_messages: usize,
+    // Whether the in-flight remote send has streamed any output (text,
+    // reasoning, or a tool call). Reset on each send. A turn that already
+    // showed output is not held for a full overload resend, because the new
+    // answer would be appended to the partial one.
+    remote_turn_streamed_output: bool,
     // Provider-specific session ID for conversation resume
     provider_session_id: Option<String>,
     // One-step undo snapshot captured before the most recent local rewind.
