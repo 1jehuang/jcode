@@ -22,6 +22,7 @@ fn test_server_initiated_usage_limit_shows_server_resume_time_without_client_res
             id: 0,
             message: ANTHROPIC_FAIL_FAST_USAGE_LIMIT.to_string(),
             retry_after_secs: Some(40 * 60 + 12),
+            server_resumes: true,
         },
         &mut remote,
     );
@@ -74,6 +75,7 @@ fn test_server_initiated_usage_limit_keeps_the_users_own_held_turn() {
             id: 0,
             message: ANTHROPIC_FAIL_FAST_USAGE_LIMIT.to_string(),
             retry_after_secs: Some(120),
+            server_resumes: true,
         },
         &mut remote,
     );
@@ -116,6 +118,7 @@ fn test_user_typed_remote_turn_with_usage_limit_is_held_until_the_reset() {
                 id: 12,
                 message: ANTHROPIC_FAIL_FAST_USAGE_LIMIT.to_string(),
                 retry_after_secs,
+                server_resumes: false,
             },
             &mut remote,
         );
@@ -172,4 +175,51 @@ fn test_user_typed_local_turn_with_usage_limit_is_retried_at_the_reset() {
     app.rate_limit_reset = Some(Instant::now());
     let _ = super::local::handle_tick(&mut app);
     assert!(app.pending_turn, "the held turn runs again after the reset");
+}
+
+/// A terminal id-0 error that only carries a retry hint (an ordinary rate
+/// limit, or the server giving up after its resumes) is a failure the user
+/// must see. Only `server_resumes` promises a server resume.
+#[test]
+fn test_terminal_server_error_with_retry_hint_is_shown_as_an_error() {
+    for (message, retry_after_secs) in [
+        (ANTHROPIC_FAIL_FAST_USAGE_LIMIT.to_string(), Some(120)),
+        (
+            "Usage limit still reached after 3 automatic resumes; giving up.".to_string(),
+            None,
+        ),
+    ] {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = None;
+        app.processing_started = Some(Instant::now());
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 0,
+                message: message.clone(),
+                retry_after_secs,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|m| m.content.contains("The server will resume this")),
+            "{message}: no resume promised"
+        );
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|m| m.role == "error" || m.content.contains(&message[..20])),
+            "{message}: shown as a failure: {:?}",
+            app.display_messages()
+        );
+    }
 }

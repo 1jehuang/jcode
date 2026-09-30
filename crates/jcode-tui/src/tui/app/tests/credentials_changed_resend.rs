@@ -160,6 +160,7 @@ fn test_rate_limit_error_for_turn_started_before_account_change_retries_promptly
             id: 9,
             message: "rate limited".to_string(),
             retry_after_secs: Some(3 * 3600),
+            server_resumes: false,
         },
         &mut remote,
     );
@@ -199,6 +200,7 @@ fn test_rate_limit_error_without_account_change_keeps_full_hold() {
             id: 9,
             message: "rate limited".to_string(),
             retry_after_secs: Some(3 * 3600),
+            server_resumes: false,
         },
         &mut remote,
     );

@@ -48,6 +48,7 @@ impl PersistedSwarmMutationResponse {
                 id,
                 message,
                 retry_after_secs,
+                server_resumes: false,
             },
             Self::Spawn { new_session_id } => ServerEvent::CommSpawnResponse {
                 id,

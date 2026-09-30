@@ -233,6 +233,7 @@ pub(super) async fn spawn_tracked_live_turn(
                     id: 0,
                     message: crate::util::format_error_chain(&error),
                     retry_after_secs,
+                    server_resumes: false,
                 });
             }
         }

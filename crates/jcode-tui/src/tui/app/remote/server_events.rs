@@ -1251,13 +1251,16 @@ pub(in crate::tui::app) fn handle_server_event(
             id,
             message,
             retry_after_secs,
+            server_resumes,
         } => {
             app.refresh_openai_usage_after_quota_error(&message);
             // A server-initiated turn (scheduled task, swarm wake, DM) hit a
             // usage limit and the server will resume it at the reset. Settle
             // the adopted turn and say when it resumes. This client did not
             // send the turn, so it must not hold or resend anything itself.
-            if id == 0
+            // Only the explicit `server_resumes` flag means that: an id-0
+            // error with just a retry hint is terminal and shown normally.
+            if server_resumes
                 && app.current_message_id.is_none()
                 && let Some(resume_in) = retry_after_secs
             {

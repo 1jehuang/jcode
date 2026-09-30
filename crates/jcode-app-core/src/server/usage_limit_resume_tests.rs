@@ -305,6 +305,7 @@ async fn always_limited_turn_gets_one_attempt_plus_three_resumes_then_fails() {
                 ServerEvent::Error {
                     id: 0,
                     retry_after_secs: Some(_),
+                    server_resumes: true,
                     ..
                 }
             ),
@@ -316,11 +317,13 @@ async fn always_limited_turn_gets_one_attempt_plus_three_resumes_then_fails() {
         id,
         message,
         retry_after_secs,
+        server_resumes,
     } = event
     else {
         panic!("expected the final failure, got {event:?}");
     };
     assert_eq!(id, 0);
+    assert!(!server_resumes, "the give-up error is terminal");
     assert_eq!(retry_after_secs, None, "nothing retries after giving up");
     assert!(
         message.contains("after 3 automatic resumes"),

@@ -312,13 +312,14 @@ pub(super) async fn resume_turn_after_usage_limit(
         )
         .await;
         on_wait(&plan).await;
-        // id 0 plus retry_after_secs tells attached clients the server owns
-        // the resume, so they show when it resumes instead of an error and
-        // do not schedule a resend of their own.
+        // `server_resumes` tells attached clients the server owns the
+        // resume, so they show when it resumes instead of an error and do
+        // not schedule a resend of their own. Terminal errors never set it.
         let _ = event_tx.send(ServerEvent::Error {
             id: 0,
             message: crate::util::format_error_chain(&error),
             retry_after_secs: Some(plan.delay_secs()),
+            server_resumes: true,
         });
         // Let the user use the session while this turn waits.
         drop(held.take());

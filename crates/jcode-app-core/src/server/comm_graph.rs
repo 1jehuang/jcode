@@ -153,6 +153,7 @@ fn err(client_event_tx: &mpsc::UnboundedSender<ServerEvent>, id: u64, message: S
         id,
         message,
         retry_after_secs: None,
+        server_resumes: false,
     });
 }
 

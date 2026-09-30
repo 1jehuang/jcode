@@ -1002,9 +1002,8 @@ fn spawn_assigned_task_run(
                                 progress.assigned_session_id = None;
                                 progress.last_heartbeat_unix_ms = Some(now_ms);
                                 progress.last_checkpoint_unix_ms = Some(now_ms);
-                                progress.checkpoint_summary = Some(
-                                    "requeued: usage-limit resume was superseded".to_string(),
-                                );
+                                progress.checkpoint_summary =
+                                    Some("requeued: usage-limit resume was superseded".to_string());
                                 progress.stale_since_unix_ms = None;
                                 progress.checkpoint_count =
                                     Some(progress.checkpoint_count.unwrap_or(0) + 1);
@@ -1412,6 +1411,7 @@ pub(super) async fn handle_comm_assign_role(
             id,
             message: "Only the coordinator can assign roles. (Tip: if the coordinator has disconnected, use assign_role with target_session set to your own session ID to self-promote.)".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -1423,6 +1423,7 @@ pub(super) async fn handle_comm_assign_role(
                 id,
                 message: "Not in a swarm.".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -2033,6 +2034,7 @@ pub(super) async fn handle_comm_assign_next(
                 id,
                 message: "No runnable unassigned tasks are available in the swarm plan".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         };
@@ -2109,6 +2111,7 @@ pub(super) async fn handle_comm_assign_next(
                         id,
                         message: format!("Failed to spawn preferred worker: {error}"),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -2147,6 +2150,7 @@ pub(super) async fn handle_comm_assign_next(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
             }
         }
@@ -2204,6 +2208,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: "Unknown task control action. Use start, wake, resume, retry, reassign, replace, or salvage.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -2232,6 +2237,7 @@ pub(super) async fn handle_comm_task_control(
                     action.as_str()
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         };
@@ -2242,6 +2248,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2255,6 +2262,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: format!("Task '{}' not found in swarm plan", task_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -2264,6 +2272,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: task_control_status_error(action, &snapshot.status, &task_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -2287,6 +2296,7 @@ pub(super) async fn handle_comm_task_control(
                 task_id
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -2301,6 +2311,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2314,6 +2325,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, assignee, requested_target
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2334,6 +2346,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2345,6 +2358,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2445,6 +2459,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: Some(1),
+                    server_resumes: false,
                 });
             }
         }
@@ -2457,6 +2472,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2500,6 +2516,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2508,6 +2525,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message: format!("'target_session' is required for {}.", action.as_str()),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2517,6 +2535,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message: format!("Task '{}' is already assigned to '{}'.", task_id, assignee),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2529,6 +2548,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, assignee
                     ),
                     retry_after_secs: Some(1),
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2546,6 +2566,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, snapshot.status
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2680,6 +2701,7 @@ pub(super) async fn handle_client_debug_command(
         id,
         message: "ClientDebugCommand is for internal use only".to_string(),
         retry_after_secs: None,
+        server_resumes: false,
     });
 }
 
@@ -2724,6 +2746,7 @@ async fn require_plan_driver_swarm(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     };
@@ -2758,6 +2781,7 @@ async fn require_plan_driver_swarm(
         id,
         message: permission_error.to_string(),
         retry_after_secs: None,
+        server_resumes: false,
     });
     None
 }

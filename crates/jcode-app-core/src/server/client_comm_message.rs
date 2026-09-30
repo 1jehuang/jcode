@@ -180,6 +180,7 @@ pub(super) async fn handle_comm_message(
                             id,
                             message: format!("Cross-swarm DM failed: {err}"),
                             retry_after_secs: None,
+                            server_resumes: false,
                         });
                         return;
                     }
@@ -192,6 +193,7 @@ pub(super) async fn handle_comm_message(
                 id,
                 message: "Channels are swarm-local. Cross-swarm messages are DMs: pass to_swarm with an optional to_session.".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -253,6 +255,7 @@ pub(super) async fn handle_comm_message(
                         id,
                         message: message.to_string(),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -283,6 +286,7 @@ pub(super) async fn handle_comm_message(
                     super::swarm_labels::swarm_display_name(&delivery_swarm_id)
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -295,6 +299,7 @@ pub(super) async fn handle_comm_message(
                     super::swarm_labels::swarm_display_name(&delivery_swarm_id)
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -544,6 +549,7 @@ pub(super) async fn handle_comm_message(
             id,
             message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
