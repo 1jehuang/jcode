@@ -628,6 +628,11 @@ pub trait TuiState {
     }
     /// Optional configured keybinding label for external dictation.
     fn dictation_key_label(&self) -> Option<String>;
+    /// Label of the `scroll_to_bottom` chord shown in the "Jump to bottom"
+    /// pill, or `None` when the action is unbound.
+    fn jump_to_bottom_key_label(&self) -> Option<String> {
+        None
+    }
     /// Time since app started (for startup animations)
     fn animation_elapsed(&self) -> f32;
     /// Time remaining until rate limit resets (if rate limited)

@@ -649,6 +649,14 @@ impl App {
         // If already at bottom with no bookmark, do nothing
     }
 
+    /// `scroll_to_bottom` hotkey / "Jump to bottom" pill: go to the live tail
+    /// and resume auto-follow. Unlike the Ctrl+G bookmark this is one-way, so
+    /// any stashed bookmark is dropped.
+    pub(super) fn jump_to_chat_bottom(&mut self) {
+        self.scroll_bookmark = None;
+        self.follow_chat_bottom();
+    }
+
     pub(super) fn follow_chat_bottom_for_typing(&mut self) {
         if !self.typing_scroll_lock {
             self.follow_chat_bottom();

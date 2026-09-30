@@ -14,6 +14,7 @@ fn all_tips() -> Vec<Tip> {
         "Ctrl+J / Ctrl+K to jump between user prompts (Cmd+J / Cmd+K on macOS terminals that forward Command)",
         "Ctrl+Shift+J / Ctrl+Shift+K to scroll the chat down and up one line",
         "Ctrl+G to bookmark your scroll position - press again to teleport back",
+        "Ctrl+End (or Alt+Q) jumps to the bottom of the chat - or click the \"Jump to bottom\" pill",
         "Swarms form automatically when multiple sessions share a repo - they coordinate plans, share context, and track file conflicts",
         "Memories are stored in a graph with semantic embeddings - recall finds related facts even if you use different words",
         "Ambient mode runs background cycles while you're away - maintaining memories, compacting context, and doing proactive work",
