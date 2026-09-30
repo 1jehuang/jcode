@@ -1395,6 +1395,12 @@ impl App {
         if cmd == self.input.trim() {
             return false;
         }
+        // The input is already a complete command that means the same thing
+        // as the highlighted suggestion (e.g. `/account switch claude-fox`
+        // vs `/account claude switch claude-fox`): let Enter submit it.
+        if super::auth::same_account_command(self.input.trim(), &cmd) {
+            return false;
+        }
 
         self.remember_input_undo_state();
         self.input = cmd;
