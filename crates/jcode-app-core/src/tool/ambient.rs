@@ -768,6 +768,12 @@ struct ScheduleToolInput {
     success_criteria: Option<String>,
     #[serde(default)]
     target: Option<String>,
+    /// Structural self-rearm interval (fork, 2026-09-30). None = one-shot.
+    #[serde(
+        default,
+        deserialize_with = "super::serde_coerce::opt_u32_from_string_or_number"
+    )]
+    recurse_minutes: Option<u32>,
 }
 
 #[async_trait]
@@ -799,6 +805,10 @@ impl Tool for ScheduleTool {
                     "description": "Task. Required for action=create."
                 },
                 "wake_in_minutes": { "type": "integer" },
+                "recurse_minutes": {
+                    "type": "integer",
+                    "description": "Fork extension: re-arm this item structurally every N minutes after each run (same id). Use for recurring guardians. Omit for one-shot."
+                },
                 "wake_at": { "type": "string" },
                 "priority": {
                     "type": "string",
@@ -911,7 +921,7 @@ impl ScheduleTool {
                 parts.push(format!("Scheduled by session: {}", ctx.session_id));
                 Some(parts.join("\n"))
             },
-            recurse_minutes: None,
+            recurse_minutes: params.recurse_minutes.map(|m| m as i64),
         };
 
         let mut manager = AmbientManager::new()?;
