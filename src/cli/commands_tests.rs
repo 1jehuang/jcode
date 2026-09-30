@@ -1686,3 +1686,27 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
         ));
     }
 }
+
+#[test]
+fn run_explains_failover_offer_without_resending() {
+    let prompt = crate::provider::ProviderFailoverPrompt {
+        from_provider: "prof-a:glm-5.3".to_string(),
+        from_label: "prof-a".to_string(),
+        to_provider: "prof-b:glm-5.3".to_string(),
+        to_label: "prof-b (glm-5.3)".to_string(),
+        reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
+        estimated_input_chars: 40,
+        estimated_input_tokens: 10,
+    };
+    let text = format!(
+        "{:#}",
+        explain_run_failover_prompt(anyhow::anyhow!(prompt.to_error_message()))
+    );
+    assert!(!text.contains("[jcode-provider-failover]"), "{text}");
+    assert!(text.contains("prof-a is out of credit"), "{text}");
+    assert!(text.contains("did not resend"), "{text}");
+    assert!(text.contains("--model prof-b:glm-5.3"), "{text}");
+
+    let other = format!("{:#}", explain_run_failover_prompt(anyhow::anyhow!("boom")));
+    assert_eq!(other, "boom");
+}

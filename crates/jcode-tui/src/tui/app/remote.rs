@@ -170,6 +170,23 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
+    needs_redraw |= app.maybe_progress_provider_failover_countdown();
+    // The countdown stages the switch; send it here (keys are not involved).
+    // The failed turn is resent once the server confirms with ModelChanged.
+    if let Some(spec) = app.pending_model_switch.take() {
+        match remote.set_model(&spec).await {
+            Ok(_) => app.remote_model_switch_in_flight = true,
+            Err(error) => {
+                app.pending_fallback_resend = None;
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to request model switch: {}",
+                    error
+                )));
+                app.set_status_notice("Model switch failed");
+            }
+        }
+        needs_redraw = true;
+    }
 
     let _ = check_debug_command(app, remote).await;
 
