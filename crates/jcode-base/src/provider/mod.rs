@@ -1653,6 +1653,23 @@ impl MultiProvider {
     fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
         let prefix = match active {
             ActiveProvider::Claude => {
+                if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+                    && crate::config::config()
+                        .providers
+                        .get(&profile_name)
+                        .is_some_and(|profile| {
+                            matches!(
+                                profile.provider_type,
+                                crate::config::NamedProviderType::AnthropicCompatible
+                            )
+                        })
+                {
+                    // A named Anthropic profile needs its profile-prefixed
+                    // route when a session fork reapplies its selection. A
+                    // generic `anthropic-api:` prefix is treated as a switch
+                    // to the first-party Anthropic runtime.
+                    return format!("{profile_name}:{current_model}");
+                }
                 if let Some(anthropic) = self.anthropic_provider() {
                     // OAuth/ApiKey emit their canonical model prefix; Auto keeps
                     // the bare provider key (route without pinning a credential).

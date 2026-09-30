@@ -243,6 +243,18 @@ async fn explicit_anthropic_api_choice_preserves_named_profile_credentials() {
         );
         assert_eq!(provider.model(), "claude-custom");
         assert!(std::env::var("ANTHROPIC_API_KEY").is_err());
+
+        let new_session_provider = provider.fork_for_new_session();
+        assert_eq!(
+            new_session_provider.credential_mode(),
+            jcode_provider_core::CredentialMode::ApiKey,
+            "new sessions should keep the API-key route for profile {profile_name}"
+        );
+        assert_eq!(
+            new_session_provider.model(),
+            "claude-custom",
+            "new sessions should keep the configured model for profile {profile_name}"
+        );
     }
 
     for (key, value) in saved {
