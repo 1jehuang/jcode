@@ -96,9 +96,27 @@ impl ScheduledQueue {
         let (ready, remaining): (Vec<_>, Vec<_>) =
             self.items.drain(..).partition(|i| i.scheduled_for <= now);
 
+        let mut ready = ready;
+
         self.items = remaining;
 
-        let mut ready = ready;
+        // Structural self-rearm (fork, 2026-09-30): recurring items get a clone
+        // pushed back with scheduled_for = now + N minutes and the same id, so
+        // the guardian survives even if the cycle is killed mid-run. The clone
+        // is scheduled from NOW (not from scheduled_for) so a backlog of missed
+        // intervals collapses to one pending copy instead of firing in a burst.
+        // NOTE: must run AFTER `self.items = remaining` above, or the assignment
+        // wipes the re-armed clones (caught by unit test 2026-09-30).
+        for item in ready.iter() {
+            if let Some(mins) = item.recurse_minutes {
+                if mins > 0 {
+                    let mut next = item.clone();
+                    next.scheduled_for = now + chrono::Duration::minutes(mins);
+                    self.items.push(next);
+                }
+            }
+        }
+
         // Sort: highest priority first, then earliest scheduled_for
         ready.sort_by(|a, b| {
             b.priority
@@ -214,4 +232,98 @@ impl Drop for AmbientLock {
 
 fn is_pid_alive(pid: u32) -> bool {
     crate::platform::is_process_running(pid)
+}
+
+#[cfg(test)]
+mod fork_recurse_tests {
+    use super::*;
+    use crate::ambient::{Priority, ScheduleTarget};
+
+    fn item(id: &str, due_minutes_ago: i64, recurse: Option<i64>) -> ScheduledItem {
+        ScheduledItem {
+            id: id.to_string(),
+            scheduled_for: Utc::now() - chrono::Duration::minutes(due_minutes_ago),
+            context: "guardian test context".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test-session".to_string(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            recurse_minutes: recurse,
+        }
+    }
+
+    fn temp_queue() -> (ScheduledQueue, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let q = ScheduledQueue::load(dir.path().join("queue.json"));
+        (q, dir)
+    }
+
+    #[test]
+    fn recurring_item_is_rearmed_with_same_id() {
+        let (mut q, _d) = temp_queue();
+        q.push(item("g1", 5, Some(240)));
+
+        let ready = q.pop_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, "g1");
+
+        // Re-arm copy must be pending with same id, due ~240min from now.
+        let pending: Vec<_> = q.items.iter().filter(|i| i.id == "g1").collect();
+        assert_eq!(pending.len(), 1);
+        let delta = pending[0].scheduled_for - Utc::now();
+        assert!(
+            delta.num_minutes() >= 238 && delta.num_minutes() <= 240,
+            "rearm should be ~240min out, got {delta}"
+        );
+        assert!(pending[0].scheduled_for > Utc::now());
+    }
+
+    #[test]
+    fn one_shot_item_is_drained() {
+        let (mut q, _d) = temp_queue();
+        q.push(item("one-shot", 5, None));
+        let ready = q.pop_ready();
+        assert_eq!(ready.len(), 1);
+        assert!(q.items.is_empty(), "one-shot must not rearm");
+    }
+
+    #[test]
+    fn missed_intervals_collapse_to_one_pending_copy() {
+        // Item due 3 recursions ago (3 x 10min = 30min late) fires ONCE and
+        // leaves exactly ONE pending copy scheduled from now, not a burst.
+        let (mut q, _d) = temp_queue();
+        q.push(item("backlog", 30, Some(10)));
+        let ready = q.pop_ready();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(
+            q.items.len(),
+            1,
+            "exactly one pending copy, no backlog burst"
+        );
+        assert!(q.items[0].scheduled_for > Utc::now());
+    }
+
+    #[test]
+    fn recurse_zero_or_negative_is_one_shot() {
+        let (mut q, _d) = temp_queue();
+        q.push(item("zero", 5, Some(0)));
+        q.push(item("neg", 5, Some(-3)));
+        let ready = q.pop_ready();
+        assert_eq!(ready.len(), 2);
+        assert!(q.items.is_empty(), "non-positive recurse must not rearm");
+    }
+
+    #[test]
+    fn future_item_untouched_and_not_duplicated() {
+        let (mut q, _d) = temp_queue();
+        q.push(item("future", -60, Some(240)));
+        let ready = q.pop_ready();
+        assert!(ready.is_empty());
+        assert_eq!(q.items.len(), 1, "future item must not be cloned");
+    }
 }

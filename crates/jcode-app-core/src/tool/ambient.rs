@@ -143,6 +143,12 @@ struct NextScheduleInput {
     context: Option<String>,
     #[serde(default)]
     priority: Option<String>,
+    /// Structural self-rearm interval (fork, 2026-09-30). None = one-shot.
+    #[serde(
+        default,
+        deserialize_with = "super::serde_coerce::opt_i64_from_string_or_number"
+    )]
+    recurse_minutes: Option<i64>,
 }
 
 #[async_trait]
@@ -215,6 +221,7 @@ impl Tool for EndAmbientCycleTool {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            recurse_minutes: ns.recurse_minutes,
         });
 
         let now = Utc::now();
@@ -295,6 +302,12 @@ struct ScheduleInput {
     context: String,
     #[serde(default)]
     priority: Option<String>,
+    /// Structural self-rearm interval (fork, 2026-09-30). None = one-shot.
+    #[serde(
+        default,
+        deserialize_with = "super::serde_coerce::opt_u32_from_string_or_number"
+    )]
+    recurse_minutes: Option<u32>,
 }
 
 #[async_trait]
@@ -316,6 +329,10 @@ impl Tool for ScheduleAmbientTool {
                 "wake_in_minutes": {
                     "type": "integer",
                     "description": "Minutes from now to wake"
+                },
+                "recurse_minutes": {
+                    "type": "integer",
+                    "description": "Fork extension: re-arm this item structurally every N minutes after each run (same id). Use for recurring guardians instead of asking the model to re-schedule. Omit for one-shot."
                 },
                 "wake_at": {
                     "type": "string",
@@ -358,6 +375,7 @@ impl Tool for ScheduleAmbientTool {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            recurse_minutes: params.recurse_minutes.map(|m| m as i64),
         };
 
         let mut manager = AmbientManager::new()?;
@@ -893,6 +911,7 @@ impl ScheduleTool {
                 parts.push(format!("Scheduled by session: {}", ctx.session_id));
                 Some(parts.join("\n"))
             },
+            recurse_minutes: None,
         };
 
         let mut manager = AmbientManager::new()?;

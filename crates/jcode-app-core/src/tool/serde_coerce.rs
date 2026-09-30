@@ -131,6 +131,41 @@ where
     deserializer.deserialize_any(BoolOrString)
 }
 
+/// Deserialize an `Option<i64>` from either a JSON number, a numeric string,
+/// or null/missing. Empty strings deserialize to `None`. Used by the fork's
+/// `recurse_minutes` field (2026-09-30).
+pub fn opt_i64_from_string_or_number<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(serde_json::Value::String(s)) => s
+            .trim()
+            .parse::<i64>()
+            .map(Some)
+            .map_err(|_| de::Error::custom(format!("string {:?} is not a valid i64", s.trim()))),
+        Some(serde_json::Value::Number(n)) => {
+            if let Some(u) = n.as_i64() {
+                Ok(Some(u))
+            } else if let Some(f) = n.as_f64() {
+                if f.fract() == 0.0 && f >= -(2f64.powi(63)) && f < 2f64.powi(63) {
+                    Ok(Some(f as i64))
+                } else {
+                    Err(de::Error::custom(format!("number {f} is not a valid i64")))
+                }
+            } else {
+                Err(de::Error::custom("number is not a valid i64"))
+            }
+        }
+        Some(other) => Err(de::Error::custom(format!(
+            "expected i64 or numeric string, got {other}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
