@@ -217,7 +217,7 @@ pub fn ensure_menubar_helper_running() {}
 /// real user is unchanged.
 #[cfg(target_os = "macos")]
 fn global_menubar_dir() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
+    let home = real_user_home()?;
     let dir = home.join(".jcode");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
@@ -232,8 +232,47 @@ fn running_in_menubar_sandbox() -> bool {
         env_truthy("JCODE_TEST_SESSION"),
         env_truthy("JCODE_TEMP_SERVER"),
         std::env::var_os("JCODE_HOME").as_deref(),
-        dirs::home_dir().map(|home| home.join(".jcode")).as_deref(),
+        std::env::var_os("HOME").as_deref(),
+        real_user_home().as_deref(),
     )
+}
+
+/// Home directory of the current OS user from the passwd database. Unlike
+/// `dirs::home_dir()` this ignores `$HOME`, so test harnesses that override
+/// `HOME` cannot relocate the global menu bar lock. Falls back to
+/// `dirs::home_dir()` only when the passwd lookup fails.
+#[cfg(target_os = "macos")]
+fn real_user_home() -> Option<std::path::PathBuf> {
+    passwd_home_dir().or_else(dirs::home_dir)
+}
+
+#[cfg(unix)]
+fn passwd_home_dir() -> Option<std::path::PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: all pointers reference live, correctly sized buffers owned here.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut pwd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir is a NUL-terminated string inside `buf`, which is alive.
+    let dir = unsafe { CStr::from_ptr(pwd.pw_dir) }.to_bytes();
+    if dir.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
 }
 
 #[cfg(target_os = "macos")]
@@ -252,17 +291,31 @@ fn env_truthy(key: &str) -> bool {
 ///
 /// - An explicit test/temp marker forces "sandbox".
 /// - A `$JCODE_HOME` that differs from the real `~/.jcode` is a sandbox home.
+/// - A `$HOME` that differs from the passwd home is a sandbox (a process with a
+///   foreign HOME must not own the user's menu bar).
 /// - No override (or an override equal to the real home) is the real user.
 #[cfg(target_os = "macos")]
 fn is_menubar_sandbox(
     test_session: bool,
     temp_server: bool,
     custom_home: Option<&std::ffi::OsStr>,
-    real_jcode_home: Option<&std::path::Path>,
+    env_home: Option<&std::ffi::OsStr>,
+    real_home: Option<&std::path::Path>,
 ) -> bool {
     if test_session || temp_server {
         return true;
     }
+    let normalize =
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    if let (Some(env_home), Some(real)) = (env_home, real_home)
+        && !env_home.is_empty()
+        && normalize(std::path::Path::new(env_home)) != normalize(real)
+    {
+        return true;
+    }
+    let real_jcode_home = real_home.map(|home| home.join(".jcode"));
+    let real_jcode_home = real_jcode_home.as_deref();
 
     // No explicit override: the real user's default `~/.jcode`.
     let Some(custom_home) = custom_home else {
@@ -273,8 +326,6 @@ fn is_menubar_sandbox(
         // No real home to compare against: treat any explicit override as a sandbox.
         return true;
     };
-    let normalize =
-        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     normalize(custom) != normalize(real)
 }
 
@@ -440,7 +491,7 @@ mod macos {
         // to spawn from sandboxes) plus the global singleton lock below, but a
         // stray `jcode menubar` invoked directly inside a test harness should
         // still never realize a status item.
-        if super::env_truthy("JCODE_TEST_SESSION") || super::env_truthy("JCODE_TEMP_SERVER") {
+        if super::running_in_menubar_sandbox() {
             return;
         }
 
@@ -953,27 +1004,31 @@ mod tests {
         use std::ffi::OsStr;
         use std::path::Path;
 
-        let real = Path::new("/Users/me/.jcode");
+        let real = Path::new("/Users/me");
+        let home = Some(OsStr::new("/Users/me"));
 
         // Real user, no override: not a sandbox -> owns the menu bar.
-        assert!(!is_menubar_sandbox(false, false, None, Some(real)));
+        assert!(!is_menubar_sandbox(false, false, None, home, Some(real)));
+        assert!(!is_menubar_sandbox(false, false, None, None, Some(real)));
         // Override equal to the real home is still the real user.
         assert!(!is_menubar_sandbox(
             false,
             false,
             Some(OsStr::new("/Users/me/.jcode")),
+            home,
             Some(real),
         ));
 
         // Explicit test/temp markers force sandbox regardless of home.
-        assert!(is_menubar_sandbox(true, false, None, Some(real)));
-        assert!(is_menubar_sandbox(false, true, None, Some(real)));
+        assert!(is_menubar_sandbox(true, false, None, home, Some(real)));
+        assert!(is_menubar_sandbox(false, true, None, home, Some(real)));
 
         // A throwaway sandbox home (e2e / self-dev / onboarding) is a sandbox.
         assert!(is_menubar_sandbox(
             false,
             false,
             Some(OsStr::new("/private/tmp/jcode-e2e-home-xyz")),
+            home,
             Some(real),
         ));
 
@@ -982,7 +1037,73 @@ mod tests {
             false,
             false,
             Some(OsStr::new("/private/tmp/jcode-e2e-home-xyz")),
+            home,
             None,
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menubar_sandbox_detects_consistent_home_override() {
+        use std::path::Path;
+
+        // HOME and JCODE_HOME both overridden consistently (the harness case
+        // that produced duplicate status items) must be a sandbox.
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(fake_home.join(".jcode")).unwrap();
+        let real = Path::new("/Users/me");
+        assert!(is_menubar_sandbox(
+            false,
+            false,
+            Some(fake_home.join(".jcode").as_os_str()),
+            Some(fake_home.as_os_str()),
+            Some(real),
+        ));
+        // Foreign HOME with no JCODE_HOME override is also a sandbox.
+        assert!(is_menubar_sandbox(
+            false,
+            false,
+            None,
+            Some(fake_home.as_os_str()),
+            Some(real),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menubar_sandbox_accepts_symlinked_real_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join(".jcode")).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(!is_menubar_sandbox(
+            false,
+            false,
+            Some(link.join(".jcode").as_os_str()),
+            Some(link.as_os_str()),
+            Some(&real),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn passwd_home_matches_getpwuid_and_ignores_home_env() {
+        use std::ffi::CStr;
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: getpwuid returns a pointer to static storage; read immediately.
+        let expected = unsafe {
+            let pw = libc::getpwuid(libc::getuid());
+            assert!(!pw.is_null());
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+                CStr::from_ptr((*pw).pw_dir).to_bytes(),
+            ))
+        };
+        let got = passwd_home_dir().expect("passwd home");
+        assert_eq!(got, expected);
+        // The passwd lookup never consults $HOME, so it matches the real user
+        // even when a harness has set HOME elsewhere.
+        assert_eq!(real_user_home().unwrap(), expected);
     }
 }
