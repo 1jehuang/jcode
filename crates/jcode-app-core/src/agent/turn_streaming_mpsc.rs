@@ -123,6 +123,51 @@ fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
 }
 
 impl Agent {
+    /// Detect a provider route change made during the request (a transparent
+    /// model fallback such as Anthropic's retired `claude-fable-5` ->
+    /// `claude-opus-4-8`, or a switch to another OpenAI-compatible profile
+    /// serving the same model) and resync the session and clients with a
+    /// `ModelChanged`, so the header, picker, and context budget reflect the
+    /// route the provider will use next. Runs on success and on every stream
+    /// error exit, because a failed turn still leaves the provider on the new
+    /// route.
+    fn sync_route_change_after_stream(
+        &mut self,
+        event_tx: &mpsc::UnboundedSender<ServerEvent>,
+        model_at_request_start: &str,
+        provider_at_request_start: &str,
+    ) {
+        let model_after_stream = self.provider.model();
+        let provider_after_stream = self.provider.display_name();
+        if model_after_stream == model_at_request_start
+            && provider_after_stream == provider_at_request_start
+        {
+            return;
+        }
+        logging::warn(&format!(
+            "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
+            model_at_request_start,
+            provider_at_request_start,
+            model_after_stream,
+            provider_after_stream
+        ));
+        self.session.model = Some(self.provider_model());
+        self.provider_runtime_state.apply(
+            crate::provider::ProviderStateEvent::RuntimeModelObserved {
+                model: model_after_stream.clone(),
+            },
+        );
+        self.persist_session_best_effort("model fallback");
+        let _ = event_tx.send(ServerEvent::ModelChanged {
+            id: 0,
+            model: model_after_stream,
+            provider_name: Some(provider_after_stream),
+            error: None,
+            resolved_credential: self.provider.active_resolved_credential(),
+            reasoning_effort: self.provider.reasoning_effort(),
+        });
+    }
+
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
@@ -375,6 +420,11 @@ impl Agent {
                                         });
                                         continue;
                                     }
+                                    self.sync_route_change_after_stream(
+                                        &event_tx,
+                                        &model_at_request_start,
+                                        &provider_at_request_start,
+                                    );
                                     return Err(e);
                                 }
                             }
@@ -569,6 +619,15 @@ impl Agent {
                             "stream_error",
                             api_start,
                             vec![("mode", "mpsc".to_string()), ("error", err_str)],
+                        );
+                        // Out-of-credit failover may have moved the provider to
+                        // another profile before this stream failed. Tell
+                        // clients and persist it, or they keep showing the old
+                        // route while the next turn goes to the new one.
+                        self.sync_route_change_after_stream(
+                            &event_tx,
+                            &model_at_request_start,
+                            &provider_at_request_start,
                         );
                         return Err(e);
                     }
@@ -1094,6 +1153,11 @@ impl Agent {
                                 ),
                             ],
                         );
+                        self.sync_route_change_after_stream(
+                            &event_tx,
+                            &model_at_request_start,
+                            &provider_at_request_start,
+                        );
                         return Err(StreamError::new(message, retry_after_secs).into());
                     }
                 }
@@ -1209,35 +1273,11 @@ impl Agent {
             // requested model with a stale context-limit. Resync the session and
             // notify clients with a `ModelChanged` so the header, picker, and
             // context budget all reflect the model that actually served.
-            let model_after_stream = self.provider.model();
-            let provider_after_stream = self.provider.display_name();
-            if model_after_stream != model_at_request_start
-                || provider_after_stream != provider_at_request_start
-            {
-                let provider_name = provider_after_stream;
-                logging::warn(&format!(
-                    "Provider switched route mid-request: '{}' ({}) -> '{}' ({}) (resyncing session/UI)",
-                    model_at_request_start,
-                    provider_at_request_start,
-                    model_after_stream,
-                    provider_name
-                ));
-                self.session.model = Some(self.provider_model());
-                self.provider_runtime_state.apply(
-                    crate::provider::ProviderStateEvent::RuntimeModelObserved {
-                        model: model_after_stream.clone(),
-                    },
-                );
-                self.persist_session_best_effort("model fallback");
-                let _ = event_tx.send(ServerEvent::ModelChanged {
-                    id: 0,
-                    model: model_after_stream,
-                    provider_name: Some(provider_name),
-                    error: None,
-                    resolved_credential: self.provider.active_resolved_credential(),
-                    reasoning_effort: self.provider.reasoning_effort(),
-                });
-            }
+            self.sync_route_change_after_stream(
+                &event_tx,
+                &model_at_request_start,
+                &provider_at_request_start,
+            );
 
             let had_tool_calls_before = !tool_calls.is_empty();
             self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);

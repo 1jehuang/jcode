@@ -829,6 +829,89 @@ async fn run_turn_streaming_mpsc_emits_model_changed_when_only_the_profile_switc
     );
 }
 
+/// Provider that moves to another profile during the request and then fails
+/// the stream before finishing the response.
+struct MidStreamProfileSwitchThenErrorProvider {
+    profile: std::sync::Mutex<String>,
+}
+
+#[async_trait]
+impl Provider for MidStreamProfileSwitchThenErrorProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        *self.profile.lock().unwrap() = "prof-b".to_string();
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::TextDelta("hel".to_string()))).await;
+            let _ = tx
+                .send(Err(anyhow::anyhow!("connection dropped mid response")))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn display_name(&self) -> String {
+        self.profile.lock().unwrap().clone()
+    }
+
+    fn model(&self) -> String {
+        "glm-5.3".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            profile: std::sync::Mutex::new(self.profile.lock().unwrap().clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn run_turn_streaming_mpsc_syncs_route_change_when_the_stream_then_fails() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MidStreamProfileSwitchThenErrorProvider {
+        profile: std::sync::Mutex::new("prof-a".to_string()),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let result = agent.run_turn_streaming_mpsc(tx).await;
+    assert!(result.is_err(), "the stream error must still end the turn");
+
+    let mut changed = None;
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::ModelChanged {
+            model,
+            provider_name,
+            ..
+        } = event
+        {
+            changed = Some((model, provider_name));
+        }
+    }
+    assert_eq!(
+        changed,
+        Some(("glm-5.3".to_string(), Some("prof-b".to_string()))),
+        "clients must learn the provider now routes to prof-b even though the turn failed"
+    );
+}
+
 #[tokio::test]
 async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
