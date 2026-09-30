@@ -1110,8 +1110,8 @@ fn remote_history_watchdog_advises_restart_after_giving_up() {
     assert_eq!(app.display_messages().len(), before + 1);
 }
 
-/// Regression for issue #427: picking an effort-variant model row (e.g.
-/// "gpt-5.5 (high)") in remote mode must forward the chosen effort to the
+/// Regression for issue #427: picking a model and a reasoning level (e.g.
+/// gpt-5.5 at high) in remote mode must forward the chosen effort to the
 /// server after the model-switch request. Previously the effort was applied
 /// only to the local stand-in provider, so the server kept its configured
 /// default (low by default) and silently ran the new model at low effort.
@@ -1162,8 +1162,8 @@ fn forward_pending_reasoning_effort_sends_effort_request_to_server() {
     );
 }
 
-/// The dispatcher must be a no-op when no effort variant was staged (plain
-/// model rows without an effort suffix).
+/// The dispatcher must be a no-op when no level was staged (routes without a
+/// reasoning ladder switch without a level step).
 #[test]
 fn forward_pending_reasoning_effort_is_noop_without_staged_effort() {
     let mut app = create_test_app();

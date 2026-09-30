@@ -48,6 +48,7 @@ fn model_browser_state(preview: bool) -> crate::tui::InlineInteractiveState {
         filter: String::new(),
         preview,
         scoped_route_restore: Vec::new(),
+        effort_step: None,
     }
 }
 
@@ -108,8 +109,7 @@ fn focused_browser_typing_searches_and_enter_selects() {
         visible_model_names(&app)
     );
 
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
+    enter_and_confirm_level(&mut app);
     assert!(
         app.inline_interactive_state.is_none(),
         "Enter on a searched row selects it and closes the browser"
@@ -122,8 +122,7 @@ fn model_with_name_still_previews_and_enter_selects() {
     configure_test_remote_models(&mut app);
 
     type_into(&mut app, "/model g52c");
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
+    enter_and_confirm_level(&mut app);
 
     assert!(app.inline_interactive_state.is_none());
     assert!(app.input().is_empty());
@@ -136,8 +135,7 @@ fn preview_enter_after_arrow_navigation_selects_that_row() {
 
     type_into(&mut app, "/model");
     app.handle_key(KeyCode::Down, KeyModifiers::empty()).unwrap();
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
+    enter_and_confirm_level(&mut app);
 
     assert!(
         app.inline_interactive_state.is_none(),

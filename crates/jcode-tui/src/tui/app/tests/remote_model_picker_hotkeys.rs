@@ -34,6 +34,7 @@ fn remote_model_picker_preview_state() -> crate::tui::InlineInteractiveState {
         filter: String::new(),
         preview: true,
         scoped_route_restore: Vec::new(),
+        effort_step: None,
     }
 }
 
@@ -105,11 +106,24 @@ fn test_remote_model_picker_preview_ctrl_o_sets_default() {
         ))
         .expect("Ctrl+O should be handled in the remote path");
 
+        // gpt-5.5 has a reasoning ladder, so Ctrl+O first asks for the level
+        // to save with the default.
         let picker = app
             .inline_interactive_state
             .as_ref()
-            .expect("picker preview should stay open after Ctrl+O");
-        assert!(picker.preview, "picker should remain in preview mode");
+            .expect("the level step should open after Ctrl+O");
+        assert!(
+            picker.effort_step.as_ref().is_some_and(|step| step.save_default),
+            "Ctrl+O opens the save-default level step"
+        );
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .expect("Enter should confirm the level in the remote path");
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("the model list should stay open after saving the default");
+        assert!(picker.effort_step.is_none(), "back in the model list");
         assert!(
             picker.entries[0].is_default,
             "Ctrl+O must mark the selected model as the default in remote sessions"

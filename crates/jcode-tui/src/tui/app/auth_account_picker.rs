@@ -429,6 +429,7 @@ impl App {
             filter: String::new(),
             preview: false,
             scoped_route_restore: Vec::new(),
+            effort_step: None,
         });
         self.input.clear();
         self.cursor_pos = 0;

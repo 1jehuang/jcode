@@ -103,16 +103,10 @@ pub(super) fn save_agent_model_override(
     cfg.save()
 }
 
+/// The model id of a model row. Rows no longer carry an effort suffix (the
+/// level is picked in a second step), so the name is the id.
 pub(super) fn model_entry_base_name(entry: &PickerEntry) -> String {
-    if entry.effort.is_some() {
-        entry
-            .name
-            .rsplit_once(" (")
-            .map(|(base, _)| base.to_string())
-            .unwrap_or_else(|| entry.name.clone())
-    } else {
-        entry.name.clone()
-    }
+    entry.name.clone()
 }
 
 pub(super) fn openrouter_route_model_id(model: &str) -> String {

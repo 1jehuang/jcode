@@ -1462,8 +1462,8 @@ pub struct App {
     // Pending model switch from picker (for remote mode async processing)
     pending_model_switch: Option<String>,
     pending_route_selection: Option<crate::provider::RouteSelection>,
-    // Reasoning-effort variant chosen together with a model in the picker
-    // (e.g. "gpt-5.5 (high)"), staged for remote mode alongside the model
+    // Reasoning level chosen for a model in the picker's level step (e.g.
+    // gpt-5.5 at high), staged for remote mode alongside the model
     // switch. Without forwarding this to the server, it keeps its configured
     // default effort (low by default) and silently runs the newly selected
     // model at the wrong effort (issue #427).

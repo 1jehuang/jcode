@@ -1503,6 +1503,22 @@ pub struct InlineInteractiveState {
     /// had before). Restored when the scope no longer applies, so a temporary
     /// filter never changes where a later unscoped selection goes.
     pub scoped_route_restore: Vec<(usize, usize)>,
+    /// Set while the `/model` picker shows the reasoning-level step for one
+    /// model. The entries are then one row per level, and the model list is
+    /// kept here so Esc can return to it unchanged.
+    pub effort_step: Option<Box<ModelEffortStep>>,
+}
+
+/// Second step of the `/model` picker: choose a reasoning level for `model`.
+#[derive(Debug, Clone)]
+pub struct ModelEffortStep {
+    /// The model row that was picked, with its chosen route selected.
+    pub model: PickerEntry,
+    /// The model list as it was, restored on Esc.
+    pub parent: InlineInteractiveState,
+    /// Opened by the save-default key: Enter saves model + level as the
+    /// default instead of switching.
+    pub save_default: bool,
 }
 
 impl InlineInteractiveState {
