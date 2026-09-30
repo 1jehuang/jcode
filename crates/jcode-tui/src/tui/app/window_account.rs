@@ -328,6 +328,14 @@ impl App {
         if requested_here {
             return;
         }
+        // The server moved the window on its own (failover, return home).
+        // That is newer than any pin request still in flight for this
+        // family, so a late Done must not put the requested label back.
+        for request in self.pending_account_requests.values_mut() {
+            if request.scope() == Some((provider.as_str(), true)) {
+                *request = PendingAccountRequest::Superseded;
+            }
+        }
         if let Some(reason) = reason.filter(|r| !r.trim().is_empty()) {
             let to = label.as_deref().unwrap_or("the default account");
             let text = match previous.as_deref() {

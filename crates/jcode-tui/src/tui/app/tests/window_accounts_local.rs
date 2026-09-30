@@ -580,3 +580,36 @@ fn rejected_switch_does_not_hide_older_confirmation() {
         );
     });
 }
+
+/// fox pending, a newer switch rejected, then the server moves the window to
+/// otter on its own. The late fox Done must not put fox back or claim it.
+#[test]
+fn independent_move_beats_late_older_confirmation() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.replace_window_accounts(vec![claude_window("claude-owl", true)]);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        pending_use(&mut app, 1, "claude-fox");
+        pending_use(&mut app, 2, "claude-bogus");
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 2,
+                message: "no such account".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        app.handle_server_event(account_changed("claude-otter", Some("failover")), &mut remote);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 1 }, &mut remote);
+        assert_eq!(
+            app.window_account_label("claude").as_deref(),
+            Some("claude-otter"),
+            "late Done overwrote the server's move"
+        );
+        let last = app.display_messages().last().unwrap().content.clone();
+        assert!(!last.contains("now uses claude-fox"), "late Done announced fox: {last}");
+    });
+}
