@@ -44,21 +44,23 @@ pub(crate) fn stored_default_label(family: &str) -> Option<String> {
     }
 }
 
-/// Identity captured at pin time (email, else OpenAI account id) so a pin
-/// survives positional relabeling.
+/// Identity captured at pin time, in the exact form credential loading
+/// compares (`auth::*::account_identity`), so a pin survives positional
+/// relabeling and is never mistaken for another login.
 fn pin_identity(family: &str, label: &str) -> Option<String> {
     match family {
-        "claude" => crate::auth::claude::list_accounts()
-            .ok()?
-            .into_iter()
-            .find(|a| a.label == label)
-            .and_then(|a| a.email),
-        "openai" => crate::auth::codex::list_accounts()
-            .ok()?
-            .into_iter()
-            .find(|a| a.label == label)
-            .and_then(|a| a.email.or(a.account_id)),
+        "claude" => crate::auth::claude::pin_for_label(label).ok()?.identity,
+        "openai" => crate::auth::codex::pin_for_label(label).ok()?.identity,
         _ => None,
+    }
+}
+
+/// Current label of the account a pin names, by identity (see
+/// `auth::*::resolve_pin`).
+fn resolve_local_pin(kind: AccountProviderKind, pin: &AccountPin) -> Option<String> {
+    match kind {
+        AccountProviderKind::Claude => crate::auth::claude::resolve_pin(pin),
+        AccountProviderKind::OpenAi => crate::auth::codex::resolve_pin(pin),
     }
 }
 
@@ -336,6 +338,52 @@ impl App {
         Ok(())
     }
 
+    /// Local (standalone) resume: push the session's account pins, failover
+    /// toggle, and failover home onto the provider, like the server agent's
+    /// `restore_account_pins_from_session`. A pin whose identity is gone (or
+    /// whose label now names another login) is dropped and the user is told.
+    pub(crate) fn restore_local_window_accounts(&mut self) {
+        let mut dropped = Vec::new();
+        for kind in AccountProviderKind::ALL {
+            let key = kind.key();
+            match self.session.account_pins.get(key).cloned() {
+                Some(pin) => match resolve_local_pin(kind, &pin) {
+                    Some(label) => {
+                        let pin = AccountPin::new(label, pin.identity.clone());
+                        if self.provider.set_account_pin(kind, Some(pin.clone())).is_ok() {
+                            self.session.account_pins.insert(key.to_string(), pin);
+                        }
+                    }
+                    None => {
+                        let _ = self.provider.set_account_pin(kind, None);
+                        let default = stored_default_label(key);
+                        dropped.push((key, pin.label.clone(), default));
+                    }
+                },
+                None => {
+                    if self.provider.account_pin(kind).is_some() {
+                        let _ = self.provider.set_account_pin(kind, None);
+                    }
+                }
+            }
+            self.provider
+                .set_account_failover_home(kind, self.session.account_failover_home.get(key).cloned());
+        }
+        for (key, label, default) in &dropped {
+            self.session.account_pins.remove(*key);
+            let reason = match default {
+                Some(default) => format!("{label} is no longer available, this window uses the default {default}"),
+                None => format!("{label} is no longer available, this window uses the default account"),
+            };
+            self.push_display_message(DisplayMessage::system(format!("⚡ {reason}")));
+        }
+        if !dropped.is_empty() {
+            let _ = self.session.save();
+        }
+        self.window_account_failover = self.session.account_failover;
+        self.provider.set_account_failover(self.session.account_failover);
+    }
+
     fn apply_set_default(&mut self, family: &str, label: &str) -> Result<(), String> {
         let result = match family {
             "claude" => crate::auth::claude::set_active_account(label),
@@ -457,6 +505,9 @@ impl App {
                     };
                     self.window_account_failover = enabled;
                     self.session.account_failover = enabled;
+                    // The provider decides whether to fail over; the session
+                    // field alone only changes what is displayed.
+                    self.provider.set_account_failover(enabled);
                     let _ = self.session.save();
                     self.push_display_message(DisplayMessage::system(failover_set_message(
                         enabled,
