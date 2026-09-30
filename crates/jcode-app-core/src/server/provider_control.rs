@@ -1575,21 +1575,27 @@ pub(super) async fn apply_subscribe_account_pins(
     }
     for (kind, label) in rejected {
         let known = crate::session_accounts::stored_labels(kind);
-        let info = crate::session_accounts::account_info(agent_guard.provider_handle().as_ref(), kind);
+        let info =
+            crate::session_accounts::account_info(agent_guard.provider_handle().as_ref(), kind);
         let uses = info
             .label
             .as_deref()
             .map(|current| format!("this window uses {current}"))
             .unwrap_or_else(|| "this window uses the default account".to_string());
         let saved = if known.is_empty() {
-            format!("no {} accounts are saved on the server", crate::session_accounts::provider_display(kind))
+            format!(
+                "no {} accounts are saved on the server",
+                crate::session_accounts::provider_display(kind)
+            )
         } else {
             format!("saved: {}", known.join(", "))
         };
         let _ = client_event_tx.send(crate::session_accounts::account_changed_event(
             agent_guard.provider_handle().as_ref(),
             kind,
-            Some(format!("--account {label} was not found on the server ({saved}), {uses}")),
+            Some(format!(
+                "--account {label} was not found on the server ({saved}), {uses}"
+            )),
         ));
     }
 }

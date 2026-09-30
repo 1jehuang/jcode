@@ -494,7 +494,9 @@ async fn subscribe_account_pin_not_found_is_reported_to_client() {
     };
     let reason = reason.expect("reason");
     assert!(
-        reason.contains("claude-zebra") && reason.contains("not found") && reason.contains("claude-otter"),
+        reason.contains("claude-zebra")
+            && reason.contains("not found")
+            && reason.contains("claude-otter"),
         "{reason}"
     );
     assert_eq!(label.as_deref(), Some("claude-otter"));

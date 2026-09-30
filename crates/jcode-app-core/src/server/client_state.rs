@@ -25,6 +25,32 @@ use tokio::sync::{Mutex, RwLock};
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 
+/// Provider handle of each shared agent, readable without the agent lock.
+/// An agent's provider is fixed at construction, so this never goes stale.
+/// Keyed by the agent's `Arc` address, checked against a `Weak` so a reused
+/// address never matches a dead agent.
+type AgentProviderEntry = (std::sync::Weak<Mutex<Agent>>, Arc<dyn Provider>);
+static AGENT_PROVIDERS: LazyLock<StdMutex<HashMap<usize, AgentProviderEntry>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Record the provider an agent streams with. Call wherever a shared agent is built.
+pub(crate) fn register_agent_provider(agent: &Arc<Mutex<Agent>>, provider: Arc<dyn Provider>) {
+    let mut map = AGENT_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, (weak, _)| weak.strong_count() > 0);
+    map.insert(
+        Arc::as_ptr(agent) as usize,
+        (Arc::downgrade(agent), provider),
+    );
+}
+
+/// The provider `agent` streams with, without taking the agent lock.
+pub(crate) fn agent_provider(agent: &Arc<Mutex<Agent>>) -> Option<Arc<dyn Provider>> {
+    let map = AGENT_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+    map.get(&(Arc::as_ptr(agent) as usize))
+        .filter(|(weak, _)| weak.upgrade().is_some_and(|live| Arc::ptr_eq(&live, agent)))
+        .map(|(_, provider)| Arc::clone(provider))
+}
+
 fn optional_token_usage_totals(totals: TokenUsageTotals) -> Option<TokenUsageTotals> {
     (totals.messages_with_token_usage > 0).then_some(totals)
 }
@@ -258,6 +284,11 @@ pub(super) async fn handle_get_model_catalog(
                     .or_else(|_| Session::load_startup_stub(session_id))
                     .ok();
                 let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
+                // The connection's `provider` belongs to its FIRST agent. After a
+                // live attach `agent` is another connection's agent with its own
+                // provider, so read that one. Fall back to the connection's handle
+                // only for an agent that was never registered.
+                let provider = &agent_provider(agent).unwrap_or_else(|| Arc::clone(provider));
                 let mut model_routes = provider.model_routes();
                 crate::model_usage::enrich_routes(&mut model_routes);
                 (
@@ -276,9 +307,9 @@ pub(super) async fn handle_get_model_catalog(
                     // A brand-new session may not be on disk yet. Its pins are
                     // then empty, but stored accounts still apply. An empty list
                     // here would erase the window's account badge (#1613 flake).
-                    // `provider` is the handle the agent streams with (it is
-                    // never replaced), so its live pins win: a window pinned
-                    // with `--account` before its first save has none on disk.
+                    // `provider` is the reported agent's own streaming handle
+                    // (see above), so its live pins win: a window pinned with
+                    // `--account` before its first save has none on disk.
                     crate::session_accounts::account_infos_from_pins(&{
                         let mut pins = persisted
                             .as_ref()

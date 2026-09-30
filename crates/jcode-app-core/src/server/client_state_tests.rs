@@ -804,7 +804,9 @@ async fn handle_get_model_catalog_busy_unsaved_session_keeps_account_labels() {
     let mut bytes = Vec::new();
     stream_b.read_to_end(&mut bytes).await.expect("read");
     let mut line = String::new();
-    std::io::Cursor::new(bytes).read_line(&mut line).expect("line");
+    std::io::Cursor::new(bytes)
+        .read_line(&mut line)
+        .expect("line");
     let event: crate::protocol::ServerEvent = serde_json::from_str(line.trim()).expect("decode");
     let crate::protocol::ServerEvent::History { account_labels, .. } = event else {
         panic!("expected history event");
@@ -815,7 +817,11 @@ async fn handle_get_model_catalog_busy_unsaved_session_keeps_account_labels() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
-    assert_eq!(account_labels.len(), 1, "account_labels: {account_labels:?}");
+    assert_eq!(
+        account_labels.len(),
+        1,
+        "account_labels: {account_labels:?}"
+    );
     assert_eq!(account_labels[0].label.as_deref(), Some("claude-otter"));
     assert!(account_labels[0].is_default);
 }
@@ -908,7 +914,9 @@ async fn handle_get_model_catalog_busy_unsaved_session_reports_live_pin() {
     let mut bytes = Vec::new();
     stream_b.read_to_end(&mut bytes).await.expect("read");
     let mut line = String::new();
-    std::io::Cursor::new(bytes).read_line(&mut line).expect("line");
+    std::io::Cursor::new(bytes)
+        .read_line(&mut line)
+        .expect("line");
     let event: crate::protocol::ServerEvent = serde_json::from_str(line.trim()).expect("decode");
     let crate::protocol::ServerEvent::History { account_labels, .. } = event else {
         panic!("expected history event");
@@ -919,8 +927,94 @@ async fn handle_get_model_catalog_busy_unsaved_session_reports_live_pin() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
-    assert_eq!(account_labels.len(), 1, "account_labels: {account_labels:?}");
+    assert_eq!(
+        account_labels.len(),
+        1,
+        "account_labels: {account_labels:?}"
+    );
     assert_eq!(account_labels[0].label.as_deref(), Some("claude-fox"));
     assert!(account_labels[0].pinned);
     assert!(!account_labels[0].is_default);
+}
+
+/// After a live attach, `handle_client` passes the attached session's agent
+/// but its own first provider. The busy fallback must report the attached
+/// agent's pin (claude-fox), not the abandoned first session's (claude-otter).
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test intentionally keeps the agent busy lock held to exercise model-catalog fallback"
+)]
+#[tokio::test]
+async fn handle_get_model_catalog_busy_live_attach_reports_attached_agent_pin() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    std::fs::write(
+        temp_home.path().join("auth.json"),
+        r#"{"anthropic_accounts":[{"label":"claude-otter","access":"a","refresh":"r","expires":1},{"label":"claude-fox","access":"b","refresh":"s","expires":1}],"active_anthropic_account":"claude-otter"}"#,
+    )
+    .expect("write auth file");
+
+    let claude = crate::provider::AccountProviderKind::Claude;
+    // Connection A's first provider, pinned by its `--account`.
+    let connection_provider: Arc<dyn Provider> =
+        Arc::new(PinnedProvider(std::sync::Mutex::new(None)));
+    connection_provider
+        .set_account_pin(
+            claude,
+            Some(crate::provider::AccountPin::new("claude-otter", None)),
+        )
+        .expect("pin otter");
+    // Session S, owned by another connection, streams with its own provider.
+    let session_id = "session_busy_live_attach_catalog";
+    let target_provider: Arc<dyn Provider> = Arc::new(PinnedProvider(std::sync::Mutex::new(None)));
+    let target_agent = Arc::new(Mutex::new(Agent::new_with_session(
+        target_provider.clone(),
+        Registry::empty(),
+        crate::session::Session::create_with_id(session_id.to_string(), None, None),
+        None,
+    )));
+    let target_handle = target_agent.lock().await.provider_handle();
+    super::register_agent_provider(&target_agent, target_handle);
+    target_provider
+        .set_account_pin(
+            claude,
+            Some(crate::provider::AccountPin::new("claude-fox", None)),
+        )
+        .expect("pin fox");
+    let busy_guard = target_agent.lock().await;
+
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+    handle_get_model_catalog(46, session_id, &target_agent, &connection_provider, &writer)
+        .await
+        .expect("catalog fallback");
+    drop(busy_guard);
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b.read_to_end(&mut bytes).await.expect("read");
+    let mut line = String::new();
+    std::io::Cursor::new(bytes)
+        .read_line(&mut line)
+        .expect("line");
+    let event: crate::protocol::ServerEvent = serde_json::from_str(line.trim()).expect("decode");
+    let crate::protocol::ServerEvent::History { account_labels, .. } = event else {
+        panic!("expected history event");
+    };
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    assert_eq!(
+        account_labels.len(),
+        1,
+        "account_labels: {account_labels:?}"
+    );
+    assert_eq!(account_labels[0].label.as_deref(), Some("claude-fox"));
+    assert!(account_labels[0].pinned);
 }

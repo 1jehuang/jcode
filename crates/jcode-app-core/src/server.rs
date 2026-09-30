@@ -964,9 +964,11 @@ impl Server {
                 )
                 .await;
 
+            let agent_provider = Arc::clone(&provider);
             let agent = Arc::new(Mutex::new(Agent::new_with_session(
                 provider, registry, session, None,
             )));
+            self::client_state::register_agent_provider(&agent, agent_provider);
 
             {
                 let mut sessions = self.sessions.write().await;
