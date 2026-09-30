@@ -535,9 +535,10 @@ fn anthropic_status_error(
             None => usage_limit_body,
         };
         if far {
+            let now = chrono::Utc::now();
             let detail = match reset_in {
                 Some(secs) => {
-                    let at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+                    let at = now + chrono::Duration::seconds(secs as i64);
                     format!(
                         " Usage limit reached for this Claude account; resets in {} ({} UTC).",
                         format_reset_duration(secs),
@@ -546,8 +547,13 @@ fn anthropic_status_error(
                 }
                 None => " Usage limit reached for this Claude account.".to_string(),
             };
+            // Stable marker so same-provider account failover can detect the
+            // exhaustion without matching the wording above.
+            let marker = jcode_provider_core::account_usage_limit_marker(
+                reset_in.map(|secs| now.timestamp() + secs as i64),
+            );
             return anyhow::Error::new(UsageLimitExhausted {
-                message: format!("{message}{detail}"),
+                message: format!("{message}{detail} {marker}"),
             });
         }
     }

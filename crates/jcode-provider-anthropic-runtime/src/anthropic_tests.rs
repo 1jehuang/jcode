@@ -2750,6 +2750,22 @@ fn short_429_keeps_retry_after_and_far_usage_limit_is_terminal() {
     assert!(far.downcast_ref::<UsageLimitExhausted>().is_some());
     assert!(far.to_string().contains("resets in 5h"), "{far}");
 
+    // Account failover detects exhaustion through the stable marker only.
+    let far_limit = jcode_provider_core::classify_account_usage_limit(&format!("{far:#}"))
+        .expect("far usage limit must carry the account-usage-limit marker");
+    let resets_at = far_limit.resets_at.expect("marker carries resets_at");
+    assert!((resets_at - (now + 5 * 3600 + 60)).abs() <= 2, "{far}");
+    assert_eq!(
+        jcode_provider_core::classify_account_usage_limit(&format!("{near:#}")),
+        None,
+        "a reset within 120 s is a short 429, not exhaustion"
+    );
+    assert_eq!(
+        jcode_provider_core::classify_account_usage_limit(&format!("{short:#}")),
+        None,
+        "a plain retry-after 429 is not exhaustion"
+    );
+
     // No unified headers, but the body names a usage limit.
     let body_only = anthropic_status_error(
         reqwest::StatusCode::TOO_MANY_REQUESTS,
@@ -2757,6 +2773,10 @@ fn short_429_keeps_retry_after_and_far_usage_limit_is_terminal() {
         "You have reached your usage limit",
     );
     assert!(body_only.downcast_ref::<UsageLimitExhausted>().is_some());
+    assert_eq!(
+        jcode_provider_core::classify_account_usage_limit(&format!("{body_only:#}")),
+        Some(jcode_provider_core::AccountUsageLimit { resets_at: None })
+    );
 
     // Other statuses are untouched.
     let server = anthropic_status_error(
