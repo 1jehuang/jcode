@@ -1458,8 +1458,21 @@ fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) 
                 if let Some((done, total)) = super::messages::todo_payload_counts(payload) {
                     title = format!(" Todos {}/{} ", done, total);
                 }
-                // Unboxed body: the band draws its own border below.
-                super::messages::render_todo_card_body(payload, inner_width).unwrap_or_default()
+                // Unboxed body: the band draws its own border below. Go through
+                // the shared message-line cache so an unchanged list is not
+                // re-rendered on every frame. The distinct title keeps this
+                // entry apart from the boxed inline card for the same payload.
+                let msg = crate::tui::DisplayMessage::todos(payload.to_string())
+                    .with_title("Todos (pinned body)");
+                super::messages::get_cached_message_lines(
+                    &msg,
+                    inner_width,
+                    app.diff_mode(),
+                    |msg, width, _| {
+                        super::messages::render_todo_card_body(&msg.content, width)
+                            .unwrap_or_default()
+                    },
+                )
             })
             .unwrap_or_default()
     } else {
