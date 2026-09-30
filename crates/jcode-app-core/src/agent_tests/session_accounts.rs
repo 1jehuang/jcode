@@ -477,3 +477,44 @@ async fn weak_identity_pin_still_accepts_label_match() {
         Some("claude-otter")
     );
 }
+
+/// Greptile "Restore notice contradicts replacement": a dropped pin's notice
+/// goes out after Subscribe may have pinned a replacement. It must name the
+/// account the window really uses.
+#[tokio::test]
+async fn dropped_pin_notice_names_the_replacement_pin() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+    store_claude_accounts();
+    restore_claude_accounts_as(&[
+        ("claude-otter", "otter@example.com"),
+        ("claude-fox", "wolf@example.com"),
+    ]);
+    let mut saved = Session::create(None, None);
+    saved.account_pins.insert("claude".to_string(), fox_pin());
+    saved.save_prepared().expect("persist session");
+
+    let provider = PinProvider::new(None);
+    let provider_dyn: Arc<dyn Provider> = Arc::new(provider.clone());
+    let registry = Registry::new(provider_dyn.clone()).await;
+    let mut agent = Agent::new(provider_dyn, registry);
+    agent.restore_session(&saved.id).expect("resume");
+    // Subscribe's `--account` replacement lands before the notice is sent.
+    agent
+        .set_account_pin(
+            AccountProviderKind::Claude,
+            Some(AccountPin::new("claude-fox", Some("wolf@example.com".to_string()))),
+        )
+        .expect("replacement pin");
+    let reason = agent
+        .take_account_notices()
+        .into_iter()
+        .find_map(|event| match event {
+            ServerEvent::SessionAccountChanged { reason, .. } => reason,
+            _ => None,
+        })
+        .expect("notice");
+    assert!(
+        !reason.contains("uses the default") && reason.contains("this window uses claude-fox"),
+        "notice contradicts the replacement pin: {reason}"
+    );
+}

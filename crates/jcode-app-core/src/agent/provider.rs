@@ -292,11 +292,13 @@ impl Agent {
     pub fn take_account_notices(&mut self) -> Vec<ServerEvent> {
         std::mem::take(&mut self.pending_account_notices)
             .into_iter()
-            .map(|(kind, reason)| {
+            .map(|(kind, what)| {
+                let uses =
+                    crate::session_accounts::current_use_suffix(self.provider.as_ref(), kind);
                 crate::session_accounts::account_changed_event(
                     self.provider.as_ref(),
                     kind,
-                    Some(reason),
+                    Some(format!("{what}{uses}")),
                 )
             })
             .collect()

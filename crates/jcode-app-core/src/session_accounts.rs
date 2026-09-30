@@ -104,7 +104,7 @@ pub fn dropped_pin_reason(kind: AccountProviderKind, pin: &AccountPin) -> String
     let relabeled = stored_accounts(kind)
         .iter()
         .any(|(label, _)| *label == pin.label);
-    let what = if relabeled {
+    if relabeled {
         format!(
             "{} now belongs to a different {} login",
             pin.label,
@@ -112,10 +112,18 @@ pub fn dropped_pin_reason(kind: AccountProviderKind, pin: &AccountPin) -> String
         )
     } else {
         format!("{} was removed", pin.label)
-    };
-    match default_label(kind) {
-        Some(default) => format!("{what}, this window uses the default {default}"),
-        None => format!("{what}, this window uses the default account"),
+    }
+}
+
+/// ", this window uses X" for the account `provider` uses right now. Built
+/// when a notice is sent, so a pin applied after it was queued is reflected.
+pub fn current_use_suffix(provider: &dyn Provider, kind: AccountProviderKind) -> String {
+    match provider.account_pin(kind) {
+        Some(pin) => format!(", this window uses {}", pin.label),
+        None => match default_label(kind) {
+            Some(default) => format!(", this window uses the default {default}"),
+            None => ", this window uses the default account".to_string(),
+        },
     }
 }
 
