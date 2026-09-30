@@ -15,8 +15,7 @@ pub(crate) fn account_family(provider: &str) -> Option<&'static str> {
     let normalized = provider.trim().to_ascii_lowercase();
     if normalized.starts_with("claude") || normalized.starts_with("anthropic") {
         Some("claude")
-    } else if normalized.starts_with("openai")
-        || matches!(normalized.as_str(), "codex" | "chatgpt")
+    } else if normalized.starts_with("openai") || matches!(normalized.as_str(), "codex" | "chatgpt")
     {
         Some("openai")
     } else {
@@ -105,10 +104,20 @@ fn family_display(family: &str) -> &'static str {
 /// An account request sent to the server and not yet answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingAccountRequest {
-    UseInWindow { family: String, label: String },
-    SetDefault { family: String, label: String },
-    Unpin { family: String },
-    Failover { enabled: Option<bool> },
+    UseInWindow {
+        family: String,
+        label: String,
+    },
+    SetDefault {
+        family: String,
+        label: String,
+    },
+    Unpin {
+        family: String,
+    },
+    Failover {
+        enabled: Option<bool>,
+    },
     /// A newer request of the same scope was already answered, so this
     /// one's answer is stale and must not change what the window shows.
     Superseded,
@@ -129,13 +138,15 @@ impl PendingAccountRequest {
     /// the server applying this request.
     fn produces(&self, family: &str, label: Option<&str>, pinned: bool) -> bool {
         match self {
-            Self::UseInWindow { family: f, label: l } => {
-                f == family && pinned && label == Some(l.as_str())
-            }
+            Self::UseInWindow {
+                family: f,
+                label: l,
+            } => f == family && pinned && label == Some(l.as_str()),
             Self::Unpin { family: f } => f == family && !pinned,
-            Self::SetDefault { family: f, label: l } => {
-                f == family && !pinned && label == Some(l.as_str())
-            }
+            Self::SetDefault {
+                family: f,
+                label: l,
+            } => f == family && !pinned && label == Some(l.as_str()),
             _ => false,
         }
     }
@@ -156,9 +167,7 @@ pub(crate) fn set_default_message(label: &str, window: Option<&SessionAccountInf
         Some((current, true)) if current != label => format!(
             "New windows now use {label}. This window stays pinned to {current} (/account switch {label} to move it)."
         ),
-        _ => format!(
-            "New windows and windows without a pin now use {label}, including this one."
-        ),
+        _ => format!("New windows and windows without a pin now use {label}, including this one."),
     }
 }
 
@@ -334,6 +343,57 @@ impl App {
         }
     }
 
+    /// Local turn start: return to the preferred account once it reset, then
+    /// snapshot the provider's pins so the turn end can spot a failover.
+    /// Same shared logic as the server agent's turn.
+    pub(crate) fn local_account_turn_start(&mut self) -> crate::session_accounts::ObservedPins {
+        let provider = self.provider.clone();
+        let mut observed = crate::session_accounts::observe_pins(provider.as_ref());
+        let events = crate::session_accounts::return_home_if_reset(
+            provider.as_ref(),
+            &mut self.session,
+            &mut observed,
+        );
+        if !events.is_empty() {
+            let _ = self.session.save();
+            self.apply_local_account_events(events);
+        }
+        observed
+    }
+
+    /// Local turn end (every exit path): save a failover move and failover
+    /// home to the session and tell the user, like the server agent does.
+    pub(crate) fn local_account_turn_end(
+        &mut self,
+        mut observed: crate::session_accounts::ObservedPins,
+    ) {
+        let provider = self.provider.clone();
+        let (changed, events) = crate::session_accounts::sync_pins_after_stream(
+            provider.as_ref(),
+            &mut self.session,
+            &mut observed,
+        );
+        if changed {
+            let _ = self.session.save();
+        }
+        self.apply_local_account_events(events);
+    }
+
+    fn apply_local_account_events(&mut self, events: Vec<crate::protocol::ServerEvent>) {
+        for event in events {
+            if let crate::protocol::ServerEvent::SessionAccountChanged {
+                provider,
+                label,
+                pinned,
+                is_default,
+                reason,
+            } = event
+            {
+                self.handle_session_account_changed(provider, label, pinned, is_default, reason);
+            }
+        }
+    }
+
     /// Credentials of `account_label` changed. Only relevant to this window
     /// when unscoped or when it is this window's own account.
     pub(super) fn credential_change_is_for_this_window(
@@ -386,7 +446,11 @@ impl App {
         crate::auth::AuthStatus::invalidate_cache();
         self.context_limit = self.provider.context_window() as u64;
         self.context_warning_shown = false;
-        let held = if family == "claude" { "anthropic" } else { "openai" };
+        let held = if family == "claude" {
+            "anthropic"
+        } else {
+            "openai"
+        };
         self.release_rate_limit_hold_after_credentials_changed(Some(held));
         Ok(())
     }
@@ -403,7 +467,11 @@ impl App {
                 Some(pin) => match resolve_local_pin(kind, &pin) {
                     Some(label) => {
                         let pin = AccountPin::new(label, pin.identity.clone());
-                        if self.provider.set_account_pin(kind, Some(pin.clone())).is_ok() {
+                        if self
+                            .provider
+                            .set_account_pin(kind, Some(pin.clone()))
+                            .is_ok()
+                        {
                             self.session.account_pins.insert(key.to_string(), pin);
                         }
                     }
@@ -419,14 +487,20 @@ impl App {
                     }
                 }
             }
-            self.provider
-                .set_account_failover_home(kind, self.session.account_failover_home.get(key).cloned());
+            self.provider.set_account_failover_home(
+                kind,
+                self.session.account_failover_home.get(key).cloned(),
+            );
         }
         for (key, label, default) in &dropped {
             self.session.account_pins.remove(*key);
             let reason = match default {
-                Some(default) => format!("{label} is no longer available, this window uses the default {default}"),
-                None => format!("{label} is no longer available, this window uses the default account"),
+                Some(default) => format!(
+                    "{label} is no longer available, this window uses the default {default}"
+                ),
+                None => {
+                    format!("{label} is no longer available, this window uses the default account")
+                }
             };
             self.push_display_message(DisplayMessage::system(format!("⚡ {reason}")));
         }
@@ -434,7 +508,8 @@ impl App {
             let _ = self.session.save();
         }
         self.window_account_failover = self.session.account_failover;
-        self.provider.set_account_failover(self.session.account_failover);
+        self.provider
+            .set_account_failover(self.session.account_failover);
     }
 
     fn apply_set_default(&mut self, family: &str, label: &str) -> Result<(), String> {
@@ -460,7 +535,11 @@ impl App {
         }
         crate::auth::AuthStatus::invalidate_cache();
         // An unpinned window follows the new default.
-        if let Some(info) = self.window_accounts.iter_mut().find(|i| i.provider == family) {
+        if let Some(info) = self
+            .window_accounts
+            .iter_mut()
+            .find(|i| i.provider == family)
+        {
             if info.pinned {
                 info.is_default = info.label.as_deref() == Some(label);
             } else {
@@ -490,9 +569,10 @@ impl App {
                 match self.apply_local_pin(family, Some(&label)) {
                     Ok(()) => {
                         let default = stored_default_label(family);
-                        self.push_display_message(DisplayMessage::system(
-                            use_in_window_message(&label, default.as_deref()),
-                        ));
+                        self.push_display_message(DisplayMessage::system(use_in_window_message(
+                            &label,
+                            default.as_deref(),
+                        )));
                         self.set_status_notice(format!("Account: {label} (this window)"));
                     }
                     Err(e) => self.push_display_message(DisplayMessage::error(format!(
@@ -724,7 +804,11 @@ impl App {
             }
             PendingAccountRequest::SetDefault { family, label } => {
                 let window = self.window_account(&family);
-                if let Some(info) = self.window_accounts.iter_mut().find(|i| i.provider == family) {
+                if let Some(info) = self
+                    .window_accounts
+                    .iter_mut()
+                    .find(|i| i.provider == family)
+                {
                     if info.pinned {
                         info.is_default = info.label.as_deref() == Some(label.as_str());
                     } else {
@@ -774,7 +858,11 @@ impl App {
             } else {
                 self.session.account_failover
             })
-            .unwrap_or(crate::config::config().provider.same_provider_account_failover)
+            .unwrap_or(
+                crate::config::config()
+                    .provider
+                    .same_provider_account_failover,
+            )
     }
 
     /// `/account failover status`: this window's account, the default, the
@@ -828,7 +916,10 @@ impl App {
                 }
             ));
             for label in &labels {
-                lines.push(format!("  - {label}: {}", account_limit_state(family, label)));
+                lines.push(format!(
+                    "  - {label}: {}",
+                    account_limit_state(family, label)
+                ));
             }
         }
         if lines.len() == 1 {
@@ -900,14 +991,19 @@ mod tests {
             use_in_window_message("claude-fox", Some("claude-otter")),
             "This window now uses claude-fox. The default for new windows is still claude-otter (/account default claude-fox to change it)."
         );
-        assert!(use_in_window_message("claude-fox", Some("claude-fox")).contains("also the default"));
+        assert!(
+            use_in_window_message("claude-fox", Some("claude-fox")).contains("also the default")
+        );
         let pinned = SessionAccountInfo {
             provider: "claude".into(),
             label: Some("claude-otter".into()),
             pinned: true,
             is_default: false,
         };
-        assert!(set_default_message("claude-fox", Some(&pinned)).contains("stays pinned to claude-otter"));
+        assert!(
+            set_default_message("claude-fox", Some(&pinned))
+                .contains("stays pinned to claude-otter")
+        );
     }
 
     #[test]

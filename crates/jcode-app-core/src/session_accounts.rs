@@ -277,3 +277,116 @@ pub fn account_changed_event(
         reason,
     }
 }
+
+/// Per-provider pin the provider reported after the last pin change or sync.
+/// Only a change from this baseline is a move the provider made itself.
+pub type ObservedPins = BTreeMap<AccountProviderKind, Option<AccountPin>>;
+
+/// Snapshot the provider's current pins as the baseline for the next sync.
+pub fn observe_pins(provider: &dyn Provider) -> ObservedPins {
+    AccountProviderKind::ALL
+        .into_iter()
+        .map(|kind| (kind, provider.account_pin(kind)))
+        .collect()
+}
+
+/// Copy account moves the provider made on its own (same-provider failover)
+/// and its failover home into `session`. Returns whether the session changed
+/// (the caller persists it) and the events that tell the user. Shared by the
+/// server agent and local TUI turns.
+pub fn sync_pins_after_stream(
+    provider: &dyn Provider,
+    session: &mut Session,
+    observed: &mut ObservedPins,
+) -> (bool, Vec<crate::protocol::ServerEvent>) {
+    let mut changed = false;
+    let mut events = Vec::new();
+    for kind in AccountProviderKind::ALL {
+        let key = kind.key();
+        let provider_pin = provider.account_pin(kind);
+        let session_pin = session.account_pins.get(key).cloned();
+        let provider_home = provider.account_failover_home(kind);
+        if provider_home != session.account_failover_home.get(key).cloned() {
+            match provider_home {
+                Some(home) => {
+                    session.account_failover_home.insert(key.to_string(), home);
+                }
+                None => {
+                    session.account_failover_home.remove(key);
+                }
+            }
+            changed = true;
+        }
+        // Only a change from what the provider reported last is a move.
+        // A provider without pin support always reports `None`; that must
+        // not erase the session's pin.
+        let last = observed.get(&kind).cloned().flatten();
+        observed.insert(kind, provider_pin.clone());
+        if provider_pin == last || provider_pin == session_pin {
+            continue;
+        }
+        let from = session_pin
+            .as_ref()
+            .map(|pin| pin.label.clone())
+            .or_else(|| default_label(kind))
+            .unwrap_or_else(|| "default".to_string());
+        let to = provider_pin
+            .as_ref()
+            .map(|pin| pin.label.clone())
+            .or_else(|| default_label(kind))
+            .unwrap_or_else(|| "default".to_string());
+        crate::logging::info(&format!(
+            "Session {} {key} account moved during the request: {from} -> {to}",
+            session.id
+        ));
+        match provider_pin {
+            Some(pin) => {
+                session.account_pins.insert(key.to_string(), pin);
+            }
+            None => {
+                session.account_pins.remove(key);
+            }
+        }
+        changed = true;
+        events.push(account_changed_event(
+            provider,
+            kind,
+            Some(format!("{from} is out of usage, this window moved to {to}")),
+        ));
+    }
+    (changed, events)
+}
+
+/// At turn start, return to the preferred account once its usage limit has
+/// reset. Updates `session` (the caller persists it when events are
+/// returned) and returns the events that tell the user.
+pub fn return_home_if_reset(
+    provider: &dyn Provider,
+    session: &mut Session,
+    observed: &mut ObservedPins,
+) -> Vec<crate::protocol::ServerEvent> {
+    let mut events = Vec::new();
+    for kind in provider.return_account_home_if_reset() {
+        let key = kind.key();
+        let pin = provider.account_pin(kind);
+        observed.insert(kind, pin.clone());
+        match pin {
+            Some(pin) => {
+                session.account_pins.insert(key.to_string(), pin);
+            }
+            None => {
+                session.account_pins.remove(key);
+            }
+        }
+        session.account_failover_home.remove(key);
+        let label = account_info(provider, kind)
+            .label
+            .unwrap_or_else(|| "the preferred account".to_string());
+        events.push(account_changed_event(
+            provider,
+            kind,
+            Some(format!("{label} reset, back to preferred account")),
+        ));
+    }
+    events
+}

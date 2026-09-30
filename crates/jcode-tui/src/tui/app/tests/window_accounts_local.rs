@@ -411,3 +411,45 @@ fn reconnect_clears_pending_account_requests() {
     app.reset_account_requests_for_new_connection();
     assert!(app.pending_account_requests.is_empty());
 }
+
+/// Greptile "Local account moves are lost": a failover during a local turn
+/// must be saved to the session and announced, like the server agent does.
+#[test]
+fn local_turn_saves_failover_move() {
+    with_temp_jcode_home(|| {
+        let (mut app, provider) = account_recording_app();
+        let kind = jcode_provider_core::AccountProviderKind::Claude;
+        let owl = jcode_provider_core::AccountPin::new("claude-owl", None);
+        provider.pins.lock().unwrap().insert(kind, owl.clone());
+        app.session.account_pins.insert("claude".to_string(), owl);
+        app.replace_window_accounts(vec![claude_window("claude-owl", true)]);
+        app.session.save_prepared().unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let observed = app.local_account_turn_start();
+            // The provider fails over mid-turn.
+            provider.pins.lock().unwrap().insert(
+                kind,
+                jcode_provider_core::AccountPin::new("claude-otter", None),
+            );
+            app.local_account_turn_end(observed);
+        });
+        assert_eq!(
+            app.session.account_pins.get("claude").map(|p| p.label.as_str()),
+            Some("claude-otter"),
+            "local failover move was not saved to the session"
+        );
+        let saved = crate::session::Session::load(&app.session.id).unwrap();
+        assert_eq!(
+            saved.account_pins.get("claude").map(|p| p.label.as_str()),
+            Some("claude-otter")
+        );
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|m| m.content.contains("moved from claude-owl to claude-otter")),
+            "local failover move was not announced"
+        );
+        assert_eq!(app.window_account_label("claude").as_deref(), Some("claude-otter"));
+    });
+}

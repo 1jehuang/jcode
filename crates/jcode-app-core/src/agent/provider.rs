@@ -382,64 +382,14 @@ impl Agent {
         &mut self,
         event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
     ) {
-        use crate::provider::AccountProviderKind;
-        let mut changed = false;
-        for kind in AccountProviderKind::ALL {
-            let key = kind.key();
-            let provider_pin = self.provider.account_pin(kind);
-            let session_pin = self.session.account_pins.get(key).cloned();
-            let provider_home = self.provider.account_failover_home(kind);
-            if provider_home != self.session.account_failover_home.get(key).cloned() {
-                match provider_home {
-                    Some(home) => {
-                        self.session
-                            .account_failover_home
-                            .insert(key.to_string(), home);
-                    }
-                    None => {
-                        self.session.account_failover_home.remove(key);
-                    }
-                }
-                changed = true;
-            }
-            // Only a change from what the provider reported last is a move.
-            // A provider without pin support always reports `None`; that must
-            // not erase the session's pin.
-            let observed = self.observed_account_pins.get(&kind).cloned().flatten();
-            self.observed_account_pins
-                .insert(kind, provider_pin.clone());
-            if provider_pin == observed || provider_pin == session_pin {
-                continue;
-            }
-            let from = session_pin
-                .as_ref()
-                .map(|pin| pin.label.clone())
-                .or_else(|| crate::session_accounts::default_label(kind))
-                .unwrap_or_else(|| "default".to_string());
-            let to = provider_pin
-                .as_ref()
-                .map(|pin| pin.label.clone())
-                .or_else(|| crate::session_accounts::default_label(kind))
-                .unwrap_or_else(|| "default".to_string());
-            logging::info(&format!(
-                "Session {} {key} account moved during the request: {from} -> {to}",
-                self.session.id
-            ));
-            match provider_pin {
-                Some(pin) => {
-                    self.session.account_pins.insert(key.to_string(), pin);
-                }
-                None => {
-                    self.session.account_pins.remove(key);
-                }
-            }
-            changed = true;
-            if let Some(event_tx) = event_tx {
-                let _ = event_tx.send(crate::session_accounts::account_changed_event(
-                    self.provider.as_ref(),
-                    kind,
-                    Some(format!("{from} is out of usage, this window moved to {to}")),
-                ));
+        let (changed, events) = crate::session_accounts::sync_pins_after_stream(
+            self.provider.as_ref(),
+            &mut self.session,
+            &mut self.observed_account_pins,
+        );
+        if let Some(event_tx) = event_tx {
+            for event in events {
+                let _ = event_tx.send(event);
             }
         }
         if changed {
@@ -453,32 +403,17 @@ impl Agent {
         &mut self,
         event_tx: Option<&mpsc::UnboundedSender<ServerEvent>>,
     ) {
-        let moved = self.provider.return_account_home_if_reset();
-        if moved.is_empty() {
+        let events = crate::session_accounts::return_home_if_reset(
+            self.provider.as_ref(),
+            &mut self.session,
+            &mut self.observed_account_pins,
+        );
+        if events.is_empty() {
             return;
         }
-        for kind in moved {
-            let key = kind.key();
-            self.observed_account_pins
-                .insert(kind, self.provider.account_pin(kind));
-            match self.provider.account_pin(kind) {
-                Some(pin) => {
-                    self.session.account_pins.insert(key.to_string(), pin);
-                }
-                None => {
-                    self.session.account_pins.remove(key);
-                }
-            }
-            self.session.account_failover_home.remove(key);
-            if let Some(event_tx) = event_tx {
-                let label = crate::session_accounts::account_info(self.provider.as_ref(), kind)
-                    .label
-                    .unwrap_or_else(|| "the preferred account".to_string());
-                let _ = event_tx.send(crate::session_accounts::account_changed_event(
-                    self.provider.as_ref(),
-                    kind,
-                    Some(format!("{label} reset, back to preferred account")),
-                ));
+        if let Some(event_tx) = event_tx {
+            for event in events {
+                let _ = event_tx.send(event);
             }
         }
         self.persist_session_best_effort("account return home");

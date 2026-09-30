@@ -502,7 +502,10 @@ async fn dropped_pin_notice_names_the_replacement_pin() {
     agent
         .set_account_pin(
             AccountProviderKind::Claude,
-            Some(AccountPin::new("claude-fox", Some("wolf@example.com".to_string()))),
+            Some(AccountPin::new(
+                "claude-fox",
+                Some("wolf@example.com".to_string()),
+            )),
         )
         .expect("replacement pin");
     let reason = agent
