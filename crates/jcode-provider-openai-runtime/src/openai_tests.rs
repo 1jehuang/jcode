@@ -207,7 +207,11 @@ async fn live_openai_catalog() -> Result<Option<jcode_base::provider::OpenAIMode
         return Ok(None);
     }
 
-    let token = openai_access_token(&Arc::new(RwLock::new(creds))).await?;
+    let token = openai_access_token(
+        &Arc::new(RwLock::new(creds)),
+        &jcode_provider_core::AccountPinSlot::default(),
+    )
+    .await?;
     Ok(Some(
         jcode_base::provider::fetch_openai_model_catalog(&token).await?,
     ))
@@ -574,4 +578,161 @@ async fn openai_refresh_without_account_switch_updates_cache() {
     assert_eq!(cached.access_token, "same-account-refreshed-access");
     assert_eq!(cached.refresh_token, "same-account-rotated-refresh");
     assert_eq!(cached.account_id.as_deref(), Some("same-account-id"));
+}
+
+fn seed_two_pinnable_openai_accounts(expires_at: i64) -> (String, String) {
+    let account = |label: &str, access: &str, refresh: &str, email: &str| {
+        let mut acc = stored_openai_account(label, access, refresh);
+        acc.email = Some(email.to_string());
+        acc.expires_at = Some(expires_at);
+        acc
+    };
+    let otter = jcode_base::auth::codex::upsert_account(account(
+        "openai-1",
+        "otter-access",
+        "otter-refresh",
+        "otter@example.com",
+    ))
+    .unwrap();
+    let fox = jcode_base::auth::codex::upsert_account(account(
+        "openai-2",
+        "fox-access",
+        "fox-refresh",
+        "fox@example.com",
+    ))
+    .unwrap();
+    jcode_base::auth::codex::set_active_account(&otter).unwrap();
+    jcode_base::auth::codex::set_active_account_override(None);
+    (otter, fox)
+}
+
+/// Forks are separate sessions. Pinning one fork to another account must not
+/// change the bearer the original session sends.
+#[tokio::test]
+async fn openai_fork_does_not_share_credential_cache() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai");
+    let _api_key = EnvVarGuard::remove("OPENAI_API_KEY");
+    jcode_base::auth::codex::set_active_account_override(None);
+    let far = chrono::Utc::now().timestamp_millis() + 8 * 60 * 60 * 1000;
+    let (_otter, fox) = seed_two_pinnable_openai_accounts(far);
+
+    let session = openai_session_from_store();
+    assert_eq!(
+        session.resolve_access_token().await.unwrap(),
+        "otter-access"
+    );
+    let forked = session.fork_concrete();
+
+    // A refresh or account change in the fork rewrites the fork's cache only.
+    *forked.credentials.write().await =
+        jcode_base::auth::codex::load_credentials_for_account(&fox).unwrap();
+    assert_eq!(
+        session.credentials.read().await.access_token,
+        "otter-access",
+        "a fork must own its credential cache"
+    );
+
+    // Pinning the fork sends fox from the fork and otter from the session.
+    forked
+        .set_account_pin(
+            AccountProviderKind::OpenAi,
+            Some(jcode_base::auth::codex::pin_for_label(&fox).unwrap()),
+        )
+        .unwrap();
+    assert_eq!(forked.resolve_access_token().await.unwrap(), "fox-access");
+    assert_eq!(
+        forked.resolved_account_label(AccountProviderKind::OpenAi),
+        Some(fox.clone())
+    );
+    assert_eq!(session.account_pin(AccountProviderKind::OpenAi), None);
+    assert_eq!(
+        session.resolve_access_token().await.unwrap(),
+        "otter-access"
+    );
+    assert_eq!(
+        session
+            .resolved_account_label(AccountProviderKind::OpenAi)
+            .as_deref(),
+        Some("openai-otter")
+    );
+}
+
+/// A pinned session whose token needs a refresh writes the refreshed tokens to
+/// the pinned account, never to the default account.
+#[tokio::test]
+async fn openai_refresh_writes_back_to_pinned_label_not_default() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _lock = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _runtime = EnvVarGuard::set("JCODE_RUNTIME_PROVIDER", "openai");
+    let _api_key = EnvVarGuard::remove("OPENAI_API_KEY");
+    jcode_base::auth::codex::set_active_account_override(None);
+    // Both accounts are about to expire, so the next token read refreshes.
+    let soon = chrono::Utc::now().timestamp_millis() + 60_000;
+    let (otter, fox) = seed_two_pinnable_openai_accounts(soon);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/oauth/token", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 16 * 1024];
+        let mut read = 0;
+        loop {
+            let n = socket.read(&mut buf[read..]).await.unwrap();
+            read += n;
+            let text = String::from_utf8_lossy(&buf[..read]).to_string();
+            if let Some(pos) = text.find("\r\n\r\n") {
+                let len = text[..pos]
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().to_string())
+                    })
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(0);
+                if read >= pos + 4 + len || n == 0 {
+                    break;
+                }
+            }
+            if n == 0 {
+                break;
+            }
+        }
+        let body =
+            r#"{"access_token":"fox-refreshed","refresh_token":"fox-refresh-2","expires_in":3600}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(resp.as_bytes()).await.unwrap();
+        String::from_utf8_lossy(&buf[..read]).to_string()
+    });
+    jcode_base::auth::oauth::set_token_url_override_for_tests("openai", Some(url));
+
+    let session = openai_session_from_store();
+    session
+        .set_account_pin(
+            AccountProviderKind::OpenAi,
+            Some(jcode_base::auth::codex::pin_for_label(&fox).unwrap()),
+        )
+        .unwrap();
+    let token = session.resolve_access_token().await;
+    jcode_base::auth::oauth::set_token_url_override_for_tests("openai", None);
+    assert_eq!(token.unwrap(), "fox-refreshed");
+    let request = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("refresh must reach the token endpoint")
+        .unwrap();
+    assert!(request.contains("fox-refresh"), "{request}");
+
+    let accounts = jcode_base::auth::codex::list_accounts().unwrap();
+    let find = |label: &str| accounts.iter().find(|a| a.label == label).unwrap().clone();
+    assert_eq!(find(&otter).access_token, "otter-access");
+    assert_eq!(find(&fox).access_token, "fox-refreshed");
+    assert_eq!(find(&fox).email.as_deref(), Some("fox@example.com"));
 }

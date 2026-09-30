@@ -822,7 +822,9 @@ impl MultiProvider {
                 if uses_api_key {
                     "claude:api-key".to_string()
                 } else {
-                    let label = crate::auth::claude::active_account_label()
+                    let label = self
+                        .resolved_account_label(AccountProviderKind::Claude)
+                        .or_else(crate::auth::claude::active_account_label)
                         .unwrap_or_else(|| "default".to_string());
                     format!("claude:oauth:{}", label)
                 }
@@ -841,7 +843,9 @@ impl MultiProvider {
                 if uses_api_key {
                     "openai:api-key".to_string()
                 } else {
-                    let label = crate::auth::codex::active_account_label()
+                    let label = self
+                        .resolved_account_label(AccountProviderKind::OpenAi)
+                        .or_else(crate::auth::codex::active_account_label)
                         .unwrap_or_else(|| "default".to_string());
                     format!("openai:oauth:{}", label)
                 }
@@ -2886,6 +2890,19 @@ impl Provider for MultiProvider {
         provider.spawn_openai_catalog_refresh_if_needed();
         let switch_request = self.fork_model_switch_request(active, &current_model);
         let _ = provider.set_model(&switch_request);
+        // A fork continues this session, so it keeps this session's accounts.
+        // `fork_for_new_session` deliberately does not: a new window starts on
+        // the default account.
+        for kind in AccountProviderKind::ALL {
+            if let Some(pin) = self.account_pin(kind)
+                && let Err(err) = provider.set_account_pin(kind, Some(pin))
+            {
+                crate::logging::warn(&format!(
+                    "Failed to carry the {} account pin into a fork: {err:#}",
+                    kind.key()
+                ));
+            }
+        }
         Arc::new(provider)
     }
 

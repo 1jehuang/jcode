@@ -5,6 +5,7 @@
 //! different subscriptions of the same provider at the same time.
 
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, RwLock};
 
 /// Stable account pin: a label plus an identity so relabeling (labels are
 /// positional) cannot silently move a session to another subscription.
@@ -49,6 +50,65 @@ impl<'a> AccountScope<'a> {
         match self {
             Self::Default => None,
             Self::Pinned(pin) => Some(pin),
+        }
+    }
+}
+
+/// Shared per-instance pin state for a provider runtime.
+///
+/// Cloning shares the slot (the spawned stream task clones it so it sees a pin
+/// change mid-retry). [`AccountPinSlot::fork`] copies the *value* into a new
+/// slot for a new session, which must not share mutable pin state.
+#[derive(Clone, Debug, Default)]
+pub struct AccountPinSlot {
+    pin: Arc<RwLock<Option<AccountPin>>>,
+    resolved_label: Arc<RwLock<Option<String>>>,
+}
+
+impl AccountPinSlot {
+    /// Current pin (a snapshot; re-read per credential resolution).
+    pub fn get(&self) -> Option<AccountPin> {
+        self.pin
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replace the pin. Returns true when the value changed.
+    pub fn set(&self, pin: Option<AccountPin>) -> bool {
+        let mut guard = self
+            .pin
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *guard == pin {
+            return false;
+        }
+        *guard = pin;
+        drop(guard);
+        self.set_resolved_label(None);
+        true
+    }
+
+    /// Label the last credential resolution used (pin or default account).
+    pub fn resolved_label(&self) -> Option<String> {
+        self.resolved_label
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn set_resolved_label(&self, label: Option<String>) {
+        *self
+            .resolved_label
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = label;
+    }
+
+    /// Independent slot carrying the same pin value.
+    pub fn fork(&self) -> Self {
+        Self {
+            pin: Arc::new(RwLock::new(self.get())),
+            resolved_label: Arc::new(RwLock::new(self.resolved_label())),
         }
     }
 }
