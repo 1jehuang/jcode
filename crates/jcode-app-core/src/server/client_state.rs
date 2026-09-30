@@ -273,12 +273,15 @@ pub(super) async fn handle_get_model_catalog(
                     provider.active_resolved_credential(),
                     provider.service_tier(),
                     provider.reasoning_effort(),
-                    persisted
-                        .as_ref()
-                        .map(|session| {
-                            crate::session_accounts::account_infos_from_pins(&session.account_pins)
-                        })
-                        .unwrap_or_default(),
+                    // A brand-new session may not be on disk yet. Its pins are
+                    // then empty, but stored accounts still apply. An empty list
+                    // here would erase the window's account badge (#1613 flake).
+                    crate::session_accounts::account_infos_from_pins(
+                        &persisted
+                            .as_ref()
+                            .map(|session| session.account_pins.clone())
+                            .unwrap_or_default(),
+                    ),
                     "fallback",
                 )
             }
