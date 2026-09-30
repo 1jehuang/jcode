@@ -149,9 +149,13 @@ pub fn provider_native_text_fallback(
         .or(call_input)
         .and_then(|input| str_field(input, "query"))
         .filter(|query| !query.is_empty());
+    // Only titles/URLs survive; say so, or the model may mistake the list for
+    // the full results it originally read and "correct" its earlier answer.
+    const NOTE: &str =
+        "(summary of an earlier provider-side search; page contents are no longer available)";
     Some(match query {
-        Some(query) => format!("[{} for \"{query}\"]\n{output}", display.name),
-        None => format!("[{} results]\n{output}", display.name),
+        Some(query) => format!("[{} for \"{query}\"] {NOTE}\n{output}", display.name),
+        None => format!("[{} results] {NOTE}\n{output}", display.name),
     })
 }
 
@@ -420,7 +424,9 @@ mod tests {
         });
         assert_eq!(
             provider_native_text_fallback("openai", &item, None).as_deref(),
-            Some("[web_search for \"jcode\"]\nSearched: jcode")
+            Some(
+                "[web_search for \"jcode\"] (summary of an earlier provider-side search; page contents are no longer available)\nSearched: jcode"
+            )
         );
         let start =
             json!({"type": "server_tool_use", "id": "s", "name": "web_search", "input": {}});
@@ -429,7 +435,9 @@ mod tests {
         assert_eq!(
             provider_native_text_fallback("anthropic", &result, Some(&json!({"query": "q"})))
                 .as_deref(),
-            Some("[web_search for \"q\"]\nNo results")
+            Some(
+                "[web_search for \"q\"] (summary of an earlier provider-side search; page contents are no longer available)\nNo results"
+            )
         );
     }
 
