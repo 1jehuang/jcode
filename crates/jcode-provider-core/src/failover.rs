@@ -141,10 +141,28 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
 ///
 /// A usage-window 402 that carries a reset instant (`resets_at`/`reset_at`,
 /// e.g. Openference's "1500 requests per 5 hours") is excluded: jcode holds
-/// and auto-resumes those instead of switching provider.
+/// and auto-resumes those instead of switching provider. Only the response
+/// body is searched for the reset fields (the text after `response:` in a
+/// formatted HTTP error), so an endpoint URL or query string that happens to
+/// contain those words does not hide a real out-of-credit error.
 pub fn is_billing_exhausted_error_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    if lower.contains("resets_at") || lower.contains("reset_at") {
+    let body = lower
+        .find("response:")
+        .map(|idx| &lower[idx + "response:".len()..])
+        .unwrap_or_else(|| {
+            // No response section: drop `endpoint:` lines and search the rest.
+            lower.as_str()
+        });
+    let has_reset = if lower.contains("response:") {
+        body.contains("resets_at") || body.contains("reset_at")
+    } else {
+        lower
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("endpoint:"))
+            .any(|line| line.contains("resets_at") || line.contains("reset_at"))
+    };
+    if has_reset {
         return false;
     }
     contains_independent_status_code(&lower, "402")
@@ -178,6 +196,12 @@ mod tests {
     fn billing_exhausted_skips_usage_window_402_with_reset_time() {
         let body = "status: 402 Payment Required\n  response: {\"error\":\"Request limit exceeded (1500 per 5 hours)\",\"type\":\"insufficient_quota\",\"code\":\"window_quota_exceeded\",\"resets_at\":\"2026-09-24T09:00:00.000Z\"}";
         assert!(!is_billing_exhausted_error_message(body));
+    }
+
+    #[test]
+    fn billing_exhausted_ignores_reset_words_in_the_endpoint_url() {
+        let body = "OpenAI-compatible chat request failed\n  endpoint: http://127.0.0.1:9/v1/chat/completions?reset_at=0&resets_at=1\n  model: glm-5.3\n  status: 402 Payment Required\n  response: {\"error\":{\"message\":\"Insufficient credits\",\"code\":402}}";
+        assert!(is_billing_exhausted_error_message(body));
     }
 
     #[test]
