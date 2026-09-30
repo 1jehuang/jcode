@@ -9,12 +9,28 @@ struct Tip {
     text: String,
 }
 
+/// Tip text for the jump-to-bottom action, built from the configured key so
+/// it never advertises a shortcut the user has changed or disabled.
+fn jump_to_bottom_tip(key_label: Option<&str>) -> String {
+    match key_label {
+        Some(label) => format!(
+            "{label} jumps to the bottom of the chat - or click the \"Jump to bottom\" pill"
+        ),
+        None => "Click the \"Jump to bottom\" pill to return to the bottom of the chat".to_string(),
+    }
+}
+
 fn all_tips() -> Vec<Tip> {
-    let mut tips = vec![
+    let jump_tip = jump_to_bottom_tip(
+        crate::tui::keybind::load_scroll_keys()
+            .to_bottom_label()
+            .as_deref(),
+    );
+    let mut tips: Vec<&str> = vec![
         "Ctrl+J / Ctrl+K to jump between user prompts (Cmd+J / Cmd+K on macOS terminals that forward Command)",
         "Ctrl+Shift+J / Ctrl+Shift+K to scroll the chat down and up one line",
         "Ctrl+G to bookmark your scroll position - press again to teleport back",
-        "Ctrl+End (or Alt+Q) jumps to the bottom of the chat - or click the \"Jump to bottom\" pill",
+        jump_tip.as_str(),
         "Swarms form automatically when multiple sessions share a repo - they coordinate plans, share context, and track file conflicts",
         "Memories are stored in a graph with semantic embeddings - recall finds related facts even if you use different words",
         "Ambient mode runs background cycles while you're away - maintaining memories, compacting context, and doing proactive work",
@@ -124,4 +140,23 @@ pub(super) fn render_tips_widget(inner: Rect) -> super::frame::Framed {
         Span::styled("💡 ", Style::default().fg(rgb(255, 210, 80))),
         super::frame::label("Did you know?"),
     ]))
+}
+
+#[cfg(test)]
+mod jump_tip_tests {
+    use super::jump_to_bottom_tip;
+
+    #[test]
+    fn jump_tip_names_the_configured_key() {
+        let tip = jump_to_bottom_tip(Some("Alt+J"));
+        assert!(tip.starts_with("Alt+J jumps to the bottom"), "{tip}");
+        assert!(!tip.contains("Ctrl+End"), "{tip}");
+    }
+
+    #[test]
+    fn jump_tip_without_a_key_only_mentions_the_pill() {
+        let tip = jump_to_bottom_tip(None);
+        assert!(tip.contains("Jump to bottom"), "{tip}");
+        assert!(!tip.contains("Ctrl+") && !tip.contains("Alt+"), "{tip}");
+    }
 }
