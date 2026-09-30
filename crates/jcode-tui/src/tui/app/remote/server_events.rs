@@ -1248,11 +1248,23 @@ pub(in crate::tui::app) fn handle_server_event(
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
+            id,
             message,
             retry_after_secs,
-            ..
         } => {
             app.refresh_openai_usage_after_quota_error(&message);
+            // A server-initiated turn (scheduled task, swarm wake, DM) hit a
+            // usage limit and the server will resume it at the reset. Settle
+            // the adopted turn and say when it resumes. This client did not
+            // send the turn, so it must not hold or resend anything itself.
+            if id == 0
+                && app.current_message_id.is_none()
+                && let Some(resume_in) = retry_after_secs
+            {
+                app.handle_server_owned_usage_limit_resume(resume_in);
+                remote.reset_call_output_tokens_seen();
+                return true;
+            }
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
