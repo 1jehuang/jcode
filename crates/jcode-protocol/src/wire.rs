@@ -1487,6 +1487,15 @@ pub enum ServerEvent {
         route: jcode_provider_core::ModelRoute,
     },
 
+    /// Credentials changed server-wide (login, account switch, or an external
+    /// edit of a credential file). Broadcast to every connected client so a
+    /// turn held on the previous account's rate/usage limit can resend now.
+    #[serde(rename = "credentials_changed")]
+    CredentialsChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+    },
+
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]
     AvailableModelsUpdated {

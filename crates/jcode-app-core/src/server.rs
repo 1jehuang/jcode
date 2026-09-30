@@ -21,6 +21,7 @@ mod comm_graph;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+mod credential_watch;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
@@ -1266,6 +1267,10 @@ impl Server {
         // keeps the first agent `session_search` call from paying the cold
         // indexing cost while leaving exhaustive searches available on demand.
         crate::tool::spawn_recent_index_warmup();
+
+        // Announce account swaps made outside this server (CLI switch, another
+        // process, manual auth-file edit) so held turns resend promptly.
+        credential_watch::spawn();
 
         // Reconcile background-task status files orphaned by a previous
         // process image (crash or exec-based reload). Non-detached tasks die

@@ -125,13 +125,16 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
         && std::time::Instant::now() >= reset_time
     {
         app.rate_limit_reset = None;
+        let account_change_resend = app.account_change_resend_at.take() == Some(reset_time);
         let queued_count = app.queued_messages.len();
-        let msg = if queued_count > 0 {
-            format!("✓ Rate limit reset. Retrying... (+{} queued)", queued_count)
-        } else {
-            "✓ Rate limit reset. Retrying...".to_string()
-        };
-        app.push_display_message(DisplayMessage::system(msg));
+        if !account_change_resend {
+            let msg = if queued_count > 0 {
+                format!("✓ Rate limit reset. Retrying... (+{} queued)", queued_count)
+            } else {
+                "✓ Rate limit reset. Retrying...".to_string()
+            };
+            app.push_display_message(DisplayMessage::system(msg));
+        }
         app.pending_turn = true;
         needs_redraw = true;
     }
@@ -205,7 +208,12 @@ pub(super) fn handle_bus_event(
             true
         }
         Ok(BusEvent::LoginCompleted(login)) => {
+            let success = login.success;
+            let provider = login.provider.clone();
             app.handle_login_completed(login);
+            if success {
+                app.release_rate_limit_hold_after_credentials_changed(Some(&provider));
+            }
             true
         }
         Ok(BusEvent::OnboardingModelValidated(result)) => {

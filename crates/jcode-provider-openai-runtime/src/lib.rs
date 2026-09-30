@@ -914,9 +914,20 @@ impl OpenAIProvider {
                     self.reload_cached_reasoning_efforts();
                 }
                 Err(_) => {
+                    // A request holds the lock right now. Apply the new
+                    // credentials as soon as it is released instead of
+                    // silently keeping the previous account's token.
                     jcode_base::logging::info(
-                        "OpenAI credentials were updated on disk, but the in-memory credential lock was busy; async refresh will retry",
+                        "OpenAI credentials were updated on disk while the in-memory credential lock was busy; applying once it is free",
                     );
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        let slot = Arc::clone(&self.credentials);
+                        let browser_only = Arc::clone(&self.browser_only);
+                        handle.spawn(async move {
+                            *slot.write().await = credentials;
+                            browser_only.store(false, AtomicOrdering::Release);
+                        });
+                    }
                 }
             }
         }
@@ -999,6 +1010,12 @@ impl OpenAIProvider {
             jcode_base::logging::info(&format!("Clearing persistent OpenAI WS state: {}", reason));
         }
         *persistent_ws = None;
+    }
+
+    /// Access token the next request from this session would send.
+    #[cfg(test)]
+    async fn resolve_access_token(&self) -> Result<String> {
+        openai_access_token(&self.credentials).await
     }
 
     fn is_chatgpt_mode(credentials: &CodexCredentials) -> bool {

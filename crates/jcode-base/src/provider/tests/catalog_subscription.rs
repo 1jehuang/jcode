@@ -766,3 +766,19 @@ fn test_anthropic_pro_no_catalog_and_explicit_long_context_keep_legacy_gates() {
         assert_eq!(anthropic_oauth_route_availability(model), expected);
     });
 }
+
+/// Account switches and relogins call this. It used to clear only OpenAI
+/// markers, so a Claude usage-limit marker from the old account kept the
+/// precheck skipping Claude for the new one (same label after relogin).
+#[test]
+fn test_clear_all_provider_unavailability_also_clears_claude_marker() {
+    let _guard = crate::storage::lock_test_env();
+    crate::auth::claude::set_active_account_override(Some("default".to_string()));
+    record_provider_unavailable_for_account("claude", "429 usage limit reached");
+    assert!(provider_unavailability_detail_for_account("claude").is_some());
+    clear_all_provider_unavailability_for_account();
+    let leftover = provider_unavailability_detail_for_account("claude");
+    crate::auth::claude::set_active_account_override(None);
+    clear_claude_provider_unavailability_for_account_label(Some("default"));
+    assert!(leftover.is_none(), "stale Claude marker survived: {leftover:?}");
+}
