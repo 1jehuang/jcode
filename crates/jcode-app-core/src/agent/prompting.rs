@@ -133,15 +133,9 @@ impl Agent {
             .as_ref()
             .and_then(|name| skills.get(name).map(|skill| skill.get_prompt().to_string()));
 
-        let available_skills: Vec<crate::prompt::SkillInfo> = self
-            .current_skills_snapshot()
-            .list()
-            .iter()
-            .map(|skill| crate::prompt::SkillInfo {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect();
+        // Frozen per session so skill installs never rewrite the cached
+        // system prefix. Later installs are announced in the transcript.
+        let available_skills = &self.prompt_skills_snapshot;
 
         let working_dir = self
             .session
@@ -151,7 +145,7 @@ impl Agent {
 
         let (mut split, _context_info) = crate::prompt::build_system_prompt_split_with_agents_md(
             skill_prompt.as_deref(),
-            &available_skills,
+            available_skills,
             self.session.is_canary,
             memory_prompt,
             working_dir.as_deref(),

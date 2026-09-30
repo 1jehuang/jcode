@@ -22,6 +22,7 @@ impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
         self.announce_late_mcp_tools().await;
+        self.announce_late_skills();
         let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
@@ -51,6 +52,7 @@ impl Agent {
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
         self.announce_late_mcp_tools().await;
+        self.announce_late_skills();
         let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
@@ -116,6 +118,7 @@ impl Agent {
             system_reminder.filter(|value| !value.trim().is_empty());
 
         self.announce_late_mcp_tools().await;
+        self.announce_late_skills();
         self.append_user_context_message_with_display_role(user_message, images, display_role)?;
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
@@ -805,6 +808,82 @@ impl Agent {
         );
     }
 
+    /// Announce skills installed after the session's system prompt was built.
+    ///
+    /// The "Available Skills" section is frozen per session (see
+    /// `prompt_skills_snapshot`) because rewriting the system prompt forces a
+    /// KV cache miss on the whole conversation. New skills are instead
+    /// described once, in a note appended before the next user message.
+    pub(crate) fn announce_late_skills(&mut self) {
+        if self.session.system_prompt.is_some() {
+            return;
+        }
+        self.seed_announced_skills_from_transcript();
+        let fresh: Vec<crate::prompt::SkillInfo> = self
+            .current_prompt_skill_infos()
+            .into_iter()
+            .filter(|skill| !self.announced_skills.contains(&skill.name))
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let mut text = format!("<system-reminder>\n{LATE_SKILL_ANNOUNCEMENT_MARKER} ");
+        text.push_str(
+            "They are not in the Available Skills list above but can be invoked with `/skillname` \
+             the same way:\n",
+        );
+        for skill in &fresh {
+            let description = skill
+                .description
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            text.push_str(&format!("- `/{} ` - {}\n", skill.name, description));
+        }
+        text.push_str("</system-reminder>");
+        for skill in &fresh {
+            self.announced_skills.insert(skill.name.clone());
+        }
+        logging::info(&format!(
+            "Announcing {} late skill(s) in the transcript (system prompt stays cache-stable)",
+            fresh.len()
+        ));
+        self.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+        );
+        self.announced_skills_scan_index = self.session.messages.len();
+    }
+
+    /// Mark skills named in earlier announcements as announced, so a
+    /// restored session does not describe them again.
+    fn seed_announced_skills_from_transcript(&mut self) {
+        let start = self
+            .announced_skills_scan_index
+            .min(self.session.messages.len());
+        for message in &self.session.messages[start..] {
+            for block in &message.content {
+                if let ContentBlock::Text { text, .. } = block
+                    && text.contains(LATE_SKILL_ANNOUNCEMENT_MARKER)
+                {
+                    for line in text.lines() {
+                        if let Some(name) = line
+                            .strip_prefix("- `/")
+                            .and_then(|rest| rest.split(' ').next())
+                            .filter(|name| !name.is_empty())
+                        {
+                            self.announced_skills.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        self.announced_skills_scan_index = self.session.messages.len();
+    }
+
     /// Mark MCP tools the transcript already describes as announced: tools
     /// loaded by a tool reference (`mcp connect` / `mcp_search` results carry
     /// their schemas) and tools named in earlier announcements (which matters
@@ -1415,3 +1494,7 @@ fn split_mcp_dispatch_name(name: &str) -> (&str, &str) {
 /// Stable header of the late-MCP transcript announcement; used to recognize
 /// earlier announcements when a session is restored.
 const LATE_MCP_ANNOUNCEMENT_MARKER: &str = "New MCP tools are available.";
+
+/// Stable header of the late-skill transcript announcement; used to recognize
+/// earlier announcements when a session is restored.
+const LATE_SKILL_ANNOUNCEMENT_MARKER: &str = "New skills were installed.";
