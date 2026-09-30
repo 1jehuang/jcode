@@ -183,8 +183,8 @@ pub fn load_session(path: &Path, session_id: &str) -> Result<Option<OpenCodeDbSe
 }
 
 /// User/assistant messages of a session in chronological order, with the text
-/// of their non-synthetic `text` parts. `limit` caps the number of messages
-/// (for cheap previews).
+/// of their non-synthetic `text` parts. `limit` keeps only the most recent
+/// messages (for cheap previews), still returned oldest-first.
 pub fn load_messages(
     path: &Path,
     session_id: &str,
@@ -201,7 +201,7 @@ pub fn load_messages(
          FROM (SELECT id, time_created, data FROM message \
                WHERE session_id = ?1 \
                  AND json_extract(data, '$.role') IN ('user', 'assistant') \
-               ORDER BY time_created, id LIMIT ?2) m \
+               ORDER BY time_created DESC, id DESC LIMIT ?2) m \
          LEFT JOIN part p ON p.message_id = m.id \
               AND json_extract(p.data, '$.type') = 'text' \
               AND COALESCE(json_extract(p.data, '$.synthetic'), 0) = 0 \
