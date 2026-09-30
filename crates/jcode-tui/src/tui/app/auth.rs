@@ -8,7 +8,7 @@ pub(crate) use self::auth_account_commands::{
     account_command_from_inline_action, account_command_from_picker,
     execute_account_command_local, execute_account_command_remote,
     handle_account_command_remote, handle_auth_command, resolve_account_provider_descriptor,
-    save_openai_fast_setting_local,
+    same_account_command, save_openai_fast_setting_local,
 };
 pub(super) use self::auth_types::{
     AccountCommand, AccountFailoverMode, PendingAccountInput, PendingLogin,

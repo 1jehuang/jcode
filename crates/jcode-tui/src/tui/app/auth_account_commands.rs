@@ -421,6 +421,17 @@ fn parse_failover(value: &str) -> Result<AccountCommand, String> {
     ))
 }
 
+/// True when both inputs are valid `/account` commands with the same action,
+/// so a differently spelled suggestion need not replace what was typed.
+pub(crate) fn same_account_command(input: &str, suggestion: &str) -> bool {
+    match (parse_account_command(input), parse_account_command(suggestion)) {
+        (Some(Ok(typed)), Some(Ok(suggested))) => {
+            format!("{typed:?}") == format!("{suggested:?}")
+        }
+        _ => false,
+    }
+}
+
 /// Inline `/account` picker rows that change which account a window uses.
 pub(crate) fn account_command_from_inline_action(
     action: &crate::tui::AccountPickerAction,
