@@ -480,6 +480,7 @@ fn login_no_browser_flag_parses() {
             no_validate,
             flow_id,
             cancel,
+            ..
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
@@ -765,6 +766,7 @@ fn run_json_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(json);
             assert!(!ndjson);
@@ -782,6 +784,7 @@ fn run_ndjson_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(!json);
             assert!(ndjson);

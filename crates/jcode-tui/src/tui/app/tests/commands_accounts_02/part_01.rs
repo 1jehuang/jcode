@@ -938,9 +938,8 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         let mut items = Vec::new();
         app.append_openai_account_picker_items(&mut items, provider);
         for label in ["openai-otter", "openai-fox"] {
-            let command = format!("/account openai switch {label}");
             let item = items.iter().find(|item| matches!(&item.command,
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) if input == &command)).unwrap();
+                crate::tui::account_picker::AccountPickerCommand::Switch { label: actual, .. } if actual == label)).unwrap();
             assert!(
                 item.details
                     .iter()
