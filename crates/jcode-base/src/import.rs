@@ -721,6 +721,11 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
         return Ok(Some(session.id));
     }
 
+    if let Some(db) = opencode_db_with_session(resume_id) {
+        let session = import_opencode_db_session(&db, resume_id)?;
+        return Ok(Some(session.id));
+    }
+
     if let Ok(path) = find_opencode_session_file(resume_id) {
         let session = import_opencode_session_from_path(&path, Some(resume_id))?;
         return Ok(Some(session.id));
@@ -1301,14 +1306,74 @@ fn find_opencode_session_file(session_id: &str) -> Result<PathBuf> {
 }
 
 pub fn import_opencode_session(session_id: &str) -> Result<Session> {
+    if let Some(db) = opencode_db_with_session(session_id) {
+        return import_opencode_db_session(&db, session_id);
+    }
     let session_path = find_opencode_session_file(session_id)?;
     import_opencode_session_from_path(&session_path, Some(session_id))
+}
+
+/// The OpenCode database path, if it exists and contains `session_id`.
+fn opencode_db_with_session(session_id: &str) -> Option<PathBuf> {
+    let db = crate::opencode_db::existing_db_path()?;
+    crate::opencode_db::load_session(&db, session_id)
+        .ok()
+        .flatten()
+        .map(|_| db)
+}
+
+/// Import one session from OpenCode's SQLite store (OpenCode 1.17+).
+pub fn import_opencode_db_session(db_path: &Path, session_id: &str) -> Result<Session> {
+    let meta = crate::opencode_db::load_session(db_path, session_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "OpenCode session {} not found in {}",
+            session_id,
+            db_path.display()
+        )
+    })?;
+    let mut session = Session::create_with_id(imported_opencode_session_id(session_id), None, None);
+    session.provider_session_id = Some(session_id.to_string());
+    session.working_dir = meta.directory.clone();
+    session.title = Some(
+        meta.title
+            .as_deref()
+            .map(truncate_title)
+            .unwrap_or_else(|| format!("OpenCode session {}", session_id)),
+    );
+    let messages = crate::opencode_db::load_messages(db_path, session_id, None)?;
+    let mut provider_key = meta.provider_id.clone();
+    let mut model = meta.model_id.clone();
+    for msg in messages {
+        let role = if msg.role == "user" {
+            Role::User
+        } else {
+            Role::Assistant
+        };
+        if provider_key.is_none() {
+            provider_key = msg.provider_id.clone();
+        }
+        if model.is_none() {
+            model = msg.model_id.clone();
+        }
+        if msg.text.trim().is_empty() {
+            continue;
+        }
+        append_text_message(&mut session, role, msg.text, msg.created_at);
+    }
+    session.provider_key = provider_key.or_else(|| Some("opencode".to_string()));
+    session.model = model;
+    finalize_imported_session(session, meta.created_at, Some(meta.updated_at))
 }
 
 pub fn import_opencode_session_from_path(
     session_path: &Path,
     session_id_hint: Option<&str>,
 ) -> Result<Session> {
+    if crate::opencode_db::is_db_path(session_path) {
+        let session_id = session_id_hint
+            .ok_or_else(|| anyhow::anyhow!("OpenCode database import needs a session id"))?;
+        return import_opencode_db_session(session_path, session_id);
+    }
     let value: serde_json::Value = serde_json::from_reader(File::open(session_path)?)?;
     let session_id = value
         .get("id")
