@@ -28,27 +28,33 @@ const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
 /// Provider handle of each shared agent, readable without the agent lock.
 /// An agent's provider is fixed at construction, so this never goes stale.
 /// Keyed by the agent's `Arc` address, checked against a `Weak` so a reused
-/// address never matches a dead agent.
-type AgentProviderEntry = (std::sync::Weak<Mutex<Agent>>, Arc<dyn Provider>);
+/// address never matches a dead agent. The provider is held weakly too: the
+/// agent owns it, so a closed session's provider is freed with the agent.
+type AgentProviderEntry = (std::sync::Weak<Mutex<Agent>>, std::sync::Weak<dyn Provider>);
 static AGENT_PROVIDERS: LazyLock<StdMutex<HashMap<usize, AgentProviderEntry>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn prune_agent_providers(map: &mut HashMap<usize, AgentProviderEntry>) {
+    map.retain(|_, (agent, provider)| agent.strong_count() > 0 && provider.strong_count() > 0);
+}
 
 /// Record the provider an agent streams with. Call wherever a shared agent is built.
 pub(crate) fn register_agent_provider(agent: &Arc<Mutex<Agent>>, provider: Arc<dyn Provider>) {
     let mut map = AGENT_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
-    map.retain(|_, (weak, _)| weak.strong_count() > 0);
+    prune_agent_providers(&mut map);
     map.insert(
         Arc::as_ptr(agent) as usize,
-        (Arc::downgrade(agent), provider),
+        (Arc::downgrade(agent), Arc::downgrade(&provider)),
     );
 }
 
 /// The provider `agent` streams with, without taking the agent lock.
 pub(crate) fn agent_provider(agent: &Arc<Mutex<Agent>>) -> Option<Arc<dyn Provider>> {
-    let map = AGENT_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = AGENT_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
+    prune_agent_providers(&mut map);
     map.get(&(Arc::as_ptr(agent) as usize))
         .filter(|(weak, _)| weak.upgrade().is_some_and(|live| Arc::ptr_eq(&live, agent)))
-        .map(|(_, provider)| Arc::clone(provider))
+        .and_then(|(_, provider)| provider.upgrade())
 }
 
 fn optional_token_usage_totals(totals: TokenUsageTotals) -> Option<TokenUsageTotals> {

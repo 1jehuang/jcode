@@ -1018,3 +1018,28 @@ async fn handle_get_model_catalog_busy_live_attach_reports_attached_agent_pin() 
     assert_eq!(account_labels[0].label.as_deref(), Some("claude-fox"));
     assert!(account_labels[0].pinned);
 }
+
+/// A closed session's provider must not outlive its agent in the registry.
+#[tokio::test]
+async fn session_accounts_registry_releases_closed_session_provider() {
+    let provider: Arc<dyn Provider> = Arc::new(PinnedProvider(std::sync::Mutex::new(None)));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        crate::session::Session::create_with_id("session_registry_release".to_string(), None, None),
+        None,
+    )));
+    let handle = agent.lock().await.provider_handle();
+    super::register_agent_provider(&agent, handle);
+    assert!(
+        super::agent_provider(&agent).is_some(),
+        "registered provider found"
+    );
+    let weak = Arc::downgrade(&provider);
+    drop(provider);
+    drop(agent);
+    assert!(
+        weak.upgrade().is_none(),
+        "registry kept a closed session's provider alive"
+    );
+}
