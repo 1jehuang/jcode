@@ -1015,7 +1015,7 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         options,
         load_pi_external_session,
     );
-    collect_opencode_external_sessions(&mut records, &mut report, options);
+    collect_opencode_external_sessions(&mut records, &mut report, query, options);
     collect_external_jsonl_source(
         &mut records,
         &mut report,
@@ -1026,11 +1026,9 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         load_cursor_external_session,
     );
 
-    if records.len() > options.max_scan_sessions.saturating_mul(5) {
-        records.truncate(options.max_scan_sessions.saturating_mul(5));
-        report.truncated = true;
-    }
-
+    // Every source already caps its own scan at `max_scan_sessions`, and the
+    // records are loaded by now, so a global cap here would only hide the
+    // sources collected last (e.g. Cursor) without saving any IO.
     report.scanned_external_sessions = records.len();
     for record in records {
         append_external_session_results(&mut report.results, &record, query, options);
@@ -1332,63 +1330,91 @@ fn external_text_matches_query(text: &str, query: &QueryProfile) -> bool {
     jcode_session_types::normalized_session_search_text_matches(&text.to_lowercase(), query)
 }
 
+/// Where an OpenCode scan candidate lives.
+enum OpenCodeCandidate {
+    Db(crate::opencode_db::OpenCodeDbSession),
+    Legacy(PathBuf),
+}
+
 fn collect_opencode_external_sessions(
     records: &mut Vec<ExternalSessionRecord>,
     report: &mut SearchReport,
+    query: &QueryProfile,
     options: &SearchOptions,
 ) {
     if !source_matches_filter("opencode", options) {
         return;
     }
-    // OpenCode 1.17+ keeps sessions in SQLite. Database rows win over legacy
-    // JSON files with the same id.
-    let mut seen = std::collections::HashSet::new();
-    if let Some(db) = crate::opencode_db::existing_db_path() {
-        report.external_sources.push("opencode");
-        match crate::opencode_db::list_sessions(&db, options.max_scan_sessions) {
-            Ok(rows) => {
-                for row in rows {
-                    match load_opencode_db_external_session(&db, row, options.include_tools) {
-                        Ok(record) => {
-                            seen.insert(record.session_id.clone());
-                            records.push(record);
-                        }
-                        Err(_) => report.parse_errors += 1,
-                    }
-                }
-            }
+    // OpenCode 1.17+ keeps sessions in SQLite; older installs use JSON files.
+    // Both stores share ONE scan allowance: the most recent sessions across
+    // them, deduped by id with database rows winning.
+    let mut candidates: Vec<(DateTime<Utc>, String, OpenCodeCandidate)> = Vec::new();
+    let db = crate::opencode_db::existing_db_path();
+    let mut found_store = false;
+    if let Some(db) = db.as_deref() {
+        found_store = true;
+        match crate::opencode_db::list_sessions(db, options.max_scan_sessions) {
+            Ok(rows) => candidates.extend(
+                rows.into_iter()
+                    .map(|row| (row.updated_at, row.id.clone(), OpenCodeCandidate::Db(row))),
+            ),
             Err(_) => report.parse_errors += 1,
         }
     }
-    let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
-        return;
-    };
-    if !root.exists() {
-        return;
+    let legacy_root = crate::storage::user_home_path(".local/share/opencode/storage/session")
+        .ok()
+        .filter(|root| root.exists());
+    if let Some(root) = legacy_root.as_deref() {
+        found_store = true;
+        let db_ids: std::collections::HashSet<String> =
+            candidates.iter().map(|(_, id, _)| id.clone()).collect();
+        for path in collect_recent_files_recursive(root, "json", options.max_scan_sessions) {
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+                continue;
+            };
+            if db_ids.contains(&id) {
+                continue;
+            }
+            let modified = jcode_import_core::file_modified_datetime(&path).unwrap_or_default();
+            candidates.push((modified, id, OpenCodeCandidate::Legacy(path)));
+        }
     }
-    if seen.is_empty() {
+    if found_store {
         report.external_sources.push("opencode");
     }
-    let Ok(messages_base) = crate::storage::user_home_path(".local/share/opencode/storage/message")
-    else {
-        return;
-    };
-    let Ok(parts_base) = crate::storage::user_home_path(".local/share/opencode/storage/part")
-    else {
-        return;
-    };
-    for path in collect_recent_files_recursive(&root, "json", options.max_scan_sessions) {
-        match load_opencode_external_session(
-            &path,
-            &messages_base,
-            &parts_base,
-            options.include_tools,
-            options.max_scan_sessions,
-        ) {
-            Ok(Some(record)) if !seen.contains(&record.session_id) => records.push(record),
-            Ok(Some(_)) => {}
-            Ok(None) => {}
-            Err(_) => report.parse_errors += 1,
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    if candidates.len() > options.max_scan_sessions {
+        candidates.truncate(options.max_scan_sessions);
+        report.truncated = true;
+    }
+
+    let messages_base = crate::storage::user_home_path(".local/share/opencode/storage/message");
+    let parts_base = crate::storage::user_home_path(".local/share/opencode/storage/part");
+    for (_, _, candidate) in candidates {
+        match candidate {
+            OpenCodeCandidate::Db(row) => {
+                let Some(db) = db.as_deref() else { continue };
+                match load_opencode_db_external_session(db, row, options.include_tools) {
+                    Ok(record) => records.push(record),
+                    Err(_) => report.parse_errors += 1,
+                }
+            }
+            OpenCodeCandidate::Legacy(path) => {
+                let (Ok(messages_base), Ok(parts_base)) = (&messages_base, &parts_base) else {
+                    continue;
+                };
+                match load_opencode_external_session(
+                    &path,
+                    messages_base,
+                    parts_base,
+                    options.include_tools,
+                    options.max_scan_sessions,
+                ) {
+                    Ok(Some(record)) => records.push(record),
+                    Ok(None) => {}
+                    Err(_) => report.parse_errors += 1,
+                }
+            }
         }
     }
 }

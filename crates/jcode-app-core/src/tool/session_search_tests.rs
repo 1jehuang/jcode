@@ -745,3 +745,95 @@ fn opencode_sqlite_tool_output_is_searchable_with_include_tools() {
         }
     });
 }
+
+#[test]
+fn opencode_sources_share_one_scan_allowance_and_keep_cursor_matches() {
+    with_temp_home(|home| {
+        let f = opencode_db_fixture(home);
+        f.session("ses_db", None, "Db", "/tmp/d", "p", "m", 3_000_000, None)
+            .message("ses_db", "msg_d", "user", 100)
+            .text("ses_db", "msg_d", "prt_d", "database chatter");
+        drop(f);
+        let legacy = home.join("external/.local/share/opencode/storage/session/proj");
+        std::fs::create_dir_all(&legacy).expect("legacy dir");
+        std::fs::write(
+            legacy.join("ses_legacy.json"),
+            json!({"id": "ses_legacy", "title": "Legacy", "directory": "/tmp/l",
+                   "time": {"created": 1, "updated": 2}})
+            .to_string(),
+        )
+        .expect("legacy session");
+        let session_id = "99999999-2222-3333-4444-555555555555";
+        let cursor_dir = home.join(format!(
+            "external/.cursor/projects/tmp-proj/agent-transcripts/{session_id}"
+        ));
+        std::fs::create_dir_all(&cursor_dir).expect("cursor dir");
+        std::fs::write(
+            cursor_dir.join(format!("{session_id}.jsonl")),
+            json!({"role": "user",
+                   "message": {"content": [{"type": "text", "text": "cursor-cap-needle here"}]}})
+            .to_string(),
+        )
+        .expect("cursor jsonl");
+        // Earlier sources also match, so they fill any combined pre-match cap.
+        let claude = home.join("external/.claude/projects/demo");
+        std::fs::create_dir_all(&claude).expect("claude dir");
+        std::fs::write(
+            claude.join("claude-cap.jsonl"),
+            json!({"type": "user", "uuid": "u1", "sessionId": "claude-cap", "cwd": "/tmp/c",
+                   "message": {"role": "user", "content": "cursor-cap-needle claude"},
+                   "timestamp": "2026-04-04T12:00:00Z"})
+            .to_string(),
+        )
+        .expect("claude jsonl");
+        let codex = home.join("external/.codex/sessions/2026/05/01");
+        std::fs::create_dir_all(&codex).expect("codex dir");
+        std::fs::write(
+            codex.join("codex-cap.jsonl"),
+            [
+                json!({"type": "session_meta", "payload": {"id": "codex-cap",
+                       "timestamp": "2026-05-01T00:00:00Z", "cwd": "/tmp/x"}}),
+                json!({"type": "message", "id": "m1", "role": "user",
+                       "timestamp": "2026-05-01T00:01:00Z",
+                       "content": [{"type": "input_text", "text": "cursor-cap-needle codex"}]}),
+            ]
+            .map(|v| v.to_string())
+            .join("\n"),
+        )
+        .expect("codex jsonl");
+        let pi = home.join("external/.pi/agent/sessions/proj");
+        std::fs::create_dir_all(&pi).expect("pi dir");
+        std::fs::write(
+            pi.join("pi-cap.jsonl"),
+            [
+                json!({"type": "session", "id": "pi-cap", "timestamp": "2026-05-01T00:00:00Z",
+                       "cwd": "/tmp/p"}),
+                json!({"type": "message", "timestamp": "2026-05-01T00:01:00Z",
+                       "message": {"role": "user", "content": "cursor-cap-needle pi"}}),
+            ]
+            .map(|v| v.to_string())
+            .join("\n"),
+        )
+        .expect("pi jsonl");
+        std::fs::remove_dir_all(home.join("sessions")).expect("remove jcode sessions dir");
+
+        let mut options = SearchOptions::for_test("current-session");
+        options.max_scan_sessions = 1;
+        let report = run_report(home, "cursor-cap-needle", &options);
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.session_id == format!("cursor:{session_id}")),
+            "cursor match dropped: {:?}",
+            report.results
+        );
+        for source in ["claude", "codex", "pi"] {
+            assert!(
+                report.results.iter().any(|r| r.source == source),
+                "{source} fixture must match too: {:?}",
+                report.results
+            );
+        }
+    });
+}
