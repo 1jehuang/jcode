@@ -143,15 +143,16 @@ fn cache_accounting_mixed_history_and_live_sum_resolved_prompts() {
         app.info_widget_data().cache_hit_info.unwrap().prompt_tokens,
         Some(20_000)
     );
+    // Yield is live-scope only: 6k live reads / 10k live optimal.
+    let optimal = app
+        .info_widget_data()
+        .cache_hit_info
+        .unwrap()
+        .optimal_ratio()
+        .unwrap();
+    assert!((optimal - 0.6).abs() < 0.0001, "{optimal}");
     assert!(
-        app.info_widget_data()
-            .cache_hit_info
-            .unwrap()
-            .optimal_ratio()
-            .is_none()
-    );
-    assert!(
-        stats.contains("cache_read_pct_of_optimal_input: None"),
+        stats.contains("cache_read_pct_of_optimal_input: 60%"),
         "{stats}"
     );
 }
@@ -276,4 +277,55 @@ fn cache_report_exposes_actual_expiry_notification_policy() {
         stats.contains("cache_expiry_notification_active: true"),
         "{stats}"
     );
+}
+
+fn record_live_cache_request(app: &mut App, input: u64, read: u64) {
+    app.kv_cache.current_api_usage_recorded = false;
+    app.streaming.streaming_input_tokens = input;
+    app.streaming.streaming_cache_read_tokens = Some(read);
+    app.streaming.streaming_cache_creation_tokens = Some(0);
+    assert!(app.record_completed_stream_cache_usage());
+}
+
+fn kv_cache_summary(app: &App) -> String {
+    let info = app.info_widget_data().cache_hit_info.unwrap();
+    crate::tui::info_widget::render_kv_cache_summary_line(&info)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[test]
+fn cache_yield_after_resume_uses_live_scope_not_priming() {
+    let mut app = cache_accounting_openai_app();
+    // Session resumed/reloaded with prior cache reads in history.
+    app.remote_token_usage_totals = Some(crate::protocol::TokenUsageTotals {
+        cache_prompt_tokens: Some(10_000),
+        input_tokens: 10_000,
+        cache_reported_input_tokens: 10_000,
+        cache_read_input_tokens: 7_000,
+        cache_creation_input_tokens: 0,
+        ..Default::default()
+    });
+    record_live_cache_request(&mut app, 10_000, 0);
+    assert!(kv_cache_summary(&app).contains("priming"));
+    record_live_cache_request(&mut app, 10_000, 9_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 90%"), "{summary}");
+    assert!(!summary.contains("priming"), "{summary}");
+    let info = app.info_widget_data().cache_hit_info.unwrap();
+    // Yield is live-scope only: 9k live reads / 10k live optimal.
+    assert!((info.optimal_ratio().unwrap() - 0.9).abs() < 0.0001);
+    // Session hit ratio still includes history: (7k + 9k) / 30k.
+    assert!((info.hit_ratio().unwrap() - 16.0 / 30.0).abs() < 0.0001);
+}
+
+#[test]
+fn cache_yield_new_session_single_request_is_priming() {
+    let mut app = cache_accounting_openai_app();
+    record_live_cache_request(&mut app, 10_000, 0);
+    assert!(kv_cache_summary(&app).contains("priming"));
+    record_live_cache_request(&mut app, 10_000, 8_000);
+    assert!(kv_cache_summary(&app).contains("yield 80%"));
 }
