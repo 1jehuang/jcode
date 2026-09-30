@@ -962,8 +962,10 @@ pub fn clear_model_unavailable_for_account(model: &str) {
 }
 
 fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
-    let key = current_provider_runtime_scope_key(provider);
+    runtime_provider_unavailability_for_key(current_provider_runtime_scope_key(provider))
+}
 
+fn runtime_provider_unavailability_for_key(key: String) -> Option<RuntimeProviderUnavailability> {
     let mut unavailable = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write().ok()?;
     if let Some(entry) = unavailable.get(&key) {
         if entry.recorded_at.elapsed() <= PROVIDER_RUNTIME_UNAVAILABLE_TTL {
@@ -975,7 +977,41 @@ fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnav
 }
 
 pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
-    let key = current_provider_runtime_scope_key(provider);
+    record_provider_unavailable_for_key(current_provider_runtime_scope_key(provider), reason);
+}
+
+/// Mark `provider` unavailable for one account label only. Sessions pinned
+/// to other accounts of the same provider are unaffected (unlike
+/// [`record_provider_unavailable_for_account`], which uses the process-wide
+/// default account's scope).
+pub fn record_provider_unavailable_for_label(provider: &str, account_label: &str, reason: &str) {
+    record_provider_unavailable_for_key(
+        provider_runtime_scope_key(provider, Some(account_label)),
+        reason,
+    );
+}
+
+/// Clear the unavailability of `provider` for one account label.
+pub fn clear_provider_unavailable_for_label(provider: &str, account_label: &str) {
+    let key = provider_runtime_scope_key(provider, Some(account_label));
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
+/// Unavailability detail of `provider` for one account label.
+pub fn provider_unavailability_detail_for_label(
+    provider: &str,
+    account_label: &str,
+) -> Option<String> {
+    let entry = runtime_provider_unavailability_for_key(provider_runtime_scope_key(
+        provider,
+        Some(account_label),
+    ))?;
+    Some(format_unavailability_detail(entry))
+}
+
+fn record_provider_unavailable_for_key(key: String, reason: &str) {
     if key.trim().is_empty() {
         return;
     }
@@ -1011,6 +1047,12 @@ pub fn clear_openai_provider_unavailability_for_account_label(account_label: Opt
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
         unavailable.remove(&key);
     }
+    if let Some(label) = account_label {
+        super::account_failover::clear_account_exhausted(
+            jcode_provider_core::AccountProviderKind::OpenAi,
+            label,
+        );
+    }
 }
 
 /// Clear the quota cooldown for the exact Claude login whose limits were reset.
@@ -1019,6 +1061,12 @@ pub fn clear_claude_provider_unavailability_for_account_label(account_label: Opt
     let key = provider_runtime_scope_key("claude", account_label);
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
         unavailable.remove(&key);
+    }
+    if let Some(label) = account_label {
+        super::account_failover::clear_account_exhausted(
+            jcode_provider_core::AccountProviderKind::Claude,
+            label,
+        );
     }
 }
 
@@ -1044,6 +1092,10 @@ pub fn clear_all_provider_unavailability_for_account() {
 
 pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<String> {
     let entry = runtime_provider_unavailability(provider)?;
+    Some(format_unavailability_detail(entry))
+}
+
+fn format_unavailability_detail(entry: RuntimeProviderUnavailability) -> String {
     let mut detail = entry.reason;
     if let Ok(elapsed) = SystemTime::now().duration_since(entry.observed_at) {
         detail.push_str(&format!(
@@ -1051,8 +1103,7 @@ pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<Stri
             format_elapsed_duration_short(elapsed)
         ));
     }
-
-    Some(detail)
+    detail
 }
 
 pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {
