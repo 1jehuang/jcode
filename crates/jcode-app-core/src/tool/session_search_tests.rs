@@ -670,3 +670,30 @@ fn limit_validation_reports_friendly_errors() {
         .expect_err("negative limit should be rejected");
     assert!(err.contains("received -1"));
 }
+
+#[test]
+fn external_opencode_sqlite_sessions_are_searchable() {
+    with_temp_home(|home| {
+        let db = home.join("external/.local/share/opencode/opencode.db");
+        drop(crate::opencode_db::fixture::standard(&db));
+
+        let mut options = SearchOptions::for_test("current-session");
+        options.source_filter = Some("opencode".to_string());
+        let report = run_report(home, "hi from assistant", &options);
+        assert_eq!(report.external_sources, vec!["opencode"]);
+        let result = report
+            .results
+            .iter()
+            .find(|r| r.message_id.as_deref() == Some("msg_b"))
+            .expect("assistant text hit");
+        assert_eq!(result.session_id, "opencode:ses_main");
+        assert_eq!(result.working_dir.as_deref(), Some("/tmp/oc-main"));
+        assert_eq!(result.provider_key.as_deref(), Some("anthropic"));
+
+        // Subagent children, archived sessions and non-text parts stay out.
+        let report = run_report(home, "THINKING", &options);
+        assert!(report.results.is_empty(), "reasoning parts must not match");
+        let report = run_report(home, "Subagent", &options);
+        assert!(report.results.is_empty(), "child sessions must be excluded");
+    });
+}
