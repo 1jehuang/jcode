@@ -147,8 +147,9 @@ pub fn should_auto_update() -> bool {
     }
 
     if let Ok(exe) = std::env::current_exe()
-        && is_inside_git_repo(&exe)
+        && let Some(reason) = auto_update_git_repo_skip_reason(&exe)
     {
+        crate::logging::info(reason);
         return false;
     }
 
@@ -187,6 +188,12 @@ fn is_inside_git_repo(path: &std::path::Path) -> bool {
         dir = d.parent();
     }
     false
+}
+
+fn auto_update_git_repo_skip_reason(path: &std::path::Path) -> Option<&'static str> {
+    is_inside_git_repo(path).then_some(
+        "Automatic update check skipped because the running executable is inside a Git repository; run `jcode update` to update manually.",
+    )
 }
 
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
@@ -1356,6 +1363,24 @@ mod tests {
     #[test]
     fn test_should_auto_update_dev_build() {
         assert!(!should_auto_update());
+    }
+
+    #[test]
+    fn git_managed_auto_update_skip_explains_manual_update() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let managed_root = temp.path().join("managed");
+        let bin_dir = managed_root.join("bin");
+        std::fs::create_dir_all(managed_root.join(".git")).expect("create git marker");
+        std::fs::create_dir_all(&bin_dir).expect("create bin directory");
+
+        let message = auto_update_git_repo_skip_reason(&bin_dir.join("jcode"))
+            .expect("git-managed executable has a skip reason");
+        assert!(message.contains("Automatic update check skipped"));
+        assert!(message.contains("run `jcode update`"));
+        assert_eq!(
+            auto_update_git_repo_skip_reason(&temp.path().join("standalone/jcode")),
+            None
+        );
     }
 
     #[test]
