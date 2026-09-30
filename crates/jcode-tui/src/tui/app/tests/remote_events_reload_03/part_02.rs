@@ -575,6 +575,46 @@ fn test_remote_provider_overload_after_partial_output_does_not_resend() {
     );
 }
 
+/// Reasoning that is not shown (reasoning display off) puts nothing on screen,
+/// so an overload after it is still safe to answer with a full resend.
+#[test]
+fn test_remote_provider_overload_after_hidden_reasoning_still_resends() {
+    with_temp_jcode_home(|| {
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Off)
+            .expect("pin reasoning display off for the test config");
+        crate::config::invalidate_config_cache();
+
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.rate_limit_pending_message = Some(held_user_turn("explain the bug", false, 0));
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.current_message_id = Some(43);
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDelta {
+                text: "thinking about it".to_string(),
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 43,
+                message: OPENFERENCE_529.to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert!(
+            app.rate_limit_pending_message.is_some(),
+            "hidden reasoning must not block the overload resend"
+        );
+        assert!(app.rate_limit_reset.is_some(), "a resend must be scheduled");
+    });
+}
+
 /// A permanent 4xx (or model-not-found) whose body happens to contain an
 /// overload phrase must not be classified as an overload: the provider
 /// runtime refuses to retry these statuses, so the TUI must not resend them.

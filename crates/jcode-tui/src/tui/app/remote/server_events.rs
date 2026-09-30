@@ -632,13 +632,16 @@ pub(in crate::tui::app) fn handle_server_event(
 
     // Remember that this send already put model output on screen, so an
     // overload failure after it is not answered with a full-turn resend.
-    if matches!(
-        &event,
+    // Reasoning only counts when it is displayed: hidden reasoning shows the
+    // user nothing, so a resend cannot duplicate anything on screen.
+    let shows_output = match &event {
         ServerEvent::TextDelta { .. }
-            | ServerEvent::TextReplace { .. }
-            | ServerEvent::ReasoningDelta { .. }
-            | ServerEvent::ToolStart { .. }
-    ) {
+        | ServerEvent::TextReplace { .. }
+        | ServerEvent::ToolStart { .. } => true,
+        ServerEvent::ReasoningDelta { .. } => crate::config::config().display.reasoning_enabled(),
+        _ => false,
+    };
+    if shows_output {
         app.remote_turn_streamed_output = true;
     }
 
