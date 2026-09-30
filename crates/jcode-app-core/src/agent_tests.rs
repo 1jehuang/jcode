@@ -2014,6 +2014,15 @@ fn output_budget_truncation_requests_a_continuation() {
 }
 
 #[test]
+fn anthropic_pause_turn_is_resumed() {
+    // Long server-tool (web search) turns stop with `pause_turn`; the turn
+    // must be resent to continue rather than treated as finished.
+    assert!(Agent::should_continue_after_stop_reason("pause_turn"));
+    assert!(Agent::is_pause_turn_stop_reason(" PAUSE_TURN "));
+    assert!(!Agent::is_pause_turn_stop_reason("max_tokens"));
+}
+
+#[test]
 fn stranded_tool_use_stop_is_detected() {
     // Second half of the Opus 5 DeepSWE incident: the provider reported
     // stop_reason="tool_use" while the parsed tool-call list was empty, so the

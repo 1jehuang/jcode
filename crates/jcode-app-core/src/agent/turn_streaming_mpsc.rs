@@ -444,6 +444,12 @@ impl Agent {
             // to clients as a keepalive; throttles issue #451 keepalives.
             let mut hidden_activity_last = Instant::now();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
+            // Provider-executed tool items (e.g. native web search), stored
+            // verbatim at their position in the response for exact replay.
+            let mut provider_native_items =
+                jcode_message_types::provider_native::ProviderNativeItems::default();
+            let mut provider_native_tracker =
+                jcode_message_types::provider_native::ProviderNativeTracker::default();
             let mut openai_native_compaction: Option<(String, usize, Option<u64>)> = None;
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
@@ -625,6 +631,73 @@ impl Agent {
                     }
                     StreamEvent::TextDone => {
                         let _ = event_tx.send(ServerEvent::TextDone);
+                    }
+                    StreamEvent::ProviderNative { provider, item } => {
+                        if reasoning_open {
+                            reasoning_open = false;
+                            let _ = event_tx.send(ServerEvent::ReasoningDone {
+                                duration_secs: None,
+                            });
+                        }
+                        // Render as a regular tool row: start, input, exec, done.
+                        use jcode_message_types::provider_native::ProviderNativeToolEvent;
+                        let already_open =
+                            jcode_message_types::provider_native::provider_native_display(
+                                &provider, &item,
+                            )
+                            .is_some_and(|display| provider_native_tracker.is_started(&display.id));
+                        match provider_native_tracker.observe(&provider, &item) {
+                            Some(ProviderNativeToolEvent::Started { id, name, input }) => {
+                                let _ = event_tx.send(ServerEvent::ToolStart {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                });
+                                let _ = event_tx.send(ServerEvent::ToolInput {
+                                    id: Some(id.clone()),
+                                    delta: input.to_string(),
+                                });
+                                let _ = event_tx.send(ServerEvent::ToolExec { id, name });
+                            }
+                            Some(ProviderNativeToolEvent::Completed {
+                                id,
+                                name,
+                                input,
+                                output,
+                                is_error,
+                            }) => {
+                                if !already_open {
+                                    // Result without a start (e.g. OpenAI items
+                                    // arrive whole): open the row first.
+                                    let _ = event_tx.send(ServerEvent::ToolStart {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                    });
+                                    let _ = event_tx.send(ServerEvent::ToolInput {
+                                        id: Some(id.clone()),
+                                        delta: input.to_string(),
+                                    });
+                                    let _ = event_tx.send(ServerEvent::ToolExec {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                    });
+                                }
+                                let _ = event_tx.send(ServerEvent::ToolDone {
+                                    id,
+                                    name,
+                                    output,
+                                    error: is_error.then(|| "Provider tool error".to_string()),
+                                });
+                            }
+                            None => {}
+                        }
+                        if let Some(display) =
+                            jcode_message_types::provider_native::provider_native_display(
+                                &provider, &item,
+                            )
+                        {
+                            tool_id_to_name.insert(display.id, display.name);
+                        }
+                        provider_native_items.push(text_content.len(), provider, item);
                     }
                     StreamEvent::TextDelta(text) => {
                         // Close any open reasoning region before real output so the
@@ -903,6 +976,8 @@ impl Agent {
                         reasoning_signature.clear();
                         reasoning_open = false;
                         openai_reasoning_items.clear();
+                        provider_native_items.clear();
+                        provider_native_tracker.clear();
                         openai_native_compaction = None;
                         saw_message_end = false;
                         stop_reason = None;
@@ -1257,7 +1332,9 @@ impl Agent {
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
-            if !text_content.is_empty() {
+            if !provider_native_items.is_empty() {
+                content_blocks.extend(provider_native_items.interleave(&text_content));
+            } else if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,

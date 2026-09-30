@@ -89,7 +89,7 @@ fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
                 ContentBlock::OpenAICompaction { .. } => {
                     out.push_str("[openai native compaction]\n");
                 }
-                ContentBlock::ToolReference { .. } => {}
+                ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
             }
         }
         out.push('\n');

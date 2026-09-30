@@ -301,7 +301,12 @@ kv_cache_miss_notices = true
 update_channel = "stable"
 
 [websearch]
-# Preferred websearch engine: "duckduckgo", "bing", or "searxng".
+# Preferred websearch engine: "duckduckgo", "bing", "searxng", or "native".
+# "native" uses the model provider's own server-side search (Anthropic
+# web_search, OpenAI Responses web_search) instead of scraping from this
+# machine, so it works on servers where DuckDuckGo/Bing are blocked. When the
+# active provider/model has no native search, the local tool runs with
+# fallback_engines. Anthropic API keys are billed about $10 per 1,000 searches.
 engine = "duckduckgo"
 # Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
 fallback_engines = ["bing"]
@@ -318,6 +323,16 @@ bing_market = "en-US"
 # this. Configure here or via the JCODE_SEARXNG_URL environment variable, then
 # set engine = "searxng" or add it to fallback_engines.
 # searxng_url = "https://searx.example.org"
+# Native search options (engine = "native"):
+# Max provider searches per request (Anthropic only). Caps spend. 0 = no cap.
+# native_max_uses = 5
+# Restrict results to these domains (Anthropic and OpenAI), or block domains
+# (Anthropic only). Set one list, not both.
+# native_allowed_domains = ["docs.rs", "developer.mozilla.org"]
+# native_blocked_domains = ["example.com"]
+# Anthropic tool version. "web_search_20260209" and newer are sent with
+# allowed_callers = ["direct"].
+# native_anthropic_tool_version = "web_search_20250305"
 
 [tools]
 # Controls which built-in tools are sent to the model.

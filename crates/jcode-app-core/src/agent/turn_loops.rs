@@ -275,6 +275,10 @@ impl Agent {
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
+            // Provider-executed tool items (e.g. native web search), stored
+            // verbatim at their position in the response for exact replay.
+            let mut provider_native_items =
+                jcode_message_types::provider_native::ProviderNativeItems::default();
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -601,9 +605,29 @@ impl Agent {
                         reasoning_content.clear();
                         reasoning_signature.clear();
                         openai_reasoning_items.clear();
+                        provider_native_items.clear();
                         openai_native_compaction = None;
                         saw_message_end = false;
                         stop_reason = None;
+                    }
+                    StreamEvent::ProviderNative { provider, item } => {
+                        if print_output
+                            && let Some(display) =
+                                jcode_message_types::provider_native::provider_native_display(
+                                    &provider, &item,
+                                )
+                        {
+                            match display.output {
+                                None => print!("\n[{}] ", display.name),
+                                Some(output) => println!(
+                                    "\n[{}] {}",
+                                    display.name,
+                                    crate::util::truncate_str(&output, 200)
+                                ),
+                            }
+                            io::stdout().flush()?;
+                        }
+                        provider_native_items.push(text_content.len(), provider, item);
                     }
                     StreamEvent::TextDone => {}
                     StreamEvent::MessageEnd {
@@ -865,7 +889,9 @@ impl Agent {
             // cleanly with only spaces despite non-zero output tokens. Persisting that makes the
             // UI look like the agent stopped after tools with no explanation.
             let mut content_blocks = Vec::new();
-            if !text_content.is_empty() && !visible_text_is_empty {
+            if !provider_native_items.is_empty() {
+                content_blocks.extend(provider_native_items.interleave(&text_content));
+            } else if !text_content.is_empty() && !visible_text_is_empty {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,

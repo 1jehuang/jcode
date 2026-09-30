@@ -85,10 +85,10 @@ impl Tool for WebSearchTool {
         let num_results = params.num_results.unwrap_or(8).min(20);
 
         let config = crate::config::config();
-        let mut engines = Vec::new();
-        engines.push(params.engine.unwrap_or(config.websearch.engine));
-        engines.extend(config.websearch.fallback_engines.iter().copied());
-        engines.dedup();
+        let engines = local_engine_order(
+            params.engine.unwrap_or(config.websearch.engine),
+            &config.websearch.fallback_engines,
+        );
 
         let market = params
             .bing_market
@@ -173,6 +173,9 @@ impl WebSearchTool {
                     .await
             }
             WebSearchEngine::Searxng => self.search_searxng(query, num_results).await,
+            // Provider-native search never reaches the local tool: engine order
+            // filters it out. Kept for exhaustiveness.
+            WebSearchEngine::Native => Ok(Vec::new()),
         }
     }
 
@@ -643,8 +646,47 @@ fn html_decode(s: &str) -> String {
         .to_string()
 }
 
+/// Engines the local tool tries, in order. `native` is provider-side and never
+/// runs locally: when it is preferred (e.g. the active provider has no server
+/// search), the local fallbacks run, defaulting to DuckDuckGo then Bing.
+fn local_engine_order(
+    preferred: WebSearchEngine,
+    fallbacks: &[WebSearchEngine],
+) -> Vec<WebSearchEngine> {
+    let mut engines: Vec<WebSearchEngine> = std::iter::once(preferred)
+        .chain(fallbacks.iter().copied())
+        .filter(|engine| engine.is_local())
+        .collect();
+    if engines.is_empty() {
+        engines = vec![WebSearchEngine::Duckduckgo, WebSearchEngine::Bing];
+    }
+    let mut seen = std::collections::HashSet::new();
+    engines.retain(|engine| seen.insert(*engine));
+    engines
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_engine_falls_back_to_local_engines() {
+        use super::local_engine_order;
+        assert_eq!(
+            local_engine_order(WebSearchEngine::Native, &[WebSearchEngine::Searxng]),
+            vec![WebSearchEngine::Searxng]
+        );
+        assert_eq!(
+            local_engine_order(WebSearchEngine::Native, &[WebSearchEngine::Native]),
+            vec![WebSearchEngine::Duckduckgo, WebSearchEngine::Bing]
+        );
+        assert_eq!(
+            local_engine_order(
+                WebSearchEngine::Bing,
+                &[WebSearchEngine::Duckduckgo, WebSearchEngine::Bing]
+            ),
+            vec![WebSearchEngine::Bing, WebSearchEngine::Duckduckgo]
+        );
+    }
+
     use super::*;
 
     #[test]
