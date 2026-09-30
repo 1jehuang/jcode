@@ -82,7 +82,8 @@ impl UsageLimitHint {
 /// Detect a subscription usage limit on `error`: first the typed
 /// [`UsageLimitReset`], then the error text (other runtimes, and
 /// multi-account messages that name the earliest reset across accounts).
-/// Returns the earliest reset found.
+/// A precise typed reset wins over text parsed from the same error, since
+/// the text is a rounded display form of it.
 pub fn usage_limit_hint(error: &anyhow::Error) -> Option<UsageLimitHint> {
     let typed = error
         .chain()
@@ -98,9 +99,10 @@ pub fn usage_limit_hint(error: &anyhow::Error) -> Option<UsageLimitHint> {
         (None, None) => None,
         (Some(reset), None) => Some(UsageLimitHint { reset_in: reset }),
         (None, Some(hint)) => Some(hint),
-        (Some(reset), Some(hint)) => Some(UsageLimitHint {
-            reset_in: earliest(reset, hint.reset_in),
+        (Some(Some(reset)), Some(_)) => Some(UsageLimitHint {
+            reset_in: Some(reset),
         }),
+        (Some(None), Some(hint)) => Some(hint),
     }
 }
 
@@ -121,7 +123,9 @@ fn unix_now() -> i64 {
 /// Text form of [`usage_limit_hint`]. Recognizes a usage limit (not a plain
 /// rate limit) and reads every reset it names: the account-usage-limit marker
 /// (`resets_at=<unix>`), "First reset: <account> at 14:05 (in 1h12m)", and
-/// "resets in 3h 17m". The earliest one wins.
+/// "resets in 3h 17m". The earliest one wins. Rounded display durations are
+/// rounded up to the end of their smallest unit, so the result is never
+/// earlier than the real reset.
 pub fn usage_limit_hint_from_text(text: &str, now_unix: i64) -> Option<UsageLimitHint> {
     let lower = text.to_ascii_lowercase();
     let is_usage_limit = [
@@ -155,25 +159,33 @@ pub fn usage_limit_hint_from_text(text: &str, now_unix: i64) -> Option<UsageLimi
         let rest = &lower[index..];
         let rest = &rest[..rest.find(')').unwrap_or(rest.len())];
         if let Some(at) = rest.find("(in ")
-            && let Some(delay) = parse_compact_duration(&rest[at + "(in ".len()..])
+            && let Some(delay) = parse_compact_duration_ceil(&rest[at + "(in ".len()..])
         {
             consider(delay);
         }
     }
     for (index, _) in lower.match_indices("resets in ") {
-        if let Some(delay) = parse_compact_duration(&lower[index + "resets in ".len()..]) {
+        if let Some(delay) = parse_compact_duration_ceil(&lower[index + "resets in ".len()..]) {
             consider(delay);
         }
     }
     Some(UsageLimitHint { reset_in })
 }
 
+/// [`parse_compact_duration`] rounded up to the end of its smallest unit:
+/// "59m" is anywhere in [59m, 60m), so it becomes 59m59s.
+fn parse_compact_duration_ceil(text: &str) -> Option<Duration> {
+    parse_compact_duration(text)
+        .map(|(total, smallest_unit)| total + Duration::from_secs(smallest_unit - 1))
+}
+
 /// Parse a leading "1h12m", "3h 17m", "30d 4h 29m", "45s" or "5 minutes"
-/// duration. `None` when the text does not start with one.
-fn parse_compact_duration(text: &str) -> Option<Duration> {
+/// duration, with the smallest unit (in seconds) it named. `None` when the
+/// text does not start with one.
+fn parse_compact_duration(text: &str) -> Option<(Duration, u64)> {
     let mut chars = text.trim_start().chars().peekable();
     let mut total: u64 = 0;
-    let mut parsed_any = false;
+    let mut smallest_unit: Option<u64> = None;
     loop {
         while chars.peek() == Some(&' ') {
             chars.next();
@@ -203,9 +215,9 @@ fn parse_compact_duration(text: &str) -> Option<Duration> {
         };
         let value = digits.parse::<u64>().ok()?;
         total = total.saturating_add(value.saturating_mul(scale));
-        parsed_any = true;
+        smallest_unit = Some(smallest_unit.map_or(scale, |unit: u64| unit.min(scale)));
     }
-    parsed_any.then(|| Duration::from_secs(total))
+    smallest_unit.map(|unit| (Duration::from_secs(total), unit))
 }
 
 /// How long to wait before resuming after a usage limit that resets in
@@ -233,12 +245,31 @@ mod tests {
     const NOW: i64 = 1_790_000_000;
 
     #[test]
+    fn precise_typed_reset_wins_over_rounded_text_on_the_same_error() {
+        let error = with_usage_limit_reset(
+            anyhow::anyhow!("Usage limit reached for this Claude account; resets in 59m."),
+            Some(Duration::from_secs(3569)),
+        );
+        let secs = usage_limit_hint(&error)
+            .and_then(|hint| hint.reset_in_secs())
+            .expect("reset");
+        assert!((3568..=3569).contains(&secs), "{secs}");
+    }
+
+    #[test]
+    fn text_only_rounded_reset_is_rounded_up() {
+        let hint = usage_limit_hint_from_text("Usage limit reached; resets in 59m.", NOW)
+            .expect("usage limit");
+        assert!(hint.reset_in.expect("reset") >= Duration::from_secs(3540 + 59));
+    }
+
+    #[test]
     fn anthropic_fail_fast_message_is_a_usage_limit_with_its_reset() {
         let text = "Anthropic API error (429 Too Many Requests): {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"}} Usage limit reached for this Claude account; resets in 40m (2026-09-30 13:30 UTC).";
         assert_eq!(
             usage_limit_hint_from_text(text, NOW),
             Some(UsageLimitHint {
-                reset_in: Some(Duration::from_secs(40 * 60))
+                reset_in: Some(Duration::from_secs(40 * 60 + 59))
             })
         );
     }
@@ -262,7 +293,7 @@ mod tests {
         );
         assert_eq!(
             usage_limit_hint_from_text(&text, NOW).unwrap().reset_in,
-            Some(Duration::from_secs(3600 + 12 * 60))
+            Some(Duration::from_secs(3600 + 12 * 60 + 59))
         );
     }
 

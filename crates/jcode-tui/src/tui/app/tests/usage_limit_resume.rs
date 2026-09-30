@@ -157,7 +157,7 @@ fn test_user_typed_local_turn_with_usage_limit_is_retried_at_the_reset() {
         .expect("local turn held for a retry at the reset");
     let wait = reset.saturating_duration_since(Instant::now());
     assert!(
-        wait > Duration::from_secs(40 * 60 - 60) && wait <= Duration::from_secs(40 * 60),
+        wait > Duration::from_secs(40 * 60 - 60) && wait <= Duration::from_secs(40 * 60 + 59),
         "{wait:?}"
     );
     assert!(
