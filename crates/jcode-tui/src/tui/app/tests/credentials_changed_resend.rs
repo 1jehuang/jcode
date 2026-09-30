@@ -39,6 +39,7 @@ fn test_credentials_changed_resends_turn_held_on_rate_limit() {
     app.handle_server_event(
         crate::protocol::ServerEvent::CredentialsChanged {
             provider: Some("anthropic".to_string()),
+            account_label: None,
         },
         &mut remote,
     );
@@ -55,7 +56,10 @@ fn test_credentials_changed_resends_turn_held_on_rate_limit() {
     // A second auth broadcast (login + catalog refresh both fire) must not
     // add a duplicate notice or schedule a second resend.
     app.handle_server_event(
-        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: None,
+            account_label: None,
+        },
         &mut remote,
     );
     assert_eq!(account_changed_notices(&app), 1);
@@ -79,7 +83,10 @@ fn test_credentials_changed_resends_turn_held_on_rate_limit() {
     // Once resent, further broadcasts are inert: no double send.
     let sent_id = app.current_message_id;
     app.handle_server_event(
-        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: None,
+            account_label: None,
+        },
         &mut remote,
     );
     rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
@@ -97,7 +104,10 @@ fn test_credentials_changed_without_hold_is_a_noop() {
     let before = app.display_messages().len();
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: None,
+            account_label: None,
+        },
         &mut remote,
     );
 
@@ -118,7 +128,10 @@ fn test_credentials_changed_does_not_shortcut_network_wait() {
     let reset = app.rate_limit_reset;
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: None,
+            account_label: None,
+        },
         &mut remote,
     );
 
@@ -149,7 +162,10 @@ fn test_rate_limit_error_for_turn_started_before_account_change_retries_promptly
     app.processing_started = Some(Instant::now() - Duration::from_secs(30));
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: None,
+            account_label: None,
+        },
         &mut remote,
     );
     assert!(app.is_processing, "an in-flight turn is not interrupted");
@@ -238,6 +254,7 @@ fn test_credentials_changed_scope_openai_credentials_change_keeps_claude_turn_he
     app.handle_server_event(
         crate::protocol::ServerEvent::CredentialsChanged {
             provider: Some("openai".to_string()),
+            account_label: None,
         },
         &mut remote,
     );
@@ -265,6 +282,7 @@ fn test_credentials_changed_scope_claude_credentials_change_releases_claude_turn
         app.handle_server_event(
             crate::protocol::ServerEvent::CredentialsChanged {
                 provider: Some(provider.to_string()),
+                account_label: None,
             },
             &mut remote,
         );
@@ -282,7 +300,10 @@ fn test_credentials_changed_scope_unscoped_credentials_change_releases_claude_tu
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
     app.handle_server_event(
-        crate::protocol::ServerEvent::CredentialsChanged { provider: None },
+        crate::protocol::ServerEvent::CredentialsChanged {
+            provider: None,
+            account_label: None,
+        },
         &mut remote,
     );
 

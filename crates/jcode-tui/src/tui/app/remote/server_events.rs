@@ -2377,7 +2377,10 @@ pub(in crate::tui::app) fn handle_server_event(
             app.invalidate_model_picker_cache();
             true
         }
-        ServerEvent::CredentialsChanged { provider } => {
+        ServerEvent::CredentialsChanged {
+            provider,
+            account_label: _,
+        } => {
             crate::logging::info(&format!(
                 "Credentials changed on server (provider={:?}); releasing any rate-limit hold",
                 provider

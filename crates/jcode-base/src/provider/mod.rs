@@ -64,6 +64,7 @@ pub use jcode_provider_core::{
     inferred_reasoning_efforts, model_name_for_provider, normalize_copilot_model_name,
     provider_from_model_key, shared_http_client, summarize_model_catalog_refresh,
 };
+pub use jcode_provider_core::{AccountPin, AccountProviderKind, AccountScope};
 pub use jcode_provider_core::{
     FallbackPickOptions, error_looks_like_credential_failure, model_route_provider_labels_match,
     normalize_model_route_provider_label, pick_next_fallback_route,
@@ -1873,6 +1874,30 @@ impl Provider for MultiProvider {
             }
             _ => None,
         }
+    }
+
+    fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        self.account_runtime(kind)
+            .and_then(|provider| provider.account_pin(kind))
+    }
+
+    fn set_account_pin(&self, kind: AccountProviderKind, pin: Option<AccountPin>) -> Result<()> {
+        match self.account_runtime(kind) {
+            Some(provider) => provider.set_account_pin(kind, pin),
+            None if pin.is_none() => Ok(()),
+            None => Err(anyhow!(
+                "{} provider is not configured",
+                match kind {
+                    AccountProviderKind::Claude => "Anthropic",
+                    AccountProviderKind::OpenAi => "OpenAI",
+                }
+            )),
+        }
+    }
+
+    fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+        self.account_runtime(kind)
+            .and_then(|provider| provider.resolved_account_label(kind))
     }
 
     fn credential_mode(&self) -> CredentialMode {

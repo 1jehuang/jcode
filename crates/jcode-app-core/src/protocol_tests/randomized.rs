@@ -75,6 +75,8 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             crash_on_disconnect,
             continue_on_disconnect,
             terminal_env: Vec::new(),
+            account_pins: Vec::new(),
+            supports_session_accounts: false,
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
         let Request::Subscribe {
@@ -90,6 +92,8 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             crash_on_disconnect: decoded_crash_on_disconnect,
             continue_on_disconnect: decoded_continue_on_disconnect,
             terminal_env: _,
+            account_pins: _,
+            supports_session_accounts: _,
         } = decoded
         else {
             return Err(anyhow!("expected randomized Subscribe"));

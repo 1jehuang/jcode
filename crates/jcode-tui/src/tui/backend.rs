@@ -371,6 +371,10 @@ impl RemoteConnection {
             } else {
                 crate::terminal_launch::snapshot_client_terminal_env()
             },
+            // Filled by `--account` and flipped on once the TUI handles
+            // `session_account_changed` (S5).
+            account_pins: Vec::new(),
+            supports_session_accounts: false,
         })
         .await?;
         let subscribe_ms = subscribe_start.elapsed().as_millis();

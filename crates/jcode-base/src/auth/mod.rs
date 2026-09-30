@@ -42,6 +42,7 @@ pub use status_types::{
 };
 
 pub use active_method::{ActiveCredential, ResolvedProviderAuth, resolve_dual_credential_auth};
+pub use jcode_provider_core::{AccountPin, AccountProviderKind, AccountScope};
 
 use crate::provider_catalog::LoginProviderAuthStateKey;
 use crate::provider_catalog::LoginProviderDescriptor;

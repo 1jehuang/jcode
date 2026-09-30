@@ -16,3 +16,4 @@ include!("protocol_tests/comm_format_awaited.rs");
 include!("protocol_tests/misc_events.rs");
 include!("protocol_tests/randomized.rs");
 include!("protocol_tests/model_usage.rs");
+include!("protocol_tests/session_accounts.rs");

@@ -23,6 +23,12 @@ pub(super) struct SessionJournalMeta {
     pub(super) model: Option<String>,
     #[serde(default)]
     pub(super) reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(super) account_pins: std::collections::BTreeMap<String, super::AccountPin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) account_failover: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(super) account_failover_home: std::collections::BTreeMap<String, super::AccountPin>,
     pub(super) subagent_model: Option<String>,
     pub(super) improve_mode: Option<SessionImproveMode>,
     pub(super) autoreview_enabled: Option<bool>,

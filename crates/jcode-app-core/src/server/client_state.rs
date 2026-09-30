@@ -310,6 +310,7 @@ pub(super) async fn handle_get_model_catalog(
         // authoritative. Omitting it falsely turns off /fast status and its badge.
         service_tier,
         subagent_model: None,
+        account_labels: Vec::new(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: Default::default(),
@@ -626,6 +627,7 @@ async fn send_history_from_persisted_session(
         // The transcript is persisted, but the tier is live provider state and
         // can be read without waiting for the busy agent's mutex.
         service_tier: provider.service_tier(),
+        account_labels: Vec::new(),
         compaction_mode: crate::config::config().compaction.mode.clone(),
         activity,
         side_panel,
@@ -819,6 +821,7 @@ async fn send_history_with_guard(
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
+        account_labels: Vec::new(),
         autoreview_enabled,
         autojudge_enabled,
         available_models,

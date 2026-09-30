@@ -190,6 +190,7 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
             resolved_credential: None,
             reasoning_effort: None,
             service_tier: None,
+            account_labels: Vec::new(),
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),

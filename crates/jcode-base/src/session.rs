@@ -31,8 +31,10 @@ impl StreamingGuard {
 }
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+
+pub use jcode_provider_core::AccountPin;
 mod crash;
 mod journal;
 mod load_telemetry;
@@ -139,6 +141,16 @@ pub struct Session {
     /// Provider reasoning/thinking effort for this session (e.g., OpenAI low|medium|high|xhigh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Per-provider account pins for this session ("claude" | "openai" -> pin).
+    /// Empty means the session follows the default account.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub account_pins: BTreeMap<String, AccountPin>,
+    /// Per-session same-provider account failover toggle. `None` = config default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_failover: Option<bool>,
+    /// Preferred pin to return to after an automatic failover move.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub account_failover_home: BTreeMap<String, AccountPin>,
     /// Optional fixed model to use for subagents launched from this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
@@ -235,6 +247,12 @@ struct SessionStartupStub {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    account_pins: BTreeMap<String, AccountPin>,
+    #[serde(default)]
+    account_failover: Option<bool>,
+    #[serde(default)]
+    account_failover_home: BTreeMap<String, AccountPin>,
     #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]
@@ -350,6 +368,9 @@ impl Session {
         session.model = stub.model;
         session.route_api_method = stub.route_api_method;
         session.reasoning_effort = stub.reasoning_effort;
+        session.account_pins = stub.account_pins;
+        session.account_failover = stub.account_failover;
+        session.account_failover_home = stub.account_failover_home;
         session.subagent_model = stub.subagent_model;
         session.improve_mode = stub.improve_mode;
         session.autoreview_enabled = stub.autoreview_enabled;
@@ -387,6 +408,9 @@ impl Session {
         session.model = snapshot.model;
         session.route_api_method = snapshot.route_api_method;
         session.reasoning_effort = snapshot.reasoning_effort;
+        session.account_pins = snapshot.account_pins;
+        session.account_failover = snapshot.account_failover;
+        session.account_failover_home = snapshot.account_failover_home;
         session.subagent_model = snapshot.subagent_model;
         session.improve_mode = snapshot.improve_mode;
         session.autoreview_enabled = snapshot.autoreview_enabled;
@@ -526,6 +550,9 @@ impl Session {
             provider_key: self.provider_key.clone(),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            account_pins: self.account_pins.clone(),
+            account_failover: self.account_failover,
+            account_failover_home: self.account_failover_home.clone(),
             subagent_model: self.subagent_model.clone(),
             improve_mode: self.improve_mode,
             autoreview_enabled: self.autoreview_enabled,
@@ -729,6 +756,9 @@ impl Session {
         self.provider_key = meta.provider_key;
         self.model = meta.model;
         self.reasoning_effort = meta.reasoning_effort;
+        self.account_pins = meta.account_pins;
+        self.account_failover = meta.account_failover;
+        self.account_failover_home = meta.account_failover_home;
         self.subagent_model = meta.subagent_model;
         self.improve_mode = meta.improve_mode;
         self.autoreview_enabled = meta.autoreview_enabled;
@@ -771,6 +801,9 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            account_pins: BTreeMap::new(),
+            account_failover: None,
+            account_failover_home: BTreeMap::new(),
             subagent_model: None,
             improve_mode: None,
             autoreview_enabled: None,
@@ -828,6 +861,9 @@ impl Session {
             model: None,
             route_api_method: None,
             reasoning_effort: None,
+            account_pins: BTreeMap::new(),
+            account_failover: None,
+            account_failover_home: BTreeMap::new(),
             subagent_model: None,
             improve_mode: None,
             autoreview_enabled: None,
@@ -1713,6 +1749,12 @@ struct RemoteStartupSessionSnapshot {
     route_api_method: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    account_pins: BTreeMap<String, AccountPin>,
+    #[serde(default)]
+    account_failover: Option<bool>,
+    #[serde(default)]
+    account_failover_home: BTreeMap<String, AccountPin>,
     #[serde(default)]
     subagent_model: Option<String>,
     #[serde(default)]

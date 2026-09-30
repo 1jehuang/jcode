@@ -946,7 +946,10 @@ pub(super) async fn handle_client(
                         last_available_models_snapshot = Some(dedup_key);
                     }
                     Ok(BusEvent::CredentialsChanged { provider }) => {
-                        let _ = client_event_tx.send(ServerEvent::CredentialsChanged { provider });
+                        let _ = client_event_tx.send(ServerEvent::CredentialsChanged {
+                            provider,
+                            account_label: None,
+                        });
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
@@ -1642,6 +1645,8 @@ pub(super) async fn handle_client(
                 crash_on_disconnect: _,
                 continue_on_disconnect: requested_continuation,
                 terminal_env,
+                account_pins: _,
+                supports_session_accounts: _,
             } => {
                 if let Err(message) =
                     validated_subscribe_working_dir(
@@ -2169,6 +2174,17 @@ pub(super) async fn handle_client(
 
             Request::SwitchOpenAiAccount { id, label } => {
                 handle_switch_openai_account(id, label, &agent, &client_event_tx).await;
+            }
+
+            // Per-session accounts: wired up in a later slice (S4).
+            Request::SetSessionAccount { id, .. }
+            | Request::SetDefaultAccount { id, .. }
+            | Request::SetAccountFailover { id, .. } => {
+                let _ = client_event_tx.send(ServerEvent::Error {
+                    id,
+                    message: "not implemented yet".to_string(),
+                    retry_after_secs: None,
+                });
             }
 
             Request::InvalidateOpenAiUsage { id, account_label } => {

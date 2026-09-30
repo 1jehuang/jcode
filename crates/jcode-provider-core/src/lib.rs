@@ -1,3 +1,4 @@
+pub mod account_pin;
 pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
@@ -18,6 +19,7 @@ pub mod transport;
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use transport::is_transient_transport_error;
 
+pub use account_pin::{AccountPin, AccountProviderKind, AccountScope};
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
     AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
@@ -368,6 +370,23 @@ pub trait Provider: Send + Sync {
     /// by another process). Providers with in-memory credential caches override
     /// this; the default is a no-op.
     fn reload_credentials(&self) {}
+
+    /// Account pin for this provider instance (one per session fork).
+    /// `None` means the instance follows the default account.
+    fn account_pin(&self, _kind: AccountProviderKind) -> Option<AccountPin> {
+        None
+    }
+
+    /// Pin (or unpin with `None`) this instance to one stored account. Affects
+    /// only this instance, never other sessions or the stored default.
+    fn set_account_pin(&self, _kind: AccountProviderKind, _pin: Option<AccountPin>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Account label the last request used (the pin, or the default account).
+    fn resolved_account_label(&self, _kind: AccountProviderKind) -> Option<String> {
+        None
+    }
 
     /// Human-facing label for the runtime backing this provider instance.
     /// Unlike `display_name`, this reflects instance state (e.g. which
