@@ -60,6 +60,7 @@ input = ["text"]
             initial_provider: None,
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         provider

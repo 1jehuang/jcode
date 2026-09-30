@@ -457,3 +457,38 @@ pub fn get_sync() -> UsageData {
 
     UsageData::default()
 }
+
+/// Label-keyed usage view for per-session account failover. Returns
+/// `Some(resets_at)` (unix seconds, when known) when the cached usage of this
+/// account label says its windows are spent. Never fetches: cache only, so it
+/// is safe on the request path.
+pub fn account_label_usage_exhausted_sync(
+    provider: MultiAccountProviderKind,
+    label: &str,
+) -> Option<Option<i64>> {
+    let to_unix = |at: Option<&str>| {
+        at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.timestamp())
+    };
+    match provider {
+        MultiAccountProviderKind::Anthropic => {
+            let usage = cached_anthropic_usage_for_label(label)?;
+            (usage.five_hour >= 0.99 && usage.seven_day >= 0.99).then(|| {
+                to_unix(usage.five_hour_resets_at.as_deref())
+                    .into_iter()
+                    .chain(to_unix(usage.seven_day_resets_at.as_deref()))
+                    .max()
+            })
+        }
+        MultiAccountProviderKind::OpenAI => {
+            let usage = cached_openai_usage_for_label(label)?;
+            usage.exhausted().then(|| {
+                [usage.five_hour.as_ref(), usage.seven_day.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|window| to_unix(window.resets_at.as_deref()))
+                    .max()
+            })
+        }
+    }
+}
