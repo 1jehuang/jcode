@@ -423,6 +423,9 @@ fn history_refresh_same_session_clears_optimal_baseline() {
         skills: vec![],
         total_tokens: None,
         token_usage_totals: Some(crate::protocol::TokenUsageTotals {
+            // Real servers always send a prompt total (Session::token_usage_totals
+            // starts at Some(0)); without it the KV line is not rendered at all.
+            cache_prompt_tokens: Some(10_000),
             input_tokens: 10_000,
             cache_reported_input_tokens: 10_000,
             ..Default::default()
@@ -456,8 +459,10 @@ fn history_refresh_same_session_clears_optimal_baseline() {
     // First request after refresh has no baseline: no yield yet.
     record_live_cache_request(&mut app, 10_000, 8_000);
     assert_eq!(app.token_accounting.total_cache_optimal_input_tokens, 0);
-    assert!(!kv_cache_summary(&app).contains("yield 80%"));
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("priming"), "{summary}");
     // Second request starts a clean measurement.
     record_live_cache_request(&mut app, 10_000, 5_000);
-    assert!(kv_cache_summary(&app).contains("yield 50%"));
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 50%"), "{summary}");
 }
