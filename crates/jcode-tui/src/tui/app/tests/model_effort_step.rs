@@ -393,3 +393,97 @@ fn effort_step_save_default_saves_model_and_chosen_level() {
         assert!(app.pending_route_selection.is_none(), "saving does not switch");
     });
 }
+
+/// The same model through a different route is not the current route: its
+/// level step starts on the saved default for the family, not on the level
+/// the active route happens to run at.
+#[test]
+fn effort_step_other_route_of_the_current_model_uses_the_saved_level() {
+    with_temp_jcode_home(|| {
+        crate::config::Config::set_openai_reasoning_effort(Some("xhigh")).unwrap();
+        crate::config::invalidate_config_cache();
+        let mut app = create_test_app();
+        configure_test_remote_models_with_openai_recommendations(&mut app);
+        app.remote_model_options.push(crate::provider::ModelRoute {
+            model: "gpt-5.2".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai-api-key".to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        });
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_reasoning_effort = Some("low".to_string());
+        app.session.route_api_method = Some("openai-oauth".to_string());
+        app.open_model_picker();
+
+        select_model_row(&mut app, "gpt-5.2", "openai-oauth");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(selected_row_name(&app), "low", "the active route keeps its level");
+
+        press(&mut app, KeyCode::Esc);
+        select_model_row(&mut app, "gpt-5.2", "openai-api-key");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            selected_row_name(&app),
+            "xhigh",
+            "another route of the same model starts on the saved level"
+        );
+    });
+}
+
+/// A route load that finishes while the level step is open must not reopen
+/// the model list after the user confirms a level.
+#[test]
+fn effort_step_confirming_a_level_drops_a_pending_route_load() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        configure_test_remote_models_with_openai_recommendations(&mut app);
+        app.open_model_picker();
+        select_model_row(&mut app, "claude-opus-4-8", "claude-oauth");
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            app.inline_interactive_state
+                .as_ref()
+                .is_some_and(|picker| picker.effort_step.is_some()),
+            "level step open"
+        );
+
+        // A background route load completes while the step is open.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok(ModelPickerRoutesResult {
+            routes: app.remote_model_options.clone(),
+            routes_ms: 1,
+        }))
+        .unwrap();
+        // Same signature the picker computes, so the load counts as current.
+        let current_model = app.remote_provider_model.clone().unwrap_or_default();
+        let efforts = super::inferred_reasoning_efforts(
+            app.remote_provider_name.as_deref(),
+            app.remote_provider_model.as_deref(),
+        );
+        let config = crate::config::config();
+        let signature = app.model_picker_cache_signature(
+            &current_model,
+            config.provider.default_model.clone(),
+            config.provider.default_provider.clone(),
+            app.remote_reasoning_effort.clone(),
+            &efforts,
+        );
+        app.pending_model_picker_load = Some(PendingModelPickerLoad {
+            request_id: app.model_picker_load_request_id,
+            signature,
+            picker_started: std::time::Instant::now(),
+            receiver: rx,
+        });
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.inline_interactive_state.is_none(), "confirming closes the picker");
+        app.poll_model_picker_load();
+        assert!(
+            app.inline_interactive_state.is_none(),
+            "the finished route load must not reopen the model list"
+        );
+    });
+}

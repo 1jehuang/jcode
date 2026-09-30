@@ -1216,7 +1216,7 @@ impl App {
         )
     }
 
-    fn model_picker_cache_signature(
+    pub(super) fn model_picker_cache_signature(
         &self,
         current_model: &str,
         config_default_model: Option<String>,
@@ -3329,6 +3329,10 @@ impl App {
         let Some(route) = entry.options.get(entry.selected_option) else {
             return;
         };
+        // The choice is made: a route load still running for this picker
+        // must not reopen the list over the confirmed selection.
+        self.pending_model_picker_load = None;
+        self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
         let effort_suffix = effort
             .as_deref()
             .map(|effort| format!(" ({})", reasoning_effort_picker_label(effort)))
@@ -3616,7 +3620,13 @@ impl App {
             return;
         };
         let levels = model_route_effort_levels(&model.name, &route);
-        let is_current_model = model.is_current || model.name == current_model;
+        // The session's level belongs to the route it runs on. Another route
+        // of the same model is a different choice and starts on the saved
+        // level. Match by name only when no row knows the current route
+        // (for example a names-only remote catalog).
+        let any_row_is_current = parent.entries.iter().any(|entry| entry.is_current);
+        let is_current_model =
+            model.is_current || (!any_row_is_current && model.name == current_model);
         let current_effort = current_effort.filter(|_| is_current_model);
         let saved_effort = saved_default_reasoning_effort(&model.name, &route);
         let selected = model_effort_step_preselection(
