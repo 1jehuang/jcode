@@ -187,7 +187,7 @@ pub(super) fn account_rotation(
 
 /// How long an account whose usage limit gave no reset time counts as
 /// exhausted.
-const UNKNOWN_RESET_EXHAUSTION_SECS: i64 = 30 * 60;
+pub(crate) const UNKNOWN_RESET_EXHAUSTION_SECS: i64 = 30 * 60;
 
 #[derive(Clone, Debug)]
 struct AccountExhaustion {
@@ -244,6 +244,12 @@ pub(crate) fn record_account_exhausted(
     resets_at: Option<i64>,
 ) {
     let fingerprint = account_fingerprint(kind, label);
+    let now = now_unix();
+    // A reset time that already passed (the account is limited again after
+    // its reset, clock skew, a stale header) says nothing about when it
+    // resets now. Treat it as unknown, or the mark would clear at once and
+    // the next turn would resend the doomed request or bounce back to it.
+    let resets_at = resets_at.filter(|at| *at > now);
     ACCOUNT_EXHAUSTION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -251,7 +257,7 @@ pub(crate) fn record_account_exhausted(
             (kind, label.to_string()),
             AccountExhaustion {
                 resets_at,
-                recorded_at: now_unix(),
+                recorded_at: now,
                 fingerprint,
             },
         );

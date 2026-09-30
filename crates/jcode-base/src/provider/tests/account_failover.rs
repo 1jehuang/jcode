@@ -14,6 +14,8 @@ enum FakeAccountBehavior {
     Ok,
     /// HTTP 200 stream whose first item is a marked usage-limit 429.
     InStreamUsageLimit { resets_at: i64 },
+    /// A marked usage-limit 429 with no reset time (no reset headers).
+    InStreamUsageLimitNoReset,
     /// Same, delivered as a `StreamEvent::Error` (OpenAI WebSocket shape).
     InStreamUsageLimitEvent { resets_at: i64 },
     /// An ordinary short 429 inside the stream (no usage-limit marker).
@@ -130,6 +132,13 @@ impl Provider for FakeAccountRuntime {
                 Err(anyhow::anyhow!(
                     "Anthropic API error (429 Too Many Requests): rate_limit_error Usage limit reached for this Claude account. {}",
                     jcode_provider_core::account_usage_limit_marker(Some(resets_at))
+                )),
+            ],
+            FakeAccountBehavior::InStreamUsageLimitNoReset => vec![
+                connecting,
+                Err(anyhow::anyhow!(
+                    "Anthropic API error (429 Too Many Requests): rate_limit_error Usage limit reached for this Claude account. {}",
+                    jcode_provider_core::account_usage_limit_marker(None)
                 )),
             ],
             FakeAccountBehavior::InStreamUsageLimitEvent { resets_at } => vec![
@@ -726,5 +735,174 @@ fn relogin_under_exhausted_label_is_not_exhausted() {
             crate::provider::account_failover::account_resets_at(AccountProviderKind::Claude, &otter),
             None
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// No loops: failover never cycles through accounts that are all out of usage.
+// ---------------------------------------------------------------------------
+
+fn claude_all_limited(world: &FakeAccountWorld, resets: &[i64]) {
+    for (label, resets_at) in ["claude-otter", "claude-fox", "claude-panda"]
+        .into_iter()
+        .zip(resets)
+    {
+        world.set(
+            label,
+            FakeAccountBehavior::InStreamUsageLimit {
+                resets_at: *resets_at,
+            },
+        );
+    }
+}
+
+/// Guard 1: one pass per call. With 3 accounts all out, exactly 3 requests,
+/// then the earliest-reset error. Cross-provider fallback (a configured
+/// OpenAI slot) must not re-enter same-provider failover.
+#[test]
+fn account_failover_all_limited_turn_tries_each_account_once() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let now = chrono::Utc::now().timestamp();
+        claude_all_limited(&world, &[now + 3 * 3600, now + 3600, now + 2 * 3600]);
+        let a = account_session(&world, "A", ActiveProvider::Claude, true);
+        let rt = enter_test_runtime();
+        let err = complete_text(&rt, &a).expect_err("all out");
+        assert!(
+            err.to_string().contains("All 3 Claude accounts are out of usage. First reset: claude-fox"),
+            "{err:#}"
+        );
+        assert_eq!(world.requests().len(), 3, "{:?}", world.requests());
+        assert_eq!(
+            world.labels_for("A"),
+            ["claude-otter", "claude-fox", "claude-panda"]
+        );
+        // Some pre-marked: fewer requests, never more than the stored count.
+        reset_account_failover_globals();
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::Claude,
+            "claude-fox",
+            Some(now + 3600),
+        );
+        let b = account_session(&world, "B", ActiveProvider::Claude, true);
+        let _ = complete_text(&rt, &b).expect_err("all out");
+        assert_eq!(world.labels_for("B"), ["claude-otter", "claude-panda"]);
+    });
+}
+
+/// Guard 2: once every account is marked out, the next turn sends nothing
+/// until the earliest reset and fails with the same earliest-reset message.
+#[test]
+fn account_failover_next_turn_after_all_limited_sends_no_requests() {
+    with_account_failover_env(|| {
+        store_claude_accounts(3);
+        let world = Arc::new(FakeAccountWorld::default());
+        let now = chrono::Utc::now().timestamp();
+        claude_all_limited(&world, &[now + 3 * 3600, now + 3600, now + 2 * 3600]);
+        let a = account_session(&world, "A", ActiveProvider::Claude, true);
+        let rt = enter_test_runtime();
+        let first = complete_text(&rt, &a).expect_err("all out");
+        assert_eq!(world.requests().len(), 3);
+        for turn in 0..3 {
+            let err = complete_text(&rt, &a).expect_err("still all out");
+            assert!(
+                err.to_string().contains("All 3 Claude accounts are out of usage. First reset: claude-fox"),
+                "turn {turn}: {err:#}"
+            );
+            assert_eq!(world.requests().len(), 3, "turn {turn} sent a request");
+        }
+        // Another window on the same accounts sends nothing either.
+        let b = account_session(&world, "B", ActiveProvider::Claude, true);
+        let _ = complete_text(&rt, &b).expect_err("all out");
+        assert!(world.labels_for("B").is_empty(), "{:?}", world.labels_for("B"));
+        drop(first);
+    });
+}
+
+/// Guard 3: a usage-limit 429 without reset headers keeps the account out
+/// for UNKNOWN_RESET_EXHAUSTION_SECS, so later turns do not hammer it.
+#[test]
+fn account_failover_unknown_reset_not_retried_within_window() {
+    with_account_failover_env(|| {
+        store_claude_accounts(2);
+        let world = Arc::new(FakeAccountWorld::default());
+        world.set("claude-otter", FakeAccountBehavior::InStreamUsageLimitNoReset);
+        world.set("claude-fox", FakeAccountBehavior::InStreamUsageLimitNoReset);
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        let rt = enter_test_runtime();
+        let _ = complete_text(&rt, &a).expect_err("both out");
+        assert_eq!(world.requests().len(), 2);
+        let until = crate::provider::account_failover::account_exhausted(
+            AccountProviderKind::Claude,
+            "claude-otter",
+        )
+        .expect("marked");
+        let window = crate::provider::account_failover::UNKNOWN_RESET_EXHAUSTION_SECS;
+        let now = chrono::Utc::now().timestamp();
+        assert!(until >= now + window - 5 && until <= now + window, "{until}");
+        for _ in 0..3 {
+            let _ = complete_text(&rt, &a).expect_err("still out");
+        }
+        assert_eq!(world.requests().len(), 2, "{:?}", world.requests());
+    });
+}
+
+/// Guard 5: return home only after the recorded reset passed, at most once
+/// per reset. Home still limited after returning: record it, move away once,
+/// and do not bounce back each turn.
+#[test]
+fn account_failover_return_home_still_limited_does_not_bounce() {
+    with_account_failover_env(|| {
+        store_claude_accounts(2);
+        let world = Arc::new(FakeAccountWorld::default());
+        let rt = enter_test_runtime();
+        let soon = chrono::Utc::now().timestamp() + 2;
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at: soon },
+        );
+        let a = account_session(&world, "A", ActiveProvider::Claude, false);
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        assert!(a.return_account_home_if_reset().is_empty(), "not before the reset");
+
+        std::thread::sleep(std::time::Duration::from_millis(2_200));
+        // The provider still reports the old (now past) reset time.
+        assert_eq!(a.return_account_home_if_reset(), vec![AccountProviderKind::Claude]);
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        assert_eq!(
+            world.labels_for("A"),
+            ["claude-otter", "claude-fox", "claude-otter", "claude-fox"],
+            "home tried once after its reset, then one move away"
+        );
+        assert!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::Claude,
+                "claude-otter"
+            )
+            .is_some(),
+            "a past reset time must not clear the new mark at once"
+        );
+        for _ in 0..3 {
+            assert!(a.return_account_home_if_reset().is_empty(), "no bounce");
+            assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
+        }
+        assert_eq!(
+            world.labels_for("A").iter().filter(|l| *l == "claude-otter").count(),
+            2,
+            "otter got no more requests: {:?}",
+            world.labels_for("A")
+        );
+
+        // A new reset time passes: return home once more.
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::Claude,
+            "claude-otter",
+            Some(chrono::Utc::now().timestamp() + 1),
+        );
+        world.set("claude-otter", FakeAccountBehavior::Ok);
+        std::thread::sleep(std::time::Duration::from_millis(1_200));
+        assert_eq!(a.return_account_home_if_reset(), vec![AccountProviderKind::Claude]);
+        assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-otter");
     });
 }

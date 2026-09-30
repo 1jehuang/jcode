@@ -644,6 +644,9 @@ impl MultiProvider {
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
+        // Same-provider account failover runs at most once per call: the
+        // cross-provider path below must never re-enter it for this turn.
+        let mut account_failover_done = false;
         let (estimated_input_chars, estimated_input_tokens) =
             Self::estimate_request_input(messages, tools, mode);
 
@@ -688,7 +691,7 @@ impl MultiProvider {
             };
             // With account failover, a marked account means "rotate", not
             // "skip the provider".
-            let account_failover = (candidate == active)
+            let account_failover = (candidate == active && !account_failover_done)
                 .then(|| self.account_failover_labels(candidate))
                 .flatten();
             if let Some(detail) = unavailable.clone()
@@ -711,6 +714,7 @@ impl MultiProvider {
             // Same-provider account failover: only this session moves to
             // another stored account, and only before any output streamed.
             if let Some(accounts) = account_failover {
+                account_failover_done = true;
                 match self
                     .complete_with_account_failover(
                         candidate,

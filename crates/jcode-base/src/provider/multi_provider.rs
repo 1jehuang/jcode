@@ -238,7 +238,22 @@ impl MultiProvider {
         let provider_key = Self::provider_key(provider);
         let provider_label = Self::provider_label(provider);
 
+        // Hard cap: each stored label is tried at most once per call (the
+        // current one was already tried or known out), and never more
+        // attempts than there are stored labels. No second pass.
+        let mut tried: std::collections::HashSet<String> =
+            std::iter::once(current.to_string()).collect();
+        let max_attempts = labels.len().saturating_sub(1);
+        let mut attempts = 0usize;
         for label in account_rotation(kind, Some(current), labels) {
+            if attempts >= max_attempts || !tried.insert(label.clone()) {
+                continue;
+            }
+            // Another session may have marked it out since the rotation was built.
+            if account_exhausted(kind, &label).is_some() {
+                continue;
+            }
+            attempts += 1;
             crate::logging::info(&format!(
                 "Same-provider failover{}: moving this session's {} request to account '{}'",
                 mode.log_suffix(),
