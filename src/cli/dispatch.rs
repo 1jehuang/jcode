@@ -303,7 +303,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             json,
             ndjson,
         }) => {
-            let pins = super::account_pins::resolve_account_pins(&account)?;
+            // `jcode --account X run ...`: the global flag applies to run too;
+            // a `run --account` value wins for the same provider.
+            let pins = super::account_pins::merge_account_values(&args.account, &account)?;
             commands::run_single_message_command(
                 &args.provider,
                 args.model.as_deref(),

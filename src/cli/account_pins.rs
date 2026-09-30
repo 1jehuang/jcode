@@ -23,28 +23,76 @@ pub fn resolve_account_pins(values: &[String]) -> Result<Vec<(String, String)>> 
     Ok(pins)
 }
 
-fn resolve_one(value: &str) -> Result<(String, String)> {
-    if let Some(kind) = crate::auth::AccountProviderKind::from_label(value) {
-        return Ok((kind.key().to_string(), value.to_string()));
+/// `jcode --account X run --account Y`: the top-level values apply to `run`
+/// too. A `run` value wins for the same provider.
+pub fn merge_account_values(global: &[String], subcommand: &[String]) -> Result<Vec<(String, String)>> {
+    let mut pins = resolve_account_pins(subcommand)?;
+    for (provider, label) in resolve_account_pins(global)? {
+        if !pins.iter().any(|(existing, _)| *existing == provider) {
+            pins.push((provider, label));
+        }
     }
-    let claude = crate::auth::claude::list_accounts()
-        .unwrap_or_default()
+    Ok(pins)
+}
+
+/// Stored (label, email) pairs for one provider family.
+fn stored(kind: crate::auth::AccountProviderKind) -> Vec<(String, Option<String>)> {
+    match kind {
+        crate::auth::AccountProviderKind::Claude => crate::auth::claude::list_accounts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| (a.label, a.email))
+            .collect(),
+        crate::auth::AccountProviderKind::OpenAi => crate::auth::codex::list_accounts()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| (a.label, a.email))
+            .collect(),
+    }
+}
+
+fn known_labels_hint() -> String {
+    let labels: Vec<String> = crate::auth::AccountProviderKind::ALL
         .into_iter()
-        .find(|a| a.label == value || a.email.as_deref() == Some(value))
-        .map(|a| a.label);
-    let openai = crate::auth::codex::list_accounts()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|a| a.label == value || a.email.as_deref() == Some(value))
-        .map(|a| a.label);
-    match (claude, openai) {
-        (Some(label), None) => Ok(("claude".to_string(), label)),
-        (None, Some(label)) => Ok(("openai".to_string(), label)),
-        (Some(_), Some(_)) => bail!(
-            "--account {value} matches both a Claude and an OpenAI account. Use its label (claude-… or openai-…)."
+        .flat_map(stored)
+        .map(|(label, _)| label)
+        .collect();
+    if labels.is_empty() {
+        "No Claude or OpenAI accounts are saved. Log in with `jcode login claude` or `jcode login openai`.".to_string()
+    } else {
+        format!(
+            "Saved accounts: {}. Run `jcode auth status` for details.",
+            labels.join(", ")
+        )
+    }
+}
+
+/// A value must name a stored account (by label or email). A known prefix
+/// alone (`claude-typo`) is not enough.
+fn resolve_one(value: &str) -> Result<(String, String)> {
+    let matches: Vec<(crate::auth::AccountProviderKind, String)> =
+        crate::auth::AccountProviderKind::ALL
+            .into_iter()
+            .filter_map(|kind| {
+                stored(kind)
+                    .into_iter()
+                    .find(|(label, email)| {
+                        label == value
+                            || email
+                                .as_deref()
+                                .is_some_and(|email| email.eq_ignore_ascii_case(value))
+                    })
+                    .map(|(label, _)| (kind, label))
+            })
+            .collect();
+    match matches.as_slice() {
+        [(kind, label)] => Ok((kind.key().to_string(), label.clone())),
+        [] => bail!(
+            "--account {value}: no saved Claude or OpenAI account with that label or email. {}",
+            known_labels_hint()
         ),
-        (None, None) => bail!(
-            "--account {value}: no saved Claude or OpenAI account with that label or email. Run `jcode auth status` to list accounts."
+        _ => bail!(
+            "--account {value} matches both a Claude and an OpenAI account. Use its label (claude-… or openai-…)."
         ),
     }
 }
@@ -59,26 +107,11 @@ pub fn apply_to_provider(
         let Some(kind) = crate::auth::AccountProviderKind::from_key(provider_key) else {
             continue;
         };
-        let identity = match kind {
-            crate::auth::AccountProviderKind::Claude => {
-                crate::auth::claude::list_accounts()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|a| &a.label == label)
-                    .and_then(|a| a.email)
-            }
-            crate::auth::AccountProviderKind::OpenAi => {
-                crate::auth::codex::list_accounts()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|a| &a.label == label)
-                    .and_then(|a| a.email.or(a.account_id))
-            }
+        let pin = match kind {
+            crate::auth::AccountProviderKind::Claude => crate::auth::claude::pin_for_label(label)?,
+            crate::auth::AccountProviderKind::OpenAi => crate::auth::codex::pin_for_label(label)?,
         };
-        provider.set_account_pin(
-            kind,
-            Some(crate::auth::AccountPin::new(label.clone(), identity)),
-        )?;
+        provider.set_account_pin(kind, Some(pin))?;
         // One-shot processes may also use the process-local override
         // (design section 0). It never writes auth.json, so the stored default
         // and other windows are unaffected.
