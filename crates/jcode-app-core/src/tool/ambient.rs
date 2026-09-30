@@ -332,7 +332,7 @@ impl Tool for ScheduleAmbientTool {
                 },
                 "recurse_minutes": {
                     "type": "integer",
-                    "description": "Fork extension: re-arm this item structurally every N minutes after each run (same id). Use for recurring guardians instead of asking the model to re-schedule. Omit for one-shot."
+                    "description": "Re-arm this item every N minutes after each run (same id). Omit for one-shot."
                 },
                 "wake_at": {
                     "type": "string",
@@ -807,7 +807,7 @@ impl Tool for ScheduleTool {
                 "wake_in_minutes": { "type": "integer" },
                 "recurse_minutes": {
                     "type": "integer",
-                    "description": "Fork extension: re-arm this item structurally every N minutes after each run (same id). Use for recurring guardians. Omit for one-shot."
+                    "description": "Re-arm this item every N minutes after each run (same id). Omit for one-shot."
                 },
                 "wake_at": { "type": "string" },
                 "priority": {
