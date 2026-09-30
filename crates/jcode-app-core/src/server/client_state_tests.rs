@@ -761,3 +761,61 @@ fn history_reload_recovery_does_not_mark_delivered_until_continuation_is_accepte
     );
     Ok(())
 }
+
+/// A new session's catalog request can arrive while its agent is busy and
+/// before the session file exists. The fallback must still report stored
+/// accounts, since the TUI replaces its window accounts with this list.
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test intentionally keeps the agent busy lock held to exercise model-catalog fallback"
+)]
+#[tokio::test]
+async fn handle_get_model_catalog_busy_unsaved_session_keeps_account_labels() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("create temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    std::fs::write(
+        temp_home.path().join("auth.json"),
+        r#"{"anthropic_accounts":[{"label":"claude-otter","access":"a","refresh":"r","expires":1}],"active_anthropic_account":"claude-otter"}"#,
+    )
+    .expect("write auth file");
+
+    let session_id = "session_busy_unsaved_catalog";
+    let session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(None));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let busy_guard = agent.lock().await;
+
+    let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
+    let (_reader_a, writer_a) = stream_a.into_split();
+    let writer = Arc::new(Mutex::new(writer_a));
+    handle_get_model_catalog(44, session_id, &agent, &provider, &writer)
+        .await
+        .expect("catalog fallback");
+    drop(busy_guard);
+    drop(writer);
+
+    let mut bytes = Vec::new();
+    stream_b.read_to_end(&mut bytes).await.expect("read");
+    let mut line = String::new();
+    std::io::Cursor::new(bytes).read_line(&mut line).expect("line");
+    let event: crate::protocol::ServerEvent = serde_json::from_str(line.trim()).expect("decode");
+    let crate::protocol::ServerEvent::History { account_labels, .. } = event else {
+        panic!("expected history event");
+    };
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    assert_eq!(account_labels.len(), 1, "account_labels: {account_labels:?}");
+    assert_eq!(account_labels[0].label.as_deref(), Some("claude-otter"));
+    assert!(account_labels[0].is_default);
+}
