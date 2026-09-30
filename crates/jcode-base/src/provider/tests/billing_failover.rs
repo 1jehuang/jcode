@@ -148,7 +148,7 @@ fn b_answer_body() -> String {
 }
 
 #[test]
-fn billing_402_on_compatible_profile_resends_to_sibling_serving_same_model() {
+fn billing_402_in_countdown_mode_offers_sibling_without_resending() {
     with_clean_provider_test_env(|| {
         let (a_base, a_hits) = spawn_canned_chat_server(
             "402 Payment Required",
@@ -170,47 +170,220 @@ fn billing_402_on_compatible_profile_resends_to_sibling_serving_same_model() {
             let stream = provider.complete(&messages, &[], "", None).await?;
             drain_text(stream).await
         });
-        let text = first.expect("402 on profile A should be resent to profile B");
-        assert_eq!(text, "hello from B");
+        // The turn must not reach prof-b before the user had the countdown to
+        // cancel it: the provider only offers the switch.
+        let err = first.expect_err("countdown mode must not resend on its own");
+        let prompt = crate::provider::parse_failover_prompt_message(&err.to_string())
+            .unwrap_or_else(|| panic!("expected a failover prompt, got: {err:#}"));
+        assert_eq!(prompt.to_provider, "prof-b:glm-5.3");
+        assert!(prompt.reason.to_ascii_lowercase().contains("credit"));
         assert_eq!(a_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(b_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            b_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "prof-b must get zero requests before the countdown ends"
+        );
         assert_eq!(
             ProviderRegistry::new(&provider).active_compatible_profile_id(),
-            Some("prof-b".to_string())
-        );
-        assert_eq!(provider.model(), "glm-5.3");
-
-        let notices = provider.drain_startup_notices().join("\n");
-        assert!(
-            notices.contains("prof-a") && notices.contains("prof-b"),
-            "notice must name both profiles: {notices}"
-        );
-        assert!(
-            notices.to_ascii_lowercase().contains("credit"),
-            "notice must say why in plain words: {notices}"
-        );
-        assert!(
-            notices.contains("Switched this session to prof-b")
-                && !notices.contains("next few minutes"),
-            "notice must say the session moved and not promise a return: {notices}"
+            Some("prof-a".to_string()),
+            "the provider must not switch profile by itself"
         );
 
-        // A later turn that explicitly goes back to A skips it while A is
-        // marked out of credit.
+        // The TUI countdown switches to the offered target and resends.
         provider
-            .set_model("prof-a:glm-5.3")
-            .expect("reselect profile A");
+            .set_model(&prompt.to_provider)
+            .expect("countdown switch to profile B");
         let second = rt.block_on(async {
             let stream = provider.complete(&messages, &[], "", None).await?;
             drain_text(stream).await
         });
-        assert_eq!(second.expect("second turn"), "hello from B");
+        assert_eq!(second.expect("resend on B"), "hello from B");
+        assert_eq!(b_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A later turn that explicitly goes back to A offers B again without
+        // touching A while A is marked out of credit.
+        provider
+            .set_model("prof-a:glm-5.3")
+            .expect("reselect profile A");
+        let third = rt.block_on(async {
+            let stream = provider.complete(&messages, &[], "", None).await?;
+            drain_text(stream).await
+        });
+        let err = third.expect_err("A is still out of credit");
+        assert!(crate::provider::parse_failover_prompt_message(&err.to_string()).is_some());
         assert_eq!(
             a_hits.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "profile A is marked unavailable and must not be retried"
         );
-        assert_eq!(b_hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-a");
+    });
+}
+
+fn write_three_profile_config(a_base: &str, b_base: &str, c_base: &str) {
+    let jcode_home = std::env::var_os("JCODE_HOME").expect("test JCODE_HOME should be set");
+    let profile = |name: &str, base: &str| {
+        format!(
+            r#"
+[providers.{name}]
+type = "openai-compatible"
+base_url = "{base}"
+auth = "none"
+model_catalog = false
+default_model = "glm-5.3"
+
+[[providers.{name}.models]]
+id = "glm-5.3"
+"#
+        )
+    };
+    std::fs::write(
+        std::path::PathBuf::from(jcode_home).join("config.toml"),
+        format!(
+            "[provider]\ncross_provider_failover = \"countdown\"\n{}{}{}",
+            profile("prof-a", a_base),
+            profile("prof-b", b_base),
+            profile("prof-c", c_base)
+        ),
+    )
+    .expect("write test config.toml");
+    crate::config::invalidate_config_cache();
+}
+
+#[test]
+fn failing_sibling_offers_the_next_sibling_instead_of_ending_failover() {
+    for (status, body) in [
+        // The runtime retries 429 and 5xx itself; `Retry-After: 0` keeps
+        // those retries instant.
+        (
+            "429 Too Many Requests\r\nRetry-After: 0",
+            r#"{"error":{"message":"rate limited"}}"#,
+        ),
+        ("401 Unauthorized", r#"{"error":{"message":"bad key"}}"#),
+        (
+            "500 Internal Server Error\r\nRetry-After: 0",
+            r#"{"error":{"message":"boom"}}"#,
+        ),
+    ] {
+        with_clean_provider_test_env(|| {
+            let (a_base, _a_hits) = spawn_canned_chat_server(
+                "402 Payment Required",
+                "application/json",
+                BILLING_402_BODY.to_string(),
+            );
+            let (b_base, b_hits) =
+                spawn_canned_chat_server(status, "application/json", body.to_string());
+            let (c_base, c_hits) =
+                spawn_canned_chat_server("200 OK", "text/event-stream", b_answer_body());
+            write_three_profile_config(&a_base, &b_base, &c_base);
+
+            let provider = billing_failover_test_provider();
+            provider.set_model("prof-a:glm-5.3").expect("select A");
+            let rt = enter_test_runtime();
+            let messages = billing_test_messages();
+            let run = |provider: &MultiProvider| {
+                rt.block_on(async {
+                    let stream = provider.complete(&messages, &[], "", None).await?;
+                    drain_text(stream).await
+                })
+            };
+
+            let err = run(&provider).expect_err("A is out of credit");
+            let prompt = crate::provider::parse_failover_prompt_message(&err.to_string())
+                .expect("prompt for B");
+            assert_eq!(prompt.to_provider, "prof-b:glm-5.3");
+
+            provider.set_model(&prompt.to_provider).expect("switch to B");
+            let err = run(&provider).expect_err("B fails before any output");
+            let prompt = crate::provider::parse_failover_prompt_message(&err.to_string())
+                .unwrap_or_else(|| {
+                    panic!("B answered {status}: expected an offer for prof-c, got: {err:#}")
+                });
+            assert_eq!(prompt.to_provider, "prof-c:glm-5.3", "{status}");
+            assert!(b_hits.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+            assert_eq!(c_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+            let notices = provider.drain_startup_notices().join("\n");
+            assert!(
+                !notices.contains("Switched"),
+                "a failing sibling must not be announced as a success: {notices}"
+            );
+
+            provider.set_model(&prompt.to_provider).expect("switch to C");
+            assert_eq!(run(&provider).expect("C answers"), "hello from B");
+            assert_eq!(c_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+            for profile in ["prof-a", "prof-b", "prof-c"] {
+                crate::provider::models::clear_provider_unavailable_for_account(&format!(
+                    "openai-compatible:{profile}"
+                ));
+            }
+        });
+    }
+}
+
+#[test]
+fn every_sibling_failing_surfaces_the_last_error() {
+    with_clean_provider_test_env(|| {
+        let (a_base, _) = spawn_canned_chat_server(
+            "402 Payment Required",
+            "application/json",
+            BILLING_402_BODY.to_string(),
+        );
+        let (b_base, _) = spawn_canned_chat_server(
+            "401 Unauthorized",
+            "application/json",
+            r#"{"error":{"message":"bad key on b"}}"#.to_string(),
+        );
+        write_two_profile_config(&a_base, &b_base, "countdown");
+        let provider = billing_failover_test_provider();
+        provider.set_model("prof-a:glm-5.3").expect("select A");
+        let rt = enter_test_runtime();
+        let messages = billing_test_messages();
+        let err = rt
+            .block_on(async {
+                let stream = provider.complete(&messages, &[], "", None).await?;
+                drain_text(stream).await
+            })
+            .expect_err("A is out of credit");
+        let prompt =
+            crate::provider::parse_failover_prompt_message(&err.to_string()).expect("prompt");
+        provider.set_model(&prompt.to_provider).expect("switch to B");
+        let err = rt
+            .block_on(async {
+                let stream = provider.complete(&messages, &[], "", None).await?;
+                drain_text(stream).await
+            })
+            .expect_err("B fails and nothing is left");
+        let text = format!("{err:#}");
+        assert!(crate::provider::parse_failover_prompt_message(&text).is_none());
+        assert!(text.contains("401") && text.contains("bad key on b"), "{text}");
+        crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-a");
+        crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-b");
+    });
+}
+
+#[test]
+fn billing_error_in_http_200_sse_event_offers_sibling() {
+    with_clean_provider_test_env(|| {
+        let sse_error = "data: {\"error\":{\"message\":\"Insufficient credits\",\"code\":402}}\n\ndata: [DONE]\n\n".to_string();
+        let (a_base, a_hits) = spawn_canned_chat_server("200 OK", "text/event-stream", sse_error);
+        let (b_base, b_hits) =
+            spawn_canned_chat_server("200 OK", "text/event-stream", b_answer_body());
+        write_two_profile_config(&a_base, &b_base, "countdown");
+        let provider = billing_failover_test_provider();
+        provider.set_model("prof-a:glm-5.3").expect("select A");
+        let rt = enter_test_runtime();
+        let messages = billing_test_messages();
+        let err = rt
+            .block_on(async {
+                let stream = provider.complete(&messages, &[], "", None).await?;
+                drain_text(stream).await
+            })
+            .expect_err("A reports no credit in an SSE error event");
+        let prompt = crate::provider::parse_failover_prompt_message(&err.to_string())
+            .unwrap_or_else(|| panic!("expected an offer for prof-b, got: {err:#}"));
+        assert_eq!(prompt.to_provider, "prof-b:glm-5.3");
+        assert_eq!(a_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(b_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-a");
     });
 }
@@ -296,3 +469,4 @@ id = "glm-5.3"
         crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-a");
     });
 }
+

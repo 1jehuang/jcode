@@ -5,8 +5,15 @@
 //! slot, and its runtime reports HTTP errors *inside* the returned stream. So
 //! the provider-level failover loop never saw a 402 and never considered other
 //! profiles that serve the same model. This module peeks at the start of the
-//! stream, and when the active profile is out of credit it resends the turn to
-//! another configured profile serving the same model id.
+//! stream, and when the active profile is out of credit it offers another
+//! configured profile serving the same model id.
+//!
+//! The provider never resends on its own. It returns a
+//! `ProviderFailoverPrompt` in both `cross_provider_failover` modes: the TUI
+//! runs the cancelable countdown (countdown mode) or shows the manual hint
+//! (manual mode), and only the TUI switches profile and resends. That keeps
+//! the conversation and tools away from another endpoint until the user had
+//! the chance to press Esc.
 
 use super::*;
 use crate::message::{ConnectionPhase, StreamEvent};
@@ -25,26 +32,56 @@ fn compatible_profile_unavailable_detail(profile_id: &str) -> Option<String> {
 }
 
 enum Peeked {
+    /// The response started (or the stream ended) without a pre-response error.
     Stream(EventStream),
-    OutOfCredit(anyhow::Error),
+    /// The request failed before any model output. `out_of_credit` is true
+    /// for billing exhaustion (HTTP 402 or credit wording without a reset time).
+    Failed {
+        error: anyhow::Error,
+        out_of_credit: bool,
+        /// The exact stream as the runtime produced it, for callers that do
+        /// not fail over and must surface the error unchanged.
+        replay: EventStream,
+    },
 }
 
 /// Read the stream up to the HTTP response (connection bookkeeping events
-/// only). A billing error at that point means the request never reached the
-/// model, so it is safe to resend elsewhere.
-async fn peek_for_out_of_credit(mut stream: EventStream) -> Peeked {
+/// only). An error at that point means the request never reached the model,
+/// so the caller may offer another profile. Errors come either as `Err` items
+/// (non-2xx HTTP status) or as `StreamEvent::Error` (an HTTP 200 SSE stream
+/// whose first event is an error payload).
+async fn peek_before_output(mut stream: EventStream) -> Peeked {
     let mut buffered: Vec<Result<StreamEvent>> = Vec::new();
     while let Some(item) = stream.next().await {
         match item {
+            Ok(StreamEvent::Error {
+                message,
+                retry_after_secs,
+            }) => {
+                let out_of_credit =
+                    jcode_provider_core::is_billing_exhausted_error_message(&message);
+                let error = anyhow::anyhow!(message.clone());
+                buffered.push(Ok(StreamEvent::Error {
+                    message,
+                    retry_after_secs,
+                }));
+                return Peeked::Failed {
+                    error,
+                    out_of_credit,
+                    replay: Box::pin(futures::stream::iter(buffered).chain(stream)),
+                };
+            }
             Ok(event) => {
                 let still_connecting = matches!(
                     event,
                     StreamEvent::ConnectionType { .. }
                         | StreamEvent::StatusDetail { .. }
+                        | StreamEvent::UpstreamProvider { .. }
                         | StreamEvent::ConnectionPhase {
                             phase: ConnectionPhase::Authenticating
                                 | ConnectionPhase::Connecting
                                 | ConnectionPhase::SendingRequest
+                                | ConnectionPhase::WaitingForResponse
                                 | ConnectionPhase::Retrying { .. }
                         }
                 );
@@ -53,12 +90,15 @@ async fn peek_for_out_of_credit(mut stream: EventStream) -> Peeked {
                     break;
                 }
             }
-            Err(err) => {
-                if jcode_provider_core::is_billing_exhausted_error_message(&format!("{err:#}")) {
-                    return Peeked::OutOfCredit(err);
-                }
-                buffered.push(Err(err));
-                break;
+            Err(error) => {
+                let text = format!("{error:#}");
+                let out_of_credit = jcode_provider_core::is_billing_exhausted_error_message(&text);
+                buffered.push(Err(error));
+                return Peeked::Failed {
+                    error: anyhow::anyhow!(text),
+                    out_of_credit,
+                    replay: Box::pin(futures::stream::iter(buffered).chain(stream)),
+                };
             }
         }
     }
@@ -68,6 +108,10 @@ async fn peek_for_out_of_credit(mut stream: EventStream) -> Peeked {
 /// Short plain-words reason, e.g. `out of credit (HTTP 402: Insufficient credits)`.
 fn out_of_credit_reason(err: &anyhow::Error) -> String {
     let text = format!("{err:#}");
+    if !text.contains("response:") && !text.trim().is_empty() && text.lines().count() == 1 {
+        // SSE error event: the message is the provider's own wording.
+        return format!("out of credit ({})", text.trim());
+    }
     let detail = serde_json::from_str::<serde_json::Value>(
         text.lines()
             .find_map(|line| line.trim().strip_prefix("response:"))
@@ -158,10 +202,48 @@ impl MultiProvider {
         siblings
     }
 
-    /// Complete on `candidate`; when it is the active OpenAI-compatible
-    /// profile and that profile is out of credit, resend on a sibling profile
-    /// serving the same model (or, with `cross_provider_failover = "manual"`,
-    /// return the failover prompt instead of resending).
+    /// Short reason for a sibling that failed with something other than
+    /// billing exhaustion, e.g. `unavailable (429 Too Many Requests)`.
+    fn failed_profile_reason(err: &anyhow::Error) -> String {
+        let text = format!("{err:#}");
+        let status = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("status:"))
+            .map(str::trim)
+            .filter(|status| !status.is_empty());
+        match status {
+            Some(status) => format!("unavailable (HTTP {status})"),
+            None => format!(
+                "unavailable ({})",
+                text.lines().next().unwrap_or("request failed").trim()
+            ),
+        }
+    }
+
+    /// True when another profile serving `model` is marked out of credit, which
+    /// means this turn is part of an out-of-credit failover chain.
+    fn credit_failover_chain_active(&self, from_profile: &str, model: &str) -> bool {
+        self.fresh_routes_memo_entry()
+            .routes
+            .iter()
+            .filter(|route| route.model == model)
+            .filter_map(|route| route.api_method.strip_prefix(COMPATIBLE_API_METHOD_PREFIX))
+            .map(str::trim)
+            .filter(|id| !id.is_empty() && *id != from_profile)
+            .any(|id| {
+                compatible_profile_unavailable_detail(id)
+                    .is_some_and(|detail| detail.contains("out of credit"))
+            })
+    }
+
+    /// Complete on `candidate`. When it is the active OpenAI-compatible
+    /// profile and that profile is out of credit (or, during a failover chain,
+    /// fails in any other way before output), return a failover prompt that
+    /// offers the next sibling profile serving the same model.
+    ///
+    /// Nothing is sent to the sibling here. The TUI countdown (or the user,
+    /// in manual mode) switches to `to_provider` and resends; the next call
+    /// then tries that sibling and, if it fails too, offers the one after it.
     pub(super) async fn complete_candidate_with_credit_failover(
         &self,
         candidate: ActiveProvider,
@@ -194,17 +276,29 @@ impl MultiProvider {
                 let stream = self
                     .complete_candidate(candidate, messages, tools, mode, resume_session_id)
                     .await?;
-                match peek_for_out_of_credit(stream).await {
+                match peek_before_output(stream).await {
                     Peeked::Stream(stream) => return Ok(stream),
-                    Peeked::OutOfCredit(err) => {
-                        let reason = out_of_credit_reason(&err);
+                    Peeked::Failed {
+                        error,
+                        out_of_credit,
+                        replay,
+                    } => {
+                        let reason = if out_of_credit {
+                            out_of_credit_reason(&error)
+                        } else if self.credit_failover_chain_active(&from_profile, &model) {
+                            Self::failed_profile_reason(&error)
+                        } else {
+                            // Not billing and no failover in progress: this is
+                            // an ordinary error for the normal error paths.
+                            return Ok(replay);
+                        };
                         record_provider_unavailable_for_account(
                             &compatible_profile_unavailability_key(&from_profile),
                             &reason,
                         );
                         crate::logging::warn(&format!(
-                            "OpenAI-compatible profile {} is {}; failing over to another profile serving {}",
-                            from_profile, reason, model
+                            "OpenAI-compatible profile {} is {}; offering {} (same model {})",
+                            from_profile, reason, siblings[0], model
                         ));
                         reason
                     }
@@ -212,73 +306,19 @@ impl MultiProvider {
             }
         };
 
-        if crate::config::config().provider.cross_provider_failover
-            == crate::config::CrossProviderFailoverMode::Manual
-        {
-            let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
-            let to_profile = &siblings[0];
-            return Err(anyhow::anyhow!(
-                ProviderFailoverPrompt {
-                    from_provider: format!("{from_profile}:{model}"),
-                    from_label: from_profile.clone(),
-                    to_provider: format!("{to_profile}:{model}"),
-                    to_label: format!("{to_profile} ({model})"),
-                    reason,
-                    estimated_input_chars: chars,
-                    estimated_input_tokens: tokens,
-                }
-                .to_error_message()
-            ));
-        }
-
-        let mut last_error: Option<anyhow::Error> = None;
-        for to_profile in &siblings {
-            if let Err(err) = self.set_model(&format!("{to_profile}:{model}")) {
-                crate::logging::warn(&format!(
-                    "Out-of-credit failover: could not switch to {}: {}",
-                    to_profile, err
-                ));
-                continue;
+        let (chars, tokens) = Self::estimate_request_input(messages, tools, mode);
+        let to_profile = &siblings[0];
+        Err(anyhow::anyhow!(
+            ProviderFailoverPrompt {
+                from_provider: format!("{from_profile}:{model}"),
+                from_label: from_profile.clone(),
+                to_provider: format!("{to_profile}:{model}"),
+                to_label: format!("{to_profile} ({model})"),
+                reason,
+                estimated_input_chars: chars,
+                estimated_input_tokens: tokens,
             }
-            let attempt = self
-                .complete_candidate(candidate, messages, tools, mode, None)
-                .await;
-            let stream = match attempt {
-                Ok(stream) => stream,
-                Err(err) => {
-                    last_error = Some(err);
-                    continue;
-                }
-            };
-            match peek_for_out_of_credit(stream).await {
-                Peeked::Stream(stream) => {
-                    let notice = format!(
-                        "{from_profile} is {reason}. Switched this session to {to_profile} (same model {model}) and resent the turn. Use /model to pick another route."
-                    );
-                    crate::logging::info(&format!("Out-of-credit failover: {notice}"));
-                    self.startup_notices
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .push(format!("⚡ {notice}"));
-                    let status = futures::stream::once(async move {
-                        Ok(StreamEvent::StatusDetail { detail: notice })
-                    });
-                    return Ok(Box::pin(status.chain(stream)));
-                }
-                Peeked::OutOfCredit(err) => {
-                    record_provider_unavailable_for_account(
-                        &compatible_profile_unavailability_key(to_profile),
-                        &out_of_credit_reason(&err),
-                    );
-                    last_error = Some(err);
-                }
-            }
-        }
-
-        // Every sibling failed too: go back to the original profile and
-        // surface the last error the way the runtime would have.
-        let _ = self.set_model(&format!("{from_profile}:{model}"));
-        let err = last_error.unwrap_or_else(|| anyhow::anyhow!("{from_profile} is {reason}"));
-        Ok(Box::pin(futures::stream::once(async move { Err(err) })))
+            .to_error_message()
+        ))
     }
 }

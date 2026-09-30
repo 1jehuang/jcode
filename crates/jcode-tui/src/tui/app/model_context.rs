@@ -76,6 +76,17 @@ impl App {
         let Some(pending) = self.pending_provider_failover.take() else {
             return;
         };
+        // Remote sessions held the failed prompt for the resend; give it back.
+        if let Some(raw_input) = pending
+            .remote_resend
+            .as_ref()
+            .and_then(|payload| payload.raw_input.clone())
+            && !raw_input.trim().is_empty()
+            && self.input.is_empty()
+        {
+            self.input = raw_input;
+            self.cursor_pos = self.input.len();
+        }
         self.push_display_message(DisplayMessage::system(format!(
             "⏸ Canceled provider auto-switch - kept {} active.\n\nYou can switch manually with /model, then resend. {}",
             pending.prompt.from_label,
@@ -102,6 +113,21 @@ impl App {
         }
 
         self.pending_provider_failover = None;
+        if self.is_remote {
+            // The remote tick loop sends the switch to the server; the failed
+            // turn is resent once the server confirms it (ModelChanged).
+            self.pending_model_switch = Some(pending.prompt.to_provider.clone());
+            self.pending_fallback_resend = pending.remote_resend.clone();
+            self.push_display_message(DisplayMessage::system(format!(
+                "⚡ Auto-switching after countdown: {} → {}.\n\nResending {} once the server confirms the switch.\n\n{}",
+                pending.prompt.from_label,
+                pending.prompt.to_label,
+                Self::format_failover_input_summary(&pending.prompt),
+                Self::failover_config_hint(),
+            )));
+            self.set_status_notice(format!("Provider → {} (retrying)", pending.prompt.to_label));
+            return true;
+        }
         match self.apply_provider_switch_for_failover(&pending.prompt) {
             Ok(active_model) => {
                 self.push_display_message(DisplayMessage::system(format!(
@@ -131,6 +157,23 @@ impl App {
     }
 
     fn handle_provider_failover_prompt(&mut self, prompt: crate::provider::ProviderFailoverPrompt) {
+        self.handle_provider_failover_prompt_with_resend(prompt, None);
+    }
+
+    /// Show a provider failover prompt. In countdown mode arm the cancelable
+    /// countdown; nothing is sent to the target until it expires.
+    ///
+    /// Remote sessions get the countdown when the target is a model spec
+    /// (`<profile>:<model>`, used by out-of-credit failover between
+    /// OpenAI-compatible profiles) and the failed turn's payload is known, so
+    /// it can be resent through the server after the switch. Other remote
+    /// prompts (a switch between built-in providers) still get the manual
+    /// hint because the server has no request for that switch.
+    pub(super) fn handle_provider_failover_prompt_with_resend(
+        &mut self,
+        prompt: crate::provider::ProviderFailoverPrompt,
+        remote_resend: Option<super::FallbackResendPayload>,
+    ) {
         let input_summary = Self::format_failover_input_summary(&prompt);
         let manual_message = format!(
             "⚠ {} became unavailable - jcode did not resend your prompt to {} automatically.\n\nReason: {}\n\nRetrying elsewhere would send {}.\n\nTo switch manually now, use /model and pick a model from {}, then resend. {}",
@@ -141,22 +184,36 @@ impl App {
             prompt.to_label,
             Self::failover_config_hint(),
         );
+        let restore_remote_input =
+            |app: &mut Self, payload: Option<&super::FallbackResendPayload>| {
+                if let Some(raw_input) = payload.and_then(|payload| payload.raw_input.clone())
+                    && !raw_input.trim().is_empty()
+                    && app.input.is_empty()
+                {
+                    app.input = raw_input;
+                    app.cursor_pos = app.input.len();
+                }
+            };
+        let remote_countdown_supported =
+            !self.is_remote || (prompt.to_provider.contains(':') && remote_resend.is_some());
 
         match crate::config::Config::load()
             .provider
             .cross_provider_failover
         {
-            crate::config::CrossProviderFailoverMode::Manual if !self.is_remote => {
+            crate::config::CrossProviderFailoverMode::Manual => {
+                restore_remote_input(self, remote_resend.as_ref());
                 self.push_display_message(DisplayMessage::system(manual_message));
                 self.set_status_notice(format!(
                     "{} unavailable; switch manually if desired",
                     prompt.from_label
                 ));
             }
-            crate::config::CrossProviderFailoverMode::Countdown if !self.is_remote => {
+            crate::config::CrossProviderFailoverMode::Countdown if remote_countdown_supported => {
                 self.pending_provider_failover = Some(super::PendingProviderFailover {
                     prompt: prompt.clone(),
                     deadline: Instant::now() + Duration::from_secs(3),
+                    remote_resend: if self.is_remote { remote_resend } else { None },
                 });
                 self.push_display_message(DisplayMessage::system(format!(
                     "⚠ {} became unavailable - jcode will switch to {} in 3 seconds unless you cancel.\n\nReason: {}\n\nRetrying would send {}. Press Esc to cancel.\n\n{}",
@@ -172,8 +229,9 @@ impl App {
                 ));
             }
             _ => {
+                restore_remote_input(self, remote_resend.as_ref());
                 self.push_display_message(DisplayMessage::system(format!(
-                    "{}\n\nAutomatic countdown switching is only available in local sessions right now.",
+                    "{}\n\nAutomatic countdown switching between built-in providers is only available in local sessions right now.",
                     manual_message,
                 )));
                 self.set_status_notice(format!(
