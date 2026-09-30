@@ -121,6 +121,10 @@ pub(crate) enum PendingAccountRequest {
     /// A newer request of the same scope was already answered, so this
     /// one's answer is stale and must not change what the window shows.
     Superseded,
+    /// The server moved the window on its own while this pin request was
+    /// still unanswered. Its Done confirms only if the window now shows
+    /// what it asked for, so a late answer never puts back a stale label.
+    Overtaken(Box<PendingAccountRequest>),
 }
 
 impl PendingAccountRequest {
@@ -130,6 +134,7 @@ impl PendingAccountRequest {
         match self {
             Self::UseInWindow { family, .. } | Self::Unpin { family } => Some((family, true)),
             Self::SetDefault { family, .. } => Some((family, false)),
+            Self::Overtaken(inner) => inner.scope(),
             _ => None,
         }
     }
@@ -147,6 +152,7 @@ impl PendingAccountRequest {
                 family: f,
                 label: l,
             } => f == family && !pinned && label == Some(l.as_str()),
+            Self::Overtaken(inner) => inner.produces(family, label, pinned),
             _ => false,
         }
     }
@@ -329,11 +335,15 @@ impl App {
             return;
         }
         // The server moved the window on its own (failover, return home).
-        // That is newer than any pin request still in flight for this
-        // family, so a late Done must not put the requested label back.
+        // Pin requests still in flight for this family may yet be applied
+        // (a switch queued until the turn ends), so keep them live, but
+        // their Done must only confirm what the window actually shows.
         for request in self.pending_account_requests.values_mut() {
-            if request.scope() == Some((provider.as_str(), true)) {
-                *request = PendingAccountRequest::Superseded;
+            if request.scope() == Some((provider.as_str(), true))
+                && !matches!(request, PendingAccountRequest::Overtaken(_))
+            {
+                let inner = std::mem::replace(request, PendingAccountRequest::Superseded);
+                *request = PendingAccountRequest::Overtaken(Box::new(inner));
             }
         }
         if let Some(reason) = reason.filter(|r| !r.trim().is_empty()) {
@@ -755,6 +765,24 @@ impl App {
         if request == PendingAccountRequest::Superseded {
             return true;
         }
+        let request = match request {
+            PendingAccountRequest::Overtaken(inner) => {
+                let applied = match &*inner {
+                    PendingAccountRequest::UseInWindow { family, label } => self
+                        .window_account(family)
+                        .is_some_and(|w| w.pinned && w.label.as_deref() == Some(label.as_str())),
+                    PendingAccountRequest::Unpin { family } => {
+                        self.window_account(family).is_some_and(|w| !w.pinned)
+                    }
+                    _ => true,
+                };
+                if result.is_ok() && !applied {
+                    return true;
+                }
+                *inner
+            }
+            other => other,
+        };
         // Answers can arrive out of order: older requests of the same scope
         // are now stale and must not overwrite this newer result. Only a
         // success supersedes: a rejected request changed nothing, so an older
@@ -780,7 +808,9 @@ impl App {
                 PendingAccountRequest::Failover { .. } => {
                     "Could not change account failover".to_string()
                 }
-                PendingAccountRequest::Superseded => unreachable!("returned above"),
+                PendingAccountRequest::Superseded | PendingAccountRequest::Overtaken(_) => {
+                    unreachable!("handled above")
+                }
             };
             self.push_display_message(DisplayMessage::error(format!("{what}: {message}")));
             self.set_status_notice("Account change failed");
@@ -852,7 +882,7 @@ impl App {
                     failover_word(self.effective_account_failover())
                 ));
             }
-            PendingAccountRequest::Superseded => {}
+            PendingAccountRequest::Superseded | PendingAccountRequest::Overtaken(_) => {}
         }
         true
     }

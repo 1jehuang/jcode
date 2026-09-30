@@ -613,3 +613,27 @@ fn independent_move_beats_late_older_confirmation() {
         assert!(!last.contains("now uses claude-fox"), "late Done announced fox: {last}");
     });
 }
+
+/// fox queued during a turn, the turn fails over to otter, then the server
+/// applies fox at turn end. The fox Done confirms the user's choice.
+#[test]
+fn queued_switch_after_failover_still_confirms() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.replace_window_accounts(vec![claude_window("claude-owl", true)]);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        pending_use(&mut app, 1, "claude-fox");
+        app.handle_server_event(account_changed("claude-otter", Some("failover")), &mut remote);
+        app.handle_server_event(account_changed("claude-fox", None), &mut remote);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 1 }, &mut remote);
+        assert_eq!(app.window_account_label("claude").as_deref(), Some("claude-fox"));
+        let last = app.display_messages().last().unwrap().content.clone();
+        assert!(
+            last.contains("now uses claude-fox") && !last.contains('⚡'),
+            "queued switch not confirmed: {last}"
+        );
+    });
+}
