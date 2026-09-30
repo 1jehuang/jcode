@@ -1340,13 +1340,35 @@ fn collect_opencode_external_sessions(
     if !source_matches_filter("opencode", options) {
         return;
     }
+    // OpenCode 1.17+ keeps sessions in SQLite. Database rows win over legacy
+    // JSON files with the same id.
+    let mut seen = std::collections::HashSet::new();
+    if let Some(db) = crate::opencode_db::existing_db_path() {
+        report.external_sources.push("opencode");
+        match crate::opencode_db::list_sessions(&db, options.max_scan_sessions) {
+            Ok(rows) => {
+                for row in rows {
+                    match load_opencode_db_external_session(&db, row) {
+                        Ok(record) => {
+                            seen.insert(record.session_id.clone());
+                            records.push(record);
+                        }
+                        Err(_) => report.parse_errors += 1,
+                    }
+                }
+            }
+            Err(_) => report.parse_errors += 1,
+        }
+    }
     let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
         return;
     };
     if !root.exists() {
         return;
     }
-    report.external_sources.push("opencode");
+    if seen.is_empty() {
+        report.external_sources.push("opencode");
+    }
     let Ok(messages_base) = crate::storage::user_home_path(".local/share/opencode/storage/message")
     else {
         return;
@@ -1363,11 +1385,45 @@ fn collect_opencode_external_sessions(
             options.include_tools,
             options.max_scan_sessions,
         ) {
-            Ok(Some(record)) => records.push(record),
+            Ok(Some(record)) if !seen.contains(&record.session_id) => records.push(record),
+            Ok(Some(_)) => {}
             Ok(None) => {}
             Err(_) => report.parse_errors += 1,
         }
     }
+}
+
+fn load_opencode_db_external_session(
+    db: &Path,
+    row: crate::opencode_db::OpenCodeDbSession,
+) -> Result<ExternalSessionRecord> {
+    let messages = crate::opencode_db::load_messages(db, &row.id, None)?
+        .into_iter()
+        .filter(|msg| !msg.text.trim().is_empty())
+        .map(|msg| jcode_import_core::ExternalMessageRecord {
+            role: msg.role,
+            text: msg.text,
+            timestamp: msg.created_at,
+            id: Some(msg.id),
+        })
+        .collect();
+    let short = jcode_core::util::truncate_str(&row.id, 8).to_string();
+    Ok(ExternalSessionRecord {
+        source: "opencode",
+        short_name: Some(format!("opencode {short}")),
+        title: Some(
+            row.title
+                .unwrap_or_else(|| format!("OpenCode session {short}")),
+        ),
+        working_dir: row.directory,
+        provider_key: Some(row.provider_id.unwrap_or_else(|| "opencode".to_string())),
+        model: row.model_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        path: db.to_path_buf(),
+        messages,
+        session_id: row.id,
+    })
 }
 
 fn append_external_session_results(
