@@ -1248,7 +1248,7 @@ pub(in crate::tui::app) fn handle_server_event(
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
-            id,
+            id: _,
             message,
             retry_after_secs,
             server_resumes,
