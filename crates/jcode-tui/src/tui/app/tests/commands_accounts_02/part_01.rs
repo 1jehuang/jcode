@@ -576,10 +576,34 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             app.input = format!("/account switch {second}");
             app.submit_input();
 
+            // Per-window accounts: the switch pins THIS window only. The
+            // stored default (used by new windows) stays on the first account.
+            assert_eq!(
+                crate::auth::codex::active_account_label().as_deref(),
+                Some(first.as_str()),
+                "/account switch must not change the default for other windows"
+            );
+            let window = app.window_account("openai").expect("window account");
+            assert_eq!(window.label.as_deref(), Some(second.as_str()));
+            assert!(window.pinned);
+            assert_eq!(
+                app.session.account_pins.get("openai").map(|pin| pin.label.as_str()),
+                Some(second.as_str()),
+                "the pin is persisted on the session"
+            );
+            let last = &app.display_messages().last().unwrap().content;
+            assert!(
+                last.contains(&format!("This window now uses {second}"))
+                    && last.contains(&format!("still {first}")),
+                "{last}"
+            );
+
+            app.input = format!("/account default {second}");
+            app.submit_input();
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
                 Some(second.as_str()),
-                "the shorthand must move the active account to the requested label"
+                "/account default changes the stored default"
             );
         });
     });
