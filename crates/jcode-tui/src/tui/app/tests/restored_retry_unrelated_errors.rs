@@ -1,4 +1,159 @@
 #[test]
+fn test_restored_retry_failed_launch_after_completed_turn_returns_idle() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for transfer in [true, false] {
+            for (input, output, cache_read_input, cache_creation_input) in [
+                (100, 0, None, None),
+                (0, 10, None, None),
+                (0, 0, Some(0), None),
+                (0, 0, None, Some(0)),
+            ] {
+                let session = "failed_launch_after_completed_turn";
+                let mut app = create_test_app();
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                remote.set_session_id(session.into());
+                remote.mark_history_loaded();
+                let message_id = rt
+                    .block_on(super::remote::begin_remote_send(
+                        &mut app,
+                        &mut remote,
+                        "fresh prompt".into(),
+                        vec![],
+                        false,
+                        None,
+                        false,
+                        0,
+                    ))
+                    .unwrap();
+                app.handle_server_event(
+                    crate::protocol::ServerEvent::TokenUsage {
+                        input,
+                        output,
+                        cache_read_input,
+                        cache_creation_input,
+                    },
+                    &mut remote,
+                );
+                app.handle_server_event(
+                    crate::protocol::ServerEvent::Done { id: message_id },
+                    &mut remote,
+                );
+                assert!(!app.is_processing);
+                assert!(
+                    app.has_streaming_footer_stats(),
+                    "completed statistics remain visible"
+                );
+                app.restored_retries.push(PendingRemoteMessage {
+                    content: "saved retry".into(),
+                    images: vec![("image/png".into(), "payload".into())],
+                    is_system: true,
+                    system_reminder: Some("saved reminder".into()),
+                    auto_retry: true,
+                    retry_attempts: 2,
+                    retry_at: None,
+                });
+                app.save_input_for_reload(session);
+                app.pending_transfer_request = transfer;
+                app.pending_split_request = !transfer;
+                let launch_id = remote.next_request_id_for_test();
+                rt.block_on(super::remote::process_remote_followups(
+                    &mut app,
+                    &mut remote,
+                ));
+                assert!(app.is_processing);
+                assert!(matches!(app.status, ProcessingStatus::Sending));
+                assert!(app.has_streaming_footer_stats());
+                app.handle_server_event(
+                    crate::protocol::ServerEvent::Done { id: message_id },
+                    &mut remote,
+                );
+                assert!(
+                    app.is_processing,
+                    "a stale completion must not settle a new launch"
+                );
+                assert!(matches!(app.status, ProcessingStatus::Sending));
+                // Neither a stale local error nor a generic server error is
+                // an active turn merely because its old statistics remain.
+                for id in [message_id, 0] {
+                    app.handle_server_event(
+                        crate::protocol::ServerEvent::Error {
+                            id,
+                            message: "stale error".into(),
+                            retry_after_secs: None,
+                        },
+                        &mut remote,
+                    );
+                    assert!(app.is_processing);
+                    assert!(matches!(app.status, ProcessingStatus::Sending));
+                    assert!(!app.restored_retry_stopped);
+                }
+                let error = if transfer {
+                    "Failed to compact session for transfer"
+                } else {
+                    "Failed to split session"
+                };
+                app.handle_server_event(
+                    crate::protocol::ServerEvent::Error {
+                        id: launch_id,
+                        message: error.into(),
+                        retry_after_secs: None,
+                    },
+                    &mut remote,
+                );
+                assert!(
+                    !app.is_processing,
+                    "matching failed launch must settle despite retained statistics"
+                );
+                assert!(matches!(app.status, ProcessingStatus::Idle));
+                assert!(app.current_message_id.is_none());
+                assert!(app.processing_started.is_none());
+                assert!(app.last_stream_activity.is_none());
+                assert!(
+                    app.has_streaming_footer_stats(),
+                    "launch failure must preserve completed statistics"
+                );
+                assert!(!app.restored_retry_stopped);
+                assert!(
+                    app.display_messages()
+                        .iter()
+                        .any(|message| message.content == error)
+                );
+                let reopened = App::new_for_remote(Some(session.into()));
+                assert!(!reopened.restored_retry_stopped);
+                assert_eq!(reopened.restored_retries.len(), 1);
+                rt.block_on(super::remote::process_remote_followups(
+                    &mut app,
+                    &mut remote,
+                ));
+                let retry_id = app
+                    .current_message_id
+                    .expect("saved retry should dispatch after failed launch");
+                assert_ne!(retry_id, launch_id);
+                assert_eq!(
+                    app.restored_retry_delivery.as_ref().unwrap().request_id,
+                    retry_id
+                );
+                let pending = app.rate_limit_pending_message.as_ref().unwrap();
+                assert_eq!(pending.retry_attempts, 2);
+                assert_eq!(pending.images, vec![("image/png".into(), "payload".into())]);
+                assert_eq!(pending.system_reminder.as_deref(), Some("saved reminder"));
+                app.handle_server_event(
+                    crate::protocol::ServerEvent::Done { id: retry_id },
+                    &mut remote,
+                );
+                assert!(
+                    App::new_for_remote(Some(session.into()))
+                        .restored_retries
+                        .is_empty()
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn test_restored_retry_unrelated_transfer_error_preserves_waiting_queue() {
     with_temp_jcode_home(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -176,30 +331,41 @@ fn test_restored_retry_unrelated_errors_preserve_attached_turn() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
         // Server turns use id 0; turns from another client keep that client's id.
-        for (terminal_id, event) in [
+        for (terminal_id, event, succeeded) in [
             (
                 0,
                 crate::protocol::ServerEvent::TextDelta {
                     text: "attached turn".into(),
                 },
+                false,
             ),
             (
                 999,
                 crate::protocol::ServerEvent::TextDelta {
                     text: "attached turn".into(),
                 },
+                false,
             ),
             (
                 0,
                 crate::protocol::ServerEvent::ConnectionPhase {
                     phase: "connecting".into(),
                 },
+                false,
             ),
             (
                 999,
                 crate::protocol::ServerEvent::StatusDetail {
                     detail: "starting attached turn".into(),
                 },
+                false,
+            ),
+            (
+                999,
+                crate::protocol::ServerEvent::StatusDetail {
+                    detail: "starting attached turn".into(),
+                },
+                true,
             ),
         ] {
             let session = format!("retry_attached_error_{terminal_id}");
@@ -241,20 +407,25 @@ fn test_restored_retry_unrelated_errors_preserve_attached_turn() {
             assert!(!app.restored_retry_stopped);
             assert_eq!(app.streaming.streaming_text, stream_before);
             assert!(!App::new_for_remote(Some(session.clone())).restored_retry_stopped);
-            app.handle_server_event(
+            let terminal = if succeeded {
+                crate::protocol::ServerEvent::Done { id: terminal_id }
+            } else {
                 crate::protocol::ServerEvent::Error {
                     id: terminal_id,
                     message: "provider failed hard".into(),
                     retry_after_secs: None,
-                },
-                &mut remote,
-            );
+                }
+            };
+            app.handle_server_event(terminal, &mut remote);
             assert!(!app.is_processing);
-            assert!(
-                app.restored_retry_stopped,
-                "actual attached-turn failure must stop saved retries"
+            assert_eq!(
+                app.restored_retry_stopped, !succeeded,
+                "only actual attached-turn failure should stop saved retries"
             );
-            assert!(App::new_for_remote(Some(session)).restored_retry_stopped);
+            assert_eq!(
+                App::new_for_remote(Some(session)).restored_retry_stopped,
+                !succeeded
+            );
         }
     });
 }

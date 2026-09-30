@@ -433,7 +433,13 @@ pub(in crate::tui::app) fn begin_remote_split_launch(app: &mut App, label: &str)
 }
 
 pub(in crate::tui::app) fn finish_remote_split_launch(app: &mut App) {
-    if !app.is_processing || app.current_message_id.is_some() {
+    // Launch setup clears these markers. If they returned, a live attached
+    // turn has taken over; completed-turn token statistics are not activity.
+    if !app.is_processing
+        || app.current_message_id.is_some()
+        || app.remote_resume_activity.is_some()
+        || app.status_detail.is_some()
+    {
         return;
     }
     if !matches!(app.status, ProcessingStatus::Sending) {
