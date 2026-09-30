@@ -105,6 +105,134 @@ where
     })
 }
 
+/// Stored default account: the persisted active label if it still exists,
+/// else the first account. Ignores the process-local runtime override, which
+/// is reserved for one-shot CLI processes.
+pub fn default_account_label<T, F>(
+    stored_active_label: Option<&str>,
+    accounts: &[T],
+    label_of: F,
+) -> Option<String>
+where
+    F: Fn(&T) -> &str + Copy,
+{
+    stored_active_label
+        .and_then(|label| {
+            accounts
+                .iter()
+                .find(|account| label_of(account) == label)
+                .map(|account| label_of(account).to_string())
+        })
+        .or_else(|| {
+            accounts
+                .first()
+                .map(|account| label_of(account).to_string())
+        })
+}
+
+/// Stable identity for a stored account: email, else the provider account id,
+/// else a short sha256 prefix of the refresh token.
+pub fn account_identity(
+    email: Option<&str>,
+    account_id: Option<&str>,
+    refresh_token: &str,
+) -> Option<String> {
+    let non_empty = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    non_empty(email)
+        .map(|email| email.to_ascii_lowercase())
+        .or_else(|| non_empty(account_id).map(|id| format!("id:{id}")))
+        .or_else(|| {
+            let refresh = refresh_token.trim();
+            (!refresh.is_empty()).then(|| {
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(refresh.as_bytes());
+                format!("rt:{}", &hex::encode(digest)[..16])
+            })
+        })
+}
+
+/// Resolve a pin to the current label of the account it names.
+///
+/// Identity wins: labels are positional and shift when an earlier account is
+/// removed. The label is used only when the pin has no identity, or when the
+/// account at that label has no identity to compare against. A pin whose
+/// identity no longer matches any account resolves to `None`.
+pub fn resolve_pin<T, FLabel, FIdentity>(
+    pin: &crate::auth::AccountPin,
+    accounts: &[T],
+    label_of: FLabel,
+    identity_of: FIdentity,
+) -> Option<String>
+where
+    FLabel: Fn(&T) -> &str + Copy,
+    FIdentity: Fn(&T) -> Option<String> + Copy,
+{
+    if let Some(identity) = pin.identity.as_deref() {
+        if let Some(account) = accounts
+            .iter()
+            .find(|account| identity_of(account).as_deref() == Some(identity))
+        {
+            return Some(label_of(account).to_string());
+        }
+        // An account at the pinned label without a stable identity cannot be
+        // told apart, so accept it. Refresh-token fingerprints (`rt:`) rotate
+        // with every refresh, so they are weak too. An account with a
+        // different email or account id is another subscription.
+        let weak = |identity: Option<&str>| identity.is_none_or(|id| id.starts_with("rt:"));
+        if !weak(Some(identity)) {
+            return accounts
+                .iter()
+                .find(|account| label_of(account) == pin.label && identity_of(account).is_none())
+                .map(|account| label_of(account).to_string());
+        }
+        return accounts
+            .iter()
+            .find(|account| label_of(account) == pin.label && weak(identity_of(account).as_deref()))
+            .map(|account| label_of(account).to_string());
+    }
+    accounts
+        .iter()
+        .find(|account| label_of(account) == pin.label)
+        .map(|account| label_of(account).to_string())
+}
+
+/// Build a pin for the stored account at `label`, capturing its identity.
+pub fn pin_for_label<T, FLabel, FIdentity>(
+    label: &str,
+    accounts: &[T],
+    label_of: FLabel,
+    identity_of: FIdentity,
+    missing_message: &str,
+) -> Result<crate::auth::AccountPin>
+where
+    FLabel: Fn(&T) -> &str + Copy,
+    FIdentity: Fn(&T) -> Option<String> + Copy,
+{
+    let account = accounts
+        .iter()
+        .find(|account| label_of(account) == label)
+        .ok_or_else(|| anyhow::anyhow!(missing_message.replace("{}", label)))?;
+    Ok(crate::auth::AccountPin::new(label, identity_of(account)))
+}
+
+/// A pinned account that no longer exists (removed or re-logged into another
+/// subscription). Callers fall back to the default account and tell the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedAccountMissing(pub String);
+
+impl std::fmt::Display for PinnedAccountMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pinned account '{}' is no longer available", self.0)
+    }
+}
+
+impl std::error::Error for PinnedAccountMissing {}
+
 pub fn set_active_account<T, F>(
     label: &str,
     accounts: &[T],
@@ -286,6 +414,59 @@ mod tests {
         assert_eq!(label, "claude-otter");
         assert_eq!(accounts[0].label, "claude-otter");
         assert_eq!(active.as_deref(), Some("claude-otter"));
+    }
+
+    #[test]
+    fn account_identity_prefers_email_then_id_then_refresh_hash() {
+        assert_eq!(
+            account_identity(Some("A@B.com"), Some("acct"), "rt").as_deref(),
+            Some("a@b.com")
+        );
+        assert_eq!(
+            account_identity(None, Some("acct"), "rt").as_deref(),
+            Some("id:acct")
+        );
+        let hashed = account_identity(Some(" "), None, "refresh").unwrap();
+        assert!(hashed.starts_with("rt:") && hashed.len() == 19, "{hashed}");
+        assert_eq!(account_identity(None, None, ""), None);
+    }
+
+    #[test]
+    fn resolve_pin_uses_identity_and_rejects_other_subscription_at_label() {
+        struct Acc(&'static str, Option<&'static str>);
+        fn label(a: &Acc) -> &str {
+            a.0
+        }
+        fn id(a: &Acc) -> Option<String> {
+            a.1.map(String::from)
+        }
+        let accounts = vec![
+            Acc("claude-otter", Some("fox@x")),
+            Acc("claude-fox", Some("panda@x")),
+            Acc("claude-panda", None),
+        ];
+        let pin = |l: &str, i: Option<&str>| crate::auth::AccountPin::new(l, i.map(String::from));
+
+        // Identity moved to another label after relabel.
+        assert_eq!(
+            resolve_pin(&pin("claude-fox", Some("fox@x")), &accounts, label, id).as_deref(),
+            Some("claude-otter")
+        );
+        // Identity gone and label now belongs to someone else.
+        assert_eq!(
+            resolve_pin(&pin("claude-fox", Some("gone@x")), &accounts, label, id),
+            None
+        );
+        // Label holder has no identity: accepted.
+        assert_eq!(
+            resolve_pin(&pin("claude-panda", Some("gone@x")), &accounts, label, id).as_deref(),
+            Some("claude-panda")
+        );
+        // Label-only pins resolve by label.
+        assert_eq!(
+            resolve_pin(&pin("claude-fox", None), &accounts, label, id).as_deref(),
+            Some("claude-fox")
+        );
     }
 
     #[test]

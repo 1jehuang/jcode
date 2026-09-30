@@ -608,6 +608,103 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     anyhow::bail!("No Claude OAuth credentials found (checked Claude Code, jcode, OpenCode)")
 }
 
+/// Stable identity of a stored account (see [`crate::auth::AccountPin`]).
+pub fn account_identity(account: &AnthropicAccount) -> Option<String> {
+    crate::auth::account_store::account_identity(account.email.as_deref(), None, &account.refresh)
+}
+
+fn credentials_from_account(account: &AnthropicAccount) -> ClaudeCredentials {
+    ClaudeCredentials {
+        access_token: account.access.clone(),
+        refresh_token: account.refresh.clone(),
+        expires_at: account.expires,
+        scopes: account.scopes.clone(),
+        subscription_type: account
+            .subscription_type
+            .clone()
+            .or_else(|| Some("max".to_string())),
+    }
+}
+
+/// Load credentials for `scope`, returning the jcode account label they came
+/// from (`None` when an external source such as Claude Code served them).
+///
+/// `Default` behaves exactly like [`load_credentials`]. `Pinned` reads only
+/// the jcode-stored account the pin resolves to, never an external source,
+/// and fails with [`crate::auth::account_store::PinnedAccountMissing`] when
+/// that account is gone.
+pub fn load_credentials_scoped(
+    scope: crate::auth::AccountScope<'_>,
+) -> Result<(ClaudeCredentials, Option<String>)> {
+    match scope {
+        crate::auth::AccountScope::Default => {
+            let creds = load_credentials()?;
+            let label = load_auth_file().ok().and_then(|auth| {
+                auth.anthropic_accounts
+                    .iter()
+                    .find(|account| {
+                        account.refresh == creds.refresh_token
+                            && account.access == creds.access_token
+                    })
+                    .map(|account| account.label.clone())
+            });
+            Ok((creds, label))
+        }
+        crate::auth::AccountScope::Pinned(pin) => {
+            let auth = load_auth_file()?;
+            let label = resolve_pin_in(pin, &auth).ok_or_else(|| {
+                anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
+                    pin.label.clone(),
+                ))
+            })?;
+            let account = auth
+                .anthropic_accounts
+                .iter()
+                .find(|account| account.label == label)
+                .context("pinned Claude account disappeared")?;
+            Ok((credentials_from_account(account), Some(label)))
+        }
+    }
+}
+
+fn resolve_pin_in(pin: &crate::auth::AccountPin, auth: &JcodeAuthFile) -> Option<String> {
+    crate::auth::account_store::resolve_pin(
+        pin,
+        &auth.anthropic_accounts,
+        |account| account.label.as_str(),
+        account_identity,
+    )
+}
+
+/// Current label of the stored account a pin names (identity first, then label).
+pub fn resolve_pin(pin: &crate::auth::AccountPin) -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    resolve_pin_in(pin, &auth)
+}
+
+/// Stored default account (persisted active, else first). Unlike
+/// [`active_account_label`] this ignores the one-shot runtime override.
+pub fn default_account_label() -> Option<String> {
+    let auth = load_auth_file().ok()?;
+    crate::auth::account_store::default_account_label(
+        auth.active_anthropic_account.as_deref(),
+        &auth.anthropic_accounts,
+        |account| account.label.as_str(),
+    )
+}
+
+/// Build a pin (label plus identity) for the stored account at `label`.
+pub fn pin_for_label(label: &str) -> Result<crate::auth::AccountPin> {
+    let auth = load_auth_file()?;
+    crate::auth::account_store::pin_for_label(
+        label,
+        &auth.anthropic_accounts,
+        |account| account.label.as_str(),
+        account_identity,
+        "No Claude account with label '{}' found",
+    )
+}
+
 /// Load credentials for a specific jcode account by label.
 pub fn load_credentials_for_account(label: &str) -> Result<ClaudeCredentials> {
     let auth = load_auth_file()?;

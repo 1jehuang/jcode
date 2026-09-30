@@ -1695,3 +1695,7 @@ fn api_key_available(env_key: &str, file_name: &str) -> bool {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "account_pin_tests.rs"]
+mod account_pin_tests;
