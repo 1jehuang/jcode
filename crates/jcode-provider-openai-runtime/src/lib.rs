@@ -1258,7 +1258,8 @@ impl OpenAIProvider {
         system: &str,
         is_chatgpt_mode: bool,
     ) -> Value {
-        let hosted_tools = native_web_search::hosted_tools_for_request(model_id);
+        let hosted_tools =
+            native_web_search::hosted_tools_for_request(model_id, is_chatgpt_mode, tools);
         let tools = native_web_search::without_local_websearch(tools, &hosted_tools);
         let mut api_tools = build_tools(&tools);
         api_tools.extend(hosted_tools);

@@ -1266,7 +1266,13 @@ pub struct WebSearchConfig {
     pub searxng_url: Option<String>,
     /// Environment variable containing the SearXNG base URL.
     pub searxng_url_env: String,
-    /// Maximum provider-native searches per request (`engine = "native"`).
+    /// Prefer the model provider's own server-side search whenever the active
+    /// provider/model supports it (Anthropic first-party API, OpenAI
+    /// Responses). The local `websearch` tool is then replaced by the hosted
+    /// one. Providers without native search keep the local tool and `engine`.
+    /// Default true. `engine = "native"` also turns this on.
+    pub prefer_native: bool,
+    /// Maximum provider-native searches per request.
     /// Anthropic bills roughly $10 per 1,000 searches on API keys, so this caps
     /// spend. Anthropic only; OpenAI has no per-request cap.
     pub native_max_uses: Option<u32>,
@@ -1292,6 +1298,7 @@ impl Default for WebSearchConfig {
             bing_market: "en-US".to_string(),
             searxng_url: None,
             searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
+            prefer_native: true,
             native_max_uses: Some(DEFAULT_NATIVE_WEB_SEARCH_MAX_USES),
             native_allowed_domains: Vec::new(),
             native_blocked_domains: Vec::new(),
@@ -1306,9 +1313,9 @@ pub const DEFAULT_NATIVE_WEB_SEARCH_MAX_USES: u32 = 5;
 pub const DEFAULT_ANTHROPIC_WEB_SEARCH_TOOL: &str = "web_search_20250305";
 
 impl WebSearchConfig {
-    /// True when provider-native search is the preferred engine.
+    /// True when provider-native search should be used where available.
     pub fn native_enabled(&self) -> bool {
-        self.engine == WebSearchEngine::Native
+        self.prefer_native || self.engine == WebSearchEngine::Native
     }
 }
 

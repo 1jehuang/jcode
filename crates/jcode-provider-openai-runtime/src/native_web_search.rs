@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 
 /// Name of jcode's local scraping search tool, replaced by the hosted tool.
 const LOCAL_WEBSEARCH_TOOL: &str = "websearch";
+/// OpenAI's own Responses API base. Custom gateways may not implement hosted
+/// tools, so they keep the local tool.
+const FIRST_PARTY_API_BASE: &str = "https://api.openai.com/v1";
 
 /// Whether the hosted `web_search` tool can be attached for `model_id`.
 ///
@@ -37,18 +40,55 @@ pub(crate) fn hosted_tool(config: &WebSearchConfig) -> Value {
     tool
 }
 
-/// Hosted tools to attach, if native search is on and the model supports it.
-pub(crate) fn hosted_tools_with_config(config: &WebSearchConfig, model_id: &str) -> Vec<Value> {
-    if config.native_enabled() && model_supports_web_search(model_id) {
+/// True when requests go to an OpenAI backend that implements hosted tools:
+/// the ChatGPT/Codex OAuth backend, or the first-party API-key endpoint.
+pub(crate) fn first_party_backend(is_chatgpt_mode: bool) -> bool {
+    is_chatgpt_mode
+        || jcode_base::provider::openai::resolve_api_base().trim_end_matches('/')
+            == FIRST_PARTY_API_BASE
+}
+
+/// True when the session offers search at all. The hosted tool only replaces
+/// the local `websearch` tool, so a session whose tool policy (allowed /
+/// disabled tools, tool profile, SDK config) excludes `websearch` never gets
+/// provider-side search either.
+pub(crate) fn session_offers_websearch(tools: &[ToolDefinition]) -> bool {
+    tools.iter().any(|tool| tool.name == LOCAL_WEBSEARCH_TOOL)
+}
+
+/// Hosted tools to attach: native search preferred, the model and backend
+/// support it, and the session's tool policy allows search.
+pub(crate) fn hosted_tools_with_config(
+    config: &WebSearchConfig,
+    model_id: &str,
+    first_party: bool,
+    tools: &[ToolDefinition],
+) -> Vec<Value> {
+    if config.native_enabled()
+        && first_party
+        && model_supports_web_search(model_id)
+        && session_offers_websearch(tools)
+    {
         vec![hosted_tool(config)]
     } else {
         Vec::new()
     }
 }
 
-pub(crate) fn hosted_tools_for_request(model_id: &str) -> Vec<Value> {
-    hosted_tools_with_config(&jcode_base::config::config().websearch, model_id)
+pub(crate) fn hosted_tools_for_request(
+    model_id: &str,
+    is_chatgpt_mode: bool,
+    tools: &[ToolDefinition],
+) -> Vec<Value> {
+    hosted_tools_with_config(
+        &jcode_base::config::config().websearch,
+        model_id,
+        first_party_backend(is_chatgpt_mode),
+        tools,
+    )
 }
+
+pub(crate) use jcode_provider_openai::downgrade_web_search_calls;
 
 /// Drop jcode's local search tool when the hosted tool replaces it.
 pub(crate) fn without_local_websearch<'a>(
@@ -81,12 +121,58 @@ mod tests {
 
     #[test]
     fn hosted_tool_only_when_native_and_not_codex() {
-        assert!(hosted_tools_with_config(&WebSearchConfig::default(), "gpt-5.4").is_empty());
-        assert!(hosted_tools_with_config(&native_config(), "gpt-5.3-codex").is_empty());
+        let tools = vec![ToolDefinition::new(
+            "websearch",
+            "",
+            json!({"type": "object"}),
+        )];
+        let off = WebSearchConfig {
+            prefer_native: false,
+            ..WebSearchConfig::default()
+        };
+        assert!(hosted_tools_with_config(&off, "gpt-5.4", true, &tools).is_empty());
+        assert!(
+            hosted_tools_with_config(&native_config(), "gpt-5.3-codex", true, &tools).is_empty()
+        );
         assert_eq!(
-            hosted_tools_with_config(&native_config(), "gpt-5.4"),
+            hosted_tools_with_config(&native_config(), "gpt-5.4", true, &tools),
             vec![json!({"type": "web_search"})]
         );
+        // Native is the default wherever the provider supports it.
+        assert_eq!(
+            hosted_tools_with_config(&WebSearchConfig::default(), "gpt-5.4", true, &tools).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn hosted_tool_respects_session_policy_and_gateway() {
+        let bash_only = vec![ToolDefinition::new("bash", "", json!({"type": "object"}))];
+        assert!(hosted_tools_with_config(&native_config(), "gpt-5.4", true, &bash_only).is_empty());
+        let tools = vec![ToolDefinition::new(
+            "websearch",
+            "",
+            json!({"type": "object"}),
+        )];
+        assert!(hosted_tools_with_config(&native_config(), "gpt-5.4", false, &tools).is_empty());
+    }
+
+    #[test]
+    fn web_search_calls_downgrade_to_text() {
+        let mut input = vec![
+            json!({"type": "web_search_call", "id": "ws_1", "status": "completed",
+                "action": {"type": "search", "query": "jcode"}}),
+            json!({"type": "message", "role": "user", "content": []}),
+        ];
+        downgrade_web_search_calls(&mut input);
+        assert_eq!(input[0]["type"], "message");
+        assert!(
+            input[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("jcode")
+        );
+        assert_eq!(input[1]["role"], "user");
     }
 
     #[test]

@@ -47,6 +47,13 @@ pub fn is_anthropic_server_tool_block(block_type: &str) -> bool {
     ANTHROPIC_SERVER_TOOL_BLOCK_TYPES.contains(&block_type)
 }
 
+/// True when a tool call id belongs to a provider-executed tool (Anthropic
+/// `srvtoolu_*`, OpenAI `ws_*`). Such rows are streamed mid-response, so a
+/// retry rollback must discard them along with the attempt's text.
+pub fn is_provider_native_tool_id(id: &str) -> bool {
+    id.starts_with("srvtoolu_") || id.starts_with("ws_")
+}
+
 fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }

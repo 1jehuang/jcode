@@ -563,6 +563,11 @@ impl Config {
         {
             self.websearch.searxng_url = Some(v);
         }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_PREFER_NATIVE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.websearch.prefer_native = parsed;
+        }
         if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_MAX_USES")
             && let Ok(parsed) = v.trim().parse::<u32>()
         {

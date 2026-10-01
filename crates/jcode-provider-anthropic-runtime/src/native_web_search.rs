@@ -61,12 +61,22 @@ fn clean_domains(domains: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Server tools to attach to this request. Empty unless native search is the
-/// configured engine and the request goes to Anthropic's first-party API
-/// (custom gateways may not implement server tools).
-pub(crate) fn server_tools_for_request(first_party: bool) -> Vec<Value> {
+/// Server tools to attach to this request. Empty unless native search is
+/// preferred, the request goes to Anthropic's first-party API (custom gateways
+/// may not implement server tools), and the session's tool policy offers
+/// `websearch` at all (the server tool only replaces it, never adds search to a
+/// session that excluded it).
+pub(crate) fn server_tools_for_request(first_party: bool, tools: &[ToolDefinition]) -> Vec<Value> {
     let config = jcode_base::config::config();
+    if !session_offers_websearch(tools) {
+        return Vec::new();
+    }
     server_tools_with_config(&config.websearch, first_party)
+}
+
+/// True when the session's filtered tool list includes the local search tool.
+pub(crate) fn session_offers_websearch(tools: &[ToolDefinition]) -> bool {
+    tools.iter().any(|tool| tool.name == LOCAL_WEBSEARCH_TOOL)
 }
 
 pub(crate) fn server_tools_with_config(config: &WebSearchConfig, first_party: bool) -> Vec<Value> {
@@ -203,9 +213,31 @@ mod tests {
 
     #[test]
     fn server_tool_only_for_native_engine_on_first_party_api() {
-        assert!(server_tools_with_config(&WebSearchConfig::default(), true).is_empty());
+        let off = WebSearchConfig {
+            prefer_native: false,
+            ..WebSearchConfig::default()
+        };
+        assert!(server_tools_with_config(&off, true).is_empty());
+        // Native is the default wherever the provider supports it.
+        assert_eq!(
+            server_tools_with_config(&WebSearchConfig::default(), true).len(),
+            1
+        );
         assert!(server_tools_with_config(&native_config(), false).is_empty());
         assert_eq!(server_tools_with_config(&native_config(), true).len(), 1);
+    }
+
+    #[test]
+    fn server_tool_requires_session_to_offer_websearch() {
+        let tool = |name: &str| ToolDefinition {
+            name: name.to_string(),
+            description: String::new(),
+            input_schema: json!({"type": "object", "properties": {}}),
+            defer_loading: false,
+        };
+        assert!(!session_offers_websearch(&[tool("bash")]));
+        assert!(server_tools_for_request(true, &[tool("bash")]).is_empty());
+        assert!(session_offers_websearch(&[tool("bash"), tool("websearch")]));
     }
 
     #[test]

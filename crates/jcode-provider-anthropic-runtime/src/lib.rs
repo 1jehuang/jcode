@@ -1283,7 +1283,12 @@ impl Provider for AnthropicProvider {
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
-        let server_tools = native_web_search::server_tools_for_request(self.first_party_api());
+        let server_tools = native_web_search::server_tools_for_request(
+            // OAuth always targets api.anthropic.com, regardless of a gateway
+            // base URL configured for API-key use.
+            is_oauth || self.first_party_api(),
+            tools,
+        );
         let tools = native_web_search::without_local_websearch(tools, &server_tools);
         let api_tools = self.format_tools(&tools, is_oauth);
         let api_messages =
@@ -1654,7 +1659,12 @@ impl Provider for AnthropicProvider {
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
-        let server_tools = native_web_search::server_tools_for_request(self.first_party_api());
+        let server_tools = native_web_search::server_tools_for_request(
+            // OAuth always targets api.anthropic.com, regardless of a gateway
+            // base URL configured for API-key use.
+            is_oauth || self.first_party_api(),
+            tools,
+        );
         let tools = native_web_search::without_local_websearch(tools, &server_tools);
         let api_tools = self.format_tools(&tools, is_oauth);
         let api_messages =

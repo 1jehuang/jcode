@@ -169,6 +169,29 @@ pub fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     build_responses_input_with_logger(messages, |_, _| {})
 }
 
+/// Replace stored hosted-search `web_search_call` items with their labelled
+/// text summary. Used when the request does not declare the hosted
+/// `web_search` tool (native search off, Codex model, custom gateway, Copilot,
+/// compaction), so the request never carries hosted-tool history it does not
+/// declare.
+pub fn downgrade_web_search_calls(input: &mut [Value]) {
+    use jcode_message_types::provider_native::{
+        PROVIDER_NATIVE_OPENAI, provider_native_text_fallback,
+    };
+    for item in input.iter_mut() {
+        if item.get("type").and_then(Value::as_str) != Some("web_search_call") {
+            continue;
+        }
+        let text = provider_native_text_fallback(PROVIDER_NATIVE_OPENAI, item, None)
+            .unwrap_or_else(|| "[web_search] (earlier provider-side search)".to_string());
+        *item = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": text }]
+        });
+    }
+}
+
 pub fn build_responses_input_with_logger(
     messages: &[ChatMessage],
     mut logger: impl FnMut(OpenAiRequestLogLevel, &str),

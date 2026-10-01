@@ -168,8 +168,36 @@ pub fn build_compaction_conversation_text(
             Role::Assistant => "Assistant",
         };
         conversation_text.push_str(&format!("**{}:**\n", role_str));
+        // Provider-native search call inputs, so a result can name its query.
+        let mut native_call_inputs: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
         for block in &msg.content {
             match block {
+                ContentBlock::ProviderNative { provider, item } => {
+                    use jcode_message_types::provider_native;
+                    let Some(display) = provider_native::provider_native_display(provider, item)
+                    else {
+                        continue;
+                    };
+                    if display.output.is_none() {
+                        if let Some(input) = display.input {
+                            native_call_inputs.insert(display.id, input);
+                        }
+                        continue;
+                    }
+                    if let Some(text) = provider_native::provider_native_text_fallback(
+                        provider,
+                        item,
+                        native_call_inputs.get(&display.id),
+                    ) {
+                        let truncated = if text.len() > 500 {
+                            format!("{}... (truncated)", truncate_str_boundary(&text, 500))
+                        } else {
+                            text
+                        };
+                        conversation_text.push_str(&format!("[Result: {}]\n", truncated));
+                    }
+                }
                 ContentBlock::Text { text, .. } => {
                     conversation_text.push_str(text);
                     conversation_text.push('\n');
@@ -189,8 +217,7 @@ pub fn build_compaction_conversation_text(
                 | ContentBlock::ReasoningTrace { .. }
                 | ContentBlock::AnthropicThinking { .. }
                 | ContentBlock::OpenAIReasoning { .. }
-                | ContentBlock::ToolReference { .. }
-                | ContentBlock::ProviderNative { .. } => {}
+                | ContentBlock::ToolReference { .. } => {}
                 ContentBlock::Image { .. } => conversation_text.push_str("[Image]\n"),
                 ContentBlock::OpenAICompaction { .. } => {
                     conversation_text.push_str("[OpenAI native compaction]\n")
@@ -728,6 +755,33 @@ pub fn tail_str_boundary(value: &str, max_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_text_keeps_native_search_query_and_urls() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ProviderNative {
+                    provider: "anthropic".to_string(),
+                    item: serde_json::json!({"type": "server_tool_use", "id": "srvtoolu_1",
+                        "name": "web_search", "input": {"query": "rust news"}}),
+                },
+                ContentBlock::ProviderNative {
+                    provider: "anthropic".to_string(),
+                    item: serde_json::json!({"type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_1", "content": [{"type": "web_search_result",
+                        "url": "https://blog.rust-lang.org/", "title": "Rust Blog",
+                        "encrypted_content": "ENC"}]}),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+        let text = build_compaction_conversation_text(&messages, None);
+        assert!(text.contains("rust news"), "{text}");
+        assert!(text.contains("https://blog.rust-lang.org/"), "{text}");
+        assert!(!text.contains("ENC"), "{text}");
+    }
 
     #[test]
     fn effective_context_split_accounting_adds_cache_counters() {

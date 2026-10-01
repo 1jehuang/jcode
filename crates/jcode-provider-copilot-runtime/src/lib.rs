@@ -954,7 +954,9 @@ impl Provider for CopilotApiProvider {
         let uses_responses_api = copilot_model_uses_responses_api(&model_for_fingerprint);
         let (canonical_payload, fingerprint_input, system_value, built_tools) =
             if uses_responses_api {
-                let input = jcode_provider_openai::build_responses_input(messages);
+                let mut input = jcode_provider_openai::build_responses_input(messages);
+                // Copilot never declares OpenAI's hosted web_search tool.
+                jcode_provider_openai::downgrade_web_search_calls(&mut input);
                 let tools = jcode_provider_openai::build_tools(tools);
                 let mut payload = json!({
                     "model": &model_for_fingerprint,
