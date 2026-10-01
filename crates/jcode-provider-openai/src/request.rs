@@ -294,6 +294,24 @@ pub fn build_responses_input_with_logger(
             Role::Assistant => {
                 for block in &msg.content {
                     match block {
+                        ContentBlock::ProviderNative { provider, item } => {
+                            use jcode_message_types::provider_native;
+                            let is_web_search_call = provider
+                                == provider_native::PROVIDER_NATIVE_OPENAI
+                                && item.get("type").and_then(Value::as_str)
+                                    == Some("web_search_call");
+                            if is_web_search_call {
+                                items.push(item.clone());
+                            } else if let Some(text) =
+                                provider_native::provider_native_text_fallback(provider, item, None)
+                            {
+                                items.push(serde_json::json!({
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{ "type": "output_text", "text": text }]
+                                }));
+                            }
+                        }
                         ContentBlock::Text { text, .. } => {
                             items.push(serde_json::json!({
                                 "type": "message",
@@ -721,6 +739,40 @@ mod tests {
             items[0]["summary"],
             json!([{ "type": "summary_text", "text": "Checked constraints." }])
         );
+    }
+
+    #[test]
+    fn build_responses_input_replays_web_search_calls_and_downgrades_foreign_items() {
+        let web_search_call = json!({
+            "type": "web_search_call", "id": "ws_1", "status": "completed",
+            "action": {"type": "search", "query": "jcode"}
+        });
+        let messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ProviderNative {
+                    provider: "openai".to_string(),
+                    item: web_search_call.clone(),
+                },
+                ContentBlock::ProviderNative {
+                    provider: "anthropic".to_string(),
+                    item: json!({"type": "web_search_tool_result", "tool_use_id": "s", "content": [
+                        {"type": "web_search_result", "url": "https://a.example", "title": "A", "encrypted_content": "ENC"}
+                    ]}),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let items = build_responses_input(&messages);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], web_search_call);
+        assert_eq!(items[1]["type"], json!("message"));
+        let text = items[1]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("https://a.example"), "{text}");
+        assert!(!text.contains("ENC"));
     }
 
     /// Integration-level regression test for issue #687: the payload actually

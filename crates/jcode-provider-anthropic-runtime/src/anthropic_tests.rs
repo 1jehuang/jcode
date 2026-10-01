@@ -2085,11 +2085,9 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
 /// `stop_reason: tool_use` with no tool call for the agent to run.
 #[test]
 fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
-    for block_type in [
-        "server_tool_use",
-        "web_search_tool_result",
-        "some_future_block",
-    ] {
+    // Server tool blocks (`server_tool_use`, `web_search_tool_result`) are
+    // captured for replay; see native_web_search_sse_tests.rs.
+    for block_type in ["some_future_block", "code_execution_tool_result_future"] {
         let mut state = SseStreamState::default();
         let event = SseEvent {
             event_type: "content_block_start".to_string(),

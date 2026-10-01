@@ -1199,7 +1199,9 @@ request in this new forked session, using the inherited conversation only as con
                     }
                     ContentBlock::ToolUse { input, .. } => redact_json_value(input),
                     ContentBlock::Image { .. } => {}
-                    ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
+                    ContentBlock::OpenAICompaction { .. }
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
                 }
             }
         }

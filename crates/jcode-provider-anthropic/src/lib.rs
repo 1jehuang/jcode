@@ -31,6 +31,23 @@ pub fn format_messages_with_tools(
     is_oauth: bool,
     api_tools: &[ApiTool],
 ) -> Vec<ApiMessage> {
+    format_messages_with_native(messages, is_oauth, api_tools, false)
+}
+
+/// Like [`format_messages_with_tools`], additionally controlling how stored
+/// provider-native blocks ([`ContentBlock::ProviderNative`]) are sent.
+///
+/// With `native_replay`, Anthropic server tool blocks (`server_tool_use`,
+/// `web_search_tool_result`) are replayed verbatim, which the API requires for
+/// their encrypted payloads. Without it (the server tool is not attached to this
+/// request, or the block came from another provider) they are downgraded to a
+/// plain-text summary so the conversation stays valid.
+pub fn format_messages_with_native(
+    messages: &[Message],
+    is_oauth: bool,
+    api_tools: &[ApiTool],
+    native_replay: bool,
+) -> Vec<ApiMessage> {
     use std::collections::HashSet;
     let available: HashSet<&str> = api_tools.iter().map(|tool| tool.name.as_str()).collect();
     // Pre-pass: drop duplicate tool_results for the same tool_use_id.
@@ -82,7 +99,7 @@ pub fn format_messages_with_tools(
             Role::Assistant => "assistant",
         };
 
-        let mut content = format_content_blocks(&msg.content, is_oauth);
+        let mut content = format_content_blocks_with_native(&msg.content, is_oauth, native_replay);
         apply_tool_references(&mut content, &msg.content, is_oauth, &available);
 
         if !content.is_empty() {
@@ -171,7 +188,14 @@ pub fn format_messages_with_tools(
     // user content and delivers its continuation as a system reminder, leaving the
     // transcript ending on the interrupted assistant turn. Repair the shape at the
     // last formatting step. See issue #600.
-    if merged.last().is_some_and(|last| last.role == "assistant") {
+    //
+    // Exception: a turn that stopped with `pause_turn` mid server-tool use must
+    // be resent exactly as-is so the API can resume it. Those turns end on an
+    // assistant message carrying raw server tool blocks.
+    if merged
+        .last()
+        .is_some_and(|last| last.role == "assistant" && !is_paused_server_tool_turn(last))
+    {
         jcode_logging::warn(
             "[anthropic] Conversation ended with an assistant message; appending a \
              continuation user turn to avoid a model prefill rejection (400)",
@@ -419,9 +443,60 @@ fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
 
 /// Convert our ContentBlock to Anthropic API format
 pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<ApiContentBlock> {
+    format_content_blocks_with_native(blocks, is_oauth, false)
+}
+
+/// True when an assistant message holds raw server tool blocks, i.e. it is a
+/// provider-native turn that may need resuming after `pause_turn`.
+fn is_paused_server_tool_turn(message: &ApiMessage) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, ApiContentBlock::Raw(_)))
+}
+
+/// See [`format_messages_with_native`] for the meaning of `native_replay`.
+pub fn format_content_blocks_with_native(
+    blocks: &[ContentBlock],
+    is_oauth: bool,
+    native_replay: bool,
+) -> Vec<ApiContentBlock> {
     let mut result: Vec<ApiContentBlock> = Vec::new();
+    // Inputs of server tool calls seen so far, so a downgraded result can name
+    // the query that produced it.
+    let mut native_call_inputs: std::collections::HashMap<String, Value> =
+        std::collections::HashMap::new();
     for block in blocks {
         match block {
+            ContentBlock::ProviderNative { provider, item } => {
+                use jcode_message_types::provider_native;
+                let display = provider_native::provider_native_display(provider, item);
+                if let Some(display) = &display
+                    && display.output.is_none()
+                    && let Some(input) = &display.input
+                {
+                    native_call_inputs.insert(display.id.clone(), input.clone());
+                }
+                let is_anthropic_block = provider == provider_native::PROVIDER_NATIVE_ANTHROPIC
+                    && item
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(provider_native::is_anthropic_server_tool_block);
+                if native_replay && is_anthropic_block {
+                    result.push(ApiContentBlock::Raw(item.clone()));
+                } else if let Some(text) = provider_native::provider_native_text_fallback(
+                    provider,
+                    item,
+                    display
+                        .as_ref()
+                        .and_then(|display| native_call_inputs.get(&display.id)),
+                ) {
+                    result.push(ApiContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    });
+                }
+            }
             ContentBlock::Text { text, .. } => {
                 // A text block that immediately follows an image-bearing tool_result is the
                 // "[Attached image associated with the preceding tool result: ...]" label
@@ -721,7 +796,7 @@ pub struct ApiRequest {
     pub system: Option<ApiSystem>,
     pub messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<ApiTool>>,
+    pub tools: Option<Vec<ApiToolParam>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ApiMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1002,6 +1077,11 @@ pub enum ApiContentBlock {
     Thinking { thinking: String, signature: String },
     #[serde(rename = "image")]
     Image { source: ApiImageSource },
+    /// Provider-native block sent back exactly as the API produced it
+    /// (`server_tool_use`, `web_search_tool_result`). Its own `type` field is
+    /// kept, and its encrypted payloads must not be touched.
+    #[serde(untagged)]
+    Raw(Value),
 }
 
 #[derive(Serialize, Clone)]
@@ -1041,6 +1121,28 @@ pub struct ApiTool {
     pub cache_control: Option<CacheControlParam>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub defer_loading: bool,
+}
+
+/// One entry of the request `tools` array: a client tool jcode executes, or an
+/// Anthropic server tool (e.g. `web_search_20250305`) the API executes itself.
+#[derive(Serialize, Clone)]
+#[serde(untagged)]
+pub enum ApiToolParam {
+    Custom(ApiTool),
+    Server(Value),
+}
+
+/// Build the request `tools` array. Server tools go right after the eager client
+/// tools (behind the tool-cache breakpoint) and before any deferred tools, so
+/// loading or unloading deferred tools never shifts them. Returns `None` when
+/// there are no tools at all.
+pub fn request_tools(custom: Vec<ApiTool>, server: Vec<Value>) -> Option<Vec<ApiToolParam>> {
+    let (eager, deferred): (Vec<ApiTool>, Vec<ApiTool>) =
+        custom.into_iter().partition(|tool| !tool.defer_loading);
+    let mut out: Vec<ApiToolParam> = eager.into_iter().map(ApiToolParam::Custom).collect();
+    out.extend(server.into_iter().map(ApiToolParam::Server));
+    out.extend(deferred.into_iter().map(ApiToolParam::Custom));
+    (!out.is_empty()).then_some(out)
 }
 
 #[cfg(test)]
