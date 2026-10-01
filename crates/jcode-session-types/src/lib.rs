@@ -166,6 +166,20 @@ pub enum SessionStatus {
     },
 }
 
+/// Lightweight metadata for a persisted session shown by remote session
+/// pickers. The transcript deliberately stays out of this payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentSessionSummary {
+    pub session_id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    /// Stable lowercase status label (for example `active`, `closed`, or
+    /// `crashed`).
+    pub status: String,
+}
+
 impl SessionStatus {
     pub fn display(&self) -> &'static str {
         match self {

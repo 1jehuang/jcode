@@ -13,6 +13,7 @@ mod comm_format;
 mod notifications;
 
 pub use comm_format::*;
+pub use jcode_session_types::RecentSessionSummary;
 pub use jcode_session_types::TurnStopReason;
 pub use notifications::{FeatureToggle, NotificationType};
 
@@ -610,6 +611,7 @@ impl Request {
             Request::ClientDebugResponse { id, .. } => *id,
             Request::Subscribe { id, .. } | Request::PrepareDisconnect { id } => *id,
             Request::GetHistory { id } => *id,
+            Request::ListRecentSessions { id, .. } => *id,
             Request::GetModelCatalog { id, .. } => *id,
             Request::GetCompactedHistory { id, .. } => *id,
             Request::Reload { id, .. } => *id,
@@ -690,6 +692,7 @@ impl Request {
                 // one-shot client can send it without subscribing to a session.
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
+                | Request::ListRecentSessions { .. }
                 | Request::NotifySession { .. }
                 | Request::AppletAction { .. }
                 | Request::CloseApplet { .. }

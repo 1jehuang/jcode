@@ -7,6 +7,7 @@ use super::client_comm::{
     handle_comm_unsubscribe_channel,
 };
 use super::client_comm_swarms::{handle_comm_list_swarms, handle_comm_set_swarm_label};
+use super::client_state::handle_list_recent_sessions;
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
@@ -112,10 +113,16 @@ pub(super) async fn handle_lightweight_control_request(
             &ServerEvent::Pong {
                 id,
                 native_ssh_protocol: Some(1),
-                capabilities: vec!["session_tools".into()],
+                capabilities: vec!["session_tools".into(), "recent_sessions".into()],
             },
         )
         .await?;
+        return Ok(());
+    }
+
+    if let Request::ListRecentSessions { id, limit } = request {
+        write_direct_event(&writer, &ServerEvent::Ack { id }).await?;
+        handle_list_recent_sessions(id, limit, &writer).await?;
         return Ok(());
     }
 

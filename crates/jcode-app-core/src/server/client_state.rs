@@ -4,7 +4,8 @@ use crate::agent::Agent;
 use crate::bus::Bus;
 use crate::message::{ContentBlock, Role};
 use crate::protocol::{
-    HistoryMessage, ServerEvent, SessionActivitySnapshot, TokenUsageTotals, encode_event,
+    HistoryMessage, RecentSessionSummary, ServerEvent, SessionActivitySnapshot, TokenUsageTotals,
+    encode_event,
 };
 use crate::provider::Provider;
 use crate::session::{Session, SessionStatus};
@@ -24,6 +25,7 @@ use tokio::sync::{Mutex, RwLock};
 
 const ATTACH_MODEL_PREFETCH_DEBOUNCE_SECS: u64 = 15;
 const RELOAD_RESTORE_MARKER_MAX_AGE: Duration = Duration::from_secs(60);
+const MAX_RECENT_SESSIONS_LIMIT: usize = 100;
 
 fn optional_token_usage_totals(totals: TokenUsageTotals) -> Option<TokenUsageTotals> {
     (totals.messages_with_token_usage > 0).then_some(totals)
@@ -131,6 +133,50 @@ pub(super) async fn handle_get_state(
         },
     )
     .await
+}
+
+pub(super) async fn handle_list_recent_sessions(
+    id: u64,
+    limit: usize,
+    writer: &Arc<Mutex<WriteHalf>>,
+) -> Result<()> {
+    let limit = limit.min(MAX_RECENT_SESSIONS_LIMIT);
+    let loaded =
+        tokio::task::spawn_blocking(move || crate::recent_session_index::recent_persisted(limit))
+            .await;
+    let event = match loaded {
+        Ok(Ok(entries)) => {
+            let sessions = entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let updated_at = chrono::DateTime::from_timestamp_millis(entry.updated_at_ms)?;
+                    let title = entry
+                        .display_title()
+                        .unwrap_or(&entry.session_id)
+                        .to_string();
+                    Some(RecentSessionSummary {
+                        session_id: entry.session_id,
+                        title,
+                        working_dir: entry.working_dir,
+                        updated_at,
+                        status: entry.status.unwrap_or_else(|| "unknown".to_string()),
+                    })
+                })
+                .collect();
+            ServerEvent::RecentSessions { id, sessions }
+        }
+        Ok(Err(error)) => ServerEvent::Error {
+            id,
+            message: format!("Failed to list recent sessions: {error}"),
+            retry_after_secs: None,
+        },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: format!("Recent-session scan failed: {error}"),
+            retry_after_secs: None,
+        },
+    };
+    write_event(writer, &event).await
 }
 
 #[expect(
