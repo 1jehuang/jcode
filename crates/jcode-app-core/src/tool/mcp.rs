@@ -357,6 +357,16 @@ impl Tool for McpCallTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let input_flags = input.clone();
         let mut params: McpCallInput = serde_json::from_value(input)?;
+        // Models sometimes spell the tool with its dispatch-time alias
+        // ("mcp__<server>__<tool>") instead of the bare tool name. Strip a
+        // matching self-prefix instead of letting the remote server answer
+        // -32602 "Tool mcp__... not found" and costing a retry round-trip.
+        let self_prefixed = format!("mcp__{}__", params.server);
+        if let Some(stripped) = params.tool.strip_prefix(&self_prefixed) {
+            if !stripped.is_empty() {
+                params.tool = stripped.to_string();
+            }
+        }
         let dispatched_name = dispatch_name(&params.server, &params.tool);
         // Check the current alias too: a per-alias deny must not be bypassed
         // by spelling the original server/tool pair through mcp_call.
