@@ -1361,7 +1361,19 @@ impl MemoryManager {
             .into_iter()
             .filter(|entry| entry.active && !is_memory_injected(session_id, &entry.id))
             .collect();
-        let entries = prefilter_for_jev(entries, query);
+        // Slot-B R3 composition (rebase onto upstream 72-cap): our
+        // Option-take stage runs when engaged; upstream's BM25 top-72
+        // `prefilter_for_jev` is the disengaged/fail-open floor (kept
+        // verbatim for next-rebase merging). The two stages never act on
+        // the same query (no double-narrow); the floor only changes
+        // behavior where raw exhaustive is dangerous (large stores).
+        let mut entries_opt = Some(entries);
+        Self::prefilter_for_jev_take(&mut entries_opt, &query);
+        let entries = entries_opt.expect("prefilter stage always leaves a set");
+        // Floor queries (mode-off / fail-open) arrive here as the raw set;
+        // cap them at 72 via the upstream floor fn so the disengaged path
+        // never reproduces the 107-call outage.
+        let entries = prefilter_for_jev(entries, &query);
         pipeline_update(|p| {
             p.search = StepStatus::Done;
             p.search_result = Some(StepResult {
@@ -1746,6 +1758,53 @@ impl MemoryManager {
     }
 }
 
+
+/// Slot-B shadow-audit counters: (queries, engaged, failopen, sampled).
+/// Process-wide atomics; the 7-day live window reads them via
+/// `MemoryManager::prefilter_shadow_stats`.
+static PREFILTER_QUERIES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_ENGAGED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_FAILOPEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_SHADOW_SAMPLED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Slot-B per-arm fail-open counters (SHADOW-GATE Metric 4): the five arms
+/// conflated in `PREFILTER_FAILOPEN`, indexed by `PrefilterFailopenArm`.
+/// Every increment pairs with the coarse bump at the
+/// `prefilter_for_jev_take` call site, so `failopen == sum(arms)`.
+static PREFILTER_FAILOPEN_ARMS: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Slot-B engaged-AND-sampled joint counter (SHADOW-GATE Metric 2
+/// denominator). Sampled-but-failopen queries have no tail by design, so
+/// only queries whose tail is actually emitted bump this.
+static PREFILTER_ENGAGED_SAMPLED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Slot-B tail re-judge counters (SHADOW-GATE Metric 2 numerator): how
+/// many sampled engaged tails finished a second `select` (`REJUDGED`),
+/// and how many of those had >= 1 judge-relevant tail memory (`HITS`).
+/// Process-wide, `Relaxed` (monotonic; exact cross-counter consistency
+/// not required). The hook bumps these read-only: no recall counts or
+/// priors are touched (none exist yet; keep it that way).
+static PREFILTER_TAIL_REJUDGED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_TAIL_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Slot-B stage-elapsed accumulators (SHADOW-GATE Metric 3 live half):
+/// embed half (query-embed wall clock) and rank half (hot rank pass).
+static PREFILTER_STAGE_EMBED: PrefilterStageAccum = PrefilterStageAccum::new();
+static PREFILTER_STAGE_RANK: PrefilterStageAccum = PrefilterStageAccum::new();
+
 /// Embedding similarity threshold (0.0 - 1.0)
 /// Lower = more candidates, higher = fewer but more relevant
 pub const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.5;
@@ -1756,10 +1815,764 @@ pub const EMBEDDING_MAX_HITS: usize = 10;
 /// Minimum per-retriever candidate pool size for hybrid fusion.
 const HYBRID_POOL_MIN: usize = 50;
 
+/// Slot-B prefilter diagnostics for the 7-day shadow audit (21 §4 gate c).
+/// Kept at module level for bench/test use; the live path uses the
+/// take-based `MemoryManager::prefilter_for_jev_take`.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum PrefilterOutcome {
+    Narrowed {
+        kept: Vec<MemoryEntry>,
+        dropped: Vec<MemoryEntry>,
+    },
+    Exhaustive,
+}
+
+/// Staged result of the guarded ranking heart: kept top-K plus the
+/// dropped tail (shadow-audit input). Module-private.
+#[derive(Debug)]
+struct PrefilterStaged {
+    #[allow(dead_code)]
+    kept: Vec<MemoryEntry>,
+    #[allow(dead_code)]
+    dropped: Vec<MemoryEntry>,
+}
+
+/// Read-only snapshot of the slot-B shadow-audit counters, backing the
+/// `jcode memory-prefilter-stats` CLI surface (human + `--json`).
+///
+/// Field order mirrors the historical `prefilter_shadow_stats` tuple
+/// `(queries, engaged, failopen, shadow_sampled)` so the CLI, the tuple
+/// helper, and the 21 §4 gate notes all read the same way. All four
+/// fields are cumulative process-wide totals since process start; there
+/// is no per-query or drop-tail-entry persistence (the tail itself is
+/// consumed live at `get_relevant_parallel` and only the sampled flag
+/// is counted).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrefilterShadowSnapshot {
+    /// Queries that reached the prefilter stage (post enable/corpus/top-K gates).
+    pub queries: u64,
+    /// Queries where ranking completed within budget (kept top-K served).
+    pub engaged: u64,
+    /// Queries that fell back to exhaustive Jev judgment (any fail-open arm).
+    pub failopen: u64,
+    /// Shadow-sampled queries (deterministic per-query hash under the rate).
+    pub shadow_sampled: u64,
+}
+
+impl PrefilterShadowSnapshot {
+    /// Dropped-tail summary for the human report: engaged queries produced
+    /// a narrowed set (tail exists, kept top-K served to Jev); fail-open
+    /// queries fell back to exhaustive judgment with no narrowing.
+    pub fn dropped_tail_summary(&self) -> String {
+        format!(
+            "narrowed {} queries to top-K (tail dropped from Jev judgment); {} queries fell back to exhaustive judgment",
+            self.engaged, self.failopen
+        )
+    }
+}
+
+/// Tail-hit window aggregation (SHADOW-GATE Metric 2 gate input):
+/// query-level `tail_hit = tail_hits / rejudged` with the Wilson 95%
+/// upper bound, plus the ENGAGED+SAMPLED joint counter as the gate
+/// denominator cross-check (`rejudged <= engaged_sampled` always: every
+/// re-judgment comes from a sampled engaged query).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PrefilterTailHitSnapshot {
+    /// Sampled engaged queries (Metric 2 denominator; tail exists by design).
+    pub engaged_sampled: u64,
+    /// Sampled engaged queries whose tail `select` completed (hook reads
+    /// the live counters; failures/hook-absent queries never land here).
+    pub rejudged: u64,
+    /// Re-judged queries with >= 1 judge-relevant tail memory.
+    pub tail_hits: u64,
+    /// Query-level tail-hit rate (`tail_hits / rejudged`, 0.0 unmeasured).
+    pub tail_hit: f64,
+    /// Wilson score 95% upper bound on the rate (1.0 unmeasured: vacuous).
+    pub tail_hit_upper_95: f64,
+}
+
+/// Slot-B fail-open arm: which of the five conflated `PREFILTER_FAILOPEN`
+/// sites fired (SHADOW-GATE Metric 4). Discriminant = index into the
+/// `PREFILTER_FAILOPEN_ARMS` atomic array. Order is fixed; append only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefilterFailopenArm {
+    /// `prefilter_take_inner`: query embed call failed.
+    EmbedError = 0,
+    /// `prefilter_rank_guarded`: embed already exceeded the stage budget.
+    EmbedOverBudget = 1,
+    /// `prefilter_rank_guarded`: hot rank pass exceeded the stage budget.
+    RankOverBudget = 2,
+    /// `prefilter_rank_guarded`: ranking dropped a nonempty input entirely.
+    EmptyFromNonempty = 3,
+    /// `prefilter_for_jev_take`: post-completion wall-clock over budget.
+    PostStageOverBudget = 4,
+}
+
+impl PrefilterFailopenArm {
+    /// All five arms in index order (read-site + test iteration order).
+    pub const ALL: [PrefilterFailopenArm; 5] = [
+        PrefilterFailopenArm::EmbedError,
+        PrefilterFailopenArm::EmbedOverBudget,
+        PrefilterFailopenArm::RankOverBudget,
+        PrefilterFailopenArm::EmptyFromNonempty,
+        PrefilterFailopenArm::PostStageOverBudget,
+    ];
+
+    /// Index into the per-arm atomic array.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Stable short name for logs and tests.
+    pub fn name(self) -> &'static str {
+        match self {
+            PrefilterFailopenArm::EmbedError => "embed_error",
+            PrefilterFailopenArm::EmbedOverBudget => "embed_over_budget",
+            PrefilterFailopenArm::RankOverBudget => "rank_over_budget",
+            PrefilterFailopenArm::EmptyFromNonempty => "empty_from_nonempty",
+            PrefilterFailopenArm::PostStageOverBudget => "post_stage_over_budget",
+        }
+    }
+}
+
+/// Embed-vs-rank stage-elapsed summary (SHADOW-GATE Metric 3, live half).
+/// Cumulative process-wide sums beside the existing counters: `mean =
+/// sum / count`, variance via `sum_sq` (`E[x^2] - E[x]^2`). Microseconds
+/// (`u64`, saturating) so sub-millisecond stages keep precision. Embed is
+/// recorded whenever the query embed completes; rank whenever the hot rank
+/// pass completes (over-budget and empty arms included — the cost was paid).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PrefilterStageStats {
+    pub embed_count: u64,
+    pub embed_sum_us: u64,
+    pub embed_sum_sq_us: u64,
+    pub embed_max_us: u64,
+    pub rank_count: u64,
+    pub rank_sum_us: u64,
+    pub rank_sum_sq_us: u64,
+    pub rank_max_us: u64,
+}
+
+impl PrefilterStageStats {
+    /// Mean embed-stage microseconds (0.0 with no samples).
+    pub fn embed_mean_us(&self) -> f64 {
+        if self.embed_count == 0 {
+            0.0
+        } else {
+            self.embed_sum_us as f64 / self.embed_count as f64
+        }
+    }
+
+    /// Mean hot-rank-pass microseconds (0.0 with no samples).
+    pub fn rank_mean_us(&self) -> f64 {
+        if self.rank_count == 0 {
+            0.0
+        } else {
+            self.rank_sum_us as f64 / self.rank_count as f64
+        }
+    }
+}
+
+/// Cumulative count/sum/sum-sq/max accumulator behind one
+/// [`PrefilterStageStats`] half. One atomic per moment; all `Relaxed`
+/// (monotonic counters, exact cross-moment consistency not required).
+pub(crate) struct PrefilterStageAccum {
+    count: std::sync::atomic::AtomicU64,
+    sum_us: std::sync::atomic::AtomicU64,
+    sum_sq_us: std::sync::atomic::AtomicU64,
+    max_us: std::sync::atomic::AtomicU64,
+}
+
+impl PrefilterStageAccum {
+    pub(crate) const fn new() -> Self {
+        Self {
+            count: std::sync::atomic::AtomicU64::new(0),
+            sum_us: std::sync::atomic::AtomicU64::new(0),
+            sum_sq_us: std::sync::atomic::AtomicU64::new(0),
+            max_us: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn note(&self, elapsed_us: u64) {
+        use std::sync::atomic::Ordering;
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(elapsed_us, Ordering::Relaxed);
+        self.sum_sq_us.fetch_add(
+            elapsed_us.saturating_mul(elapsed_us),
+            Ordering::Relaxed,
+        );
+        self.max_us.fetch_max(elapsed_us, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot(&self) -> (u64, u64, u64, u64) {
+        use std::sync::atomic::Ordering;
+        (
+            self.count.load(Ordering::Relaxed),
+            self.sum_us.load(Ordering::Relaxed),
+            self.sum_sq_us.load(Ordering::Relaxed),
+            self.max_us.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Per-sampled-engaged-query drop-tail record (SHADOW-GATE Metric 2
+/// numerator plumbing). The raw query text is NEVER stored — only its
+/// deterministic hash (same `DefaultHasher` posture as the sampler). Tail
+/// IDs are bounded at [`PREFILTER_TAIL_LOG_MAX_IDS`] with totals kept so
+/// truncation is visible to the window aggregation.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PrefilterTailDetail {
+    /// Hex (`{:016x}`) hash of the query text. Joins the tail log to the
+    /// re-judge output without disclosing query content.
+    pub query_hash: String,
+    /// Served kept-set IDs (length <= top_k by construction).
+    pub kept_ids: Vec<String>,
+    pub kept_total: usize,
+    /// Dropped-tail IDs, truncated to the bound below.
+    pub tail_ids: Vec<String>,
+    /// Full tail length before truncation.
+    pub tail_total: usize,
+    /// True when `tail_ids` was cut at the bound.
+    pub tail_truncated: bool,
+    /// Stage top-K the kept set was narrowed to.
+    pub top_k: usize,
+    /// Sampler rate in force when the query engaged.
+    pub rate: f32,
+    /// Train/test split tag. Live traffic counts as test per SHADOW-GATE
+    /// §4.2 unless c3 later tunes on live-derived queries (no tuning-set
+    /// registry exists yet, so the constant below is the whole policy).
+    pub split_tag: String,
+}
+
+/// Max tail IDs per [`PrefilterTailDetail`] log line (tail can be
+/// corpus − top_k; IDs only, but the JSONL line stays bounded).
+pub const PREFILTER_TAIL_LOG_MAX_IDS: usize = 1024;
+
+/// Split tag for live shadow traffic (see [`PrefilterTailDetail::split_tag`]).
+pub const PREFILTER_SPLIT_TAG: &str = "live";
+
+impl MemoryManager {
+    /// Slot-B hybrid prefilter stage for Jev automatic recall (§3).
+    ///
+    /// Takes the ALREADY-COLLECTED set out of `entries_opt` (post-`entry.active`
+    /// filter, post-already-injected filter — exactly the set Jev would
+    /// otherwise judge exhaustively), narrows it to `prefilter_top_k` via the
+    /// same dense+BM25 RRF ranking the shipped hybrid path uses, and puts the
+    /// narrowed set back. Returns the dropped tail (shadow-audit input;
+    /// empty unless the query was shadow-sampled). Do NOT re-collect here:
+    /// output ⊆ input by construction.
+    ///
+    /// Fail-open is scoped to this stage ONLY (the input is left in place):
+    /// disabled / at-or-below `prefilter_min_corpus` / already fits top-K /
+    /// embed error / empty-ranked-from-nonempty / stage wall-clock over
+    /// `prefilter_budget_ms` → input untouched, returns None (the full set
+    /// flows to Jev), logged once. Downstream fail-closed (JevClient::new
+    /// Err, select Err, 60 s timeout) is the caller's and is untouched.
+    /// Always leaves a set in `entries_opt` (never None on return).
+    pub fn prefilter_for_jev_take(
+        entries_opt: &mut Option<Vec<MemoryEntry>>,
+        query_text: &str,
+    ) -> Option<Vec<MemoryEntry>> {
+        use std::sync::atomic::Ordering;
+        let entries = entries_opt.take().expect("prefilter stage takes a set");
+        // Disengage WITHOUT consuming: put the input straight back.
+        if !Self::prefilter_enabled() {
+            *entries_opt = Some(entries);
+            return None;
+        }
+        let min_corpus = Self::prefilter_min_corpus();
+        if entries.len() <= min_corpus {
+            *entries_opt = Some(entries);
+            return None;
+        }
+        let top_k = Self::prefilter_top_k();
+        if entries.len() <= top_k {
+            *entries_opt = Some(entries);
+            return None;
+        }
+        let budget = std::time::Duration::from_millis(Self::prefilter_budget_ms());
+        let stage_start = Instant::now();
+
+        PREFILTER_QUERIES.fetch_add(1, Ordering::Relaxed);
+        // Shadow sampling: deterministic per-query hash so the rate is stable
+        // across restarts and testable without RNG plumbing.
+        if Self::prefilter_shadow_sampled(query_text) {
+            PREFILTER_SHADOW_SAMPLED.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // The take above consumed the input: put it back so the inner
+        // stage (borrow-split around the embed call) can take it again.
+        // Disengaged arms returned early with the input already restored;
+        // only this engaged path reaches the inner with a None slot.
+        *entries_opt = Some(entries);
+        match Self::prefilter_take_inner(entries_opt, query_text, stage_start, budget, top_k) {
+            Some(PrefilterStaged { kept, dropped }) => {
+                PREFILTER_ENGAGED.fetch_add(1, Ordering::Relaxed);
+                // The staged kept set flows out of the rank guard (no
+                // store-take round trip there): it lands back in the slot
+                // here, so the "always leaves a set" contract holds on
+                // every arm below (fail-open extends it back to full).
+                *entries_opt = Some(kept);
+                if stage_start.elapsed() > budget {
+                    // Over budget even though ranking finished: still fail open
+                    // (the guarantee is wall-clock, not just completion).
+                    Self::note_prefilter_failopen(PrefilterFailopenArm::PostStageOverBudget);
+                    crate::logging::info(&format!(
+                        "memory prefilter over budget ({}ms > {}ms): flowing exhaustive to Jev",
+                        stage_start.elapsed().as_millis(),
+                        budget.as_millis()
+                    ));
+                    // Kept is back in entries_opt (stored just above);
+                    // extend it with the tail in place.
+                    if let Some(slot) = entries_opt.as_mut() {
+                        slot.extend(dropped);
+                    }
+                    return None;
+                }
+                // Engaged AND sampled: the tail below is real (fail-open
+                // queries have none by design), so this is the Metric 2
+                // denominator and the tail-log trigger. Recomputing the
+                // sampler here (pure function of the query text) agrees
+                // with the counter-site decision above by construction.
+                if Self::prefilter_shadow_sampled(query_text) {
+                    PREFILTER_ENGAGED_SAMPLED.fetch_add(1, Ordering::Relaxed);
+                    let kept_ref = entries_opt.as_ref().expect("kept just stored");
+                    let detail = Self::prefilter_tail_detail(
+                        query_text,
+                        kept_ref,
+                        &dropped,
+                        top_k,
+                        Self::prefilter_shadow_rate(),
+                    );
+                    crate::logging::info(&format!(
+                        "memory prefilter shadow tail query_hash={} kept={} tail={} top_k={} rate={} split={}",
+                        detail.query_hash,
+                        detail.kept_total,
+                        detail.tail_total,
+                        detail.top_k,
+                        detail.rate,
+                        detail.split_tag,
+                    ));
+                    crate::memory_log::log_prefilter_tail(&detail);
+                    // Tail-only re-judge (SHADOW-GATE Metric 2, item 5): the
+                    // live kept judgments transfer as observed, so only the
+                    // dropped tail needs a second `select` (same 24-entry
+                    // batches, same 60 s deadline, same shipped threshold).
+                    // Off-thread: the live `select` over kept proceeds
+                    // untouched. Read-only: touches no recall counts or
+                    // priors (none exist; keep it that way).
+                    Self::spawn_shadow_tail_rejudge(
+                        query_text.to_string(),
+                        detail.query_hash.clone(),
+                        detail.split_tag.clone(),
+                        dropped,
+                    );
+                    drop(detail);
+                }
+                // The tail moved into the spawned re-judge (or was empty
+                // when unsampled); the kept set stays in the slot for the
+                // live `select`. Return an empty tail: the shadow audit no
+                // longer flows through this return value.
+                Some(Vec::new())
+            }
+            None => {
+                // Inner already restored the FULL input on every fail-open
+                // arm and bumped that arm's counter; the coarse total moves
+                // here so the call-site diff stays one line per arm.
+                PREFILTER_FAILOPEN.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
+
+    /// Bump one fail-open arm's counter (SHADOW-GATE Metric 4). The coarse
+    /// `PREFILTER_FAILOPEN` total moves at the `prefilter_for_jev_take`
+    /// call site, so every arm increment preserves `failopen ==
+    /// sum(arms)` and the existing CLI/tuple readers never change.
+    fn note_prefilter_failopen(arm: PrefilterFailopenArm) {
+        use std::sync::atomic::Ordering;
+        PREFILTER_FAILOPEN_ARMS[arm.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Per-arm fail-open counts in [`PrefilterFailopenArm::ALL`] order.
+    /// Sums to `failopen` (every arm bump pairs with the coarse bump at
+    /// the take call site).
+    pub fn prefilter_failopen_arms() -> [u64; 5] {
+        use std::sync::atomic::Ordering;
+        [
+            PREFILTER_FAILOPEN_ARMS[0].load(Ordering::Relaxed),
+            PREFILTER_FAILOPEN_ARMS[1].load(Ordering::Relaxed),
+            PREFILTER_FAILOPEN_ARMS[2].load(Ordering::Relaxed),
+            PREFILTER_FAILOPEN_ARMS[3].load(Ordering::Relaxed),
+            PREFILTER_FAILOPEN_ARMS[4].load(Ordering::Relaxed),
+        ]
+    }
+
+    /// Engaged AND shadow-sampled queries: the Metric 2 denominator
+    /// (sampled-but-failopen queries have no tail by design, so the
+    /// marginal `shadow_sampled` counter cannot serve).
+    pub fn prefilter_engaged_sampled() -> u64 {
+        use std::sync::atomic::Ordering;
+        PREFILTER_ENGAGED_SAMPLED.load(Ordering::Relaxed)
+    }
+
+    /// Embed-vs-rank stage-elapsed summary (Metric 3 live half).
+    pub fn prefilter_stage_stats() -> PrefilterStageStats {
+        let (embed_count, embed_sum_us, embed_sum_sq_us, embed_max_us) =
+            PREFILTER_STAGE_EMBED.snapshot();
+        let (rank_count, rank_sum_us, rank_sum_sq_us, rank_max_us) =
+            PREFILTER_STAGE_RANK.snapshot();
+        PrefilterStageStats {
+            embed_count,
+            embed_sum_us,
+            embed_sum_sq_us,
+            embed_max_us,
+            rank_count,
+            rank_sum_us,
+            rank_sum_sq_us,
+            rank_max_us,
+        }
+    }
+
+    /// Build the per-query drop-tail record: hash (never raw text),
+    /// kept/tail IDs (tail bounded), top_k, rate, split tag.
+    /// Pure constructor so tests cover the shape without I/O.
+    pub fn prefilter_tail_detail(
+        query_text: &str,
+        kept: &[MemoryEntry],
+        dropped: &[MemoryEntry],
+        top_k: usize,
+        rate: f32,
+    ) -> PrefilterTailDetail {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        query_text.hash(&mut hasher);
+        let tail_total = dropped.len();
+        PrefilterTailDetail {
+            query_hash: format!("{:016x}", hasher.finish()),
+            kept_ids: kept.iter().map(|e| e.id.clone()).collect(),
+            kept_total: kept.len(),
+            tail_ids: dropped
+                .iter()
+                .take(PREFILTER_TAIL_LOG_MAX_IDS)
+                .map(|e| e.id.clone())
+                .collect(),
+            tail_total,
+            tail_truncated: tail_total > PREFILTER_TAIL_LOG_MAX_IDS,
+            top_k,
+            rate,
+            split_tag: PREFILTER_SPLIT_TAG.to_string(),
+        }
+    }
+
+    /// Take-based ranking inner: embeds (fail-open restores input), then
+    /// delegates to the guarded ranker. Split from `prefilter_for_jev_take`
+    /// so the embed borrow of `entries_opt` never overlaps the ranker's
+    /// mutable borrow.
+    fn prefilter_take_inner(
+        entries_opt: &mut Option<Vec<MemoryEntry>>,
+        query_text: &str,
+        stage_start: Instant,
+        budget: std::time::Duration,
+        top_k: usize,
+    ) -> Option<PrefilterStaged> {
+        // Same embed call the stale-rank guard uses (LRU-cached). Embed
+        // BEFORE taking the set: on error the input never moved.
+        let embed_start = Instant::now();
+        let query_embedding = match crate::embedding::embed(query_text) {
+            Ok(v) => v,
+            Err(e) => {
+                Self::note_prefilter_failopen(PrefilterFailopenArm::EmbedError);
+                crate::logging::info(&format!(
+                    "memory prefilter embed failed ({e}): flowing exhaustive to Jev"
+                ));
+                return None;
+            }
+        };
+        let embed_us =
+            u64::try_from(embed_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        PREFILTER_STAGE_EMBED.note(embed_us);
+        Self::prefilter_rank_guarded(
+            entries_opt,
+            query_text,
+            stage_start,
+            budget,
+            top_k,
+            &query_embedding,
+        )
+    }
+
+    /// Guarded ranking heart of the slot-B stage. Puts kept top-K back into
+    /// `entries_opt` on success and returns the staged tail; on ANY fail-open
+    /// trigger (embed error, empty-from-nonempty, over-budget) puts the FULL
+    /// input back untouched and returns None. The full-depth tail pass
+    /// (shadow-sampled queries) runs on a clone.
+    fn prefilter_rank_guarded(
+        entries_opt: &mut Option<Vec<MemoryEntry>>,
+        query_text: &str,
+        stage_start: Instant,
+        budget: std::time::Duration,
+        top_k: usize,
+        query_embedding: &[f32],
+    ) -> Option<PrefilterStaged> {
+        let entries = entries_opt.take().expect("rank guard takes a set");
+        if stage_start.elapsed() > budget {
+            Self::note_prefilter_failopen(PrefilterFailopenArm::EmbedOverBudget);
+            crate::logging::info("memory prefilter embed over budget: flowing exhaustive to Jev");
+            *entries_opt = Some(entries);
+            return None;
+        }
+        let pool = top_k.saturating_mul(5).max(HYBRID_POOL_MIN);
+        // Fail-open restore needs the FULL input back (the ranking core
+        // consumes its input). Clone once up front: the hot path reuses it
+        // only on the rare fail-open arms; the shadow-sampled path reuses
+        // it for the full-depth tail pass. One clone per engaged query is
+        // the price of a lossless fail-open guarantee.
+        let restore_clone: Vec<MemoryEntry> = entries.clone();
+        // Shadow path needs the FULL ranking (kept + tail); the hot path
+        // needs only top-K. Both go through the same public core.
+        let sampled = Self::prefilter_shadow_sampled(query_text);
+        let rank_start = Instant::now();
+        let ranked = Self::hybrid_prefilter_rank(entries, query_text, query_embedding, top_k, pool);
+        let rank_us = u64::try_from(rank_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        PREFILTER_STAGE_RANK.note(rank_us);
+        if stage_start.elapsed() > budget {
+            Self::note_prefilter_failopen(PrefilterFailopenArm::RankOverBudget);
+            crate::logging::info("memory prefilter rank over budget: flowing exhaustive to Jev");
+            *entries_opt = Some(restore_clone);
+            return None;
+        }
+        if ranked.is_empty() {
+            // Empty-from-nonempty: ranking dropped everything (e.g. no
+            // BM25 overlap AND no dense-eligible entries). Fail open.
+            Self::note_prefilter_failopen(PrefilterFailopenArm::EmptyFromNonempty);
+            crate::logging::info(
+                "memory prefilter ranked empty from nonempty input: flowing exhaustive to Jev",
+            );
+            *entries_opt = Some(restore_clone);
+            return None;
+        }
+        let kept_ids: std::collections::HashSet<String> =
+            ranked.iter().map(|(e, _)| e.id.clone()).collect();
+        let mut kept = Vec::with_capacity(ranked.len());
+        for (e, _) in ranked {
+            kept.push(e);
+        }
+        let dropped: Vec<MemoryEntry> = if sampled {
+            let full = Self::hybrid_prefilter_rank(
+                restore_clone,
+                query_text,
+                query_embedding,
+                usize::MAX,
+                usize::MAX,
+            );
+            full.into_iter()
+                .filter(|(e, _)| !kept_ids.contains(&e.id))
+                .map(|(e, _)| e)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Kept flows out in the staged struct (no store-take round trip);
+        // the caller puts it back into the slot. Fail-open arms above
+        // restored the FULL input instead and returned None.
+        Some(PrefilterStaged { kept, dropped })
+    }
+
+    /// Deterministic shadow-sampling decision for a query string.
+    /// Public so the bench and tests exercise the exact shipped sampler.
+    pub fn prefilter_shadow_sampled(query_text: &str) -> bool {
+        let rate = Self::prefilter_shadow_rate();
+        if rate <= 0.0 {
+            return false;
+        }
+        if rate >= 1.0 {
+            return true;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        query_text.hash(&mut hasher);
+        let draw = (hasher.finish() % 10_000) as f32 / 10_000.0;
+        draw < rate
+    }
+
+    /// Slot-B shadow-audit counters (21 §4 gate (c) plumbing). Read via
+    /// `jcode memory-prefilter-stats` (human + `--json`) or the
+    /// `prefilter_shadow_stats` tuple helper. The tail re-judge hook
+    /// (`spawn_shadow_tail_rejudge`) is the consumer of the drop tail;
+    /// these counters prove the sampling path engaged.
+    /// (queries, engaged, failopen, shadow_sampled)
+    pub fn prefilter_shadow_stats() -> (u64, u64, u64, u64) {
+        let snapshot = Self::prefilter_shadow_snapshot();
+        (
+            snapshot.queries,
+            snapshot.engaged,
+            snapshot.failopen,
+            snapshot.shadow_sampled,
+        )
+    }
+
+    /// Read-only snapshot of the slot-B shadow-audit counters for the
+    /// `jcode memory-prefilter-stats` CLI surface. Loads the four
+    /// process-wide atomics; performs no scoring, no mutation, and no I/O.
+    /// No new counters: the tuple accessor above stays the canonical
+    /// bench/test reader.
+    pub fn prefilter_shadow_snapshot() -> PrefilterShadowSnapshot {
+        use std::sync::atomic::Ordering;
+        PrefilterShadowSnapshot {
+            queries: PREFILTER_QUERIES.load(Ordering::Relaxed),
+            engaged: PREFILTER_ENGAGED.load(Ordering::Relaxed),
+            failopen: PREFILTER_FAILOPEN.load(Ordering::Relaxed),
+            shadow_sampled: PREFILTER_SHADOW_SAMPLED.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Fire-and-forget tail-only re-judge (SHADOW-GATE Metric 2, item 5).
+    ///
+    /// Runs on shadow-sampled ENGAGED queries only (the tail is real there;
+    /// sampled-but-failopen queries have none by design, and unsampled
+    /// queries never reach this call site). Spawns onto the runtime so the
+    /// live `select` over the kept set proceeds untouched: 2x judge cost on
+    /// ~1% of engaged traffic during the window only.
+    ///
+    /// Read-only by construction: the task judges cloned tail entries and
+    /// bumps two counters plus one log line. It never touches recall
+    /// counts or priors (none exist yet; keep it that way), never mutates
+    /// the live kept set, and never feeds the accept set back into recall.
+    fn spawn_shadow_tail_rejudge(
+        query: String,
+        query_hash: String,
+        split_tag: String,
+        tail: Vec<MemoryEntry>,
+    ) {
+        use std::sync::atomic::Ordering;
+        if tail.is_empty() {
+            return;
+        }
+        // `get_relevant_parallel` always runs under a runtime (the fire
+        // path spawns it); outside one the hook must not block the live
+        // path, so skip the spawn but keep the tail log as the record.
+        if tokio::runtime::Handle::try_current().is_err() {
+            crate::logging::info(&format!(
+                "memory prefilter shadow re-judge skipped (no runtime) query_hash={query_hash} split={split_tag}"
+            ));
+            return;
+        }
+        let handle = tokio::spawn(async move {
+            let accepted: usize = match crate::jev::JevClient::new() {
+                Ok(client) => {
+                    match crate::memory_jev::select(
+                        &client,
+                        &query,
+                        tail,
+                        crate::memory_jev::MAX_BATCH_ENTRIES,
+                    )
+                    .await
+                    {
+                        Ok(results) => results.len(),
+                        Err(e) => {
+                            crate::logging::info(&format!(
+                                "memory prefilter shadow re-judge failed query_hash={query_hash} split={split_tag}: {e}"
+                            ));
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    crate::logging::info(&format!(
+                        "memory prefilter shadow re-judge no client query_hash={query_hash} split={split_tag}: {e}"
+                    ));
+                    return;
+                }
+            };
+            PREFILTER_TAIL_REJUDGED.fetch_add(1, Ordering::Relaxed);
+            if accepted > 0 {
+                PREFILTER_TAIL_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            crate::memory_log::log_prefilter_rejudge(
+                &query_hash,
+                &split_tag,
+                accepted,
+                Self::prefilter_shadow_rate(),
+            );
+        });
+        drop(handle);
+    }
+
+    /// Record one tail re-judgment outcome (test/maintenance seam for the
+    /// spawned hook above: same counters, same log line, no Jev call).
+    /// `tail_accepts` is the judge-relevant tail count for one sampled
+    /// engaged query; `tail_accepts > 0` marks a query-level tail hit.
+    pub fn note_shadow_tail_rejudged(query_hash: &str, split_tag: &str, tail_accepts: usize) {
+        use std::sync::atomic::Ordering;
+        PREFILTER_TAIL_REJUDGED.fetch_add(1, Ordering::Relaxed);
+        if tail_accepts > 0 {
+            PREFILTER_TAIL_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+        crate::memory_log::log_prefilter_rejudge(
+            query_hash,
+            split_tag,
+            tail_accepts,
+            Self::prefilter_shadow_rate(),
+        );
+    }
+
+    /// Tail-hit window aggregation (SHADOW-GATE Metric 2 gate input).
+    ///
+    /// Query-level `tail_hit = tail_hits / engaged_sampled`: the fraction
+    /// of re-judged sampled engaged queries with >= 1 judge-relevant tail
+    /// memory. The denominator is the ENGAGED+SAMPLED joint counter
+    /// (sampled-but-failopen queries have no tail by design); the
+    /// numerator counts re-judged queries with `tail_accepts > 0`. Gate on
+    /// test-split queries only (live traffic counts as test per §4.2
+    /// unless c3 tunes on live-derived queries); the per-query split tag
+    /// lives on both log lines for offline filtering.
+    pub fn prefilter_tail_hit_snapshot() -> PrefilterTailHitSnapshot {
+        use std::sync::atomic::Ordering;
+        let rejudged = PREFILTER_TAIL_REJUDGED.load(Ordering::Relaxed);
+        let hits = PREFILTER_TAIL_HITS.load(Ordering::Relaxed);
+        let engaged_sampled = PREFILTER_ENGAGED_SAMPLED.load(Ordering::Relaxed);
+        let tail_hit = if rejudged == 0 {
+            0.0
+        } else {
+            hits as f64 / rejudged as f64
+        };
+        PrefilterTailHitSnapshot {
+            engaged_sampled,
+            rejudged,
+            tail_hits: hits,
+            tail_hit,
+            tail_hit_upper_95: Self::wilson_upper_95(hits, rejudged),
+        }
+    }
+
+    /// Wilson score upper bound (95%, z = 1.96) for a binomial rate.
+    /// Pure math, no counters: `upper = (p + z^2/2n + z*sqrt(p(1-p)/n +
+    /// z^2/4n^2)) / (1 + z^2/n)`. Returns 1.0 with no samples (no
+    /// evidence: the bound is vacuous) and clamps to [0, 1].
+    pub fn wilson_upper_95(hits: u64, total: u64) -> f64 {
+        if total == 0 {
+            return 1.0;
+        }
+        const Z: f64 = 1.96;
+        const Z2: f64 = Z * Z;
+        let n = total as f64;
+        let p = hits as f64 / n;
+        let denom = 1.0 + Z2 / n;
+        let center = p + Z2 / (2.0 * n);
+        let spread = Z * (p * (1.0 - p) / n + Z2 / (4.0 * n * n)).sqrt();
+        ((center + spread) / denom).clamp(0.0, 1.0)
+    }
+}
+
 /// Most memories Jcode sends to Jev per automatic recall. Every 24 entries costs
 /// one Jev decision, so judging a whole store (thousands of memories) each turn
 /// exhausted the daily plan allowance within hours. Lexical relevance narrows
 /// the field first; Jev still judges every candidate that reaches the prompt.
+/// (Upstream `00c1d655b`, kept verbatim for next-rebase merging; wired as the
+/// disengaged/fail-open floor inside `prefilter_for_jev_take` per R3 XOR —
+/// the engaged path runs our stage alone and never chains.)
 pub(crate) const MAX_JEV_RECALL_CANDIDATES: usize = 72;
 
 /// Keep the most lexically relevant memories for Jev judgement. Small stores
@@ -1777,10 +2590,6 @@ fn prefilter_for_jev(entries: Vec<MemoryEntry>, query: &str) -> Vec<MemoryEntry>
         .collect()
 }
 
-/// Rank memories by BM25 over their normalized search text.
-///
-/// Returns `(entry_index, score)` pairs sorted by score desc, truncated to
-/// `limit`. Memories with zero query-term overlap are dropped.
 fn bm25_rank(entries: &[MemoryEntry], query_text: &str, limit: usize) -> Vec<(usize, f32)> {
     const K1: f32 = 1.2;
     const B: f32 = 0.75;

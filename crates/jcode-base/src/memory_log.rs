@@ -400,6 +400,51 @@ pub fn log_judge_decision(
     );
 }
 
+/// Log one shadow-sampled engaged prefilter query's drop tail
+/// (SHADOW-GATE Metric 2 numerator plumbing). The detail carries a query
+/// hash (never raw text), kept/tail IDs (tail bounded), top_k, rate, and
+/// split tag; see `memory::PrefilterTailDetail`. The re-judge hook (item 5)
+/// joins its `tail_accepts` output to this line via `query_hash`.
+pub fn log_prefilter_tail(detail: &crate::memory::PrefilterTailDetail) {
+    write_log(
+        "prefilter_shadow_tail",
+        Some(serde_json::json!({
+            "query_hash": detail.query_hash,
+            "kept_ids": detail.kept_ids,
+            "kept_total": detail.kept_total,
+            "tail_ids": detail.tail_ids,
+            "tail_total": detail.tail_total,
+            "tail_truncated": detail.tail_truncated,
+            "top_k": detail.top_k,
+            "rate": detail.rate,
+            "split_tag": detail.split_tag,
+        })),
+    );
+}
+
+/// Log one shadow tail re-judgment outcome (SHADOW-GATE Metric 2
+/// numerator). Joins the `prefilter_shadow_tail` line via `query_hash`.
+/// `tail_accepts` is the judge-relevant tail count (`> 0` = query-level
+/// tail hit); `split_tag` carries the train/test tag so window
+/// aggregation can gate on test-split queries only.
+pub fn log_prefilter_rejudge(
+    query_hash: &str,
+    split_tag: &str,
+    tail_accepts: usize,
+    rate: f32,
+) {
+    write_log(
+        "prefilter_shadow_rejudge",
+        Some(serde_json::json!({
+            "query_hash": query_hash,
+            "split_tag": split_tag,
+            "tail_accepts": tail_accepts,
+            "tail_hit": tail_accepts > 0,
+            "rate": rate,
+        })),
+    );
+}
+
 /// Remove `memory-events-*.jsonl` files older than the documented 14-day
 /// retention window. The general log rotation deliberately leaves these files
 /// alone (they are analysis data, not debug logs), so this is the only place
