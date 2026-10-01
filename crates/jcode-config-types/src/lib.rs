@@ -610,6 +610,71 @@ pub struct AgentsConfig {
     /// Legacy setting, retained for config compatibility. Jev recall ignores it.
     #[serde(default = "default_memory_rerank_min_agree")]
     pub memory_rerank_min_agree: usize,
+    /// RRF k for hybrid (BM25 + dense) fusion in recall. Higher k compresses
+    /// rank gaps (flatter fusion), lower k rewards top ranks more steeply.
+    /// k=60 is tuned for thousand-item corpora; memory stores are far
+    /// smaller, so operators with tens of memories may prefer 10-30 for
+    /// sharper top-rank separation. Clamped to [1.0, 1000.0] at use.
+    /// Env override: `JCODE_MEMORY_RRF_K` (wins over file).
+    #[serde(default = "default_memory_rrf_k")]
+    pub memory_rrf_k: f32,
+    /// Dense-list weight for hybrid RRF fusion. The dense list's RRF terms
+    /// are multiplied by this; the sparse (BM25) list keeps weight 1.0.
+    /// Default 3.0 (L1 grid winner 2026-09-27: the unique grid point in
+    /// {1.0, 1.5, 2.0, 3.0} weakly dominating the 1.0 baseline on every
+    /// dev+blind cell; dev recall@5 0.9355 -> 0.9677, blind MRR +0.0455,
+    /// no recall@10 regression either set). Values > 1.0 prioritize the
+    /// dense retriever, which carries paraphrase-heavy queries the sparse
+    /// side buries. Must be finite and positive at use (non-finite or
+    /// non-positive falls back to 1.0).
+    /// Env override: `JCODE_MEMORY_RRF_DENSE_W` (wins over file).
+    #[serde(default = "default_memory_rrf_dense_weight")]
+    pub memory_rrf_dense_weight: f32,
+    /// Recency-prior weight for hybrid RRF fusion (G-R, shipped 2026-09-30).
+    /// Bounded additive bonus `w_r * 0.5^(age_days / half_life)` added
+    /// post-fusion. Default 0.05 (tuning grid + blind no-regression confirm).
+    /// Env override: `JCODE_MEMORY_RECENCY_W` (wins over file).
+    #[serde(default = "default_memory_recency_weight")]
+    pub memory_recency_weight: f32,
+    /// Recency half-life override in days (G-R, shipped 2026-09-30).
+    /// 0.0 = per-category half-lives from the existing decay table
+    /// (Fact 30 / Entity 60 / Preference 90 / Correction 365 / Custom 45).
+    /// Default 90.0 (tuning grid safe cell: holds C1, lifts C4; tau=7 and
+    /// w=0.2 are cliff regions, dropped). Positive values force a single
+    /// global tau.
+    /// Env override: `JCODE_MEMORY_RECENCY_TAU_DAYS` (wins over file).
+    #[serde(default = "default_memory_recency_tau_days")]
+    pub memory_recency_tau_days: f32,
+    /// Slot-B hybrid prefilter mode for Jev automatic recall (`off` default;
+    /// `"hybrid-topk"` narrows the exhaustive active set via hybrid
+    /// dense+BM25 RRF ranking before Jev judges the top-K). Default-off until
+    /// the 21 §4 gate passes; the ship commit flips the default separately.
+    /// Env override: `JCODE_MEMORY_PREFILTER_MODE` (wins over file).
+    #[serde(default = "default_memory_prefilter_mode")]
+    pub memory_prefilter_mode: String,
+    /// Slot-B prefilter top-K: Jev judges at most this many narrowed memories
+    /// (default 96 = 4 Jev batches of 24). Clamped to [24, 480] at use;
+    /// non-finite or out-of-range file/garbage values fall back to 96.
+    /// Env override: `JCODE_MEMORY_PREFILTER_TOP_K` (wins over file).
+    #[serde(default = "default_memory_prefilter_top_k")]
+    pub memory_prefilter_top_k: usize,
+    /// Slot-B prefilter min corpus: the stage disengages (exhaustive flows)
+    /// at or below this many memories (default 96: at or below one Jev batch
+    /// of headroom the prefilter is pure overhead). Must be positive at use.
+    /// Env override: `JCODE_MEMORY_PREFILTER_MIN_CORPUS` (wins over file).
+    #[serde(default = "default_memory_prefilter_min_corpus")]
+    pub memory_prefilter_min_corpus: usize,
+    /// Slot-B prefilter wall-clock budget in ms (default 500): when the local
+    /// stage exceeds it, fail open (exhaustive set flows to Jev). Must be
+    /// positive at use.
+    /// Env override: `JCODE_MEMORY_PREFILTER_BUDGET_MS` (wins over file).
+    #[serde(default = "default_memory_prefilter_budget_ms")]
+    pub memory_prefilter_budget_ms: u64,
+    /// Slot-B shadow-audit sampling rate (default 0.01 = 1%): fraction of
+    /// queries running the drop-tail audit. Clamped to [0.0, 1.0] at use.
+    /// Env override: `JCODE_MEMORY_PREFILTER_SHADOW_RATE` (wins over file).
+    #[serde(default = "default_memory_prefilter_shadow_rate")]
+    pub memory_prefilter_shadow_rate: f32,
     /// Legacy benchmark/debug embedding backend. Jev recall never uses it.
     #[serde(default = "default_memory_embedding_backend")]
     pub memory_embedding_backend: String,
@@ -667,6 +732,33 @@ fn default_memory_rerank_votes() -> usize {
 fn default_memory_rerank_min_agree() -> usize {
     2
 }
+fn default_memory_rrf_k() -> f32 {
+    60.0
+}
+fn default_memory_rrf_dense_weight() -> f32 {
+    3.0
+}
+fn default_memory_recency_weight() -> f32 {
+    0.05
+}
+fn default_memory_recency_tau_days() -> f32 {
+    90.0
+}
+fn default_memory_prefilter_mode() -> String {
+    "off".to_string()
+}
+fn default_memory_prefilter_top_k() -> usize {
+    96
+}
+fn default_memory_prefilter_min_corpus() -> usize {
+    96
+}
+fn default_memory_prefilter_budget_ms() -> u64 {
+    500
+}
+fn default_memory_prefilter_shadow_rate() -> f32 {
+    0.01
+}
 
 impl Default for AgentsConfig {
     fn default() -> Self {
@@ -685,6 +777,15 @@ impl Default for AgentsConfig {
             memory_rerank_cadence: default_memory_rerank_cadence(),
             memory_rerank_votes: default_memory_rerank_votes(),
             memory_rerank_min_agree: default_memory_rerank_min_agree(),
+            memory_rrf_k: default_memory_rrf_k(),
+            memory_rrf_dense_weight: default_memory_rrf_dense_weight(),
+            memory_recency_weight: default_memory_recency_weight(),
+            memory_recency_tau_days: default_memory_recency_tau_days(),
+            memory_prefilter_mode: default_memory_prefilter_mode(),
+            memory_prefilter_top_k: default_memory_prefilter_top_k(),
+            memory_prefilter_min_corpus: default_memory_prefilter_min_corpus(),
+            memory_prefilter_budget_ms: default_memory_prefilter_budget_ms(),
+            memory_prefilter_shadow_rate: default_memory_prefilter_shadow_rate(),
             memory_embedding_backend: default_memory_embedding_backend(),
             memory_embedding_model: None,
             memory_embedding_base_url: None,

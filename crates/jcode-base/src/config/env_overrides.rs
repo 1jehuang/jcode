@@ -425,6 +425,80 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_RRF_K") {
+            // Finite only: NaN/inf/garbage leaves the file value in place.
+            if let Ok(parsed) = v.trim().parse::<f32>() {
+                if parsed.is_finite() {
+                    self.agents.memory_rrf_k = parsed;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_RRF_DENSE_W") {
+            // Finite and positive only: NaN/inf/non-positive/garbage
+            // leaves the file value in place.
+            if let Ok(parsed) = v.trim().parse::<f32>() {
+                if parsed.is_finite() && parsed > 0.0 {
+                    self.agents.memory_rrf_dense_weight = parsed;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_RECENCY_W") {
+            // Finite and non-negative only; garbage leaves file value.
+            // 0.0 = off (explicit opt-out; shipped default is 0.05).
+            if let Ok(parsed) = v.trim().parse::<f32>() {
+                if parsed.is_finite() && parsed >= 0.0 {
+                    self.agents.memory_recency_weight = parsed;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_RECENCY_TAU_DAYS") {
+            // Finite and non-negative only; 0.0 = per-category half-lives.
+            if let Ok(parsed) = v.trim().parse::<f32>() {
+                if parsed.is_finite() && parsed >= 0.0 {
+                    self.agents.memory_recency_tau_days = parsed;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_PREFILTER_MODE") {
+            // "hybrid-topk" enables the slot-B stage; anything else
+            // (including garbage) leaves the file value in place.
+            let trimmed = v.trim().to_ascii_lowercase();
+            if trimmed == "hybrid-topk" || trimmed == "off" {
+                self.agents.memory_prefilter_mode = trimmed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_PREFILTER_TOP_K") {
+            // Clamp [24, 480]; garbage leaves the file value in place.
+            if let Ok(parsed) = v.trim().parse::<usize>() {
+                if (24..=480).contains(&parsed) {
+                    self.agents.memory_prefilter_top_k = parsed;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_PREFILTER_MIN_CORPUS") {
+            // Positive only; garbage leaves the file value in place.
+            if let Ok(parsed) = v.trim().parse::<usize>() {
+                if parsed > 0 {
+                    self.agents.memory_prefilter_min_corpus = parsed;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_PREFILTER_BUDGET_MS") {
+            // Positive only; garbage leaves the file value in place.
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                if parsed > 0 {
+                    self.agents.memory_prefilter_budget_ms = parsed;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_PREFILTER_SHADOW_RATE") {
+            // Finite and within [0.0, 1.0]; garbage leaves the file value.
+            if let Ok(parsed) = v.trim().parse::<f32>() {
+                if parsed.is_finite() && (0.0..=1.0).contains(&parsed) {
+                    self.agents.memory_prefilter_shadow_rate = parsed;
+                }
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
             self.agents.memory_model = if trimmed.is_empty() {
