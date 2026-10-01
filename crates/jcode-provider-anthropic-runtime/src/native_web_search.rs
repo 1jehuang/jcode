@@ -12,8 +12,7 @@ use jcode_base::config::WebSearchConfig;
 use jcode_message_types::ToolDefinition;
 use serde_json::{Value, json};
 
-/// Name of jcode's local scraping search tool, replaced by the server tool.
-const LOCAL_WEBSEARCH_TOOL: &str = "websearch";
+use jcode_message_types::provider_native::is_builtin_local_websearch;
 /// First tool version; later versions default `allowed_callers` to code
 /// execution and must be pinned to direct calls.
 const BASIC_TOOL_VERSION: &str = "web_search_20250305";
@@ -76,7 +75,7 @@ pub(crate) fn server_tools_for_request(first_party: bool, tools: &[ToolDefinitio
 
 /// True when the session's filtered tool list includes the local search tool.
 pub(crate) fn session_offers_websearch(tools: &[ToolDefinition]) -> bool {
-    tools.iter().any(|tool| tool.name == LOCAL_WEBSEARCH_TOOL)
+    tools.iter().any(is_builtin_local_websearch)
 }
 
 pub(crate) fn server_tools_with_config(config: &WebSearchConfig, first_party: bool) -> Vec<Value> {
@@ -100,7 +99,7 @@ pub(crate) fn without_local_websearch<'a>(
     std::borrow::Cow::Owned(
         tools
             .iter()
-            .filter(|tool| tool.name != LOCAL_WEBSEARCH_TOOL)
+            .filter(|tool| !is_builtin_local_websearch(tool))
             .cloned()
             .collect(),
     )
@@ -229,25 +228,46 @@ mod tests {
 
     #[test]
     fn server_tool_requires_session_to_offer_websearch() {
-        let tool = |name: &str| ToolDefinition {
-            name: name.to_string(),
-            description: String::new(),
-            input_schema: json!({"type": "object", "properties": {}}),
-            defer_loading: false,
-        };
+        let tool = builtin;
         assert!(!session_offers_websearch(&[tool("bash")]));
         assert!(server_tools_for_request(true, &[tool("bash")]).is_empty());
         assert!(session_offers_websearch(&[tool("bash"), tool("websearch")]));
     }
 
+    fn builtin(name: &str) -> ToolDefinition {
+        let description = if name == "websearch" {
+            jcode_message_types::provider_native::LOCAL_WEBSEARCH_DESCRIPTION
+        } else {
+            ""
+        };
+        ToolDefinition::new(
+            name,
+            description,
+            json!({"type": "object", "properties": {}}),
+        )
+    }
+
+    #[test]
+    fn sdk_custom_websearch_is_never_replaced_by_server_tool() {
+        // An SDK app that registers its own `websearch` callback keeps it: the
+        // server tool only replaces jcode's built-in local search.
+        let tools = vec![
+            builtin("bash"),
+            ToolDefinition::new(
+                "websearch",
+                "Search our internal index.",
+                json!({"type": "object", "properties": {}}),
+            ),
+        ];
+        assert!(!session_offers_websearch(&tools));
+        assert!(server_tools_for_request(true, &tools).is_empty());
+        let kept = without_local_websearch(&tools, &[json!({"type": "web_search_20250305"})]);
+        assert_eq!(kept.len(), 2);
+    }
+
     #[test]
     fn local_websearch_is_dropped_only_when_server_tool_attached() {
-        let tool = |name: &str| ToolDefinition {
-            name: name.to_string(),
-            description: String::new(),
-            input_schema: json!({"type": "object", "properties": {}}),
-            defer_loading: false,
-        };
+        let tool = builtin;
         let tools = vec![tool("bash"), tool("websearch")];
         assert_eq!(without_local_websearch(&tools, &[]).len(), 2);
         let kept = without_local_websearch(&tools, &[json!({"type": "web_search_20250305"})]);

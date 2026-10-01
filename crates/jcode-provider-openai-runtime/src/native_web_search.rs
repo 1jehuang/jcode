@@ -11,8 +11,7 @@ use jcode_base::config::WebSearchConfig;
 use jcode_message_types::ToolDefinition;
 use serde_json::{Value, json};
 
-/// Name of jcode's local scraping search tool, replaced by the hosted tool.
-const LOCAL_WEBSEARCH_TOOL: &str = "websearch";
+use jcode_message_types::provider_native::is_builtin_local_websearch;
 /// OpenAI's own Responses API base. Custom gateways may not implement hosted
 /// tools, so they keep the local tool.
 const FIRST_PARTY_API_BASE: &str = "https://api.openai.com/v1";
@@ -53,7 +52,7 @@ pub(crate) fn first_party_backend(is_chatgpt_mode: bool) -> bool {
 /// disabled tools, tool profile, SDK config) excludes `websearch` never gets
 /// provider-side search either.
 pub(crate) fn session_offers_websearch(tools: &[ToolDefinition]) -> bool {
-    tools.iter().any(|tool| tool.name == LOCAL_WEBSEARCH_TOOL)
+    tools.iter().any(is_builtin_local_websearch)
 }
 
 /// Hosted tools to attach: native search preferred, the model and backend
@@ -101,7 +100,7 @@ pub(crate) fn without_local_websearch<'a>(
     std::borrow::Cow::Owned(
         tools
             .iter()
-            .filter(|tool| tool.name != LOCAL_WEBSEARCH_TOOL)
+            .filter(|tool| !is_builtin_local_websearch(tool))
             .cloned()
             .collect(),
     )
@@ -111,6 +110,7 @@ pub(crate) fn without_local_websearch<'a>(
 mod tests {
     use super::*;
     use jcode_base::config::WebSearchEngine;
+    use jcode_message_types::provider_native::LOCAL_WEBSEARCH_DESCRIPTION;
 
     fn native_config() -> WebSearchConfig {
         WebSearchConfig {
@@ -123,7 +123,7 @@ mod tests {
     fn hosted_tool_only_when_native_and_not_codex() {
         let tools = vec![ToolDefinition::new(
             "websearch",
-            "",
+            LOCAL_WEBSEARCH_DESCRIPTION,
             json!({"type": "object"}),
         )];
         let off = WebSearchConfig {
@@ -151,10 +151,24 @@ mod tests {
         assert!(hosted_tools_with_config(&native_config(), "gpt-5.4", true, &bash_only).is_empty());
         let tools = vec![ToolDefinition::new(
             "websearch",
-            "",
+            LOCAL_WEBSEARCH_DESCRIPTION,
             json!({"type": "object"}),
         )];
         assert!(hosted_tools_with_config(&native_config(), "gpt-5.4", false, &tools).is_empty());
+    }
+
+    #[test]
+    fn sdk_custom_websearch_is_never_replaced_by_hosted_tool() {
+        let tools = vec![ToolDefinition::new(
+            "websearch",
+            "Search our internal index.",
+            json!({"type": "object"}),
+        )];
+        assert!(hosted_tools_with_config(&native_config(), "gpt-5.4", true, &tools).is_empty());
+        assert_eq!(
+            without_local_websearch(&tools, &[json!({"type": "web_search"})]).len(),
+            1
+        );
     }
 
     #[test]
@@ -189,7 +203,11 @@ mod tests {
     fn local_websearch_dropped_only_with_hosted_tool() {
         let tools = vec![
             ToolDefinition::new("bash", "", json!({"type": "object"})),
-            ToolDefinition::new("websearch", "", json!({"type": "object"})),
+            ToolDefinition::new(
+                "websearch",
+                LOCAL_WEBSEARCH_DESCRIPTION,
+                json!({"type": "object"}),
+            ),
         ];
         assert_eq!(without_local_websearch(&tools, &[]).len(), 2);
         let kept = without_local_websearch(&tools, &[json!({"type": "web_search"})]);

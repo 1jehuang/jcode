@@ -19,6 +19,21 @@ pub const PROVIDER_NATIVE_OPENAI: &str = "openai";
 /// Display name for provider-native web search calls.
 pub const PROVIDER_NATIVE_WEB_SEARCH_TOOL: &str = "web_search";
 
+/// Name of jcode's built-in local search tool, which provider-native search
+/// replaces.
+pub const LOCAL_WEBSEARCH_TOOL: &str = "websearch";
+/// Description of jcode's built-in local search tool. Provider-native search
+/// only replaces the built-in: an SDK custom tool that reuses the `websearch`
+/// name (to route search through the app's own callback) keeps its definition
+/// and is never swapped for hosted search.
+pub const LOCAL_WEBSEARCH_DESCRIPTION: &str = "Search the web.";
+
+/// True when `tool` is jcode's built-in local `websearch` tool, as opposed to
+/// an SDK custom tool with the same name.
+pub fn is_builtin_local_websearch(tool: &crate::ToolDefinition) -> bool {
+    tool.name == LOCAL_WEBSEARCH_TOOL && tool.description == LOCAL_WEBSEARCH_DESCRIPTION
+}
+
 /// Anthropic content block types that belong to server tools and must be
 /// stored and replayed verbatim.
 pub const ANTHROPIC_SERVER_TOOL_BLOCK_TYPES: &[&str] =

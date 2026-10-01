@@ -50,7 +50,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search the web."
+        jcode_message_types::provider_native::LOCAL_WEBSEARCH_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {
