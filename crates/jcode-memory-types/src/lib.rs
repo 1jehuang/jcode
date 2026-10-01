@@ -587,6 +587,7 @@ impl MemoryStore {
                 .filter(|entry| entry.active)
                 .map(|entry| (entry, memory_score(entry) as f32)),
             limit,
+            |entry| entry.id.as_str(),
         )
         .into_iter()
         .map(|(entry, _)| entry)
@@ -767,6 +768,66 @@ pub fn normalize_search_text(text: &str) -> String {
     normalized.trim_end().to_string()
 }
 
+/// Light plural/possessive folding for the BM25 leg (c2b gate, shipped
+/// only if the gate passes). Symmetric application (query AND docs) turns
+/// plural/singular mismatches into exact matches. Deliberately NOT Porter:
+/// the dense leg owns derivational recall; aggressive stemming on the BM25
+/// leg creates false positives that poison RRF fusion.
+///
+/// Rules (C3 §G1, fixture-validated): strip possessive `'s`; tokens shorter
+/// than 5 chars pass through untouched (`glass`, `ties`, `does` classes);
+/// `ies->y` (stem len >= 4: `batteries->battery`); strip-2 ONLY for
+/// unambiguous `-ches/-shes/-xes/-zes` (`watches->watch`, `boxes->box`);
+/// everything else singularizes via trailing `s->` strip
+/// (`snapshots->snapshot`, `commands->command`, `licenses->license`),
+/// except `-ss` (`access`), `-us` (`analytics`), `-is`/`-ics`.
+/// Empty-after-fold tokens are dropped by the caller (no zero-length IDF).
+///
+/// Used ONLY by `bm25_rank`. Never by `normalize_search_text` callers
+/// (`search_scoped`, `get_relevant_keywords`, skill paths, stored
+/// `search_text`) - their behavior is unchanged.
+pub fn bm25_token_stream(text: &str) -> Vec<String> {
+    normalize_search_text(text)
+        .split_whitespace()
+        .filter_map(|tok| fold_plural_token(tok))
+        .collect()
+}
+
+/// Fold one normalized token. Returns `None` for empty-after-fold tokens.
+fn fold_plural_token(tok: &str) -> Option<String> {
+    let mut s = tok.to_string();
+    // Possessive strip (inert on ASCII fixtures, real on live input).
+    if let Some(stripped) = s.strip_suffix("'s") {
+        s = stripped.to_string();
+    }
+    if s.len() < 5 {
+        return if s.is_empty() { None } else { Some(s) };
+    }
+    // ies -> y (stem guard: batteries->battery, ties untouched by len guard).
+    if s.ends_with("ies") && s.len() - 3 >= 4 {
+        s.truncate(s.len() - 3);
+        s.push('y');
+    } else if s.ends_with("ches")
+        || s.ends_with("shes")
+        || s.ends_with("xes")
+        || s.ends_with("zes")
+    {
+        // Unambiguous -es plurals: watches->watch, boxes->box.
+        // NOTE: -ses/-ces/-ges take the strip-1 path below (licenses->license,
+        // cases->case); strip-2 there would give licens/cas (buses->buse is
+        // the accepted miss - unattested in fixtures).
+        s.truncate(s.len() - 2);
+    } else if s.ends_with('s')
+        && !s.ends_with("ss")
+        && !s.ends_with("us")
+        && !s.ends_with("is")
+        && !s.ends_with("ics")
+    {
+        s.pop();
+    }
+    if s.is_empty() { None } else { Some(s) }
+}
+
 pub fn is_skill_memory(entry: &MemoryEntry) -> bool {
     entry.id.starts_with("skill:")
         || entry.source.as_deref() == Some("skill_registry")
@@ -838,15 +899,22 @@ pub mod ranking {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
+    /// Heap item for top-k selection. Total order (ascending = worst first):
+    /// score ascending, then id DESCENDING (larger id sorts worse), then
+    /// ordinal descending (later arrival sorts worse). The id arm fires only
+    /// on bitwise score equality, so scores and thresholds are untouched.
     struct TopKItem<T> {
         score: f32,
+        id: String,
         ordinal: usize,
         value: T,
     }
 
     impl<T> PartialEq for TopKItem<T> {
         fn eq(&self, other: &Self) -> bool {
-            self.score.to_bits() == other.score.to_bits() && self.ordinal == other.ordinal
+            self.score.to_bits() == other.score.to_bits()
+                && self.id == other.id
+                && self.ordinal == other.ordinal
         }
     }
 
@@ -860,15 +928,24 @@ pub mod ranking {
 
     impl<T> Ord for TopKItem<T> {
         fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            // Worst-first: lower score is worse; on ties the LARGER id is
+            // worse (so the final descending sort yields id ascending); the
+            // ordinal arm keeps Vec-ordered inputs stable (earlier wins).
             self.score
                 .total_cmp(&other.score)
-                .then_with(|| self.ordinal.cmp(&other.ordinal))
+                .then_with(|| other.id.cmp(&self.id))
+                .then_with(|| other.ordinal.cmp(&self.ordinal))
         }
     }
 
-    pub fn top_k_by_score<T, I>(items: I, limit: usize) -> Vec<(T, f32)>
+    /// Deterministic top-k by score: descending score, ascending id on
+    /// bitwise score ties, ascending arrival ordinal as the final key.
+    /// `id_of` extracts the tiebreak id from each value. Scores are never
+    /// modified: the id/ordinal arms fire only when `total_cmp` is Equal.
+    pub fn top_k_by_score<T, I, F>(items: I, limit: usize, id_of: F) -> Vec<(T, f32)>
     where
         I: IntoIterator<Item = (T, f32)>,
+        F: Fn(&T) -> &str,
     {
         if limit == 0 {
             return Vec::new();
@@ -879,6 +956,7 @@ pub mod ranking {
         for (ordinal, (value, score)) in items.into_iter().enumerate() {
             let candidate = Reverse(TopKItem {
                 score,
+                id: id_of(&value).to_string(),
                 ordinal,
                 value,
             });
@@ -888,9 +966,14 @@ pub mod ranking {
                 continue;
             }
 
+            // Full-order retention: replace iff the candidate outranks the
+            // current worst (score, then smaller-id, then earlier-ordinal).
+            // The old `score > smallest.score` gate never replaced on ties,
+            // so which tied rows survived truncation depended on HashMap
+            // arrival order.
             let replace = heap
                 .peek()
-                .map(|smallest| score > smallest.0.score)
+                .map(|smallest| candidate.0 > smallest.0)
                 .unwrap_or(false);
             if replace {
                 heap.pop();
@@ -900,12 +983,16 @@ pub mod ranking {
 
         let mut results: Vec<_> = heap
             .into_iter()
-            .map(|Reverse(item)| (item.value, item.score, item.ordinal))
+            .map(|Reverse(item)| (item.value, item.score, item.id, item.ordinal))
             .collect();
-        results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+        results.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
         results
             .into_iter()
-            .map(|(value, score, _)| (value, score))
+            .map(|(value, score, _, _)| (value, score))
             .collect()
     }
 
@@ -988,8 +1075,32 @@ pub mod ranking {
 
         #[test]
         fn top_k_by_score_keeps_highest_scores_in_order() {
-            let ranked = top_k_by_score([("a", 1.0), ("b", 3.0), ("c", 2.0)], 2);
+            let ranked = top_k_by_score(
+                [("a", 1.0), ("b", 3.0), ("c", 2.0)],
+                2,
+                |id: &&str| *id,
+            );
             assert_eq!(ranked, vec![("b", 3.0), ("c", 2.0)]);
+        }
+
+        #[test]
+        fn top_k_by_score_breaks_bitwise_ties_by_id_ascending() {
+            // Equal scores sort by id ascending; the arm fires only on
+            // total_cmp == Equal and never touches the scores.
+            let ranked = top_k_by_score(
+                [("b", 1.0), ("a", 1.0), ("c", 1.0)],
+                3,
+                |id: &&str| *id,
+            );
+            assert_eq!(ranked, vec![("a", 1.0), ("b", 1.0), ("c", 1.0)]);
+            // Truncation keeps the smallest ids among ties regardless of
+            // arrival order.
+            let ranked = top_k_by_score(
+                [("c", 1.0), ("b", 1.0), ("a", 1.0)],
+                2,
+                |id: &&str| *id,
+            );
+            assert_eq!(ranked, vec![("a", 1.0), ("b", 1.0)]);
         }
 
         #[test]
@@ -1000,7 +1111,7 @@ pub mod ranking {
 
         #[test]
         fn top_k_zero_limit_is_empty() {
-            assert!(top_k_by_score([("a", 1.0)], 0).is_empty());
+            assert!(top_k_by_score([("a", 1.0)], 0, |id: &&str| *id).is_empty());
             assert!(top_k_by_ord([("a", 1)], 0).is_empty());
         }
     }
