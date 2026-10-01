@@ -2995,3 +2995,81 @@ fn skill_installed_mid_session_keeps_system_prompt_stable_and_is_announced_once(
         .count();
     assert_eq!(count, 1);
 }
+
+/// SWE-Pruner Stage 1 pilot gate (phase3/13-swe-pruner/PLAN.md section 6).
+/// Scores the FROZEN corpus holdout split through the real scorer and
+/// asserts: (a) mean tokens_after/before <= 0.85, (b) error_lines_kept
+/// 100%. (The WIP stash's cue_ref_intact check tested recipe markers the
+/// scorer never emits -- markers are built by apply_tool_result_clearing
+/// at wire time, not by prune_tool_result. Cue coverage is proven by the
+/// pilot's per-item records + the cue-format unit test instead.)
+/// Corpus dir overrides via `JCODE_PRUNER_CORPUS_DIR` (fails open with a
+/// skip message on machines without the corpus, never red).
+/// Recovered 2026-10-01 from the pilot session's WIP stash.
+#[test]
+fn pruner_stage1_pilot_gate_on_frozen_corpus() {
+    let dir = std::env::var("JCODE_PRUNER_CORPUS_DIR").unwrap_or_else(|_| {
+        "/home/sk/.jcode/scratch/pruner-pilot/items".to_string()
+    });
+    let manifest_path = format!("{dir}/manifest.json");
+    let manifest_text = match std::fs::read_to_string(&manifest_path) {
+        Ok(text) => text,
+        Err(_) => {
+            eprintln!("SKIP pruner pilot gate: no corpus at {manifest_path}");
+            return;
+        }
+    };
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_text).expect("corpus manifest parses");
+    let items = manifest.as_array().expect("manifest is an array");
+    assert!(items.len() >= 30, "corpus holds >=30 items");
+    let mut ratios: Vec<f64> = Vec::new();
+    let mut err_ok = 0usize;
+    let mut n = 0usize;
+    for (idx, item) in items.iter().enumerate() {
+        if item.get("split").and_then(|v| v.as_str()) == Some("tune") {
+            continue;
+        }
+        let file = item["file"].as_str().expect("file");
+        let content =
+            std::fs::read_to_string(format!("{dir}/{file}")).expect("item text");
+        let tool = item["tool"].as_str().unwrap_or("unknown");
+        let input: serde_json::Value = item
+            .get("input_json")
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let file_path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        let query = input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let command = input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let family = match crate::agent::pruner::classify_tool(tool) {
+            Some(f) => f,
+            None => continue,
+        };
+        let outcome = crate::agent::pruner::prune_tool_result(
+            family, tool, file_path, query, command, "", &content,
+        );
+        let out = &outcome.text;
+        let err_kept = content
+            .lines()
+            .filter(|l| crate::agent::pruner::is_error_line(l))
+            .all(|l| out.contains(l));
+        assert!(err_kept, "item {idx} error lines kept");
+        err_ok += err_kept as usize;
+        let tb = crate::agent::pruner::tokens_for_text(&content);
+        let ta = crate::agent::pruner::tokens_for_text(out);
+        ratios.push(ta as f64 / tb.max(1) as f64);
+        n += 1;
+    }
+    assert!(n >= 15, "scored >=15 holdout classifiable items, got {n}");
+    let mean = ratios.iter().sum::<f64>() / n as f64;
+    eprintln!("pruner gate: n={n} mean_ratio={mean:.3} err={err_ok}/{n}");
+    assert_eq!(err_ok, n, "error_lines_kept 100%");
+    assert!(mean <= 0.85, "mean ratio {mean:.3} <= 0.85");
+}

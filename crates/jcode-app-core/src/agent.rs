@@ -9,6 +9,7 @@ mod messages;
 mod model_usage_tests;
 mod prompting;
 mod provider;
+pub(crate) mod pruner;
 mod response_recovery;
 mod status;
 mod streaming;

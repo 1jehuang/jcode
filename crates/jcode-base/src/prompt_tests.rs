@@ -897,3 +897,108 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
         }
     });
 }
+
+#[test]
+fn progress_md_loads_after_instructions_with_state_label() {
+    // U4 historian-lite read-side: project PROGRESS.md joins the bootstrap
+    // snapshot AFTER instruction files, labeled as state. Model owns the
+    // write side; core only reads.
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(project_dir.path().join("AGENTS.md"), "project instructions").unwrap();
+    std::fs::write(project_dir.path().join("PROGRESS.md"), "## Next: ship U4").unwrap();
+
+    let (content, info) = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let content = content.expect("snapshot with progress");
+    assert!(info.has_project_agents_md);
+    assert!(info.has_project_progress_md);
+    assert!(!info.has_global_agents_md);
+    assert_eq!(info.project_progress_md_chars, "## Next: ship U4".len());
+    assert!(content.contains("# Project Instructions (AGENTS.md)"));
+    assert!(content.contains("# Project Progress (PROGRESS.md)"));
+    assert!(content.contains("## Next: ship U4"));
+    // State, not instructions: ordered after.
+    assert!(
+        content.find("AGENTS.md)").unwrap() < content.find("PROGRESS.md)").unwrap(),
+        "progress must load after instruction files"
+    );
+}
+
+#[test]
+fn progress_md_lives_in_dynamic_part_leaving_static_byte_identical() {
+    // V1: PROGRESS.md is model-written state. Adding the file must not move
+    // a single byte of the cached static prefix; the state rides uncached in
+    // dynamic_parts, ordered before the memory block.
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(project_dir.path().join("AGENTS.md"), "project instructions").unwrap();
+    let without_progress = load_agents_md_files_from_dirs(project_dir.path(), None);
+    std::fs::write(project_dir.path().join("PROGRESS.md"), "## Next: ship U4").unwrap();
+    let with_progress = load_agents_md_files_from_dirs(project_dir.path(), None);
+
+    let (before, before_info) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        without_progress,
+    );
+    let (after, after_info) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        with_progress,
+    );
+
+    assert_eq!(before.static_part, after.static_part);
+    assert!(after.static_part.contains("project instructions"));
+    assert!(!after.static_part.contains("PROGRESS.md"));
+    assert!(!before_info.has_project_progress_md);
+    assert!(after_info.has_project_progress_md);
+
+    assert!(after.dynamic_part.contains("# Project Progress (PROGRESS.md)"));
+    assert!(after.dynamic_part.contains("## Next: ship U4"));
+
+    // Progress state precedes the memory block in the uncached region.
+    let (with_memory, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        Some("# Memory\n\nrecalled fact"),
+        Some(project_dir.path()),
+        load_agents_md_files_from_dirs(project_dir.path(), None),
+    );
+    assert!(
+        with_memory.dynamic_part.find("PROGRESS.md)").unwrap()
+            < with_memory.dynamic_part.find("# Memory").unwrap(),
+        "dynamic was: {}",
+        with_memory.dynamic_part
+    );
+}
+
+#[test]
+fn progress_md_absent_is_byte_identical() {
+    // Off by absence: projects without the file see zero behavior change.
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(project_dir.path().join("AGENTS.md"), "project instructions").unwrap();
+
+    let (content, info) = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let content = content.expect("snapshot without progress");
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_project_progress_md);
+    assert_eq!(info.project_progress_md_chars, 0);
+    assert!(!content.contains("PROGRESS.md"));
+    assert!(content.contains("project instructions"));
+}
+
+#[test]
+fn progress_md_counts_in_prefix_accounting() {
+    // Token-pressure math must see the progress bytes.
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(project_dir.path().join("PROGRESS.md"), "state-bytes").unwrap();
+
+    let (_, info) = load_agents_md_files_from_dirs(project_dir.path(), None);
+    assert!(info.has_project_progress_md);
+    assert!(info.prompt_prefix_chars() >= "state-bytes".len());
+}

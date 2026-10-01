@@ -293,6 +293,11 @@ pub struct ContextInfo {
     pub has_project_agents_md: bool,
     /// Project AGENTS.md size (chars)
     pub project_agents_md_chars: usize,
+    /// Whether project PROGRESS.md was loaded (cross-session state, not
+    /// instructions — ordered after instruction files in the snapshot)
+    pub has_project_progress_md: bool,
+    /// Project PROGRESS.md size (chars)
+    pub project_progress_md_chars: usize,
     /// Whether global ~/AGENTS.md was loaded
     pub has_global_agents_md: bool,
     /// Global AGENTS.md size (chars)
@@ -343,6 +348,7 @@ impl ContextInfo {
         self.system_prompt_chars
             + self.session_context_chars
             + self.project_agents_md_chars
+            + self.project_progress_md_chars
             + self.global_agents_md_chars
             + self.skills_chars
             + self.selfdev_chars
@@ -431,7 +437,12 @@ pub fn build_system_prompt_with_context_and_memory(
     )
 }
 
-/// Build the full system prompt with working directory support for loading context files
+/// Build the full system prompt with working directory support for loading context files.
+///
+/// DEPRECATED for provider-bound use: this joins memory mid-prompt with no
+/// static/dynamic split, so any memory change invalidates the cached skills
+/// suffix (and vice versa). Prefer `build_system_prompt_split*`, which keeps
+/// memory in the uncached dynamic part. Kept for tests-only callers.
 pub fn build_system_prompt_full(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
@@ -584,6 +595,29 @@ pub fn build_system_prompt_split_with_agents_md(
     )
 }
 
+/// Header the agents-md loader stamps on the PROGRESS.md state block.
+/// The split builder uses it to separate cacheable instructions (static)
+/// from model-written cross-session state (dynamic) without changing the
+/// loader snapshot shape.
+const PROGRESS_MD_HEADER: &str = "# Project Progress (PROGRESS.md)";
+
+/// Split a joined agents-md snapshot into cacheable instructions and volatile
+/// progress state. Returns `(static_md, Option<progress_md>)`. When the loader
+/// reports no PROGRESS.md, the whole snapshot is static by construction.
+fn split_agents_md_snapshot(content: &str, has_progress: bool) -> (&str, Option<&str>) {
+    if !has_progress {
+        return (content, None);
+    }
+    match content.find(PROGRESS_MD_HEADER) {
+        Some(idx) => {
+            let static_md = content[..idx].trim_end();
+            let progress_md = content[idx..].trim_end();
+            (static_md, Some(progress_md))
+        }
+        None => (content, None),
+    }
+}
+
 fn build_system_prompt_split_with_capabilities_and_agents_md(
     skill_prompt: Option<&str>,
     available_skills: &[SkillInfo],
@@ -612,15 +646,27 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
         static_parts.push(selfdev_prompt);
     }
 
-    // Add AGENTS.md instructions (static per project)
+    // Add AGENTS.md instructions (static per project). PROGRESS.md is
+    // model-written cross-session state, not instructions: it rides in
+    // dynamic_parts (uncached) so milestone edits never invalidate the
+    // cached static prefix. Split from the same loader snapshot tuple, so
+    // the snapshot mechanism is unchanged.
     let (md_content, md_info) = agents_md;
+    let mut progress_block: Option<String> = None;
     if let Some(content) = md_content {
-        static_parts.push(content);
+        let (static_md, progress_md) =
+            split_agents_md_snapshot(&content, md_info.has_project_progress_md);
+        if !static_md.is_empty() {
+            static_parts.push(static_md.to_string());
+        }
+        progress_block = progress_md.map(str::to_string);
     }
     info.has_project_agents_md = md_info.has_project_agents_md;
     info.project_agents_md_chars = md_info.project_agents_md_chars;
     info.has_global_agents_md = md_info.has_global_agents_md;
     info.global_agents_md_chars = md_info.global_agents_md_chars;
+    info.has_project_progress_md = md_info.has_project_progress_md;
+    info.project_progress_md_chars = md_info.project_progress_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
     let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
@@ -644,6 +690,12 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     }
 
     // === TURN CONTEXT (not cached) ===
+
+    // Project progress state (changes at milestones + session end, written
+    // by the model). Uncached by design: same volatility class as memory.
+    if let Some(progress) = progress_block {
+        dynamic_parts.push(progress);
+    }
 
     // Memory prompt (changes per conversation)
     if let Some(memory) = memory_prompt {
@@ -972,6 +1024,19 @@ fn load_agents_md_files_from_dirs(
     {
         info.has_project_agents_md = true;
         info.project_agents_md_chars = size;
+        contents.push(content);
+    }
+
+    // Cross-session progress state (U4 historian-lite). Project-dir only by
+    // design — progress belongs to one project, never global. State, not
+    // instructions: loads AFTER the instruction files. Off by absence: no
+    // file means no bytes and no behavior change. The model owns the write
+    // side (updates via edit at milestones + session end); core only reads.
+    let project_progress_md = project_dir.join("PROGRESS.md");
+    if let Some((content, size)) = load_file(&project_progress_md, "Project Progress (PROGRESS.md)")
+    {
+        info.has_project_progress_md = true;
+        info.project_progress_md_chars = size;
         contents.push(content);
     }
 
