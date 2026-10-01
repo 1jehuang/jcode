@@ -7,6 +7,7 @@ mod interrupts;
 mod messages;
 #[cfg(test)]
 mod model_usage_tests;
+mod pre_request;
 mod prompting;
 mod provider;
 mod response_recovery;
