@@ -15,6 +15,7 @@
   "fixes": [
     "Copilot uses the authenticated Business or Enterprise API host and live model endpoint metadata, fixing Responses-only model requests such as GPT-6 Luna",
     "Copilot catalog refresh preserves explicit model selections and selects defaults only from available picker models",
+    "Copilot catalog stalls no longer queue concurrent turns, API host changes refresh model routes, and picker updates publish atomically",
     "OpenAI login validation no longer hangs when the account hits a usage limit",
     "Retrying a turn no longer leaves web search rows from the aborted attempt",
     "Interrupted Anthropic turns that used native search no longer risk a request error on the next message"

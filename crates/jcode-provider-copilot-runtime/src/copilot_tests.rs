@@ -1,16 +1,20 @@
 use super::*;
 
+#[path = "catalog_tests.rs"]
+mod catalog_tests;
+
 fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
+    let mut catalog = ModelCatalog::default();
+    catalog.models = fetched;
+    catalog.source = CatalogSource::Live;
     CopilotApiProvider {
         client: jcode_base::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
         model_explicit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         github_token: "test-token".to_string(),
         bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
-        fetched_models: Arc::new(RwLock::new(fetched)),
-        model_routes: Arc::new(RwLock::new(HashMap::new())),
+        catalog: Arc::new(RwLock::new(catalog)),
         catalog_refresh: Arc::new(tokio::sync::Mutex::new(())),
-        catalog_source: Arc::new(RwLock::new(CatalogSource::Live)),
         session_id: "test-session".to_string(),
         machine_id: "test-machine".to_string(),
         init_ready: Arc::new(tokio::sync::Notify::new()),

@@ -30,9 +30,14 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 mod catalog;
+mod request;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use catalog::ModelCatalog;
+use request::CopilotRequest;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum CatalogSource {
+    #[default]
     None,
     Cached,
     Live,
@@ -47,10 +52,8 @@ pub struct CopilotApiProvider {
     model_explicit: Arc<std::sync::atomic::AtomicBool>,
     github_token: String,
     bearer_token: Arc<tokio::sync::RwLock<Option<copilot_auth::CopilotApiToken>>>,
-    fetched_models: Arc<RwLock<Vec<String>>>,
-    model_routes: Arc<RwLock<HashMap<String, bool>>>,
+    catalog: Arc<RwLock<ModelCatalog>>,
     catalog_refresh: Arc<tokio::sync::Mutex<()>>,
-    catalog_source: Arc<RwLock<CatalogSource>>,
     session_id: String,
     machine_id: String,
     init_ready: Arc<tokio::sync::Notify>,
@@ -103,13 +106,17 @@ impl CopilotApiProvider {
         add_copilot_max_token_parameter(body, model, max_tokens);
     }
 
-    fn model_uses_responses_api(&self, model: &str) -> bool {
-        self.model_routes
+    fn model_uses_responses_api(&self, model: &str, api_base: &str) -> bool {
+        let catalog = self
+            .catalog
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(model)
-            .copied()
-            .unwrap_or_else(|| copilot_model_uses_responses_api(model, &[]))
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if catalog.api_base.as_deref() == Some(api_base)
+            && let Some(route) = catalog.routes.get(model)
+        {
+            return *route;
+        }
+        copilot_model_uses_responses_api(model, &[])
     }
 
     fn set_detected_default(&self, default: Option<String>) {
@@ -172,22 +179,22 @@ impl CopilotApiProvider {
     }
 
     fn seed_cached_catalog(&self) {
-        if let Some(catalog) = Self::load_persisted_catalog() {
-            if let Ok(mut models) = self.fetched_models.try_write() {
-                *models = catalog.models;
-            }
-            if let Ok(mut source) = self.catalog_source.try_write() {
-                *source = CatalogSource::Cached;
-            }
+        if let Some(cached) = Self::load_persisted_catalog() {
+            let mut catalog = self
+                .catalog
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            catalog.models = cached.models;
+            catalog.source = CatalogSource::Cached;
         }
     }
 
     fn model_catalog_detail_impl(&self) -> String {
         match self
-            .catalog_source
-            .try_read()
-            .map(|g| *g)
-            .unwrap_or(CatalogSource::None)
+            .catalog
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .source
         {
             CatalogSource::Live => String::new(),
             CatalogSource::Cached => "cached live catalog".to_string(),
@@ -207,10 +214,8 @@ impl CopilotApiProvider {
             model_explicit: Arc::new(std::sync::atomic::AtomicBool::new(model_explicit)),
             github_token,
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
-            fetched_models: Arc::new(RwLock::new(Vec::new())),
-            model_routes: Arc::new(RwLock::new(HashMap::new())),
+            catalog: Arc::new(RwLock::new(ModelCatalog::default())),
             catalog_refresh: Arc::new(tokio::sync::Mutex::new(())),
-            catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
             session_id: Uuid::new_v4().to_string(),
             machine_id: Self::get_or_create_machine_id(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
@@ -247,10 +252,8 @@ impl CopilotApiProvider {
             model_explicit: Arc::new(std::sync::atomic::AtomicBool::new(model_explicit)),
             github_token,
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
-            fetched_models: Arc::new(RwLock::new(Vec::new())),
-            model_routes: Arc::new(RwLock::new(HashMap::new())),
+            catalog: Arc::new(RwLock::new(ModelCatalog::default())),
             catalog_refresh: Arc::new(tokio::sync::Mutex::new(())),
-            catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
             session_id: Uuid::new_v4().to_string(),
             machine_id: Self::get_or_create_machine_id(),
             init_ready: Arc::new(tokio::sync::Notify::new()),
@@ -414,19 +417,17 @@ impl CopilotApiProvider {
     /// Send a streaming request to Copilot API with retry logic
     async fn stream_request(
         &self,
-        body: Value,
-        uses_responses_api: bool,
+        request: CopilotRequest,
+        mut bearer_token: copilot_auth::CopilotApiToken,
         is_user_initiated: bool,
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) {
         use jcode_message_types::ConnectionPhase;
 
         self.wait_for_init().await;
-        let model = self
-            .model
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+        let model = &request.model;
+        let mut uses_responses_api = self.model_uses_responses_api(model, &bearer_token.api_base);
+        let mut body = self.build_request_body(&request, uses_responses_api, is_user_initiated);
         let initiator = if is_user_initiated { "user" } else { "agent" };
 
         const MAX_RETRIES: u32 = 3;
@@ -462,13 +463,21 @@ impl CopilotApiProvider {
                 initiator, model
             ));
 
-            let bearer_token = match self.get_bearer_token().await {
-                Ok(t) => t,
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                    return;
+            if attempt > 0 {
+                bearer_token = match self.get_bearer_token().await {
+                    Ok(token) => token,
+                    Err(error) => {
+                        let _ = tx.send(Err(error)).await;
+                        return;
+                    }
+                };
+                self.ensure_model_catalog(&bearer_token).await;
+                let route = self.model_uses_responses_api(model, &bearer_token.api_base);
+                if route != uses_responses_api {
+                    uses_responses_api = route;
+                    body = self.build_request_body(&request, route, is_user_initiated);
                 }
-            };
+            }
 
             let request_id = Uuid::new_v4().to_string();
 
@@ -898,88 +907,26 @@ impl Provider for CopilotApiProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         self.wait_for_init().await;
-        self.ensure_model_catalog().await;
-
-        self.get_bearer_token().await.map_err(|e| {
+        let bearer = self.get_bearer_token().await.map_err(|e| {
             jcode_base::logging::warn(&format!(
                 "Copilot bearer token acquisition failed (will trigger fallback): {}",
                 e
             ));
             e
         })?;
+        self.ensure_model_catalog(&bearer).await;
 
         let is_user_initiated = self.is_user_initiated(messages);
         if is_user_initiated {
             self.user_turn_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let model_for_fingerprint = self.model();
-        let uses_responses_api = self.model_uses_responses_api(&model_for_fingerprint);
-        let (canonical_payload, fingerprint_input, system_value, built_tools) =
-            if uses_responses_api {
-                let mut input = jcode_provider_openai::build_responses_input(messages);
-                // Copilot never declares OpenAI's hosted web_search tool.
-                jcode_provider_openai::downgrade_web_search_calls(&mut input);
-                let tools = jcode_provider_openai::build_tools(tools);
-                let mut payload = json!({
-                    "model": &model_for_fingerprint,
-                    "input": &input,
-                    "stream": true,
-                    "max_output_tokens": 32_768u32,
-                });
-                if !system.is_empty() {
-                    payload["instructions"] = json!(system);
-                }
-                if !tools.is_empty() {
-                    payload["tools"] = json!(&tools);
-                }
-                (
-                    payload,
-                    input,
-                    (!system.is_empty()).then(|| json!(system)),
-                    tools,
-                )
-            } else {
-                let built_messages = Self::build_messages(system, messages);
-                let tools = Self::build_tools(tools);
-                let mut payload = json!({
-                    "model": &model_for_fingerprint,
-                    "messages": &built_messages,
-                    "stream": true,
-                });
-                Self::add_max_token_parameter(&mut payload, &model_for_fingerprint, 32_768u32);
-                self.add_reasoning_effort_parameter(&mut payload, &model_for_fingerprint);
-                if !tools.is_empty() {
-                    payload["tools"] = json!(&tools);
-                }
-                let system_value = built_messages
-                    .first()
-                    .filter(|message| {
-                        message.get("role").and_then(|role| role.as_str()) == Some("system")
-                    })
-                    .cloned();
-                (payload, built_messages, system_value, tools)
-            };
-        let tools_value = if built_tools.is_empty() {
-            None
-        } else {
-            Some(Value::Array(built_tools.clone()))
+        let request = CopilotRequest {
+            model: self.model(),
+            messages: messages.to_vec(),
+            tools: tools.to_vec(),
+            system: system.to_string(),
         };
-        jcode_provider_core::fingerprint::log_provider_canonical_input(
-            "copilot",
-            &model_for_fingerprint,
-            if uses_responses_api {
-                "responses"
-            } else {
-                "chat_completions"
-            },
-            &canonical_payload,
-            &fingerprint_input,
-            system_value.as_ref(),
-            tools_value.as_ref(),
-            Some(built_tools.len()),
-            &[("user_initiated", is_user_initiated.to_string())],
-        );
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
@@ -989,10 +936,8 @@ impl Provider for CopilotApiProvider {
             model_explicit: self.model_explicit.clone(),
             github_token: self.github_token.clone(),
             bearer_token: self.bearer_token.clone(),
-            fetched_models: self.fetched_models.clone(),
-            model_routes: self.model_routes.clone(),
+            catalog: self.catalog.clone(),
             catalog_refresh: self.catalog_refresh.clone(),
-            catalog_source: self.catalog_source.clone(),
             session_id: self.session_id.clone(),
             machine_id: self.machine_id.clone(),
             init_ready: self.init_ready.clone(),
@@ -1005,7 +950,7 @@ impl Provider for CopilotApiProvider {
 
         tokio::spawn(async move {
             provider
-                .stream_request(canonical_payload, uses_responses_api, is_user_initiated, tx)
+                .stream_request(request, bearer, is_user_initiated, tx)
                 .await;
         });
 
@@ -1052,10 +997,12 @@ impl Provider for CopilotApiProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        if let Ok(models) = self.fetched_models.read()
-            && !models.is_empty()
-        {
-            return models.clone();
+        let catalog = self
+            .catalog
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !catalog.models.is_empty() {
+            return catalog.models.clone();
         }
         FALLBACK_MODELS
             .iter()
@@ -1111,10 +1058,8 @@ impl Provider for CopilotApiProvider {
             )),
             github_token: self.github_token.clone(),
             bearer_token: self.bearer_token.clone(),
-            fetched_models: self.fetched_models.clone(),
-            model_routes: self.model_routes.clone(),
+            catalog: self.catalog.clone(),
             catalog_refresh: self.catalog_refresh.clone(),
-            catalog_source: self.catalog_source.clone(),
             session_id: self.session_id.clone(),
             machine_id: self.machine_id.clone(),
             init_ready: self.init_ready.clone(),

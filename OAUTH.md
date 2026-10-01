@@ -372,6 +372,8 @@ Cursor uses jcode's native HTTPS transport. Copilot uses GitHub device-flow auth
   - jcode uses GitHub device code flow and can print the verification URL/QR without opening a local browser.
 - API routing follows the `endpoints.api` returned by GitHub's token exchange, including Copilot Business and Enterprise hosts.
 - Model routing follows the authenticated `/models` catalog's `supported_endpoints`: Chat Completions when supported, otherwise Responses for Responses-only models. Explicit model selections are preserved during catalog refresh.
+- Catalog routes and picker models are published together for the authenticated API host. A token host change triggers discovery again; retries rebuild the request payload if the new host advertises a different endpoint.
+- Catalog discovery has a 2-second deadline, including response-body reads. Concurrent turns do not wait behind a catalog refresh. Failed automatic discovery uses fallback routes for a 60-second cooldown; an explicit model refresh bypasses the cooldown.
 - For unambiguous CLI selection, use a provider-qualified model, for example `jcode --provider copilot --model copilot:gpt-6-luna`.
 - Credential discovery order:
   1. `COPILOT_GITHUB_TOKEN`
