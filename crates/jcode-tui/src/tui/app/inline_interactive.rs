@@ -4155,8 +4155,9 @@ mod tests {
         model_picker_effort_matches_default, model_picker_route_is_current,
         model_picker_route_is_default, model_picker_route_is_recommended,
         next_model_favorite_after_current, picker_is_runtime_model_picker,
-        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
-        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
+        picker_keep_default_effort, remote_model_catalog_cache_is_fresh,
+        remote_model_catalog_cache_origin, remote_model_catalog_snapshot_is_safe,
+        route_supports_reasoning_effort,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -4981,5 +4982,49 @@ mod tests {
         let routes = vec![model_route("gpt-6-luna", "OpenAI", "openai-oauth")];
         let filtered = filter_routes_by_keep_list(routes.clone(), &[], "unrelated", "OpenAI", None);
         assert_eq!(filtered.len(), routes.len());
+    }
+
+    #[test]
+    fn keep_default_effort_prefers_family_config_then_falls_back_to_high() {
+        // OpenAI native lanes resolve the configured family effort.
+        assert_eq!(
+            picker_keep_default_effort(
+                "gpt-6-astra",
+                &picker_option_with_method("OpenAI", "openai-api-key"),
+                None,
+                Some("medium"),
+            ),
+            "medium"
+        );
+        // Anthropic OAuth lanes resolve the anthropic family effort.
+        assert_eq!(
+            picker_keep_default_effort(
+                "claude-opus",
+                &picker_option_with_method("Anthropic", "claude-oauth"),
+                Some("high"),
+                None,
+            ),
+            "high"
+        );
+        // Families without a configured effort fall back to "high"...
+        assert_eq!(
+            picker_keep_default_effort(
+                "gpt-6-astra",
+                &picker_option_with_method("OpenAI", "openai-api-key"),
+                None,
+                None,
+            ),
+            "high"
+        );
+        // ...including openai-compatible profile lanes (kimi, glm, ...).
+        assert_eq!(
+            picker_keep_default_effort(
+                "kimi-for-coding",
+                &picker_option_with_method("Kimi", "openai-compatible:kimi"),
+                None,
+                Some("medium"),
+            ),
+            "high"
+        );
     }
 }
