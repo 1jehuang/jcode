@@ -106,7 +106,7 @@ impl CopilotApiProvider {
         add_copilot_max_token_parameter(body, model, max_tokens);
     }
 
-    fn model_uses_responses_api(&self, model: &str, api_base: &str) -> bool {
+    fn known_model_route(&self, model: &str, api_base: &str) -> Option<bool> {
         let catalog = self
             .catalog
             .read()
@@ -114,9 +114,18 @@ impl CopilotApiProvider {
         if catalog.api_base.as_deref() == Some(api_base)
             && let Some(route) = catalog.routes.get(model)
         {
-            return *route;
+            return Some(*route);
         }
-        copilot_model_uses_responses_api(model, &[])
+        if copilot_model_uses_responses_api(model, &[]) {
+            return Some(true);
+        }
+        FALLBACK_MODELS.contains(&model).then_some(false)
+    }
+
+    fn model_uses_responses_api(&self, model: &str, api_base: &str) -> Result<bool> {
+        self.known_model_route(model, api_base).ok_or_else(|| anyhow::anyhow!(
+            "Cannot determine the Copilot API endpoint for model '{model}' on {api_base}: catalog metadata is unavailable or does not advertise this model. Refresh the model catalog or select a known fallback model."
+        ))
     }
 
     fn set_detected_default(&self, default: Option<String>) {
@@ -419,6 +428,7 @@ impl CopilotApiProvider {
         &self,
         request: CopilotRequest,
         mut bearer_token: copilot_auth::CopilotApiToken,
+        uses_responses_api: bool,
         is_user_initiated: bool,
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) {
@@ -426,7 +436,7 @@ impl CopilotApiProvider {
 
         self.wait_for_init().await;
         let model = &request.model;
-        let mut uses_responses_api = self.model_uses_responses_api(model, &bearer_token.api_base);
+        let mut uses_responses_api = uses_responses_api;
         let mut body = self.build_request_body(&request, uses_responses_api, is_user_initiated);
         let initiator = if is_user_initiated { "user" } else { "agent" };
 
@@ -471,8 +481,14 @@ impl CopilotApiProvider {
                         return;
                     }
                 };
-                self.ensure_model_catalog(&bearer_token).await;
-                let route = self.model_uses_responses_api(model, &bearer_token.api_base);
+                self.ensure_model_catalog(&bearer_token, model).await;
+                let route = match self.model_uses_responses_api(model, &bearer_token.api_base) {
+                    Ok(route) => route,
+                    Err(error) => {
+                        let _ = tx.send(Err(error)).await;
+                        return;
+                    }
+                };
                 if route != uses_responses_api {
                     uses_responses_api = route;
                     body = self.build_request_body(&request, route, is_user_initiated);
@@ -914,15 +930,17 @@ impl Provider for CopilotApiProvider {
             ));
             e
         })?;
-        self.ensure_model_catalog(&bearer).await;
+        self.ensure_model_catalog(&bearer, &self.model()).await;
 
         let is_user_initiated = self.is_user_initiated(messages);
         if is_user_initiated {
             self.user_turn_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        let model = self.model();
+        let uses_responses_api = self.model_uses_responses_api(&model, &bearer.api_base)?;
         let request = CopilotRequest {
-            model: self.model(),
+            model,
             messages: messages.to_vec(),
             tools: tools.to_vec(),
             system: system.to_string(),
@@ -948,9 +966,13 @@ impl Provider for CopilotApiProvider {
             created_at: self.created_at,
         };
 
+        let log_session = jcode_base::logging::current_session();
         tokio::spawn(async move {
+            if let Some(session) = log_session {
+                jcode_base::logging::set_session(&session);
+            }
             provider
-                .stream_request(request, bearer, is_user_initiated, tx)
+                .stream_request(request, bearer, uses_responses_api, is_user_initiated, tx)
                 .await;
         });
 

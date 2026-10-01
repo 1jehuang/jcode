@@ -27,7 +27,10 @@ impl CopilotApiProvider {
     pub async fn detect_tier_and_set_default(&self) {
         let _refresh = self.catalog_refresh.lock().await;
         match self.get_bearer_token().await {
-            Ok(bearer) => self.refresh_model_catalog(&bearer).await,
+            Ok(bearer) => {
+                self.refresh_model_catalog(&bearer, tokio::time::Instant::now() + DISCOVERY_TIMEOUT)
+                    .await
+            }
             Err(error) => jcode_base::logging::info(&format!(
                 "Copilot tier detection: failed to get bearer token: {error}"
             )),
@@ -42,24 +45,38 @@ impl CopilotApiProvider {
             .needs_refresh(api_base)
     }
 
-    pub(super) async fn ensure_model_catalog(&self, bearer: &copilot_auth::CopilotApiToken) {
+    pub(super) async fn ensure_model_catalog(
+        &self,
+        bearer: &copilot_auth::CopilotApiToken,
+        model: &str,
+    ) {
         if !self.catalog_needs_refresh(&bearer.api_base) {
             return;
         }
-        // A concurrent refresh must not queue completions behind discovery.
-        let Ok(_refresh) = self.catalog_refresh.try_lock() else {
-            return;
+        let deadline = tokio::time::Instant::now() + DISCOVERY_TIMEOUT;
+        // Known routes can proceed immediately; unknown models need the shared result.
+        let _refresh = match self.catalog_refresh.try_lock() {
+            Ok(refresh) => refresh,
+            Err(_) if self.known_model_route(model, &bearer.api_base).is_some() => return,
+            Err(_) => match tokio::time::timeout_at(deadline, self.catalog_refresh.lock()).await {
+                Ok(refresh) => refresh,
+                Err(_) => return,
+            },
         };
         if self.catalog_needs_refresh(&bearer.api_base) {
-            self.refresh_model_catalog(bearer).await;
+            self.refresh_model_catalog(bearer, deadline).await;
         }
     }
 
-    async fn refresh_model_catalog(&self, bearer: &copilot_auth::CopilotApiToken) {
+    async fn refresh_model_catalog(
+        &self,
+        bearer: &copilot_auth::CopilotApiToken,
+        deadline: tokio::time::Instant,
+    ) {
         let started = std::time::Instant::now();
         // Cover connection, response headers, and the complete JSON body.
-        let result = tokio::time::timeout(
-            DISCOVERY_TIMEOUT,
+        let result = tokio::time::timeout_at(
+            deadline,
             copilot_auth::fetch_available_models(&self.client, &bearer.token, &bearer.api_base),
         )
         .await

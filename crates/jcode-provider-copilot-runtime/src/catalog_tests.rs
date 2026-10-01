@@ -110,7 +110,7 @@ async fn stalled_catalog_bounds_completions_without_queuing_or_repeated_fetches(
     let mut provider = make_test_provider(Vec::new());
     provider.client = reqwest::Client::builder().no_proxy().build()?;
     provider.catalog.write().unwrap().source = CatalogSource::None;
-    provider.set_model("future-model")?;
+    provider.set_model("gpt-5-mini")?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     set_host(&provider, format!("http://{}", listener.local_addr()?)).await;
     let provider = Arc::new(provider);
@@ -173,15 +173,23 @@ async fn host_change_refreshes_live_routes() -> Result<()> {
     provider.catalog.write().unwrap().source = CatalogSource::None;
     let (first_host, first_server) = catalog_server("/responses").await?;
     let first_bearer = set_host(&provider, first_host).await;
-    provider.ensure_model_catalog(&first_bearer).await;
+    provider
+        .ensure_model_catalog(&first_bearer, "future-model")
+        .await;
     first_server.await??;
-    assert!(provider.model_uses_responses_api("future-model", &first_bearer.api_base));
+    assert!(provider.model_uses_responses_api("future-model", &first_bearer.api_base)?);
     let (second_host, second_server) = catalog_server("/chat/completions").await?;
     let second_bearer = set_host(&provider, second_host).await;
-    assert!(!provider.model_uses_responses_api("future-model", &second_bearer.api_base));
-    provider.ensure_model_catalog(&second_bearer).await;
+    assert!(
+        provider
+            .model_uses_responses_api("future-model", &second_bearer.api_base)
+            .is_err()
+    );
+    provider
+        .ensure_model_catalog(&second_bearer, "future-model")
+        .await;
     second_server.await??;
-    assert!(!provider.model_uses_responses_api("future-model", &second_bearer.api_base));
+    assert!(!provider.model_uses_responses_api("future-model", &second_bearer.api_base)?);
     Ok(())
 }
 
@@ -331,12 +339,116 @@ async fn failed_catalog_can_be_explicitly_refreshed_during_cooldown() -> Result<
         reply(&mut socket, "200 OK", "application/json", r#"{"data":[{"id":"future-model","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}"#).await?;
         Ok::<_, anyhow::Error>(())
     });
-    provider.ensure_model_catalog(&bearer).await;
-    provider.ensure_model_catalog(&bearer).await;
-    assert!(!provider.model_uses_responses_api("future-model", &bearer.api_base));
+    provider.ensure_model_catalog(&bearer, "future-model").await;
+    provider.ensure_model_catalog(&bearer, "future-model").await;
+    assert!(
+        provider
+            .model_uses_responses_api("future-model", &bearer.api_base)
+            .is_err()
+    );
     provider.detect_tier_and_set_default().await;
     server.await??;
-    assert!(provider.model_uses_responses_api("future-model", &bearer.api_base));
+    assert!(provider.model_uses_responses_api("future-model", &bearer.api_base)?);
     assert_eq!(provider.available_models_display(), vec!["future-model"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_responses_only_turns_share_discovery_before_sending() -> Result<()> {
+    let _home = CatalogHome::new()?;
+    let mut provider = make_test_provider(Vec::new());
+    provider.client = reqwest::Client::builder().no_proxy().build()?;
+    provider.catalog.write().unwrap().source = CatalogSource::None;
+    provider.set_model("gpt-6-luna")?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    set_host(&provider, format!("http://{}", listener.local_addr()?)).await;
+    let provider = Arc::new(provider);
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut catalog, _) = listener.accept().await?;
+        let headers = read_headers(&mut catalog).await?;
+        assert!(headers.starts_with(b"GET /models HTTP/1.1\r\n"));
+        started_tx.send(()).unwrap();
+        release_rx.await?;
+        reply(&mut catalog, "200 OK", "application/json", r#"{"data":[{"id":"gpt-6-luna","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}"#).await?;
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await?;
+            let body = read_completion(&mut socket, "/responses").await?;
+            assert_eq!(body["model"], "gpt-6-luna");
+            assert_eq!(body["input"][0]["content"][0]["text"], "hello");
+            reply(&mut socket, "200 OK", "text/event-stream", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ROUTE_OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n").await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let first_provider = provider.clone();
+    let first = tokio::spawn(async move { completion_text(&first_provider).await });
+    started_rx.await?;
+    let messages = vec![make_msg(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    )];
+    let mut second = Box::pin(provider.complete(&messages, &[], "system", None));
+    assert!(
+        futures::poll!(second.as_mut()).is_pending(),
+        "unknown model bypassed the active refresh"
+    );
+    release_tx.send(()).unwrap();
+    let mut stream = tokio::time::timeout(Duration::from_secs(4), second).await??;
+    let mut text = String::new();
+    use futures::StreamExt;
+    while let Some(event) = stream.next().await {
+        if let StreamEvent::TextDelta(delta) = event? {
+            text.push_str(&delta);
+        }
+    }
+    assert_eq!(text, "ROUTE_OK");
+    assert_eq!(first.await??, "ROUTE_OK");
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_model_with_stalled_catalog_fails_without_inference_or_repeated_fetches()
+-> Result<()> {
+    let mut provider = make_test_provider(Vec::new());
+    provider.client = reqwest::Client::builder().no_proxy().build()?;
+    provider.catalog.write().unwrap().source = CatalogSource::None;
+    provider.set_model("gpt-6-luna")?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    set_host(&provider, format!("http://{}", listener.local_addr()?)).await;
+    let provider = Arc::new(provider);
+    let first_provider = provider.clone();
+    let first = tokio::spawn(async move { completion_text(&first_provider).await });
+    let (mut stalled_catalog, _) = listener.accept().await?;
+    let headers = read_headers(&mut stalled_catalog).await?;
+    assert!(headers.starts_with(b"GET /models HTTP/1.1\r\n"));
+    stalled_catalog
+        .write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1024\r\n\r\n{",
+        )
+        .await?;
+    let concurrent =
+        tokio::time::timeout(Duration::from_secs(3), completion_text(&provider)).await?;
+    assert!(
+        concurrent.is_err(),
+        "unknown model was sent without endpoint metadata"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), first)
+            .await??
+            .is_err()
+    );
+    let repeated = tokio::time::timeout(Duration::from_secs(1), completion_text(&provider)).await?;
+    assert!(repeated.is_err());
+    // Neither an inference request nor a second catalog fetch reached the API host.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err()
+    );
     Ok(())
 }
