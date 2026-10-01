@@ -23,10 +23,13 @@ use jcode_provider_copilot::{DEFAULT_MODEL, FALLBACK_MODELS};
 pub use jcode_provider_core::PremiumMode;
 use jcode_provider_core::{EventStream, Provider};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
+
+mod catalog;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatalogSource {
@@ -37,13 +40,16 @@ enum CatalogSource {
 
 /// Copilot API provider - uses GitHub Copilot's OpenAI-compatible API.
 /// Authenticates via GitHub OAuth token, exchanges for Copilot bearer token,
-/// and sends requests to api.githubcopilot.com.
+/// and sends requests to the API endpoint returned by that exchange.
 pub struct CopilotApiProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
+    model_explicit: Arc<std::sync::atomic::AtomicBool>,
     github_token: String,
     bearer_token: Arc<tokio::sync::RwLock<Option<copilot_auth::CopilotApiToken>>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
+    model_routes: Arc<RwLock<HashMap<String, bool>>>,
+    catalog_refresh: Arc<tokio::sync::Mutex<()>>,
     catalog_source: Arc<RwLock<CatalogSource>>,
     session_id: String,
     machine_id: String,
@@ -63,8 +69,20 @@ fn copilot_model_supports_reasoning_effort(model: &str) -> bool {
     model == "claude-sonnet-5"
 }
 
-fn copilot_model_uses_responses_api(model: &str) -> bool {
-    model.trim().to_ascii_lowercase().starts_with("gpt-5.6")
+fn copilot_model_uses_responses_api(model: &str, supported_endpoints: &[String]) -> bool {
+    if supported_endpoints.is_empty() {
+        // Older catalogs omit endpoint metadata. Preserve their existing routes.
+        return model
+            .trim()
+            .get(.."gpt-5.6".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("gpt-5.6"));
+    }
+    supported_endpoints
+        .iter()
+        .any(|endpoint| endpoint.trim_start_matches('/') == "responses")
+        && !supported_endpoints
+            .iter()
+            .any(|endpoint| endpoint.trim_start_matches('/') == "chat/completions")
 }
 
 fn copilot_api_path(uses_responses_api: bool) -> &'static str {
@@ -83,6 +101,26 @@ impl CopilotApiProvider {
 
     fn add_max_token_parameter(body: &mut Value, model: &str, max_tokens: u32) {
         add_copilot_max_token_parameter(body, model, max_tokens);
+    }
+
+    fn model_uses_responses_api(&self, model: &str) -> bool {
+        self.model_routes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(model)
+            .copied()
+            .unwrap_or_else(|| copilot_model_uses_responses_api(model, &[]))
+    }
+
+    fn set_detected_default(&self, default: Option<String>) {
+        if let Some(default) = default
+            && let Ok(mut model) = self.model.try_write()
+            && !self
+                .model_explicit
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *model = default;
+        }
     }
 
     fn current_reasoning_effort(&self) -> Option<String> {
@@ -159,15 +197,19 @@ impl CopilotApiProvider {
 
     pub fn new() -> Result<Self> {
         let github_token = copilot_auth::load_github_token()?;
-        let model =
-            std::env::var("JCODE_COPILOT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model_override = std::env::var("JCODE_COPILOT_MODEL").ok();
+        let model_explicit = model_override.is_some();
+        let model = model_override.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
+            model_explicit: Arc::new(std::sync::atomic::AtomicBool::new(model_explicit)),
             github_token,
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            model_routes: Arc::new(RwLock::new(HashMap::new())),
+            catalog_refresh: Arc::new(tokio::sync::Mutex::new(())),
             catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
             session_id: Uuid::new_v4().to_string(),
             machine_id: Self::get_or_create_machine_id(),
@@ -195,15 +237,19 @@ impl CopilotApiProvider {
     }
 
     pub fn new_with_token(github_token: String) -> Self {
-        let model =
-            std::env::var("JCODE_COPILOT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let model_override = std::env::var("JCODE_COPILOT_MODEL").ok();
+        let model_explicit = model_override.is_some();
+        let model = model_override.unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
+            model_explicit: Arc::new(std::sync::atomic::AtomicBool::new(model_explicit)),
             github_token,
             bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            model_routes: Arc::new(RwLock::new(HashMap::new())),
+            catalog_refresh: Arc::new(tokio::sync::Mutex::new(())),
             catalog_source: Arc::new(RwLock::new(CatalogSource::None)),
             session_id: Uuid::new_v4().to_string(),
             machine_id: Self::get_or_create_machine_id(),
@@ -310,89 +356,6 @@ impl CopilotApiProvider {
         }
     }
 
-    /// Detect the user's Copilot tier and set the best default model.
-    /// Call this after construction. Fetches a bearer token and queries /models.
-    /// If JCODE_COPILOT_MODEL is set, this is a no-op (user override).
-    pub async fn detect_tier_and_set_default(&self) {
-        let detect_start = std::time::Instant::now();
-        if std::env::var("JCODE_COPILOT_MODEL").is_ok() {
-            jcode_base::logging::info(
-                "Copilot model overridden via JCODE_COPILOT_MODEL, skipping tier detection",
-            );
-            self.mark_init_done();
-            return;
-        }
-
-        let bearer_start = std::time::Instant::now();
-        let bearer = match self.get_bearer_token().await {
-            Ok(t) => t,
-            Err(e) => {
-                jcode_base::logging::info(&format!(
-                    "Copilot tier detection: failed to get bearer token after {}ms: {}",
-                    bearer_start.elapsed().as_millis(),
-                    e
-                ));
-                self.mark_init_done();
-                return;
-            }
-        };
-
-        let fetch_start = std::time::Instant::now();
-        match copilot_auth::fetch_available_models(&self.client, &bearer).await {
-            Ok(models) => {
-                let picker_models: Vec<String> = models
-                    .iter()
-                    .filter(|m| m.model_picker_enabled)
-                    .map(|m| m.id.clone())
-                    .collect();
-                let all_ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
-                let default = copilot_auth::choose_default_model(&models);
-                jcode_base::logging::info(&format!(
-                    "Copilot tier detection: bearer={}ms, fetch_models={}ms, total={}ms, {} total, {} picker-enabled, default -> {}. Picker: [{}]. All: [{}]",
-                    bearer_start.elapsed().as_millis(),
-                    fetch_start.elapsed().as_millis(),
-                    detect_start.elapsed().as_millis(),
-                    all_ids.len(),
-                    picker_models.len(),
-                    default,
-                    picker_models.join(", "),
-                    all_ids.join(", ")
-                ));
-                if let Ok(mut m) = self.model.try_write() {
-                    *m = default;
-                }
-                let display_models = if picker_models.is_empty() {
-                    all_ids
-                } else {
-                    picker_models
-                };
-                if let Ok(mut fm) = self.fetched_models.try_write() {
-                    *fm = display_models;
-                }
-                if let Ok(mut source) = self.catalog_source.try_write() {
-                    *source = CatalogSource::Live;
-                }
-                Self::persist_catalog(
-                    &self
-                        .fetched_models
-                        .try_read()
-                        .map(|models| models.clone())
-                        .unwrap_or_default(),
-                );
-            }
-            Err(e) => {
-                jcode_base::logging::info(&format!(
-                    "Copilot tier detection: bearer={}ms, fetch_models={}ms, total={}ms, failed to fetch models: {}",
-                    bearer_start.elapsed().as_millis(),
-                    fetch_start.elapsed().as_millis(),
-                    detect_start.elapsed().as_millis(),
-                    e
-                ));
-            }
-        }
-        self.mark_init_done();
-    }
-
     fn mark_init_done(&self) {
         self.init_done
             .store(true, std::sync::atomic::Ordering::Release);
@@ -416,22 +379,21 @@ impl CopilotApiProvider {
     }
 
     /// Get a valid Copilot bearer token, refreshing if expired
-    async fn get_bearer_token(&self) -> Result<String> {
+    async fn get_bearer_token(&self) -> Result<copilot_auth::CopilotApiToken> {
         {
             let guard = self.bearer_token.read().await;
             if let Some(ref token) = *guard
                 && !token.is_expired()
             {
-                return Ok(token.token.clone());
+                return Ok(token.clone());
             }
         }
 
         // Need to refresh
         let new_token =
             copilot_auth::exchange_github_token(&self.client, &self.github_token).await?;
-        let token_str = new_token.token.clone();
-        *self.bearer_token.write().await = Some(new_token);
-        Ok(token_str)
+        *self.bearer_token.write().await = Some(new_token.clone());
+        Ok(new_token)
     }
 
     /// Check if an error indicates token expiration
@@ -524,10 +486,10 @@ impl CopilotApiProvider {
             let resp = attempt_client
                 .post(format!(
                     "{}/{}",
-                    copilot_auth::COPILOT_API_BASE,
+                    bearer_token.api_base.trim_end_matches('/'),
                     copilot_api_path(uses_responses_api)
                 ))
-                .header("Authorization", format!("Bearer {}", bearer_token))
+                .header("Authorization", format!("Bearer {}", bearer_token.token))
                 .header("Editor-Version", copilot_auth::EDITOR_VERSION)
                 .header("Editor-Plugin-Version", copilot_auth::EDITOR_PLUGIN_VERSION)
                 .header(
@@ -936,6 +898,7 @@ impl Provider for CopilotApiProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         self.wait_for_init().await;
+        self.ensure_model_catalog().await;
 
         self.get_bearer_token().await.map_err(|e| {
             jcode_base::logging::warn(&format!(
@@ -951,7 +914,7 @@ impl Provider for CopilotApiProvider {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let model_for_fingerprint = self.model();
-        let uses_responses_api = copilot_model_uses_responses_api(&model_for_fingerprint);
+        let uses_responses_api = self.model_uses_responses_api(&model_for_fingerprint);
         let (canonical_payload, fingerprint_input, system_value, built_tools) =
             if uses_responses_api {
                 let mut input = jcode_provider_openai::build_responses_input(messages);
@@ -1023,9 +986,12 @@ impl Provider for CopilotApiProvider {
         let provider = CopilotApiProvider {
             client: self.client.clone(),
             model: self.model.clone(),
+            model_explicit: self.model_explicit.clone(),
             github_token: self.github_token.clone(),
             bearer_token: self.bearer_token.clone(),
             fetched_models: self.fetched_models.clone(),
+            model_routes: self.model_routes.clone(),
+            catalog_refresh: self.catalog_refresh.clone(),
             catalog_source: self.catalog_source.clone(),
             session_id: self.session_id.clone(),
             machine_id: self.machine_id.clone(),
@@ -1071,6 +1037,8 @@ impl Provider for CopilotApiProvider {
         }
         if let Ok(mut current) = self.model.try_write() {
             *current = trimmed.to_string();
+            self.model_explicit
+                .store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -1137,9 +1105,15 @@ impl Provider for CopilotApiProvider {
         Arc::new(CopilotApiProvider {
             client: self.client.clone(),
             model: Arc::new(RwLock::new(self.model())),
+            model_explicit: Arc::new(std::sync::atomic::AtomicBool::new(
+                self.model_explicit
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )),
             github_token: self.github_token.clone(),
             bearer_token: self.bearer_token.clone(),
             fetched_models: self.fetched_models.clone(),
+            model_routes: self.model_routes.clone(),
+            catalog_refresh: self.catalog_refresh.clone(),
             catalog_source: self.catalog_source.clone(),
             session_id: self.session_id.clone(),
             machine_id: self.machine_id.clone(),

@@ -9,6 +9,7 @@ fn copilot_api_token_not_expired() {
     let token = CopilotApiToken {
         token: "test-token".to_string(),
         expires_at: future_ts,
+        api_base: COPILOT_API_BASE.to_string(),
     };
     assert!(!token.is_expired());
 }
@@ -19,6 +20,7 @@ fn copilot_api_token_expired() {
     let token = CopilotApiToken {
         token: "test-token".to_string(),
         expires_at: past_ts,
+        api_base: COPILOT_API_BASE.to_string(),
     };
     assert!(token.is_expired());
 }
@@ -29,6 +31,7 @@ fn copilot_api_token_expiring_within_buffer() {
     let token = CopilotApiToken {
         token: "test-token".to_string(),
         expires_at: almost_ts,
+        api_base: COPILOT_API_BASE.to_string(),
     };
     assert!(token.is_expired());
 }
@@ -344,58 +347,63 @@ fn load_token_from_json_does_not_change_external_permissions() -> Result<()> {
 }
 
 #[test]
-fn choose_default_model_with_opus() {
-    let models = vec![
-        CopilotModelInfo {
-            id: "claude-sonnet-4".to_string(),
-            name: String::new(),
-            vendor: String::new(),
-            version: String::new(),
-            model_picker_enabled: false,
-            capabilities: Default::default(),
-        },
-        CopilotModelInfo {
-            id: "claude-opus-4.6".to_string(),
-            name: String::new(),
-            vendor: String::new(),
-            version: String::new(),
-            model_picker_enabled: false,
-            capabilities: Default::default(),
-        },
-    ];
-    assert_eq!(choose_default_model(&models), "claude-opus-4.6");
+fn choose_default_model_prefers_selectable_claude() -> Result<()> {
+    for (ids, expected) in [
+        (
+            vec!["gpt-6-luna", "claude-sonnet-4", "claude-opus-4.6"],
+            "claude-opus-4.6",
+        ),
+        (
+            vec!["gpt-6-luna", "claude-sonnet-4", "claude-sonnet-4.6"],
+            "claude-sonnet-4.6",
+        ),
+        (vec!["gpt-6-luna", "claude-sonnet-4"], "claude-sonnet-4"),
+    ] {
+        let models: Vec<CopilotModelInfo> = ids
+            .iter()
+            .map(|id| {
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "model_picker_enabled": true,
+                }))
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        assert_eq!(choose_default_model(&models).as_deref(), Some(expected));
+    }
+    Ok(())
 }
 
 #[test]
-fn choose_default_model_without_opus() {
-    let models = vec![CopilotModelInfo {
-        id: "claude-sonnet-4.6".to_string(),
-        name: String::new(),
-        vendor: String::new(),
-        version: String::new(),
-        model_picker_enabled: false,
-        capabilities: Default::default(),
-    }];
-    assert_eq!(choose_default_model(&models), "claude-sonnet-4.6");
+fn choose_default_model_from_openai_only_catalog() -> Result<()> {
+    let models: Vec<CopilotModelInfo> = serde_json::from_value(serde_json::json!([
+        {"id": "gpt-5-mini", "model_picker_enabled": false},
+        {"id": "gpt-6-luna", "model_picker_enabled": true},
+        {"id": "gpt-5.5", "model_picker_enabled": true},
+    ]))?;
+    assert_eq!(choose_default_model(&models).as_deref(), Some("gpt-6-luna"));
+    Ok(())
 }
 
 #[test]
-fn choose_default_model_with_sonnet_4_only() {
-    let models = vec![CopilotModelInfo {
-        id: "claude-sonnet-4".to_string(),
-        name: String::new(),
-        vendor: String::new(),
-        version: String::new(),
-        model_picker_enabled: false,
-        capabilities: Default::default(),
-    }];
-    assert_eq!(choose_default_model(&models), "claude-sonnet-4");
+fn choose_default_model_skips_disabled_preferred_models() -> Result<()> {
+    let models: Vec<CopilotModelInfo> = serde_json::from_value(serde_json::json!([
+        {"id": "claude-opus-4.6", "model_picker_enabled": false},
+        {"id": "claude-sonnet-4.6", "model_picker_enabled": false},
+        {"id": "claude-sonnet-4", "model_picker_enabled": false},
+        {"id": "gpt-6-luna", "model_picker_enabled": true},
+    ]))?;
+    assert_eq!(choose_default_model(&models).as_deref(), Some("gpt-6-luna"));
+    Ok(())
 }
 
 #[test]
-fn choose_default_model_empty_list() {
-    let models: Vec<CopilotModelInfo> = vec![];
-    assert_eq!(choose_default_model(&models), "claude-sonnet-4");
+fn choose_default_model_without_selectable_models() -> Result<()> {
+    assert_eq!(choose_default_model(&[]), None);
+    let models: Vec<CopilotModelInfo> = serde_json::from_value(serde_json::json!([
+        {"id": "gpt-6-luna", "model_picker_enabled": false},
+    ]))?;
+    assert_eq!(choose_default_model(&models), None);
+    Ok(())
 }
 
 #[test]
@@ -471,15 +479,77 @@ fn access_token_response_expired() -> Result<()> {
 }
 
 #[test]
-fn copilot_token_response_roundtrip() -> Result<()> {
-    let resp = CopilotTokenResponse {
-        token: "bearer_token_xxx".to_string(),
-        expires_at: 1700000000,
-    };
-    let json = serde_json::to_string(&resp)?;
-    let parsed: CopilotTokenResponse = serde_json::from_str(&json)?;
-    assert_eq!(parsed.token, "bearer_token_xxx");
-    assert_eq!(parsed.expires_at, 1700000000);
+fn copilot_api_token_uses_business_endpoint() -> Result<()> {
+    let response: CopilotTokenResponse = serde_json::from_value(serde_json::json!({
+        "token": "business-token",
+        "expires_at": 1700000000,
+        "endpoints": {
+            "api": "https://api.business.githubcopilot.com",
+            "telemetry": "https://copilot-telemetry.githubusercontent.com",
+        },
+    }))?;
+    let token = CopilotApiToken::from(response);
+    assert_eq!(token.api_base, "https://api.business.githubcopilot.com");
+    Ok(())
+}
+
+#[test]
+fn copilot_api_token_defaults_when_api_endpoint_is_absent() -> Result<()> {
+    for json in [
+        r#"{"token":"legacy-token","expires_at":1700000000}"#,
+        r#"{"token":"legacy-token","expires_at":1700000000,"endpoints":null}"#,
+        r#"{"token":"legacy-token","expires_at":1700000000,"endpoints":{}}"#,
+    ] {
+        let response: CopilotTokenResponse = serde_json::from_str(json)?;
+        let token = CopilotApiToken::from(response);
+        assert_eq!(token.api_base, COPILOT_API_BASE);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fetch_available_models_uses_authenticated_api_base() -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await?;
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await?;
+            if n == 0 {
+                anyhow::bail!("Catalog request ended before its headers");
+            }
+            request.extend_from_slice(&buf[..n]);
+            if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(request.starts_with(b"GET /models HTTP/1.1\r\n"));
+        let body = r#"{"data":[{"id":"gpt-6-luna","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await?;
+        Ok::<_, anyhow::Error>(())
+    });
+    let response: CopilotTokenResponse = serde_json::from_value(serde_json::json!({
+        "token": "local-test-token",
+        "expires_at": 1700000000,
+        "endpoints": {"api": format!("http://{addr}/")},
+    }))?;
+    let token = CopilotApiToken::from(response);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let models = fetch_available_models(&client, &token.token, &token.api_base).await?;
+    server.await??;
+    assert_eq!(choose_default_model(&models).as_deref(), Some("gpt-6-luna"));
+    assert_eq!(models[0].supported_endpoints, vec!["/responses"]);
     Ok(())
 }
 
@@ -491,6 +561,7 @@ fn copilot_model_info_deserialize() -> Result<()> {
             "vendor": "anthropic",
             "version": "2025-01-01",
             "model_picker_enabled": true,
+            "supported_endpoints": ["/chat/completions"],
             "capabilities": {
                 "type": "chat",
                 "family": "claude-sonnet-4"
@@ -500,6 +571,7 @@ fn copilot_model_info_deserialize() -> Result<()> {
     assert_eq!(model.id, "claude-sonnet-4");
     assert_eq!(model.vendor, "anthropic");
     assert!(model.model_picker_enabled);
+    assert_eq!(model.supported_endpoints, vec!["/chat/completions"]);
     Ok(())
 }
 
@@ -510,6 +582,7 @@ fn copilot_model_info_minimal() -> Result<()> {
     assert_eq!(model.id, "gpt-4o");
     assert_eq!(model.name, "");
     assert!(!model.model_picker_enabled);
+    assert!(model.supported_endpoints.is_empty());
     Ok(())
 }
 

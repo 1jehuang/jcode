@@ -370,6 +370,9 @@ Cursor uses jcode's native HTTPS transport. Copilot uses GitHub device-flow auth
   - Headless / SSH: `jcode login --provider copilot --no-browser`
   - Scriptable remote flow: `jcode login --provider copilot --print-auth-url`, then later `jcode login --provider copilot --complete`
   - jcode uses GitHub device code flow and can print the verification URL/QR without opening a local browser.
+- API routing follows the `endpoints.api` returned by GitHub's token exchange, including Copilot Business and Enterprise hosts.
+- Model routing follows the authenticated `/models` catalog's `supported_endpoints`: Chat Completions when supported, otherwise Responses for Responses-only models. Explicit model selections are preserved during catalog refresh.
+- For unambiguous CLI selection, use a provider-qualified model, for example `jcode --provider copilot --model copilot:gpt-6-luna`.
 - Credential discovery order:
   1. `COPILOT_GITHUB_TOKEN`
   2. `GH_TOKEN`

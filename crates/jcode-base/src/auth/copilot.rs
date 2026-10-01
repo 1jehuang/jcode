@@ -125,6 +125,14 @@ pub struct AccessTokenResponse {
 pub struct CopilotTokenResponse {
     pub token: String,
     pub expires_at: i64,
+    #[serde(default)]
+    pub endpoints: Option<CopilotTokenEndpoints>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CopilotTokenEndpoints {
+    #[serde(default)]
+    pub api: Option<String>,
 }
 
 /// Cached Copilot API token with expiry
@@ -132,6 +140,20 @@ pub struct CopilotTokenResponse {
 pub struct CopilotApiToken {
     pub token: String,
     pub expires_at: i64,
+    pub api_base: String,
+}
+
+impl From<CopilotTokenResponse> for CopilotApiToken {
+    fn from(response: CopilotTokenResponse) -> Self {
+        Self {
+            token: response.token,
+            expires_at: response.expires_at,
+            api_base: response
+                .endpoints
+                .and_then(|endpoints| endpoints.api)
+                .unwrap_or_else(|| COPILOT_API_BASE.to_string()),
+        }
+    }
 }
 
 impl CopilotApiToken {
@@ -652,10 +674,7 @@ pub async fn exchange_github_token(
                 .await
                 .context("Failed to parse Copilot token response")?;
 
-            return Ok(CopilotApiToken {
-                token: token_resp.token,
-                expires_at: token_resp.expires_at,
-            });
+            return Ok(token_resp.into());
         }
 
         let retryable = token_exchange_retryable_status(status.as_u16());
@@ -882,6 +901,8 @@ pub struct CopilotModelInfo {
     pub model_picker_enabled: bool,
     #[serde(default)]
     pub capabilities: Option<CopilotModelCapabilities>,
+    #[serde(default)]
+    pub supported_endpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -908,9 +929,10 @@ struct ModelsResponse {
 pub async fn fetch_available_models(
     client: &reqwest::Client,
     bearer_token: &str,
+    api_base: &str,
 ) -> Result<Vec<CopilotModelInfo>> {
     let resp = client
-        .get(format!("{}/models", COPILOT_API_BASE))
+        .get(format!("{}/models", api_base.trim_end_matches('/')))
         .header("Authorization", format!("Bearer {}", bearer_token))
         .header("Editor-Version", EDITOR_VERSION)
         .header("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION)
@@ -933,19 +955,22 @@ pub async fn fetch_available_models(
     Ok(models_resp.data)
 }
 
-/// Determine the best default model based on available models.
-/// - If claude-opus-4.6 is available -> paid tier -> use claude-opus-4.6
-/// - Otherwise -> free/basic tier -> use claude-sonnet-4.6 or claude-sonnet-4
-pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
-    let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
-
-    if model_ids.contains(&"claude-opus-4.6") {
-        "claude-opus-4.6".to_string()
-    } else if model_ids.contains(&"claude-sonnet-4.6") {
-        "claude-sonnet-4.6".to_string()
-    } else {
-        "claude-sonnet-4".to_string()
+/// Prefer selectable Claude models, then the first selectable catalog model.
+/// An empty catalog or one without picker-enabled models has no default.
+pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> Option<String> {
+    for preferred in ["claude-opus-4.6", "claude-sonnet-4.6", "claude-sonnet-4"] {
+        if let Some(model) = available_models
+            .iter()
+            .find(|model| model.model_picker_enabled && model.id == preferred)
+        {
+            return Some(model.id.clone());
+        }
     }
+
+    available_models
+        .iter()
+        .find(|model| model.model_picker_enabled)
+        .map(|model| model.id.clone())
 }
 
 /// Fetch the authenticated GitHub username using an OAuth token.

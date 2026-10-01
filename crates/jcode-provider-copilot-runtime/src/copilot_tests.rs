@@ -4,9 +4,12 @@ fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
     CopilotApiProvider {
         client: jcode_base::provider::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+        model_explicit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         github_token: "test-token".to_string(),
         bearer_token: Arc::new(tokio::sync::RwLock::new(None)),
         fetched_models: Arc::new(RwLock::new(fetched)),
+        model_routes: Arc::new(RwLock::new(HashMap::new())),
+        catalog_refresh: Arc::new(tokio::sync::Mutex::new(())),
         catalog_source: Arc::new(RwLock::new(CatalogSource::Live)),
         session_id: "test-session".to_string(),
         machine_id: "test-machine".to_string(),
@@ -99,14 +102,63 @@ fn non_gpt5_copilot_models_keep_max_tokens() {
 }
 
 #[test]
-fn only_gpt_5_6_family_uses_responses_api() {
-    assert!(copilot_model_uses_responses_api("gpt-5.6-terra"));
-    assert!(copilot_model_uses_responses_api("gpt-5.6-sol"));
-    assert!(copilot_model_uses_responses_api("gpt-5.6-luna"));
-    assert!(!copilot_model_uses_responses_api("gpt-5.4"));
-    assert!(!copilot_model_uses_responses_api("claude-sonnet-4.6"));
-    assert_eq!(copilot_api_path(true), "responses");
-    assert_eq!(copilot_api_path(false), "chat/completions");
+fn responses_only_metadata_routes_arbitrary_model_ids() {
+    let endpoints = vec!["/responses".to_string()];
+    for model in ["gpt-6-luna", "gpt-5.5", "gpt-5.3-codex", "future-model"] {
+        assert!(copilot_model_uses_responses_api(model, &endpoints));
+    }
+}
+
+#[test]
+fn chat_endpoint_takes_precedence_over_responses_and_family_fallback() {
+    let endpoints = vec!["/responses".to_string(), "/chat/completions".to_string()];
+    assert!(!copilot_model_uses_responses_api("gpt-5-mini", &endpoints));
+    assert!(!copilot_model_uses_responses_api(
+        "gpt-5.6-luna",
+        &endpoints
+    ));
+}
+
+#[test]
+fn missing_endpoint_metadata_preserves_legacy_routes() {
+    assert!(copilot_model_uses_responses_api(" GPT-5.6-luna ", &[]));
+    assert!(!copilot_model_uses_responses_api("gpt-5.4", &[]));
+    assert!(!copilot_model_uses_responses_api("claude-sonnet-4.6", &[]));
+}
+
+#[test]
+fn unrelated_endpoint_metadata_does_not_imply_responses_support() {
+    let endpoints = vec!["/embeddings".to_string()];
+    assert!(!copilot_model_uses_responses_api(
+        "gpt-5.6-luna",
+        &endpoints
+    ));
+}
+
+#[test]
+fn detected_default_does_not_replace_explicit_selection() {
+    let provider = make_test_provider(Vec::new());
+    provider.set_model("gpt-6-luna").unwrap();
+    provider.set_detected_default(Some("claude-opus-4.6".to_string()));
+    assert_eq!(provider.model(), "gpt-6-luna");
+}
+
+#[test]
+fn detected_default_updates_only_when_catalog_supplies_one() {
+    let provider = make_test_provider(Vec::new());
+    provider.set_detected_default(Some("catalog-model".to_string()));
+    provider.set_detected_default(None);
+    assert_eq!(provider.model(), "catalog-model");
+}
+
+#[test]
+fn fork_selection_is_independent_of_parent_tier_detection() {
+    let provider = make_test_provider(Vec::new());
+    let forked = provider.fork();
+    forked.set_model("gpt-6-luna").unwrap();
+    provider.set_detected_default(Some("claude-opus-4.6".to_string()));
+    assert_eq!(provider.model(), "claude-opus-4.6");
+    assert_eq!(forked.model(), "gpt-6-luna");
 }
 
 #[test]
