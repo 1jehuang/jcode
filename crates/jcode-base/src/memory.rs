@@ -35,8 +35,9 @@ pub use crate::memory_types::{
     format_relevant_display_prompt, format_relevant_prompt,
 };
 use crate::memory_types::{
-    collect_skill_query_terms, format_entries_for_prompt, memory_matches_search,
-    normalize_memory_search_text, normalize_search_text, skill_retrieval_bonus,
+    bm25_token_stream, collect_skill_query_terms, format_entries_for_prompt,
+    memory_matches_search, normalize_memory_search_text, normalize_search_text,
+    skill_retrieval_bonus,
 };
 pub use activity::{
     activity_snapshot, add_event, apply_remote_activity_snapshot, check_staleness, clear_activity,
@@ -580,6 +581,165 @@ impl MemoryManager {
         ))
     }
 
+    /// RRF k from config, clamped to [1.0, 1000.0]. Config knob
+    /// `memory_rrf_k` (default 60.0); env `JCODE_MEMORY_RRF_K` wins.
+    /// NaN/inf can arrive via TOML (`nan`) since clamp preserves NaN:
+    /// fall back to the default instead of poisoning every fused score.
+    /// Public so the recall bench fuses with the same k as the runtime.
+    pub fn rrf_k() -> f32 {
+        let v = crate::config::config().agents.memory_rrf_k;
+        if !v.is_finite() {
+            return 60.0;
+        }
+        v.clamp(1.0, 1000.0)
+    }
+
+    /// Dense-list weight for hybrid RRF fusion (`memory_rrf_dense_weight`,
+    /// default 1.0 = equal weights); env `JCODE_MEMORY_RRF_DENSE_W` wins.
+    /// Non-finite or non-positive values fall back to 1.0 so a bad config
+    /// can never zero out or invert the dense half.
+    /// Public so the recall bench fuses with the same weight as the runtime.
+    pub fn rrf_dense_weight() -> f32 {
+        let v = crate::config::config().agents.memory_rrf_dense_weight;
+        if !v.is_finite() || v <= 0.0 {
+            return 1.0;
+        }
+        v
+    }
+
+    /// Recency-prior weight for hybrid RRF fusion (G-R, shipped 2026-09-30:
+    /// `memory_recency_weight`, default 0.05); env
+    /// `JCODE_MEMORY_RECENCY_W` wins. Non-finite or negative falls back
+    /// to 0.0 so a bad config can never penalize or invert ranking.
+    /// Public so the recall bench fuses with the same weight as runtime.
+    pub fn recency_weight() -> f32 {
+        let v = crate::config::config().agents.memory_recency_weight;
+        if !v.is_finite() || v < 0.0 {
+            return 0.0;
+        }
+        v
+    }
+
+    /// Recency half-life override in days (G-R, shipped 2026-09-30:
+    /// `memory_recency_tau_days`, default 90.0); env
+    /// `JCODE_MEMORY_RECENCY_TAU_DAYS` wins. Non-finite or negative
+    /// falls back to 0.0 (per-category table).
+    pub fn recency_tau_override_days() -> f32 {
+        let v = crate::config::config().agents.memory_recency_tau_days;
+        if !v.is_finite() || v < 0.0 {
+            return 0.0;
+        }
+        v
+    }
+
+    /// Recency half-life in days for an entry: global override when
+    /// positive, else the existing decay table (Fact 30 / Entity 60 /
+    /// Preference 90 / Correction 365 / Custom 45).
+    pub fn recency_half_life_days(category: &MemoryCategory) -> f32 {
+        let ov = Self::recency_tau_override_days();
+        if ov > 0.0 {
+            return ov;
+        }
+        match category {
+            MemoryCategory::Correction => 365.0,
+            MemoryCategory::Preference => 90.0,
+            MemoryCategory::Fact => 30.0,
+            MemoryCategory::Entity => 60.0,
+            MemoryCategory::Custom(_) => 45.0,
+        }
+    }
+
+    /// Bounded additive recency bonus for one entry (G-R, shipped):
+    /// `w_r * 0.5^(age_days / half_life)` with touch-aware age
+    /// (`now - max(created_at, updated_at)`). Returns 0.0 when the knob
+    /// is off (explicit opt-out restores pre-G-R ranking).
+    pub fn recency_bonus(entry: &MemoryEntry) -> f32 {
+        let w = Self::recency_weight();
+        if w <= 0.0 {
+            return 0.0;
+        }
+        let latest = entry.created_at.max(entry.updated_at);
+        let age_days = (Utc::now() - latest).num_seconds().max(0) as f32 / 86_400.0;
+        let tau = Self::recency_half_life_days(&entry.category);
+        Self::recency_bonus_for(w, tau, age_days)
+    }
+
+    /// Pure recency math (unit-testable, no clock, no config):
+    /// `w * 0.5^(age_days / tau)`. Returns 0.0 for non-positive weight,
+    /// non-finite/non-positive tau, or negative age.
+    pub fn recency_bonus_for(weight: f32, tau_days: f32, age_days: f32) -> f32 {
+        if weight <= 0.0 || !weight.is_finite() {
+            return 0.0;
+        }
+        if !tau_days.is_finite() || tau_days <= 0.0 {
+            return 0.0;
+        }
+        if !age_days.is_finite() || age_days < 0.0 {
+            return 0.0;
+        }
+        weight * 0.5f32.powf(age_days / tau_days)
+    }
+
+    /// Slot-B prefilter mode for Jev automatic recall (`memory_prefilter_mode`,
+    /// default `"off"`; `"hybrid-topk"` enables the stage).
+    /// Env `JCODE_MEMORY_PREFILTER_MODE` wins. Only the exact string
+    /// `"hybrid-topk"` engages; anything else (including garbage) is off.
+    pub fn prefilter_mode() -> String {
+        crate::config::config()
+            .agents
+            .memory_prefilter_mode
+            .trim()
+            .to_ascii_lowercase()
+    }
+
+    /// Whether the slot-B stage is enabled this process.
+    pub fn prefilter_enabled() -> bool {
+        Self::prefilter_mode() == "hybrid-topk"
+    }
+
+    /// Slot-B prefilter top-K (`memory_prefilter_top_k`, default 96),
+    /// clamped to [24, 480] at use. Env `JCODE_MEMORY_PREFILTER_TOP_K` wins.
+    pub fn prefilter_top_k() -> usize {
+        crate::config::config()
+            .agents
+            .memory_prefilter_top_k
+            .clamp(24, 480)
+    }
+
+    /// Slot-B min corpus (`memory_prefilter_min_corpus`, default 96):
+    /// the stage disengages at or below this many memories.
+    /// Env `JCODE_MEMORY_PREFILTER_MIN_CORPUS` wins. Zero/near-zero file
+    /// values fall back to the default so the stage cannot spin on tiny sets.
+    pub fn prefilter_min_corpus() -> usize {
+        let v = crate::config::config().agents.memory_prefilter_min_corpus;
+        if v == 0 {
+            return 96;
+        }
+        v
+    }
+
+    /// Slot-B wall-clock budget in ms (`memory_prefilter_budget_ms`,
+    /// default 500). Env `JCODE_MEMORY_PREFILTER_BUDGET_MS` wins.
+    /// Zero file values fall back to the default.
+    pub fn prefilter_budget_ms() -> u64 {
+        let v = crate::config::config().agents.memory_prefilter_budget_ms;
+        if v == 0 {
+            return 500;
+        }
+        v
+    }
+
+    /// Slot-B shadow-audit sampling rate (`memory_prefilter_shadow_rate`,
+    /// default 0.01). Env `JCODE_MEMORY_PREFILTER_SHADOW_RATE` wins.
+    /// Clamped to [0.0, 1.0]; non-finite falls back to 0.01.
+    pub fn prefilter_shadow_rate() -> f32 {
+        let v = crate::config::config().agents.memory_prefilter_shadow_rate;
+        if !v.is_finite() {
+            return 0.01;
+        }
+        v.clamp(0.0, 1.0)
+    }
+
     /// Pull pool, rank by dense and BM25 separately, fuse with RRF.
     fn hybrid_fuse(
         entries: Vec<MemoryEntry>,
@@ -596,7 +756,30 @@ impl MemoryManager {
         }
 
         // Generous per-retriever pool so fusion has signal to work with.
-        let pool = (limit * 5).max(HYBRID_POOL_MIN);
+        let pool = limit.saturating_mul(5).max(HYBRID_POOL_MIN);
+        Self::hybrid_prefilter_rank(entries, query_text, query_embedding, limit, pool)
+    }
+
+    /// Slot-B hybrid ranking core: dense (cosine, active-model space only) +
+    /// BM25 lexical, fused with RRF, over a CALLER-SUPPLIED entry set.
+    ///
+    /// Unlike [`Self::hybrid_fuse`] this does NOT re-collect and does NOT
+    /// drop embedding-less entries: they stay reachable via the BM25 half
+    /// (backend-switch contract, §3.2). Output ⊆ input by construction.
+    /// `pool` is the per-retriever candidate depth (hybrid_fuse passes
+    /// `(limit*5).max(50)`; the slot-B stage passes the same shape).
+    ///
+    /// Public so the recall bench measures the exact shipped ranking.
+    pub fn hybrid_prefilter_rank(
+        entries: Vec<MemoryEntry>,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+        pool: usize,
+    ) -> Vec<(MemoryEntry, f32)> {
+        if entries.is_empty() || limit == 0 {
+            return Vec::new();
+        }
 
         // Dense ranking (no hard threshold; just take the top by cosine).
         // Vector-space gate: only entries embedded by the ACTIVE backend share a
@@ -618,20 +801,39 @@ impl MemoryManager {
         let dense_scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
         let mut dense: Vec<(usize, f32)> =
             dense_eligible.iter().copied().zip(dense_scores).collect();
-        dense.sort_by(|a, b| b.1.total_cmp(&a.1));
+        dense.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| entries[a.0].id.cmp(&entries[b.0].id))
+        });
         dense.truncate(pool);
 
         // Sparse (BM25) ranking over memory search text.
         let sparse = bm25_rank(&entries, query_text, pool);
 
-        // RRF fusion.
-        const RRF_K: f32 = 60.0;
+        // RRF fusion. k comes from config (default 60.0); higher k
+        // compresses rank gaps, lower k rewards top ranks more steeply.
+        // The dense list is weighted by `memory_rrf_dense_weight`
+        // (default 1.0 = equal weights); the sparse list keeps weight 1.0.
+        let rrf_k = Self::rrf_k();
+        let w_dense = Self::rrf_dense_weight();
         let mut fused: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
         for (rank, (idx, _)) in dense.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *fused.entry(*idx).or_insert(0.0) += w_dense / (rrf_k + rank as f32 + 1.0);
         }
         for (rank, (idx, _)) in sparse.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
+        }
+
+        // G-R recency prior: bounded additive bonus per fused candidate.
+        // Touch-aware age, global tau=90 default (0.0 = per-category table).
+        // Applies only among live rows: tombstoned / superseded entries
+        // never reach this pool (active-only collection upstream).
+        if Self::recency_weight() > 0.0 {
+            for (idx, score) in fused.iter_mut() {
+                if let Some(e) = entries.get(*idx) {
+                    *score += Self::recency_bonus(e);
+                }
+            }
         }
 
         let mut entries: Vec<Option<MemoryEntry>> = entries.into_iter().map(Some).collect();
@@ -640,7 +842,22 @@ impl MemoryManager {
                 .into_iter()
                 .filter_map(|(idx, score)| entries[idx].take().map(|e| (e, score))),
             limit,
+            |entry| entry.id.as_str(),
         )
+    }
+
+    /// Bench/diagnostic helper for the slot-B gate: the EXACT collection +
+    /// active-filter the live `get_relevant_parallel` path applies
+    /// (`collect_scoped(self, MemoryScope::All)` + `entry.active`; the
+    /// already-injected filter is session-pipeline state with no bench
+    /// equivalent, and the seeded bench graphs have no injected ids anyway),
+    /// WITHOUT the embedding-presence filter (the stage keeps
+    /// embedding-less entries reachable via BM25).
+    pub fn prefilter_bench_entries(&self) -> Result<Vec<MemoryEntry>> {
+        Ok(crate::memory_jev::collect_scoped(self, MemoryScope::All)?
+            .into_iter()
+            .filter(|entry| entry.active)
+            .collect())
     }
 
     fn collect_all_memories_with_embeddings(&self) -> Result<Vec<MemoryEntry>> {
@@ -770,6 +987,7 @@ impl MemoryManager {
                 })
                 .filter(|(_, sim)| *sim >= threshold),
             limit,
+            |entry| entry.id.as_str(),
         );
 
         let scored = Self::apply_gap_filter(scored);
@@ -1508,6 +1726,7 @@ impl MemoryManager {
                     .map(|entry| (entry, score))
             }),
             limit,
+            |entry| entry.id.as_str(),
         );
 
         Ok(results)
@@ -1565,32 +1784,109 @@ fn prefilter_for_jev(entries: Vec<MemoryEntry>, query: &str) -> Vec<MemoryEntry>
 fn bm25_rank(entries: &[MemoryEntry], query_text: &str, limit: usize) -> Vec<(usize, f32)> {
     const K1: f32 = 1.2;
     const B: f32 = 0.75;
+    /// Tag-field term-frequency boost (c2a gate grid: {2, 4, 8}).
+    const TAG_BOOST: f32 = 2.0;
+    // c2c: additive bigram bonus weight (C3 G3-additive primary; union-model
+    // stays diagnostic-only per c5 W3). 0.05 selected by the c2c sweep:
+    // all of {0.05, 0.10, 0.15, 0.25} score identically on dev C1/C4 and
+    // hold both blind sets, so the smallest weight ships (least veto risk
+    // under two-list RRF per c5 X3).
+    const BIGRAM_W: f32 = 0.05;
 
-    let q_terms: Vec<String> = normalize_search_text(query_text)
+    // c2b: light plural folding via bm25_token_stream (query AND docs
+    // symmetric). BM25-leg only — normalize_search_text callers elsewhere
+    // are untouched.
+    // Narrowing (attempt 1, reachability-preserving): doc-side folding
+    // applies ONLY to docs that already engage the query in unfolded OR
+    // folded space (support = doc unfolded tokens hit the unfolded or
+    // folded query set). A doc with no support falls back to pristine
+    // (unfolded tokens vs unfolded query) and can never gain a
+    // fold-conjured match. Consequence: the BM25-leg scoring set is a
+    // SUBSET of the pristine scoring set — folding reweights reached docs
+    // but reaches no new doc. This blocks the observed 04 harm (a
+    // `codes->code` fold conjuring a BM25 score for a doc the unfolded
+    // query never reached) while keeping every dev-W1 rescue (each W1
+    // gold already shares an unfolded term with its query).
+    let q_unfolded: Vec<String> = normalize_search_text(query_text)
         .split_whitespace()
         .map(|s| s.to_string())
         .collect();
+    let q_terms: Vec<String> = bm25_token_stream(query_text);
     if q_terms.is_empty() {
         return Vec::new();
     }
     let q_set: std::collections::HashSet<&String> = q_terms.iter().collect();
+    // Support vocabulary: unfolded + folded query forms. A doc token in
+    // either space counts as engagement (so pristine-exact pairs always
+    // confer support, and every pristine pair survives folding).
+    let q_support: std::collections::HashSet<&str> = q_unfolded
+        .iter()
+        .map(|s| s.as_str())
+        .chain(q_terms.iter().map(|s| s.as_str()))
+        .collect();
+    // c2c: query bigrams from pre-dedup order (adjacency available on the
+    // Vec before the HashSet above). Repeated query bigrams count once
+    // (set semantics, matches query-dedup).
+    let q_bigrams: std::collections::HashSet<(&str, &str)> = q_terms
+        .windows(2)
+        .map(|w| (w[0].as_str(), w[1].as_str()))
+        .collect();
 
-    // Tokenize each doc once; compute df and doc lengths.
-    let docs: Vec<Vec<String>> = entries
+    // c2a+c2b composed: per-field streams with c2b support-gating.
+    // FieldDoc split (c2a): content/tags tokenized separately from raw
+    // fields (same tokenizer the `search_text` cache was built with, so
+    // the content+tag union matches the cached flat join exactly).
+    // Support gate (c2b narrowing): a field folds ONLY when the doc
+    // already engages the query in unfolded OR folded space; otherwise
+    // that field falls back to pristine tokens and can never gain a
+    // fold-conjured match. BM25-leg scoring set stays a SUBSET of the
+    // pristine set.
+    struct FieldDoc {
+        content: Vec<String>,
+        tags: Vec<String>,
+    }
+    let docs: Vec<FieldDoc> = entries
         .iter()
         .map(|e| {
-            e.searchable_text()
+            let content_unfolded: Vec<String> = normalize_search_text(&e.content)
                 .split_whitespace()
                 .map(|s| s.to_string())
-                .collect()
+                .collect();
+            let tags_unfolded: Vec<String> = normalize_search_text(&e.tags.join(" "))
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            let supported = content_unfolded
+                .iter()
+                .chain(tags_unfolded.iter())
+                .any(|t| q_support.contains(t.as_str()));
+            if supported {
+                FieldDoc {
+                    content: bm25_token_stream(&e.content),
+                    tags: bm25_token_stream(&e.tags.join(" ")),
+                }
+            } else {
+                FieldDoc {
+                    content: content_unfolded,
+                    tags: tags_unfolded,
+                }
+            }
         })
         .collect();
 
     let n = docs.len().max(1) as f32;
-    let avgdl = docs.iter().map(|d| d.len()).sum::<usize>() as f32 / n;
+    let avglen_c = docs.iter().map(|d| d.content.len()).sum::<usize>() as f32 / n;
+    let avglen_t = docs.iter().map(|d| d.tags.len()).sum::<usize>() as f32 / n;
+    // Pool-local unigram df over the field union (a doc counts when the
+    // term appears in EITHER field) — same basis as the flat-join df.
     let mut df: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
     for doc in &docs {
-        let unique: std::collections::HashSet<&str> = doc.iter().map(|s| s.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = doc
+            .content
+            .iter()
+            .chain(doc.tags.iter())
+            .map(|s| s.as_str())
+            .collect();
         for t in unique {
             *df.entry(t).or_insert(0.0) += 1.0;
         }
@@ -1598,32 +1894,125 @@ fn bm25_rank(entries: &[MemoryEntry], query_text: &str, limit: usize) -> Vec<(us
 
     let mut scored: Vec<(usize, f32)> = Vec::new();
     for (idx, doc) in docs.iter().enumerate() {
-        if doc.is_empty() {
+        if doc.content.is_empty() && doc.tags.is_empty() {
             continue;
         }
-        let dl = doc.len() as f32;
-        let mut tf: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
-        for t in doc {
-            *tf.entry(t.as_str()).or_insert(0.0) += 1.0;
+        let mut tf_c: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+        for t in &doc.content {
+            *tf_c.entry(t.as_str()).or_insert(0.0) += 1.0;
         }
+        let mut tf_t: std::collections::HashMap<&str, f32> = std::collections::HashMap::new();
+        for t in &doc.tags {
+            *tf_t.entry(t.as_str()).or_insert(0.0) += 1.0;
+        }
+        // Empty-field guards: no 0/0 when a pool is contentless/tagless.
+        // (b_c is defined below with the c2a-guard norm floor.)
+        let tag_field_live = avglen_t > 0.0;
+        let b_t = if tag_field_live {
+            1.0 - B + B * doc.tags.len() as f32 / avglen_t
+        } else {
+            1.0
+        };
         let mut score = 0.0f32;
+        // c2a-guard (corrected 2026-10-01): FieldDoc content-norm floor
+        // for stopword-only overlap. Forensics (raw BM25-leg scores on
+        // 04-rescore M-006) proved the keep-alive is content-side, not
+        // tag-side: mh-M-004-S03-T01 matches `the` in CONTENT
+        // (content=[replace,the,hallway,printer,toner], tags
+        // query-disjoint), so a tag-only veto never fires (guarded
+        // sparse-leg byte-identical to unguarded, all queries). The real
+        // inversion is the content-norm split: the 5-token distractor
+        // gets b=0.53 (tf 1.87) on `the` while the 15-token gold gets
+        // b=1.10 (tf 0.91), and c2b folding discounts IDF(buddy)
+        // 2.38->2.04 / IDF(code) 1.79->1.59, compressing the gold.
+        // Two drop-rule variants were tried and REJECTED (both measured):
+        // per-term stopword veto = inert (zero query-term tag overlap
+        // corpus-wide); per-doc stopword-only veto = backfires (drops
+        // the boundary gold itself, whose M-006 overlap is also
+        // stopword-only — recall falls OUT of top-10). The floor instead
+        // caps the norm AMPLIFICATION a stopword-only doc can draw: when
+        // the doc has no unfolded non-stopword overlap with the query,
+        // its content length norm b_c is floored at 1.0 (no sub-unity
+        // boost; tf can only saturate DOWN toward the gold, never above
+        // it on length grounds). Docs WITH unfolded topical overlap
+        // (every gold and every c2b rescue on content-bearing queries)
+        // score EXACTLY as before. Pristine reachability preserved: the
+        // floor only lowers score, never adds reach (scoring-set subset
+        // holds; the c2b support gate is untouched).
+        let doc_has_unfolded_topical_overlap = q_unfolded.iter().any(|t| {
+            !jcode_session_types::is_session_search_stop_word(t.as_str())
+                && (tf_c.contains_key(t.as_str()) || tf_t.contains_key(t.as_str()))
+        });
+        let b_c = if avglen_c > 0.0 {
+            let b = 1.0 - B + B * doc.content.len() as f32 / avglen_c;
+            if !doc_has_unfolded_topical_overlap {
+                b.max(1.0)
+            } else {
+                b
+            }
+        } else {
+            1.0
+        };
         for term in &q_set {
-            let Some(&f) = tf.get(term.as_str()) else {
-                continue;
+            let f_c = tf_c.get(term.as_str()).copied().unwrap_or(0.0);
+            let f_t = if tag_field_live {
+                tf_t.get(term.as_str()).copied().unwrap_or(0.0)
+            } else {
+                0.0
             };
+            if f_c == 0.0 && f_t == 0.0 {
+                continue;
+            }
             let n_q = *df.get(term.as_str()).unwrap_or(&0.0);
             if n_q == 0.0 {
                 continue;
             }
             let idf = (((n - n_q + 0.5) / (n_q + 0.5)) + 1.0).ln();
-            let denom = f + K1 * (1.0 - B + B * dl / avgdl);
-            score += idf * (f * (K1 + 1.0)) / denom;
+            let tf_tilde = f_c / b_c + TAG_BOOST * f_t / b_t;
+            score += idf * (tf_tilde * (K1 + 1.0)) / (tf_tilde + K1);
+        }
+        // c2c: additive bigram bonus `w*(idf_a + idf_b)` per shared bigram,
+        // scored on UNIGRAM IDFs (reuse df map — no bigram-IDF term, so no
+        // high-IDF noise on accidental bigrams per c5 W3). Bigrams run over
+        // the content+tag UNION stream (c2a composed: adjacency across the
+        // field boundary is ignored — content-internal and tag-internal
+        // pairs only; cross-boundary pairs would be spurious). A shared
+        // bigram implies both unigrams shared, so no drop-rule interaction:
+        // docs with no shared bigram get +0. Stopword-carrying bigrams
+        // self-discount via the unigram-IDF sum (no stoplist).
+        // Streams are the support-gated folded streams (c2b composed).
+        if !q_bigrams.is_empty() {
+            let idf_of = |t: &str| {
+                let n_q = *df.get(t).unwrap_or(&0.0);
+                if n_q == 0.0 {
+                    0.0
+                } else {
+                    (((n - n_q + 0.5) / (n_q + 0.5)) + 1.0).ln()
+                }
+            };
+            let mut d_bigrams: std::collections::HashSet<(&str, &str)> =
+                std::collections::HashSet::new();
+            for stream in [&doc.content, &doc.tags] {
+                if stream.len() >= 2 {
+                    d_bigrams.extend(
+                        stream
+                            .windows(2)
+                            .map(|w| (w[0].as_str(), w[1].as_str())),
+                    );
+                }
+            }
+            for (a, b) in q_bigrams.intersection(&d_bigrams) {
+                score += BIGRAM_W * (idf_of(a) + idf_of(b));
+            }
         }
         if score > 0.0 {
             scored.push((idx, score));
         }
     }
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| entries[a.0].id.cmp(&entries[b.0].id))
+    });
     scored.truncate(limit);
     scored
 }
