@@ -112,6 +112,8 @@ pub(super) struct VersionReport {
     pub(super) build_time: String,
     pub(super) git_date: String,
     pub(super) release_build: bool,
+    pub(super) build_channel: String,
+    pub(super) external_provider_protocol_version: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -443,6 +445,9 @@ pub(super) fn run_version_command(emit_json: bool) -> Result<()> {
             .unwrap_or_else(|| "unknown".to_string()),
         git_date: jcode_build_meta::git_date().to_string(),
         release_build: jcode_build_meta::is_release_build(),
+        build_channel: jcode_build_meta::build_channel().to_string(),
+        external_provider_protocol_version:
+            jcode_build_meta::EXTERNAL_PROVIDER_PROTOCOL_VERSION.to_string(),
     };
 
     if emit_json {
@@ -457,6 +462,11 @@ pub(super) fn run_version_command(emit_json: bool) -> Result<()> {
         println!("build_time\t{}", report.build_time);
         println!("git_date\t{}", report.git_date);
         println!("release_build\t{}", report.release_build);
+        println!("build_channel\t{}", report.build_channel);
+        println!(
+            "external_provider_protocol_version\t{}",
+            report.external_provider_protocol_version
+        );
     }
 
     Ok(())
