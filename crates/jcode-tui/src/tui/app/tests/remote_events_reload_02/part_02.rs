@@ -516,3 +516,165 @@ fn test_keyed_tool_inputs_interleave_in_remote_events() {
         assert_eq!(tool.intent.as_deref(), Some(intent));
     }
 }
+
+/// Send the events the server emits for one provider-native web search row.
+fn send_native_search_row(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+    id: &str,
+    query: &str,
+) {
+    use crate::protocol::ServerEvent;
+    app.handle_server_event(
+        ServerEvent::ToolStart {
+            id: id.to_string(),
+            name: "web_search".to_string(),
+        },
+        remote,
+    );
+    app.handle_server_event(
+        ServerEvent::ToolInput {
+            id: Some(id.to_string()),
+            delta: format!(r#"{{"query":"{query}"}}"#),
+        },
+        remote,
+    );
+    app.handle_server_event(
+        ServerEvent::ToolExec {
+            id: id.to_string(),
+            name: "web_search".to_string(),
+        },
+        remote,
+    );
+    app.handle_server_event(
+        ServerEvent::ToolDone {
+            id: id.to_string(),
+            name: "web_search".to_string(),
+            output: "1. Rust\n   https://www.rust-lang.org/".to_string(),
+            error: None,
+        },
+        remote,
+    );
+}
+
+fn native_search_rows(app: &App) -> usize {
+    app.display_messages()
+        .iter()
+        .filter(|dm| {
+            dm.tool_data
+                .as_ref()
+                .is_some_and(|td| td.name == "web_search")
+        })
+        .count()
+}
+
+#[test]
+fn test_retry_rollback_discards_native_search_rows_from_aborted_attempt() {
+    // A hosted web search completes mid-response. If the stream then fails and
+    // the server retries from the top, the retry is a fresh sample with new
+    // srvtoolu_ ids, so the aborted attempt's row must be rolled back too or
+    // the transcript shows the search twice.
+    use crate::protocol::ServerEvent;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    // A completed local tool from earlier in the turn is a fence the rollback
+    // must never cross.
+    app.handle_server_event(
+        ServerEvent::ToolStart {
+            id: "toolu_earlier".to_string(),
+            name: "bash".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        ServerEvent::ToolDone {
+            id: "toolu_earlier".to_string(),
+            name: "bash".to_string(),
+            output: "ok".to_string(),
+            error: None,
+        },
+        &mut remote,
+    );
+    let baseline = app.display_messages().len();
+
+    // Attempt 1: text, native search, more text, then a transport fault.
+    app.handle_server_event(
+        ServerEvent::TextDelta {
+            text: "Let me search. ".to_string(),
+        },
+        &mut remote,
+    );
+    send_native_search_row(&mut app, &mut remote, "srvtoolu_attempt1", "rust");
+    app.handle_server_event(
+        ServerEvent::TextDelta {
+            text: "Partial answer".to_string(),
+        },
+        &mut remote,
+    );
+    assert_eq!(native_search_rows(&app), 1);
+    app.handle_server_event(ServerEvent::RetryRollback { attempt: 1, max: 3 }, &mut remote);
+
+    assert_eq!(
+        native_search_rows(&app),
+        0,
+        "aborted attempt's native search row must be rolled back"
+    );
+    assert_eq!(app.display_messages().len(), baseline);
+    assert!(
+        app.display_messages().iter().any(|dm| dm
+            .tool_data
+            .as_ref()
+            .is_some_and(|td| td.id == "toolu_earlier")),
+        "rollback must not remove completed local tool rows"
+    );
+
+    // Attempt 2 replays with a fresh id: exactly one row remains.
+    app.handle_server_event(
+        ServerEvent::TextDelta {
+            text: "Let me search. ".to_string(),
+        },
+        &mut remote,
+    );
+    send_native_search_row(&mut app, &mut remote, "srvtoolu_attempt2", "rust");
+    assert_eq!(native_search_rows(&app), 1);
+}
+
+#[test]
+fn test_native_search_rows_from_completed_attempt_survive_later_rollback() {
+    // Native rows belong to the attempt that produced them. Once a local tool
+    // result fences them off, a rollback of a later attempt must keep them.
+    use crate::protocol::ServerEvent;
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    send_native_search_row(&mut app, &mut remote, "srvtoolu_done", "rust");
+    app.handle_server_event(
+        ServerEvent::ToolStart {
+            id: "toolu_bash".to_string(),
+            name: "bash".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        ServerEvent::ToolDone {
+            id: "toolu_bash".to_string(),
+            name: "bash".to_string(),
+            output: "ok".to_string(),
+            error: None,
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        ServerEvent::TextDelta {
+            text: "next attempt text".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(ServerEvent::RetryRollback { attempt: 1, max: 3 }, &mut remote);
+    assert_eq!(native_search_rows(&app), 1);
+}
