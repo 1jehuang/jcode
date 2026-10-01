@@ -446,13 +446,13 @@ pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<Api
     format_content_blocks_with_native(blocks, is_oauth, false)
 }
 
-/// True when an assistant message holds raw server tool blocks, i.e. it is a
-/// provider-native turn that may need resuming after `pause_turn`.
+/// True when an assistant message ends on a raw server tool block, i.e. the
+/// shape of a provider-native turn paused with `pause_turn`. Anthropic resumes
+/// such a turn when it is resent as-is. A turn that searched and then went on to
+/// produce text (e.g. interrupted mid-answer) ends on that text instead, and
+/// still needs the continuation user turn to avoid a prefill rejection.
 fn is_paused_server_tool_turn(message: &ApiMessage) -> bool {
-    message
-        .content
-        .iter()
-        .any(|block| matches!(block, ApiContentBlock::Raw(_)))
+    matches!(message.content.last(), Some(ApiContentBlock::Raw(_)))
 }
 
 /// See [`format_messages_with_native`] for the meaning of `native_replay`.
