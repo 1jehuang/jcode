@@ -535,6 +535,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     .await?;
             }
         },
+        Some(Command::MemoryPrefilterStats { json }) => {
+            commands::run_memory_prefilter_stats_command(json)?;
+        }
         Some(Command::ProviderTestCoverage {
             provider_query,
             model_query,

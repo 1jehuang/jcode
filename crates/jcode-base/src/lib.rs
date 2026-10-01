@@ -61,6 +61,7 @@ pub mod memory_agent;
 pub mod memory_graph;
 pub mod memory_jev;
 pub mod memory_judge_metrics;
+pub mod memory_tier2_gate;
 pub mod memory_log;
 pub mod memory_rerank;
 pub mod memory_types;

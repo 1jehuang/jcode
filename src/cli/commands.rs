@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
@@ -1826,6 +1826,26 @@ async fn run_memory_command_for_dir(
         }
     }
 
+    Ok(())
+}
+
+pub fn run_memory_prefilter_stats_command(json: bool) -> Result<()> {
+    let snapshot = memory::MemoryManager::prefilter_shadow_snapshot();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&snapshot)
+                .context("serialize prefilter shadow stats")?
+        );
+    } else {
+        println!("Memory Prefilter Shadow Stats:");
+        println!("  Queries:        {}", snapshot.queries);
+        println!("  Engaged:        {}", snapshot.engaged);
+        println!("  Fail-open:      {}", snapshot.failopen);
+        println!("  Shadow-sampled: {}", snapshot.shadow_sampled);
+        println!("\nDropped tail:");
+        println!("  {}", snapshot.dropped_tail_summary());
+    }
     Ok(())
 }
 

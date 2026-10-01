@@ -468,6 +468,16 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Model(ModelCommand),
 
+    /// Show slot-B memory prefilter shadow-audit counters (queries, engaged,
+    /// fail-open, shadow-sampled) plus the dropped-tail summary, in human or
+    /// JSON form. Read-only: reports the process-wide counters, never scores.
+    #[command(name = "memory-prefilter-stats")]
+    MemoryPrefilterStats {
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show live verification coverage. With no provider/model, prints the full coverage summary.
     #[command(name = "provider-test-coverage", alias = "model-status")]
     ProviderTestCoverage {
