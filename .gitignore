@@ -21,3 +21,6 @@ captures/
 /*.avif
 /*.mp4
 /*.png
+# run artifacts (timestamped); only committed green references are kept
+harness/ledger/*.jsonl
+!harness/ledger/2026-09-26-184635.jsonl
