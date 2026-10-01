@@ -417,6 +417,15 @@ cross_provider_failover = "countdown"
 # openai-compatible profile ids ("myprofile"). The active model's routes always
 # stay visible. Unset or empty = show everything.
 # model_picker_providers = ["myprofile", "openrouter"]
+# Optional picker keep-list (allowlist): when non-empty, /model only renders
+# rows matching these entries — one model, one lane, one effort per entry —
+# instead of every catalog model expanded across every lane and effort rung.
+# Entry forms: "model" (any lane), "lane:model", "lane:model:effort". A pinned
+# effort renders exactly that row; without one, the route collapses to its
+# family's default effort row. Same lane vocabulary as model_picker_providers.
+# The active model's routes always stay visible; a keep-list matching nothing
+# falls back to the full list. Unset or empty = show everything.
+# model_picker_keep = ["kimi:kimi-for-coding", "openai-oauth:gpt-6-luna:med"]
 # Max seconds to wait for streaming data before timing out a request with no
 # data received. Raise this for slow reasoning models (e.g. DeepSeek) that think
 # silently for minutes before emitting tokens. Default: 180.
