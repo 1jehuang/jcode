@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "judge-runner ledger record (superset schema v1)",
+  "description": "One record per (item, arm, attempt). Union of the 17-judge-calib record with the d2-P1 extensions (em_correct/agree/abstained/category) and runner columns (head/arm/attempt/swap_agree/votes/unanimous). Metrics stay per-head; the ledger is the only shared surface.",
+  "type": "object",
+  "required": ["record", "qid", "head", "arm", "model", "attempt", "judge", "error"],
+  "properties": {
+    "record": { "enum": ["judge-run", "judge", "judge-summary"] },
+    "qid": { "type": "string" },
+    "head": { "enum": ["listwise", "h1", "h2", "h3", "h4", "h5", "h6"] },
+    "arm": { "type": "string", "description": "blind arm label, stripped at grade time, unblinded in analysis" },
+    "step": { "type": "string" },
+    "model": { "type": "string" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 2 },
+    "judge": {
+      "type": ["object", "null"],
+      "properties": {
+        "verdict": { "description": "per-head verdict object (listwise: {relevant_ids}; h1: {dims}); null when error" },
+        "error": { "type": ["string", "null"], "description": "free-text detail (taxonomy class + cause); null on success" },
+        "model": { "type": "string" }
+      }
+    },
+    "em_correct": { "type": ["boolean", "null"] },
+    "agree": { "type": ["boolean", "null"] },
+    "abstained": { "type": ["boolean", "null"] },
+    "swap_agree": { "type": ["boolean", "null"] },
+    "votes": { "description": "H5: verdict list from the n=3 majority; null otherwise" },
+    "unanimous": { "type": ["boolean", "null"] },
+    "category": { "type": ["string", "null"] },
+    "tokens": { "type": "integer", "minimum": 0 },
+    "dollars": { "type": "number", "minimum": 0 },
+    "error": {
+      "enum": [null, "parse", "credential", "timeout", "rate_limit", "transport"],
+      "description": "NEEDS-WORK taxonomy: error != null after 2 attempts is a NEEDS-WORK row, never a guessed grade"
+    }
+  }
+}

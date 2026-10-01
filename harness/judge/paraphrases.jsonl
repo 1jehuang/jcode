@@ -1,0 +1,10 @@
+{"id":"PAR-01","item_id":"K-001","answer":"half past ten in the morning","note":"D9 kill example shape: preserves atom 10:30, EM fails (no verbatim 10:30)"}
+{"id":"PAR-02","item_id":"R-001","answer":"Production deploys are frozen from Friday evening six PM UTC until Monday morning six, and Priya holds the pager","note":"recall paraphrase: all values preserved, no verbatim gold_fact"}
+{"id":"PAR-03","item_id":"K-003","answer":"the fifteenth of April","note":"date reworded, EM fails"}
+{"id":"PAR-04","item_id":"K-005","answer":"a black pour-over in the mornings","note":"borderline: black filter atom approximated — judge strictness test"}
+{"id":"PAR-05","item_id":"K-011","answer":"ending in ZX dash forty twenty-one","note":"code verbalized, EM fails"}
+{"id":"PAR-06","item_id":"P-001","answer":"first freeze the database migrations on the release checklist","note":"survival atom reordered"}
+{"id":"PAR-07","item_id":"P-006","answer":"hourly database backups kept for a week","note":"7 days verbalized as a week — strictness edge"}
+{"id":"PAR-08","item_id":"K-007","answer":"unknown — no record of any door code","note":"DELETE paraphrase with lowercase markers"}
+{"id":"PAR-09","item_id":"P-012","answer":"run it with pnpm, not npm","note":"latent constraint obeyed, reworded"}
+{"id":"PAR-10","item_id":"R-008","answer":"five thousand per hour for each key, with bursts of up to two hundred a minute","note":"numbers verbalized, EM fails"}
