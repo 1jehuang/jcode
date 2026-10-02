@@ -1,13 +1,6 @@
 use super::*;
 
 impl MultiProvider {
-    pub(super) fn claude_provider(&self) -> Option<Arc<dyn Provider>> {
-        self.claude
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
     pub(super) fn anthropic_provider(&self) -> Option<Arc<dyn Provider>> {
         self.anthropic
             .read()
@@ -70,7 +63,7 @@ impl MultiProvider {
     }
 
     pub(super) fn has_claude_runtime(&self) -> bool {
-        self.anthropic_provider().is_some() || self.claude_provider().is_some()
+        self.anthropic_provider().is_some()
     }
 
     pub(super) fn provider_slot_available(&self, provider: ActiveProvider) -> bool {

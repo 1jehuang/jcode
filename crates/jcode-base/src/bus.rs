@@ -321,6 +321,12 @@ pub struct SidePanelUpdated {
     pub snapshot: SidePanelSnapshot,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppletsUpdated {
+    pub session_id: String,
+    pub snapshot: jcode_applet_types::AgentApplets,
+}
+
 #[derive(Clone, Debug)]
 pub enum UpdateStatus {
     Checking,
@@ -342,6 +348,10 @@ pub enum UpdateStatus {
         version: String,
     },
     UpToDate,
+    /// Automatic checks are not applicable, e.g. a local untracked checkout.
+    Skipped {
+        reason: String,
+    },
     Error(String),
 }
 
@@ -445,10 +455,16 @@ pub enum BusEvent {
         session_id: Option<String>,
         message: String,
     },
+    /// Built-in voice input has new state (meter level, partial transcript,
+    /// or a final result). The owning client polls its recording on receipt.
+    VoiceInputWake,
     /// Background compaction task finished (check_and_apply should be called)
     CompactionFinished,
     /// Provider's available models list may have changed
     ModelsUpdated,
+    /// A single route's usage changed. Carries its snapshot so busy agents do
+    /// not prevent clients from refreshing cached picker metadata.
+    ModelUsageUpdated(crate::provider::ModelRoute),
     /// Synchronous provider activation after a login/import has completed, so
     /// the model picker can stop hiding the stale pre-auth catalog.
     AuthCatalogRefreshReady,
@@ -462,6 +478,7 @@ pub enum BusEvent {
     },
     /// Side panel pages were updated for a session
     SidePanelUpdated(SidePanelUpdated),
+    AppletsUpdated(AppletsUpdated),
     /// Deferred Mermaid rendering completed and cached content may now be visible
     MermaidRenderCompleted,
     /// Productivity report finished generating off the UI thread

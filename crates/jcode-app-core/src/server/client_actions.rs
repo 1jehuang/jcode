@@ -174,6 +174,66 @@ pub(super) async fn handle_notify_session(
     }
 }
 
+/// A user pressed something in an agent applet: store its state, publish, then
+/// resolve a waiting `applet` tool call or wake the agent like a notification.
+pub(super) async fn handle_applet_action(
+    id: u64,
+    session_id: String,
+    instance: String,
+    action: jcode_applet_types::Action,
+    state: serde_json::Value,
+    source_key: Option<String>,
+    ctx: NotifySessionContext<'_>,
+) {
+    let stored = match crate::applets::set_state(&session_id, &instance, state) {
+        Ok(stored) => stored,
+        Err(error) => {
+            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    let (snapshot, inst) = stored;
+    crate::tool::applet::publish(&session_id, snapshot);
+    let message = crate::tool::applet::format_action_message(
+        &instance,
+        &inst.document.title,
+        &action,
+        &inst.document.state,
+        source_key.as_deref(),
+    );
+    if crate::tool::applet::deliver_to_waiter(&session_id, &instance, message.clone()) {
+        let _ = ctx.client_event_tx.send(ServerEvent::Done { id });
+        return;
+    }
+    handle_notify_session(id, session_id, message, ctx).await;
+}
+
+/// The user closed an agent applet. No agent wake.
+pub(super) fn handle_close_applet(
+    id: u64,
+    session_id: String,
+    instance: String,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    match crate::applets::close(&session_id, &instance) {
+        Ok((snapshot, _)) => {
+            crate::tool::applet::publish(&session_id, snapshot);
+            let _ = client_event_tx.send(ServerEvent::Done { id });
+        }
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+        }
+    }
+}
+
 pub(super) fn handle_input_shell(
     id: u64,
     command: String,
@@ -298,6 +358,7 @@ pub(super) fn handle_run_subagent(
             name: tool_name.clone(),
         });
         let _ = tx.send(ServerEvent::ToolInput {
+            id: Some(tool_call_id.clone()),
             delta: tool_input.to_string(),
         });
         let _ = tx.send(ServerEvent::ToolExec {
@@ -542,6 +603,75 @@ pub(super) async fn handle_set_feature(
     }
 }
 
+/// Bookmark or unbookmark the session. A save label is the name the user chose,
+/// so it doubles as the session title and is announced like a rename.
+pub(super) async fn handle_set_session_saved(
+    id: u64,
+    saved: bool,
+    label: Option<String>,
+    agent: &Arc<Mutex<Agent>>,
+    client_session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let result = agent.lock().await.set_session_saved(saved, label.clone());
+    if let Err(error) = result {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: crate::util::format_error_chain(&error),
+            retry_after_secs: None,
+        });
+        return;
+    }
+    crate::session_list_cache::invalidate();
+    let label = label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    if saved && label.is_some() {
+        let (session_id, display_title) = {
+            let agent = agent.lock().await;
+            (
+                agent.session_id().to_string(),
+                agent.session_display_title_or_name(),
+            )
+        };
+        broadcast_session_renamed(
+            swarm_members,
+            client_session_id,
+            client_event_tx,
+            ServerEvent::SessionRenamed {
+                session_id,
+                title: label.map(ToOwned::to_owned),
+                display_title,
+            },
+        )
+        .await;
+    }
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+async fn broadcast_session_renamed(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    client_session_id: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    event: ServerEvent,
+) -> usize {
+    let ServerEvent::SessionRenamed { session_id, .. } = &event else {
+        return 0;
+    };
+    let renamed_session_id = session_id.clone();
+    let mut delivered =
+        fanout_session_event(swarm_members, &renamed_session_id, event.clone()).await;
+    if renamed_session_id != client_session_id {
+        delivered += fanout_session_event(swarm_members, client_session_id, event.clone()).await;
+    }
+    if delivered == 0 {
+        let _ = client_event_tx.send(event);
+    }
+    delivered
+}
+
 pub(super) async fn handle_rename_session(
     id: u64,
     title: Option<String>,
@@ -603,14 +733,8 @@ pub(super) async fn handle_rename_session(
         title: normalized_title,
         display_title,
     };
-    let mut delivered =
-        fanout_session_event(swarm_members, &renamed_session_id, event.clone()).await;
-    if renamed_session_id != client_session_id {
-        delivered += fanout_session_event(swarm_members, client_session_id, event.clone()).await;
-    }
-    if delivered == 0 {
-        let _ = client_event_tx.send(event);
-    }
+    let delivered =
+        broadcast_session_renamed(swarm_members, client_session_id, client_event_tx, event).await;
     let _ = client_event_tx.send(ServerEvent::Done { id });
     crate::logging::event_info(
         "SESSION_LIFECYCLE",
@@ -655,12 +779,28 @@ pub(super) async fn handle_trigger_memory_extraction(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
-fn clone_split_session(parent_session_id: &str) -> anyhow::Result<(String, String)> {
-    let parent = Session::load(parent_session_id)?;
+fn clone_split_session(
+    parent_session_id: &str,
+    live_parent: Option<&Session>,
+) -> anyhow::Result<(String, String)> {
+    // Keep the persisted snapshot authoritative, including while the parent is
+    // busy. A brand-new Agent may not have saved anything yet, however. Only a
+    // missing snapshot permits an in-memory fallback, never corrupt/unreadable
+    // history or a session belonging to a different client.
+    let parent = Session::load(parent_session_id).or_else(|error| {
+        let missing = error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        match live_parent.filter(|parent| missing && parent.id == parent_session_id) {
+            Some(parent) => Ok(parent.clone()),
+            None => Err(error),
+        }
+    })?;
 
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.replace_messages(parent.messages.clone());
     child.compaction = parent.compaction.clone();
+    child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.status = crate::session::SessionStatus::Closed;
@@ -695,6 +835,7 @@ fn create_transfer_child_session(
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = compaction;
+    child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();
@@ -715,6 +856,7 @@ fn create_transfer_child_session(
 pub(super) async fn handle_split(
     id: u64,
     client_session_id: &str,
+    agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let started = Instant::now();
@@ -726,7 +868,16 @@ pub(super) async fn handle_split(
             ("session_id", client_session_id.to_string()),
         ],
     );
-    let (new_session_id, new_session_name) = match clone_split_session(client_session_id) {
+    // Splitting must remain available during a streaming turn. Never await the
+    // Agent lock: busy sessions can still fork their last persisted snapshot.
+    let result = {
+        let idle_agent = agent.try_lock().ok();
+        clone_split_session(
+            client_session_id,
+            idle_agent.as_ref().map(|agent| agent.session_for_split()),
+        )
+    };
+    let (new_session_id, new_session_name) = match result {
         Ok(result) => result,
         Err(e) => {
             crate::logging::event_warn(
@@ -954,7 +1105,8 @@ pub(super) async fn handle_resume_all_sessions(
         };
 
         // Only act on idle sessions; a busy session is already making progress.
-        let Ok(agent_guard) = agent.try_lock() else {
+        // The owned guard doubles as the turn reservation (#1152).
+        let Ok(agent_guard) = Arc::clone(&agent).try_lock_owned() else {
             skipped += 1;
             continue;
         };
@@ -973,7 +1125,6 @@ pub(super) async fn handle_resume_all_sessions(
             .session_short_name()
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
-        drop(agent_guard);
 
         // Best-effort: record that the durable recovery intent was delivered.
         if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
@@ -989,7 +1140,7 @@ pub(super) async fn handle_resume_all_sessions(
 
         super::live_turn::spawn_tracked_live_turn(
             &session_id,
-            Arc::clone(&agent),
+            agent_guard,
             String::new(),
             Some(reminder),
             None,

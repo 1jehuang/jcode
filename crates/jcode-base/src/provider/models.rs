@@ -205,15 +205,23 @@ fn current_anthropic_catalog_scope() -> String {
     // anthropic.env file. Checking only the env var made env-file-keyed
     // sessions read/write the OAuth scope while requests actually used the
     // API key, so the `api-key` catalog scope went permanently stale.
-    if crate::provider_catalog::load_api_key_from_env_or_config(
-        "ANTHROPIC_API_KEY",
-        "anthropic.env",
-    )
-    .is_some()
-    {
-        "api-key".to_string()
+    if super::anthropic::load_anthropic_api_key().is_ok() {
+        anthropic_catalog_scope_for_route(false)
     } else {
+        anthropic_catalog_scope_for_route(true)
+    }
+}
+
+/// Resolve a catalog scope for the credential route actually being used.
+/// API keys are fingerprinted so changing organizations cannot reuse access
+/// claims from a different key. OAuth refresh tokens never form cache keys.
+pub fn anthropic_catalog_scope_for_route(oauth: bool) -> String {
+    if oauth {
         format!("oauth::{}", current_claude_account_scope())
+    } else {
+        use sha2::{Digest, Sha256};
+        let key = super::anthropic::load_anthropic_api_key().unwrap_or_default();
+        format!("api-key::{:x}", Sha256::digest(key.as_bytes()))
     }
 }
 
@@ -251,7 +259,7 @@ fn openai_static_model_ids() -> Vec<String> {
 
     // Only advertise the explicit [1m] alias when the live catalog we fetched
     // says this backend exposes a >=1M context window for GPT-5.4.
-    if get_cached_context_limit("gpt-5.4").unwrap_or_default() >= 1_000_000 {
+    if cached_context_limit_for_model("gpt-5.4").unwrap_or_default() >= 1_000_000 {
         if let Some(index) = models.iter().position(|model| model == "gpt-5.4") {
             models.insert(index + 1, "gpt-5.4[1m]".to_string());
         } else {
@@ -307,7 +315,7 @@ fn model_exposes_1m_alias(normalized_model: &str) -> bool {
             return mode.exposes_1m_alias();
         }
     }
-    get_cached_context_limit(normalized_model).unwrap_or_default() >= 1_000_000
+    cached_context_limit_for_model(normalized_model).unwrap_or_default() >= 1_000_000
 }
 
 fn live_catalog_model_ids(service: &ModelCatalogService, scope: &str) -> Option<Vec<String>> {
@@ -375,6 +383,12 @@ fn persist_scoped_model_catalog(
         return;
     }
 
+    // Independently refreshed routes share one file. Serialize read-modify-write
+    // so simultaneous API/OAuth completions cannot discard the other's scope.
+    static STORE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = STORE_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
     let mut store = load_persisted_model_catalog_store(file_name).unwrap_or_default();
     store.scopes.insert(
         scope.to_string(),
@@ -421,8 +435,12 @@ fn hydrate_catalog_cache_from_disk(
 
 pub fn cached_anthropic_model_ids() -> Option<Vec<String>> {
     let scope = current_anthropic_catalog_scope();
-    live_catalog_model_ids(&ANTHROPIC_MODEL_CATALOG_SERVICE, &scope)
-        .or_else(|| load_anthropic_catalog_from_disk(&scope))
+    cached_anthropic_model_ids_for_scope(&scope)
+}
+
+pub fn cached_anthropic_model_ids_for_scope(scope: &str) -> Option<Vec<String>> {
+    live_catalog_model_ids(&ANTHROPIC_MODEL_CATALOG_SERVICE, scope)
+        .or_else(|| load_anthropic_catalog_from_disk(scope))
 }
 
 pub fn cached_openai_model_ids() -> Option<Vec<String>> {
@@ -463,9 +481,13 @@ pub fn persist_openai_model_catalog(catalog: &OpenAIModelCatalog) {
 }
 
 pub fn persist_anthropic_model_catalog(catalog: &AnthropicModelCatalog) {
+    persist_anthropic_model_catalog_for_scope(&current_anthropic_catalog_scope(), catalog);
+}
+
+pub fn persist_anthropic_model_catalog_for_scope(scope: &str, catalog: &AnthropicModelCatalog) {
     persist_scoped_model_catalog(
         ANTHROPIC_MODEL_CATALOG_CACHE_FILE,
-        &current_anthropic_catalog_scope(),
+        scope,
         &catalog.available_models,
         &catalog.context_limits,
         &HashMap::new(),
@@ -474,7 +496,7 @@ pub fn persist_anthropic_model_catalog(catalog: &AnthropicModelCatalog) {
 }
 
 /// Look up a cached context limit for a model.
-fn get_cached_context_limit(model: &str) -> Option<usize> {
+pub fn cached_context_limit_for_model(model: &str) -> Option<usize> {
     let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
     cache.get(model).copied()
 }
@@ -599,7 +621,7 @@ fn populate_account_models_for_scope(scope: &str, slugs: Vec<String>) {
     }
 }
 
-fn populate_anthropic_models_for_scope(scope: &str, slugs: Vec<String>) {
+pub fn populate_anthropic_models_for_scope(scope: &str, slugs: Vec<String>) {
     if slugs.is_empty() {
         return;
     }
@@ -683,7 +705,30 @@ pub(crate) fn merge_anthropic_model_ids(dynamic_models: Vec<String>) -> Vec<Stri
 }
 
 pub fn known_anthropic_model_ids() -> Vec<String> {
-    cached_anthropic_model_ids().unwrap_or_else(anthropic_static_model_ids)
+    let api = cached_anthropic_model_ids_for_scope(&anthropic_catalog_scope_for_route(false))
+        .or_else(|| {
+            super::anthropic::load_anthropic_api_key()
+                .is_ok()
+                .then(anthropic_static_model_ids)
+        });
+    let oauth = cached_anthropic_model_ids_for_scope(&anthropic_catalog_scope_for_route(true))
+        .or_else(|| {
+            auth::claude::load_credentials()
+                .is_ok()
+                .then(anthropic_static_model_ids)
+        });
+    if api.is_none() && oauth.is_none() {
+        return anthropic_static_model_ids();
+    }
+    let mut models = api.unwrap_or_default();
+    models.extend(oauth.unwrap_or_default());
+    models.sort();
+    models.dedup();
+    models
+}
+
+pub fn known_anthropic_model_ids_for_scope(scope: &str) -> Vec<String> {
+    cached_anthropic_model_ids_for_scope(scope).unwrap_or_else(anthropic_static_model_ids)
 }
 
 /// True when an OpenAI platform API key is configured (env or openai.env).
@@ -744,13 +789,18 @@ pub fn should_refresh_openai_model_catalog() -> bool {
 
 pub fn should_refresh_anthropic_model_catalog() -> bool {
     let scope = current_anthropic_catalog_scope();
-    if anthropic_model_cache_is_fresh(&scope) {
+    should_refresh_anthropic_model_catalog_for_scope(&scope)
+}
+
+pub fn should_refresh_anthropic_model_catalog_for_scope(scope: &str) -> bool {
+    let _ = cached_anthropic_model_ids_for_scope(scope);
+    if anthropic_model_cache_is_fresh(scope) {
         return false;
     }
-    if anthropic_model_catalog_refresh_throttled(&scope) {
+    if anthropic_model_catalog_refresh_throttled(scope) {
         return false;
     }
-    ANTHROPIC_MODEL_CATALOG_SERVICE.should_refresh(&scope)
+    ANTHROPIC_MODEL_CATALOG_SERVICE.should_refresh(scope)
 }
 
 pub fn begin_openai_model_catalog_refresh() -> bool {
@@ -760,9 +810,14 @@ pub fn begin_openai_model_catalog_refresh() -> bool {
 
 pub fn begin_anthropic_model_catalog_refresh() -> Option<String> {
     let scope = current_anthropic_catalog_scope();
-    ANTHROPIC_MODEL_CATALOG_SERVICE
-        .begin_refresh(&scope)
-        .then_some(scope)
+    begin_anthropic_model_catalog_refresh_for_scope(&scope).then_some(scope)
+}
+
+pub fn begin_anthropic_model_catalog_refresh_for_scope(scope: &str) -> bool {
+    // Hydrate before checking TTL so a fresh disk snapshot avoids a request,
+    // while a stale snapshot remains visible during background revalidation.
+    let _ = cached_anthropic_model_ids_for_scope(scope);
+    ANTHROPIC_MODEL_CATALOG_SERVICE.begin_refresh(scope)
 }
 
 pub fn finish_openai_model_catalog_refresh() {
@@ -948,6 +1003,25 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
     }
 }
 
+/// Clear the quota cooldown for the exact OpenAI account that was reset, even
+/// if the active account changed while confirmation or redemption was pending.
+/// `None` refers to the default scope, not the current active account.
+pub fn clear_openai_provider_unavailability_for_account_label(account_label: Option<&str>) {
+    let key = provider_runtime_scope_key("openai", account_label);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
+/// Clear the quota cooldown for the exact Claude login whose limits were reset.
+/// `None` refers to the active (or default) login.
+pub fn clear_claude_provider_unavailability_for_account_label(account_label: Option<&str>) {
+    let key = provider_runtime_scope_key("claude", account_label);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
 /// Clear all runtime model unavailability markers.
 pub fn clear_all_model_unavailability_for_account() {
     let scope = current_openai_account_scope();
@@ -1070,6 +1144,7 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
 /// Preferred model order for fallback selection.
 /// If the desired model isn't available, we try these in order.
 const OPENAI_MODEL_PREFERENCE: &[&str] = &[
+    "gpt-6-astra",
     "gpt-5.6-sol",
     "gpt-5.6-pro",
     "gpt-5.6",
@@ -1118,7 +1193,11 @@ pub fn context_limit_for_model_with_provider(
     model: &str,
     provider_hint: Option<&str>,
 ) -> Option<usize> {
-    context_limit_for_model_with_provider_and_cache(model, provider_hint, get_cached_context_limit)
+    context_limit_for_model_with_provider_and_cache(
+        model,
+        provider_hint,
+        cached_context_limit_for_model,
+    )
 }
 
 pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> ModelCapabilities {

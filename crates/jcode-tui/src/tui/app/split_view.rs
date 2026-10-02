@@ -120,6 +120,7 @@ impl App {
             title: SPLIT_VIEW_TITLE.to_string(),
             file_path: "split://chat-mirror".to_string(),
             format: SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: SidePanelPageSource::Ephemeral,
             content: if self.split_view_markdown.trim().is_empty() {
                 split_view_placeholder_markdown()

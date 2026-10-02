@@ -75,6 +75,7 @@ workspace_right = "alt+l"
 side_panel_toggle = "alt+m"
 copy_selection_toggle = "alt+y"
 diagram_pane_toggle = "alt+t"
+diagram_pane_visibility_toggle = "alt+shift+m"
 typing_scroll_lock_toggle = "alt+s"
 diff_mode_cycle = "alt+g"
 info_widget_toggle = "alt+i"
@@ -100,6 +101,11 @@ swarm_panel_focus = "alt+n"
 # Default: Cmd+B on macOS, Alt+R on Windows/Linux. Set "" to disable.
 # open_resume = "cmd+b"
 
+# Built-in voice input: press to record, press again to send the transcript.
+# Esc cancels. Needs a Nari API key (NARI_API_KEY or ~/.config/jcode/nari.env).
+# Default: Ctrl+Space. Set "" to disable.
+# voice_input = "ctrl+space"
+
 # /resume picker Enter behavior. Options: "current-terminal" or "new-terminal".
 # By default Enter resumes in this terminal; Ctrl+Enter performs the alternate action.
 session_picker_enter = "current-terminal"
@@ -123,8 +129,17 @@ key = "off"
 # Max seconds to wait for the dictation command to finish (0 = no timeout)
 timeout_secs = 90
 
+# Extra names or terms to help built-in voice transcription recognize them.
+# Jcode's own product names are always included.
+# vocabulary = ["Kubernetes", "Alice Zhang"]
+
+# Microphone recorder for built-in voice input (keybindings.voice_input).
+# Empty auto-detects pw-record, parecord, arecord, rec (SoX), or ffmpeg.
+# A custom command must print raw mono 16 kHz signed 16-bit little-endian PCM.
+# recorder = "arecord -q -t raw -f S16_LE -r 16000 -c 1 -"
+
 [display]
-# Diff display mode: "off", "inline" (default), "full-inline", "pinned" (dedicated pane), or "file"
+# Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"
 
 # Center all content by default (default: false)
@@ -136,10 +151,6 @@ pin_images = true
 # Pin the full session todo list to the top of the chat transcript while it
 # scrolls, like the sticky previous-prompt preview (default: false)
 # pin_todos = true
-
-# Wrap long lines in the pinned diff pane (default: true)
-# Set to false for horizontal scrolling instead of wrapping
-diff_line_wrap = true
 
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
@@ -220,12 +231,6 @@ prompt_entry_animation = true
 # (default: true). Set false to list only jcode's own sessions.
 # external_sessions = true
 
-# Overscroll status line (model/provider/context info below the input):
-#   "overscroll" - elastic reveal when scrolling past the bottom (default)
-#   "on"         - always visible
-#   "off"        - never shown
-# overscroll_status = "overscroll"
-
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
 # Legacy aliases such as "three_rings" and "gyroscope" are still accepted.
@@ -296,7 +301,15 @@ kv_cache_miss_notices = true
 update_channel = "stable"
 
 [websearch]
-# Preferred websearch engine: "duckduckgo", "bing", or "searxng".
+# Use the model provider's own server-side search (Anthropic web_search on the
+# first-party API, OpenAI Responses web_search) whenever the active
+# provider/model supports it. Searches then run on the provider's side, so they
+# work on servers where DuckDuckGo/Bing scraping is blocked and need no extra
+# key. Providers without native search use the local engines below.
+# Anthropic API keys are billed about $10 per 1,000 searches.
+prefer_native = true
+# Local websearch engine: "duckduckgo", "bing", "searxng", or "native"
+# ("native" forces prefer_native on and otherwise runs fallback_engines).
 engine = "duckduckgo"
 # Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
 fallback_engines = ["bing"]
@@ -313,6 +326,16 @@ bing_market = "en-US"
 # this. Configure here or via the JCODE_SEARXNG_URL environment variable, then
 # set engine = "searxng" or add it to fallback_engines.
 # searxng_url = "https://searx.example.org"
+# Native search options (prefer_native):
+# Max provider searches per request (Anthropic only). Caps spend. 0 = no cap.
+# native_max_uses = 5
+# Restrict results to these domains (Anthropic and OpenAI), or block domains
+# (Anthropic only). Set one list, not both.
+# native_allowed_domains = ["docs.rs", "developer.mozilla.org"]
+# native_blocked_domains = ["example.com"]
+# Anthropic tool version. "web_search_20260209" and newer are sent with
+# allowed_callers = ["direct"].
+# native_anthropic_tool_version = "web_search_20250305"
 
 [tools]
 # Controls which built-in tools are sent to the model.
@@ -329,10 +352,15 @@ profile = "full"
 # disabled = ["browser", "gmail", "swarm"]
 # Disable all built-in tools unless enabled is set.
 disable_base_tools = false
-# MCP tool exposure: "eager" sends every server tool definition, "deferred"
-# sends only fixed mcp_search/mcp_call tools, and "auto" switches to deferred
-# when the filtered MCP definitions exceed the token threshold below.
-# Env overrides: JCODE_MCP_TOOLS, JCODE_MCP_TOOLS_TOKEN_THRESHOLD.
+# MCP tool exposure. "auto" never changes the cached tool list when MCP
+# servers connect, reconnect, or register late, so the provider prompt cache
+# survives: Claude and OpenAI (gpt-5.4+) load MCP tools natively as deferred
+# definitions; other providers use fixed mcp_search/mcp_call tools and learn
+# new tools' schemas from the transcript. "deferred" behaves like "auto".
+# "eager" sends every server tool definition in the tool list; adding a
+# server mid-session then invalidates the whole prompt cache.
+# Env overrides: JCODE_MCP_TOOLS. mcp_tools_token_threshold is ignored and
+# kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
 
@@ -348,7 +376,7 @@ tool_profile = "acp"
 [provider]
 # Default model (optional, uses provider default if not set)
 # Set via /model picker with Ctrl+B to save as default
-# default_model = "claude-opus-5"
+# default_model = "claude-opus-5-5"
 # Default provider (optional: claude|anthropic-api|openai|openai-api|copilot|openrouter|...)
 # When set, this provider is preferred on startup if available.
 #   claude        = Claude via OAuth/subscription (token in ~/.jcode/auth.json)
@@ -404,15 +432,39 @@ cross_provider_failover = "countdown"
 # max_retries = 8
 # retry_backoff_cap_secs = 30
 
+[server]
+# Who executes autonomous wake requests from background completion/stall,
+# swarm await completion, and communication delivery.
+# "internal" starts or interrupts turns in the daemon (default).
+# "external" emits typed wake_requested events for an operator to handle and
+# never starts a turn or injects into a running turn.
+# Env override: JCODE_WAKE_MODE
+wake_mode = "internal"
+
 [agents]
-# Defaults for spawned helper agents (swarm workers, subagents, sidecars).
+# Swarm root settings and defaults for helper agents (workers, subagents, sidecars).
 # All keys are optional; the values below are the built-in defaults.
 #
 # Default model for spawned swarm/subagent sessions.
 # Leave unset (or "inherit"/"coordinator") so workers inherit the model of the
-# session that spawned them. Set a concrete model only to pin every worker to it.
+# session that spawned them. Set a concrete model to change the worker default.
+# An explicit `model` in the swarm tool overrides this default for new workers.
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
+#
+# Default reasoning effort for spawned swarm workers when the spawn call does
+# not pass an explicit `effort` ("low", "medium", "high", ...). Leave unset so
+# workers inherit the provider-wide reasoning effort.
+# Env override: JCODE_SWARM_EFFORT
+# swarm_effort = "medium"
+#
+# Root model reasoning while /effort swarm or /effort swarm-deep is selected.
+# These are independent of worker swarm_effort. Supported levels:
+# none|minimal|low|medium|high|xhigh|max. Unset/invalid = max (model maximum).
+# Providers map unsupported levels to their supported range.
+# Env overrides: JCODE_SWARM_ROOT_EFFORT, JCODE_SWARM_DEEP_ROOT_EFFORT
+swarm_root_effort = "max"
+swarm_deep_root_effort = "max"
 #
 # How swarm-created agents are spawned:
 #   "inline"   - in-process (no window), shown as a live gallery viewport in the coordinator (default)
@@ -442,42 +494,28 @@ swarm_max_concurrent_agents = 32
 # Env override: JCODE_SWARM_STRIP_LAYOUT
 # swarm_strip_layout = "vertical"
 #
-# Model for the memory sidecar (relevance/extraction). Unset = sidecar auto-select
+# Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
+# Provider values: auto, jcode, openrouter, typesafe, aimlapi.
+# auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.
+# Env override: JCODE_MEMORY_JEV_PROVIDER
+# memory_jev_provider = "auto"
+# Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
+# memory_jev_threshold = 0.8
+# BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.
+# Jcode requires an eligible subscription and gateway memory_jev capability.
+# With a Jcode login and an older gateway, explicitly select a BYOK provider.
+# No fallback after entitlement, auth, billing, or network failure; no silent BYOK spend.
+# Memories remain local; the query and candidate memories go to the selected provider.
+# No keys? Local memory list/search/remember/forget still work.
+#
+# Optional text-generating extraction is separate from recall. Disable it to
+# learn only through the main agent's explicit memory writes.
 # (OpenAI defaults to gpt-5.6-luna with reasoning effort "none").
-# Env override: JCODE_MEMORY_MODEL
-# memory_model = "gpt-5.6-luna"
-#
-# Whether the memory sidecar (LLM precision judge) handles relevance/extraction.
-# Default true: the LLM precision-judge path is the only reliably productive
-# memory mode. Set false only to opt into the lower-precision no-LLM hybrid path.
-# When this is true but no LLM backend is reachable (logged out), memory goes
-# dormant instead of degrading to the no-LLM path. Env: JCODE_MEMORY_SIDECAR_ENABLED
+# Env overrides: JCODE_MEMORY_SIDECAR_ENABLED, JCODE_MEMORY_MODEL
 # memory_sidecar_enabled = true
-#
-# Minimum turns between Mode-2 memory reranks (cadence floor). The expensive
-# listwise LLM rerank runs at most once per this many turns; skipped turns fall
-# back to hybrid-ordered surfacing. A topic change always forces a rerank. Set 1
-# to rerank every turn. Default 3.
-# memory_rerank_cadence = 3
-#
-# High-precision consensus rerank: run N independent LLM judges per fired rerank
-# and inject only memories that >= memory_rerank_min_agree of them agree on.
-# Default 2 judges / 2 agreement -> injection precision ~1.0 with ~100% clean
-# (zero memory) on no-memory turns, at 2 LLM calls per fired turn. Set votes=1
-# for the cheaper single-judge path (precision ~0.77).
-# memory_rerank_votes = 2
-# memory_rerank_min_agree = 2
-#
-# Embedding backend for memory dense-retrieval. "local" (default) uses the
-# bundled all-MiniLM-L6-v2 ONNX model (no network); "openai" uses a remote
-# OpenAI / OpenAI-compatible /v1/embeddings endpoint (requires OPENAI_API_KEY;
-# silently falls back to local when no key is found). Vectors from different
-# models live in separate spaces and are never compared, so switching is safe.
-# Env override: JCODE_MEMORY_EMBEDDING_BACKEND
-# memory_embedding_backend = "local"
-# memory_embedding_model = "text-embedding-3-small"
-# memory_embedding_base_url = "https://api.openai.com/v1"
-# memory_embedding_dim = 1536
+# memory_model = "gpt-5.6-luna"
+# Legacy memory_rerank_* and memory_embedding_* settings are accepted for
+# backwards compatibility, but have no effect on Jev recall.
 
 [terminal]
 # Without a hook, clients inside tmux automatically use a right-side pane.
@@ -543,6 +581,11 @@ swarm_max_concurrent_agents = 32
 # turn_complete_sound = "Glass"
 
 [hooks]
+# Synchronous tool-input transformers. Each receives the tool input JSON on
+# stdin and may print replacement JSON on stdout. Failures and empty output
+# retain the original input. Transformers run before pre_tool policy gates.
+# pre_tool_transform = ["~/.jcode/plugins/rtk-transform"]
+# pre_tool_transform_timeout_ms = 500
 # Lifecycle hooks: external commands jcode runs at well-defined points so other
 # programs can observe or gate agent behavior. Commands are parsed shell-style
 # (quotes work) but executed directly, with JCODE_HOOK_* env vars describing
@@ -626,11 +669,17 @@ bind_addr = "0.0.0.0"
 
 [power]
 # Prevent automatic system sleep while any jcode session is actively working.
-# Linux also blocks lid-switch suspend. Windows still respects explicit lid-close
-# and power-button actions from your active power plan. The display may sleep.
+# Linux also blocks lid-switch suspend. On Windows and macOS see block_lid_close.
+# The display may sleep.
 # The guard is held only for as long as work is in flight. (default: true)
 # Set JCODE_DISABLE_POWER_INHIBIT=1 to force-disable regardless of this setting.
 prevent_sleep_while_streaming = true
+# Also keep working when the lid closes on macOS and Windows while a session is
+# working. Windows temporarily sets the power plan's lid close action to "Do
+# nothing". macOS runs `sudo -n pmset -a disablesleep 1` and needs a passwordless
+# sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
+# saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
+block_lid_close = true
 
 [safety]
 # Notification settings for ambient mode events

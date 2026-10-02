@@ -68,6 +68,8 @@ pub fn anthropic_api_pricing_with_tier(
     }
 
     match base {
+        "claude-opus-5-5" => exact(4.0, 20.0, 0.20, "Anthropic API pricing"),
+        "claude-fable-5-1" => exact(10.0, 50.0, 0.25, "Anthropic API pricing"),
         "claude-fable-5" => exact(10.0, 50.0, 1.0, "Anthropic API pricing"),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
         | "claude-opus-4-5" => exact(5.0, 25.0, 0.5, "Anthropic API pricing"),
@@ -174,6 +176,7 @@ pub fn openai_api_pricing_with_tier(
         .as_deref()
     {
         Some("priority") => match base {
+            "gpt-6-astra" => return exact(20.0, 100.0, Some(2.0), "OpenAI API fast pricing"),
             "gpt-5.5" => return exact(12.5, 75.0, Some(1.25), "OpenAI API priority pricing"),
             "gpt-5.4" => return exact(5.0, 30.0, Some(0.5), "OpenAI API priority pricing"),
             "gpt-5.4-mini" => return exact(1.5, 9.0, Some(0.15), "OpenAI API priority pricing"),
@@ -181,6 +184,7 @@ pub fn openai_api_pricing_with_tier(
             _ => {}
         },
         Some("flex") => match base {
+            "gpt-6-astra" => return exact(5.0, 25.0, Some(0.5), "OpenAI API flex pricing"),
             "gpt-5.5" => return exact(2.5, 15.0, Some(0.25), "OpenAI API flex pricing"),
             "gpt-5.5-pro" => return exact(15.0, 90.0, None, "OpenAI API flex pricing"),
             "gpt-5.4" => return exact(1.25, 7.5, Some(0.13), "OpenAI API flex pricing"),
@@ -193,6 +197,9 @@ pub fn openai_api_pricing_with_tier(
     }
 
     match base {
+        // Verified 2026-09-07: https://developers.openai.com/api/docs/models/gpt-6-astra
+        // The caller applies the >272K-input surcharge using actual request usage.
+        "gpt-6-astra" => exact(10.0, 50.0, Some(1.0), "OpenAI API pricing"),
         "gpt-5.5" => exact(5.0, 30.0, Some(0.5), "OpenAI API pricing"),
         "gpt-5.5-pro" | "gpt-5.4-pro" => exact(30.0, 180.0, None, "OpenAI API pricing"),
         "gpt-5.4" => exact(2.5, 15.0, Some(0.25), "OpenAI API pricing"),
@@ -293,6 +300,16 @@ mod tests {
     use crate::RouteBillingKind;
 
     #[test]
+    fn opus_55_published_pricing_includes_discounted_cache_reads() {
+        for model in ["claude-opus-5-5", "claude-opus-5-5[1m]"] {
+            let pricing = anthropic_api_pricing(model).expect("Opus 5.5 pricing");
+            assert_eq!(pricing.input_price_per_mtok_micros, Some(4_000_000));
+            assert_eq!(pricing.output_price_per_mtok_micros, Some(20_000_000));
+            assert_eq!(pricing.cache_read_price_per_mtok_micros, Some(200_000));
+        }
+    }
+
+    #[test]
     fn anthropic_api_pricing_long_context_uses_standard_rates() {
         // Anthropic includes the 1M context window at standard pricing, so the
         // `[1m]` suffix must not change the estimate.
@@ -319,6 +336,11 @@ mod tests {
         assert_eq!(fable.input_price_per_mtok_micros, Some(10_000_000));
         assert_eq!(fable.output_price_per_mtok_micros, Some(50_000_000));
         assert_eq!(fable.cache_read_price_per_mtok_micros, Some(1_000_000));
+
+        let fable_51 = anthropic_api_pricing("claude-fable-5-1").expect("priced model");
+        assert_eq!(fable_51.input_price_per_mtok_micros, Some(10_000_000));
+        assert_eq!(fable_51.output_price_per_mtok_micros, Some(50_000_000));
+        assert_eq!(fable_51.cache_read_price_per_mtok_micros, Some(250_000));
 
         let sonnet = anthropic_api_pricing("claude-sonnet-4-6").expect("priced model");
         assert_eq!(sonnet.input_price_per_mtok_micros, Some(3_000_000));
@@ -396,6 +418,20 @@ mod tests {
             openai_api_pricing_with_tier("gpt-5.4", None),
             openai_api_pricing("gpt-5.4")
         );
+    }
+
+    #[test]
+    fn astra_public_api_rates_cover_standard_flex_and_fast() {
+        for (tier, input, output, cached) in [
+            (None, 10_000_000, 50_000_000, 1_000_000),
+            (Some("flex"), 5_000_000, 25_000_000, 500_000),
+            (Some("priority"), 20_000_000, 100_000_000, 2_000_000),
+        ] {
+            let price = openai_api_pricing_with_tier("gpt-6-astra", tier).unwrap();
+            assert_eq!(price.input_price_per_mtok_micros, Some(input));
+            assert_eq!(price.output_price_per_mtok_micros, Some(output));
+            assert_eq!(price.cache_read_price_per_mtok_micros, Some(cached));
+        }
     }
 
     #[test]

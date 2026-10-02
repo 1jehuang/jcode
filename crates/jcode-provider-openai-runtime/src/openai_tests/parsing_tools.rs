@@ -111,35 +111,35 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
     let mut pending = VecDeque::new();
 
     let added = r#"{"type":"response.output_item.added","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"batch","arguments":""}}"#;
-    assert!(
-        parse_openai_response_event(
-            added,
-            &mut saw_text_delta,
-            &mut saw_thinking_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        )
-        .is_none(),
-        "output_item.added should just seed tool state"
-    );
+    let first = parse_openai_response_event(
+        added,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("tool name must be emitted at output_item.added");
+    assert!(matches!(first, StreamEvent::ToolUseStart { id, name }
+        if id == "call_123" && name == "batch"));
+    assert!(pending.is_empty());
 
     let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_123","delta":"{\"tool_calls\":[{\"tool\":\"read\"}]"}"#;
-    assert!(
-        parse_openai_response_event(
-            delta,
-            &mut saw_text_delta,
-            &mut saw_thinking_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        )
-        .is_none(),
-        "argument delta should accumulate state only"
-    );
+    let event = parse_openai_response_event(
+        delta,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("argument fragments must stream before completion");
+    assert!(matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta }
+        if id == "call_123" && delta == r#"{"tool_calls":[{"tool":"read"}]"#));
+    assert!(pending.is_empty());
 
     let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[{\"tool\":\"read\"}]}"}"#;
-    let first = parse_openai_response_event(
+    let event = parse_openai_response_event(
         done,
         &mut saw_text_delta,
         &mut saw_thinking_delta,
@@ -147,29 +147,10 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
         &mut completed_tool_items,
         &mut pending,
     )
-    .expect("expected tool start");
-
-    match first {
-        StreamEvent::ToolUseStart { id, name } => {
-            assert_eq!(id, "call_123");
-            assert_eq!(name, "batch");
-        }
-        other => panic!("expected ToolUseStart, got {:?}", other),
-    }
-
-    match pending.pop_front() {
-        Some(StreamEvent::ToolInputDelta(delta)) => {
-            let parsed: Value = serde_json::from_str(&delta).expect("valid args json");
-            let tool_calls = parsed
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .expect("tool_calls array");
-            assert_eq!(tool_calls.len(), 1);
-        }
-        other => panic!("expected ToolInputDelta, got {:?}", other),
-    }
-
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+    .expect("only the unstreamed suffix should be emitted");
+    assert!(matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta } if id == "call_123" && delta == "}"));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_123"));
+    assert!(pending.is_empty());
     assert!(streaming_tool_calls.is_empty());
     assert!(completed_tool_items.contains("fc_123"));
 }
@@ -194,7 +175,7 @@ fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_d
 
     assert!(event.is_none(), "duplicate function call should be skipped");
     assert!(pending.is_empty());
-    assert!(!completed_tool_items.contains("fc_123"));
+    assert!(completed_tool_items.contains("fc_123"));
 }
 
 #[test]
@@ -207,7 +188,7 @@ fn test_tool_call_chain_reset_survives_duplicate_output_item_done() {
     let mut response_tool_call_count = 0usize;
 
     let added = r#"{"type":"response.output_item.added","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"batch","arguments":""}}"#;
-    assert!(parse_openai_response_event(
+    let event = parse_openai_response_event(
         added,
         &mut saw_text_delta,
         &mut saw_thinking_delta,
@@ -215,7 +196,15 @@ fn test_tool_call_chain_reset_survives_duplicate_output_item_done() {
         &mut completed_tool_items,
         &mut pending,
     )
-    .is_none());
+    .expect("tool start must be emitted at output_item.added");
+    if stream_event_starts_tool_call(&event) {
+        response_tool_call_count += 1;
+    }
+
+    assert_eq!(response_tool_call_count, 1);
+    assert!(persistent_ws_response_requires_chain_reset(
+        response_tool_call_count
+    ));
 
     let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[]}"}"#;
     let event = parse_openai_response_event(
@@ -226,7 +215,7 @@ fn test_tool_call_chain_reset_survives_duplicate_output_item_done() {
         &mut completed_tool_items,
         &mut pending,
     )
-    .expect("expected tool start");
+    .expect("expected tool end for empty arguments");
     if stream_event_starts_tool_call(&event) {
         response_tool_call_count += 1;
     }
@@ -248,7 +237,7 @@ fn test_tool_call_chain_reset_survives_duplicate_output_item_done() {
     );
 
     assert!(duplicate.is_none(), "duplicate function call should be skipped");
-    assert!(!completed_tool_items.contains("fc_123"));
+    completed_tool_items.clear();
     assert!(
         persistent_ws_response_requires_chain_reset(response_tool_call_count),
         "reset decision must not depend on completed_tool_items still retaining the id"
@@ -477,6 +466,7 @@ fn test_build_tools_sets_strict_true() {
             "required": ["command"],
             "properties": { "command": { "type": "string" } }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools.len(), 1);
@@ -505,6 +495,7 @@ fn test_build_tools_disables_strict_for_free_form_object_nodes() {
                 }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools.len(), 1);
@@ -537,6 +528,7 @@ fn test_build_tools_normalizes_object_schema_additional_properties() {
             },
             "required": ["path"]
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(
@@ -582,6 +574,7 @@ fn test_build_tools_rewrites_oneof_to_anyof_for_openai() {
                 }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert!(api_tools[0]["parameters"]["properties"]["tool_calls"]["items"]["oneOf"].is_null());
@@ -623,6 +616,7 @@ fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
                 "wake_at": { "type": "string" }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
@@ -668,10 +662,13 @@ fn test_handle_openai_output_item_normalizes_null_arguments() {
         _ => panic!("expected ToolUseStart"),
     }
     match pending.pop_front() {
-        Some(StreamEvent::ToolInputDelta(delta)) => assert_eq!(delta, "{}"),
-        _ => panic!("expected ToolInputDelta"),
+        Some(StreamEvent::ToolInputDeltaFor { id, delta }) => {
+            assert_eq!(id, "call_1");
+            assert_eq!(delta, "{}");
+        }
+        _ => panic!("expected ToolInputDeltaFor"),
     }
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_1"));
 }
 
 #[test]
@@ -710,7 +707,7 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
             StreamEvent::ToolUseStart { name, .. } if name == "batch" => {
                 saw_tool = true;
             }
-            StreamEvent::ToolInputDelta(delta) => {
+            StreamEvent::ToolInputDeltaFor { delta, .. } => {
                 let args: Value = serde_json::from_str(&delta).expect("valid tool args");
                 let calls = args
                     .get("tool_calls")

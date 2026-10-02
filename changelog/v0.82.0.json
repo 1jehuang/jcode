@@ -1,0 +1,24 @@
+{
+  "version": "0.82.0",
+  "date": "2026-09-06",
+  "title": "Faster starts and richer session controls",
+  "highlights": [
+    "OpenAI Responses WebSocket connections now warm up while sessions are idle and before request preparation, reducing time to the first response",
+    "Click images in the side panel to open an enlarged preview",
+    "Rust and TypeScript SDKs can include image attachments in soft interrupts, and interrupts sent to idle sessions now start a response immediately"
+  ],
+  "improvements": [
+    "Swarm workers can use an explicit model override or inherit the coordinator model",
+    "Configure MCP request timeouts separately for each server with timeout_secs",
+    "Headless and browser-suppressed login flows display a QR code for signing in on another device"
+  ],
+  "fixes": [
+    "Reattaching to a session preserves its saved working directory",
+    "Fast service-tier selections remain visible after reconnecting or refreshing the model catalog",
+    "Mouse-wheel scrolling works on the hovered diagram without first moving keyboard focus",
+    "Idle session disconnects are no longer incorrectly marked as crashes",
+    "Repeated ownership completion checks no longer interrupt unchanged sessions",
+    "Remote turns report actual context compaction metrics",
+    "Reduce retained memory from session tool policies, batch tools, and MCP registries"
+  ]
+}

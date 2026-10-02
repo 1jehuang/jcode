@@ -68,6 +68,23 @@ impl App {
         let mut lines = vec!["OpenAI Accounts:".to_string(), String::new()];
         lines.extend(format_account_table(&headers, &rows));
         lines.push(String::new());
+        lines.push("## ChatGPT OAuth API-equivalent usage".to_string());
+        lines.push("Today is since local midnight. Lifetime is recorded Jcode usage, not your subscription bill or all ChatGPT activity.".to_string());
+        for account in &accounts {
+            lines.push(String::new());
+            lines.push(format!(
+                "### {} (`{}`)",
+                account_display_name("OpenAI", &account.label, accounts.len()),
+                account.label
+            ));
+            for (label, value) in
+                crate::provider_activity::openai_oauth_usage_summary(&account.label)
+            {
+                lines.push(format!("- **{label}:** {value}"));
+            }
+        }
+
+        lines.push(String::new());
         lines.push(
             "Commands: /account openai switch <label>, /account openai add, /account openai remove <label>"
                 .to_string(),
@@ -216,16 +233,19 @@ impl App {
             } else {
                 ""
             };
-            items.push(crate::tui::account_picker::AccountPickerItem::action(
-                provider.id,
-                provider.display_name,
-                format!("Switch {display_name}"),
-                format!("{email} - {status} - acct {account_id}{active_suffix}"),
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                    "/account {} switch {}",
-                    provider.id, label
-                )),
-            ));
+            items.push(
+                crate::tui::account_picker::AccountPickerItem::action(
+                    provider.id,
+                    provider.display_name,
+                    format!("Switch {display_name}"),
+                    format!("{email} - {status} - acct {account_id}{active_suffix}"),
+                    crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
+                        "/account {} switch {}",
+                        provider.id, label
+                    )),
+                )
+                .with_details(openai_account_usage_details(&label)),
+            );
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
@@ -248,6 +268,16 @@ impl App {
             ));
         }
     }
+}
+
+/// Keep full usage out of compact list subtitles, which are intentionally truncated.
+fn openai_account_usage_details(label: &str) -> Vec<(String, String)> {
+    let mut details = vec![(
+        "Full usage details".to_string(),
+        "/account openai settings".to_string(),
+    )];
+    details.extend(crate::provider_activity::openai_oauth_usage_summary(label));
+    details
 }
 
 /// A provider name is enough when there is only one login. Animal names are
@@ -279,31 +309,6 @@ pub(super) fn anthropic_account_use(subscription_type: Option<&str>) -> &'static
     }
 }
 
-#[cfg(test)]
-mod account_display_tests {
-    use super::*;
-
-    #[test]
-    fn animals_only_distinguish_duplicate_provider_logins() {
-        assert_eq!(account_display_name("Claude", "claude-otter", 1), "Claude");
-        assert_eq!(
-            account_display_name("Claude", "claude-otter", 2),
-            "Claude Otter"
-        );
-        assert_eq!(
-            account_display_name("Claude", "claude-fox", 2),
-            "Claude Fox"
-        );
-    }
-
-    #[test]
-    fn known_anthropic_plans_identify_personal_and_work_accounts() {
-        assert_eq!(anthropic_account_use(Some("max")), "personal");
-        assert_eq!(anthropic_account_use(Some("team")), "work");
-        assert_eq!(anthropic_account_use(None), "unknown");
-    }
-}
-
 fn format_account_table(headers: &[&str; 5], rows: &[[String; 5]]) -> Vec<String> {
     let mut widths = [0usize; 5];
     for (i, h) in headers.iter().enumerate() {
@@ -331,4 +336,29 @@ fn format_account_table(headers: &[&str; 5], rows: &[[String; 5]]) -> Vec<String
         lines.push(render_row(row));
     }
     lines
+}
+
+#[cfg(test)]
+mod account_display_tests {
+    use super::*;
+
+    #[test]
+    fn animals_only_distinguish_duplicate_provider_logins() {
+        assert_eq!(account_display_name("Claude", "claude-otter", 1), "Claude");
+        assert_eq!(
+            account_display_name("Claude", "claude-otter", 2),
+            "Claude Otter"
+        );
+        assert_eq!(
+            account_display_name("Claude", "claude-fox", 2),
+            "Claude Fox"
+        );
+    }
+
+    #[test]
+    fn known_anthropic_plans_identify_personal_and_work_accounts() {
+        assert_eq!(anthropic_account_use(Some("max")), "personal");
+        assert_eq!(anthropic_account_use(Some("team")), "work");
+        assert_eq!(anthropic_account_use(None), "unknown");
+    }
 }

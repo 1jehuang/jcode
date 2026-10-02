@@ -69,13 +69,9 @@ impl MultiProvider {
                     anthropic
                         .complete(messages, tools, system, resume_session_id)
                         .await
-                } else if let Some(claude) = self.claude_provider() {
-                    claude
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
                 } else {
                     Err(anyhow::anyhow!(
-                        "Claude credentials not available. Run `claude` to log in."
+                        "Claude credentials not available. Run `jcode login --provider claude` to log in."
                     ))
                 }
             }
@@ -198,19 +194,9 @@ impl MultiProvider {
                             resume_session_id,
                         )
                         .await
-                } else if let Some(claude) = self.claude_provider() {
-                    claude
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
                 } else {
                     Err(anyhow::anyhow!(
-                        "Claude credentials not available. Run `claude` to log in."
+                        "Claude credentials not available. Run `jcode login --provider claude` to log in."
                     ))
                 }
             }

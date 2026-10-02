@@ -1,0 +1,16 @@
+{
+  "version": "0.84.0",
+  "date": "2026-09-06",
+  "title": "Clearer remote login onboarding",
+  "highlights": [
+    "Connecting to an SSH host now asks a plain yes-or-no question before offering to import a local OpenAI or Claude login"
+  ],
+  "improvements": [
+    "The remote login picker lists the providers the host actually supports, with local imports shown as explicit choices",
+    "Remote login status is sanitized before display, so host credential details are never echoed back"
+  ],
+  "fixes": [
+    "Pasted input while choosing a login stays in the active picker instead of leaking into the prompt",
+    "Remote hosts configured with an unrecognized provider are reported as unknown rather than signed in"
+  ]
+}

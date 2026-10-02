@@ -78,7 +78,7 @@ fn the_daemons_own_formatter_round_trips() {
             current: Some(37),
             total: Some(100),
             unit: Some("crates".into()),
-            message: Some("Running jcode-desktop2 tests".into()),
+            message: Some("Running jcode-tui tests".into()),
             eta_seconds: Some(90),
             kind: BackgroundTaskProgressKind::Determinate,
             source: BackgroundTaskProgressSource::Reported,
@@ -91,7 +91,7 @@ fn the_daemons_own_formatter_round_trips() {
     assert_eq!(parsed.label, "workspace tests");
     assert_eq!(parsed.percent, Some(37.0));
     assert!(
-        parsed.summary.contains("Running jcode-desktop2 tests"),
+        parsed.summary.contains("Running jcode-tui tests"),
         "the status line was lost: {rendered}"
     );
     assert!(!parsed.done);

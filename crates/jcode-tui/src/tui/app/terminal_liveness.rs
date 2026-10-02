@@ -13,8 +13,10 @@
 //! field of `/proc/self/stat` against the value captured at startup: when the
 //! controlling terminal is torn down the kernel resets `tty_nr` to 0 while
 //! the stale fd 0 still reports `isatty=true`, so this is a strictly stronger
-//! signal than `IsTerminal`. On other platforms it conservatively reports
-//! `false` and orphan exit relies on SIGHUP alone.
+//! signal than `IsTerminal`. On macOS, where `/proc` is unavailable and closing
+//! a terminal window does not reliably deliver SIGHUP, it probes the foreground
+//! process group of the controlling TTY. A revoked PTY makes `tcgetpgrp` fail,
+//! which lets the event loops terminate instead of keeping the window alive.
 
 use std::sync::OnceLock;
 
@@ -52,7 +54,22 @@ fn current_tty_nr() -> Option<u64> {
     parse_tty_nr(&stat)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn current_tty_nr() -> Option<u64> {
+    // `isatty` alone is insufficient here: Darwin may leave the stale file
+    // descriptor looking like a TTY after Terminal.app or another emulator has
+    // closed its window. Querying the PTY itself fails with ENOTTY/EIO once it
+    // has been revoked. Map that failure to zero to match Linux's lost-tty
+    // sentinel used by `terminal_abandoned` above.
+    let foreground_pgrp = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+    if foreground_pgrp < 0 {
+        Some(0)
+    } else {
+        Some(foreground_pgrp as u64)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn current_tty_nr() -> Option<u64> {
     None
 }

@@ -103,6 +103,12 @@ impl App {
     }
 
     fn inline_picker_preview_request(&self, input: &str) -> Option<InlinePickerPreviewRequest> {
+        if crate::tui::is_ssh_remote() {
+            // Do not read local auth/account/config while merely typing a
+            // command. Enter will show the actionable SSH setup notice.
+            return Self::model_picker_preview_filter(input)
+                .map(|filter| InlinePickerPreviewRequest::Model { filter });
+        }
         Self::model_picker_preview_filter(input)
             .map(|filter| InlinePickerPreviewRequest::Model { filter })
             .or_else(|| {

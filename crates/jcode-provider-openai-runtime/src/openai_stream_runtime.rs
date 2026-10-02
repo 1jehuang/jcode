@@ -1,5 +1,9 @@
 use super::*;
 
+#[path = "openai_usage_recording.rs"]
+mod openai_usage_recording;
+use openai_usage_recording::OAuthUsageRecorder;
+
 #[path = "openai_rate_limit_format.rs"]
 mod openai_rate_limit_format;
 use self::openai_rate_limit_format::format_rate_limit_error;
@@ -100,6 +104,14 @@ pub(super) async fn stream_response(
     emit_connection_phase(&tx, ConnectionPhase::Authenticating).await;
     let access_token = openai_access_token(&credentials).await?;
     let creds = credentials.read().await;
+    // Account switching can race token refresh. Never combine an old bearer
+    // with a new account header or attribute that request to the new account.
+    if access_token != creds.access_token {
+        return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "OpenAI credentials changed before request, retrying"
+        )));
+    }
+    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
     let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     let url = OpenAIProvider::responses_url(&creds);
     let account_id = creds.account_id.clone();
@@ -306,6 +318,7 @@ pub(super) async fn stream_response(
                         )));
                     }
                 }
+                usage_recorder.observe(&event).await;
                 if tx.send(Ok(event)).await.is_err() {
                     // Receiver dropped, stop streaming
                     log_openai_stream_lifecycle(
@@ -385,6 +398,8 @@ pub(super) fn is_ws_upgrade_required(err: &WsError) -> bool {
 /// Result of trying to continue on a persistent WebSocket connection
 pub(super) enum PersistentWsResult {
     Success,
+    /// A terminal API error was forwarded to the consumer. Do not replay it.
+    TerminalError,
     NotAvailable,
     Failed(String),
 }
@@ -393,13 +408,51 @@ pub(super) enum PersistentWsResult {
 /// using `previous_response_id` to send only incremental input.
 pub(super) async fn try_persistent_ws_continuation(
     persistent_ws: &Arc<Mutex<Option<PersistentWsState>>>,
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    request: &Value,
+    input: &[Value],
+    input_item_count: usize,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> PersistentWsResult {
+    let mut guard = persistent_ws.lock().await;
+    let result = continue_persistent_ws_locked(
+        &mut guard,
+        credentials,
+        request,
+        input,
+        input_item_count,
+        tx,
+    )
+    .await;
+    // Invalidate under the same lock that protected the attempt. Clearing in
+    // the caller after unlocking lets a queued request reuse the failed chain
+    // and can later erase a replacement connection belonging to another turn.
+    if matches!(
+        result,
+        PersistentWsResult::Failed(_) | PersistentWsResult::TerminalError
+    ) {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Warn,
+            "persistent_state_reset",
+            vec![
+                ("model", openai_request_model(request)),
+                ("reason", "persistent_reuse_failed".to_string()),
+            ],
+        );
+    }
+    result
+}
+
+async fn continue_persistent_ws_locked(
+    guard: &mut Option<PersistentWsState>,
+    credentials: &Arc<RwLock<CodexCredentials>>,
     request: &Value,
     input: &[Value],
     input_item_count: usize,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> PersistentWsResult {
     let request_model = openai_request_model(request);
-    let mut guard = persistent_ws.lock().await;
     let state = match guard.as_mut() {
         Some(s) => s,
         None => {
@@ -414,6 +467,19 @@ pub(super) async fn try_persistent_ws_continuation(
             return PersistentWsResult::NotAvailable;
         }
     };
+
+    if state.identity != openai_websocket_prewarm::prewarm_identity(&*credentials.read().await) {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "handshake_identity_changed".to_string()),
+            ],
+        );
+        return PersistentWsResult::NotAvailable;
+    }
 
     // Check connection age - reconnect before the 60-min server limit
     if state.connected_at.elapsed() >= Duration::from_secs(WEBSOCKET_PERSISTENT_MAX_AGE_SECS) {
@@ -504,6 +570,30 @@ pub(super) async fn try_persistent_ws_continuation(
         return PersistentWsResult::NotAvailable;
     }
 
+    // Canonicalization can move a new tool output before the old cursor, even
+    // when the input grows. Slicing by count would silently omit that output.
+    // Replay the full normalized history unless the prior input is unchanged.
+    let input_item_hashes = persistent_ws_input_item_hashes(input);
+    if state.last_input_item_hashes.len() != state.last_input_item_count
+        || !input_item_hashes.starts_with(&state.last_input_item_hashes)
+    {
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "input_prefix_changed".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                (
+                    "last_input_item_count",
+                    state.last_input_item_count.to_string(),
+                ),
+            ],
+        );
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
     // Compute incremental items: everything after the last_input_item_count.
     //
     // When continuing with `previous_response_id`, OpenAI already has every
@@ -513,8 +603,13 @@ pub(super) async fn try_persistent_ws_continuation(
     // rs_...". The full input still needs reasoning items for fresh requests,
     // but deltas must only contain genuinely new client-side input/tool
     // callbacks.
-    let (incremental_items, skipped_reasoning_items) =
-        persistent_ws_incremental_items(input, state.last_input_item_count);
+    let (incremental_items, skipped_reasoning_items) = if state.message_count == 0 {
+        // A generate:false warmup has no model output in its context. Preserve
+        // all history (including encrypted reasoning) for its first generation.
+        (input.to_vec(), 0)
+    } else {
+        persistent_ws_incremental_items(input, state.last_input_item_count)
+    };
     if skipped_reasoning_items > 0 {
         jcode_base::logging::info(&format!(
             "Skipped {} reasoning item(s) in persistent WS continuation delta to avoid duplicate rs_* replay",
@@ -749,9 +844,19 @@ pub(super) async fn try_persistent_ws_continuation(
     // Send the continuation request on the existing WebSocket
     let send_started_at = Instant::now();
     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await;
+    // Health checks and event backpressure above can yield to a credential
+    // change in another fork. Revalidate at the send boundary and keep the
+    // read guard until the frame is flushed, not throughout generation.
+    let send_credentials = credentials.read().await;
+    if state.identity != openai_websocket_prewarm::prewarm_identity(&send_credentials) {
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+    let mut usage_recorder = OAuthUsageRecorder::capture(&send_credentials, request);
     if let Err(e) = state.ws_stream.send(WsMessage::Text(request_text)).await {
         return PersistentWsResult::Failed(format!("send error: {}", e));
     }
+    drop(send_credentials);
     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await;
     state.last_activity_at = Instant::now();
     jcode_base::logging::info(&format!(
@@ -886,20 +991,47 @@ pub(super) async fn try_persistent_ws_continuation(
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
                         saw_response_completed = true;
                     }
-                    if let StreamEvent::Error { ref message, .. } = event
-                        && is_retryable_error(&message.to_lowercase())
-                    {
-                        return PersistentWsResult::Failed(format!("stream error: {}", message));
+                    if let StreamEvent::Error { ref message, .. } = event {
+                        let lower = message.to_lowercase();
+                        if is_retryable_error(&lower)
+                            || lower.contains("previous_response_not_found")
+                            || lower.contains("no tool output found for function call")
+                        {
+                            return PersistentWsResult::Failed(format!(
+                                "stream error: {}",
+                                message
+                            ));
+                        }
+                        // A failed response will not send response.completed.
+                        // Forward once and stop, even if the server keeps the
+                        // socket open or the consumer retains its stream.
+                        let _ = tx.send(Ok(event)).await;
+                        return PersistentWsResult::TerminalError;
                     }
                     if stream_event_starts_tool_call(&event) {
                         response_tool_call_count += 1;
                     }
+                    usage_recorder.observe(&event).await;
                     if tx.send(Ok(event)).await.is_err() {
                         consumer_dropped = true;
                         break;
                     }
                 }
                 while let Some(event) = pending.pop_front() {
+                    if let StreamEvent::Error { ref message, .. } = event {
+                        let lower = message.to_lowercase();
+                        if is_retryable_error(&lower)
+                            || lower.contains("previous_response_not_found")
+                            || lower.contains("no tool output found for function call")
+                        {
+                            return PersistentWsResult::Failed(format!(
+                                "stream error: {}",
+                                message
+                            ));
+                        }
+                        let _ = tx.send(Ok(event)).await;
+                        return PersistentWsResult::TerminalError;
+                    }
                     if is_stream_activity_event(&event) {
                         made_api_activity = true;
                     }
@@ -909,6 +1041,7 @@ pub(super) async fn try_persistent_ws_continuation(
                     if stream_event_starts_tool_call(&event) {
                         response_tool_call_count += 1;
                     }
+                    usage_recorder.observe(&event).await;
                     if tx.send(Ok(event)).await.is_err() {
                         consumer_dropped = true;
                         break;
@@ -1001,6 +1134,7 @@ pub(super) async fn try_persistent_ws_continuation(
     if let Some(resp_id) = new_response_id {
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
+        state.last_input_item_hashes = input_item_hashes;
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         state.last_response_completed_at = Instant::now();
@@ -1080,42 +1214,18 @@ pub(super) async fn stream_response_websocket_persistent(
     ));
     emit_status_detail(&tx, "opening websocket").await;
     let creds = credentials.read().await;
-    let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
-    let ws_url = OpenAIProvider::responses_ws_url(&creds);
-    let mut ws_request = ws_url.into_client_request().map_err(|err| {
-        OpenAIStreamFailure::Other(anyhow::anyhow!(
-            "Failed to build websocket request: {}",
-            err
-        ))
-    })?;
-
-    let auth_header =
-        HeaderValue::from_str(&format!("Bearer {}", access_token)).map_err(|err| {
-            OpenAIStreamFailure::Other(anyhow::anyhow!("Invalid Authorization header: {}", err))
-        })?;
-    ws_request
-        .headers_mut()
-        .insert("Authorization", auth_header);
-    ws_request
-        .headers_mut()
-        .insert("Content-Type", HeaderValue::from_static("application/json"));
-
-    if is_chatgpt_mode {
-        ws_request
-            .headers_mut()
-            .insert("originator", HeaderValue::from_static(ORIGINATOR));
-        if let Some(account_id) = creds.account_id.as_ref() {
-            let account_header = HeaderValue::from_str(account_id).map_err(|err| {
-                OpenAIStreamFailure::Other(anyhow::anyhow!(
-                    "Invalid chatgpt-account-id header: {}",
-                    err
-                ))
-            })?;
-            ws_request
-                .headers_mut()
-                .insert("chatgpt-account-id", account_header);
-        }
+    // Account switching can race token refresh. Never combine an old bearer
+    // with a new account header or attribute that request to the new account.
+    if access_token != creds.access_token {
+        return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
+            "OpenAI credentials changed before request, retrying"
+        )));
     }
+    let mut usage_recorder = OAuthUsageRecorder::capture(&creds, &request);
+    let ws_request = openai_websocket_prewarm::websocket_request(&creds, &access_token)
+        .map_err(OpenAIStreamFailure::Other)?;
+    let mut identity = openai_websocket_prewarm::prewarm_identity(&creds);
+    identity.0 = access_token;
     drop(creds);
 
     emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
@@ -1169,6 +1279,13 @@ pub(super) async fn stream_response_websocket_persistent(
         }))
         .await;
 
+    let input_item_hashes = persistent_ws_input_item_hashes(
+        request
+            .get("input")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    );
     let mut request_event = request;
     if !request_event.is_object() {
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1359,10 +1476,16 @@ pub(super) async fn stream_response_websocket_persistent(
                                     message
                                 )));
                             }
+                            // A failed response never sends response.completed,
+                            // and the server may keep the socket open (usage
+                            // limits do). Forward once and drop the socket.
+                            let _ = tx.send(Ok(event)).await;
+                            return Ok(());
                         }
                         if stream_event_starts_tool_call(&event) {
                             response_tool_call_count += 1;
                         }
+                        usage_recorder.observe(&event).await;
                         if tx.send(Ok(event)).await.is_err() {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
@@ -1395,6 +1518,8 @@ pub(super) async fn stream_response_websocket_persistent(
                                     message
                                 )));
                             }
+                            let _ = tx.send(Ok(event)).await;
+                            return Ok(());
                         }
                         if matches!(event, StreamEvent::MessageEnd { .. }) {
                             saw_response_completed = true;
@@ -1402,6 +1527,7 @@ pub(super) async fn stream_response_websocket_persistent(
                         if stream_event_starts_tool_call(&event) {
                             response_tool_call_count += 1;
                         }
+                        usage_recorder.observe(&event).await;
                         if tx.send(Ok(event)).await.is_err() {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
@@ -1507,12 +1633,14 @@ pub(super) async fn stream_response_websocket_persistent(
         );
         *guard = Some(PersistentWsState {
             ws_stream,
+            identity,
             last_response_id: resp_id,
             connected_at,
             last_activity_at: Instant::now(),
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
+            last_input_item_hashes: input_item_hashes,
         });
         drop(guard);
         spawn_persistent_ws_keepalive(
@@ -1644,6 +1772,7 @@ pub(super) fn is_retryable_error(error_str: &str) -> bool {
         // Auth: we just force-refreshed the OpenAI token in place and want the
         // retry loop to reconnect with the fresh credentials.
         || error_str.contains("openai token refreshed, retrying")
+        || error_str.contains("openai credentials changed before request, retrying")
 }
 
 #[cfg(test)]

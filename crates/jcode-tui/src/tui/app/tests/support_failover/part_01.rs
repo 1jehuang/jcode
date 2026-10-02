@@ -141,6 +141,7 @@ impl Provider for OpenRouterSpecCaptureProvider {
             api_method: "openrouter".to_string(),
             available: true,
             detail: "cached route".to_string(),
+            usage: None,
             cheapness: None,
         }]
     }
@@ -275,6 +276,7 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
     let mut app = create_test_app();
     app.remote_side_pane_images
         .push(crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: "x".repeat(32 * 1024),
             label: Some("preview.png".to_string()),
@@ -318,12 +320,14 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
 
 fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::SidePanelSnapshot {
     crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some(page_id.to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: page_id.to_string(),
             title: title.to_string(),
             file_path: format!("/tmp/{page_id}.md"),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: format!("# {title}"),
             updated_at_ms: 1,
@@ -353,11 +357,18 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
 /// `try_lock` fails because this thread holds the lock, the caller's own
 /// exclusion already covers the transition; a cross-thread `try_lock` miss
 /// falls back to the pre-serialization benign race for that one call.
+/// The shared per-process test home that `create_test_app` installs when no
+/// test has scoped its own `JCODE_HOME`.
+fn shared_test_jcode_home() -> &'static std::path::Path {
+    static TEST_HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    TEST_HOME.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&path);
+        path
+    })
+}
+
 fn ensure_test_jcode_home_if_unset() {
-    use std::sync::OnceLock;
-
-    static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
-
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
@@ -377,17 +388,20 @@ fn ensure_test_jcode_home_if_unset() {
         return;
     }
 
-    let path = TEST_HOME.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&path);
-        path
-    });
-    crate::env::set_var("JCODE_HOME", path);
+    crate::env::set_var("JCODE_HOME", shared_test_jcode_home());
 }
 
 fn clear_persisted_test_ui_state() {
-    if let Ok(home) = crate::storage::jcode_dir() {
-        let ambient_dir = home.join("ambient");
+    // Only wipe ambient files in the *shared* per-process test home, and only
+    // while `JCODE_HOME` still points at it. `create_test_app` runs from ~800
+    // sites without the env lock, so following whatever `JCODE_HOME` happens
+    // to be set to deleted the ambient queue of a concurrently running test
+    // that scoped its own temporary home (#1142). A scoped home starts from an
+    // empty tempdir and has no stale ambient state to clear anyway.
+    let home_is_shared = std::env::var_os("JCODE_HOME")
+        .is_some_and(|home| std::path::Path::new(&home) == shared_test_jcode_home());
+    if home_is_shared {
+        let ambient_dir = shared_test_jcode_home().join("ambient");
         let _ = std::fs::remove_file(ambient_dir.join("queue.json"));
         let _ = std::fs::remove_file(ambient_dir.join("state.json"));
         let _ = std::fs::remove_file(ambient_dir.join("directives.json"));
@@ -397,11 +411,44 @@ fn clear_persisted_test_ui_state() {
     crate::auth::AuthStatus::invalidate_cache();
 }
 
+struct EnvRestoreGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestoreGuard {
+    fn capture(keys: impl IntoIterator<Item = &'static str>) -> Self {
+        Self(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        )
+    }
+
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let guard = Self::capture([key]);
+        crate::env::set_var(key, value);
+        guard
+    }
+}
+
+impl Drop for EnvRestoreGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.0.drain(..) {
+            if let Some(value) = value {
+                crate::env::set_var(key, value);
+            } else {
+                crate::env::remove_var(key);
+            }
+        }
+    }
+}
+
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
-    let prev_home = std::env::var_os("JCODE_HOME");
+    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
     crate::env::set_var("JCODE_HOME", temp.path());
+    // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
+    // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
+    // opt-out must keep blocking delivery for tests that exercise onboarding.
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
@@ -416,11 +463,6 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
     // Drop any config loaded from the temp home so it cannot leak into the next
     // test, which is process-global state shared across this suite.
     crate::config::invalidate_config_cache();

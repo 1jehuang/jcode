@@ -212,6 +212,7 @@ fn build_side_panel(args: &Args) -> SidePanelSnapshot {
             title: format!("Bench Page {idx}"),
             file_path: format!("/tmp/bench_page_{idx}.md"),
             format: SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: SidePanelPageSource::Managed,
             content: make_blob(
                 &format!("# Bench Page {idx}\n\n"),
@@ -222,6 +223,7 @@ fn build_side_panel(args: &Args) -> SidePanelSnapshot {
     }
 
     SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: pages.first().map(|page| page.id.clone()),
         pages,
     }

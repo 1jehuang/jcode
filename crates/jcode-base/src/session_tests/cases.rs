@@ -69,6 +69,28 @@ fn derive_session_provider_key_keeps_openai_compatible_profile_namespace() {
 }
 
 #[test]
+fn save_label_becomes_the_session_title() {
+    let mut session = Session::create_with_id(
+        "session_save_label_123".to_string(),
+        None,
+        Some("Generated title".to_string()),
+    );
+    session.mark_saved(None);
+    assert_eq!(session.display_title(), Some("Generated title"));
+
+    session.mark_saved(Some("  yc mcp  ".to_string()));
+    assert_eq!(session.save_label.as_deref(), Some("yc mcp"));
+    assert_eq!(session.custom_title.as_deref(), Some("yc mcp"));
+    assert_eq!(session.display_title(), Some("yc mcp"));
+
+    // Legacy bookmarks saved a label without setting the title.
+    session.custom_title = None;
+    assert_eq!(session.display_title(), Some("yc mcp"));
+    session.unmark_saved();
+    assert_eq!(session.display_title(), Some("Generated title"));
+}
+
+#[test]
 fn rename_title_preserves_generated_title_for_clear() {
     let mut session = Session::create_with_id(
         "session_rename_clear_123".to_string(),
@@ -219,6 +241,7 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
         }],
         None,
         Some(StoredTokenUsage {
+            prompt_tokens: None,
             input_tokens: 100,
             output_tokens: 10,
             cache_read_input_tokens: None,
@@ -233,6 +256,7 @@ fn token_usage_totals_counts_cache_reported_inputs_only_when_cache_fields_exist(
         }],
         None,
         Some(StoredTokenUsage {
+            prompt_tokens: None,
             input_tokens: 200,
             output_tokens: 20,
             cache_read_input_tokens: Some(150),
@@ -698,6 +722,80 @@ fn test_recover_crashed_sessions_by_ids_restores_only_selected_group() -> Result
 }
 
 #[test]
+fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-lazy-save-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let id = "session_untouched_lazy_save";
+    let mut session = Session::create_with_id(id.to_string(), None, None);
+    assert!(session.ensure_initial_session_context_message());
+    session.save()?;
+    assert!(!session_path(id)?.exists());
+
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "hello".to_string(),
+            cache_control: None,
+        }],
+    );
+    session.save()?;
+    assert!(session_path(id)?.exists());
+    Ok(())
+}
+
+#[test]
+fn empty_fork_is_persisted_before_first_visible_message() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let mut child = Session::create(Some("session_empty_parent".into()), None);
+    child.append_fork_notice("session_empty_parent", "empty parent");
+    assert_eq!(child.visible_conversation_message_count(), 0);
+    child.save()?;
+
+    let restored = Session::load(&child.id)?;
+    assert_eq!(restored.parent_id.as_deref(), Some("session_empty_parent"));
+    assert_eq!(restored.visible_conversation_message_count(), 0);
+    assert!(
+        restored
+            .messages
+            .last()
+            .unwrap()
+            .content_preview()
+            .contains("forked")
+    );
+    assert!(!session_path("session_empty_parent")?.exists());
+    Ok(())
+}
+
+#[test]
+fn session_created_with_title_is_persisted_before_first_visible_message() -> Result<()> {
+    // Regression for #1144: `Session::create(_, Some(title))` was skipped by
+    // the untouched-session gate, so later lookups by id found nothing.
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-titled-save-test-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let id = "session_titled_eager_save";
+    let mut session = Session::create_with_id(id.to_string(), None, Some("review".to_string()));
+    assert!(session.ensure_initial_session_context_message());
+    session.save()?;
+    assert!(session_path(id)?.exists());
+
+    let stub = Session::load_startup_stub(id)?;
+    assert_eq!(stub.title.as_deref(), Some("review"));
+    Ok(())
+}
+
+#[test]
 fn test_save_persists_full_session_content() -> Result<()> {
     let _env_lock = lock_env();
     let temp_home = tempfile::Builder::new()
@@ -1158,6 +1256,43 @@ fn test_redacted_for_export_redacts_tool_result_and_tool_input() -> Result<()> {
     assert!(!input_str.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
     assert!(!input_str.contains("short-secret-value"));
     assert!(input_str.contains("fn add(a: i32, b: i32)"));
+    Ok(())
+}
+
+#[test]
+fn test_redacted_for_export_redacts_provider_native_items_only_in_copy() -> Result<()> {
+    let mut session = Session::create_with_id(
+        "session_redact_native_test".to_string(),
+        None,
+        Some("redaction test".to_string()),
+    );
+    let item = serde_json::json!({
+        "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+        "input": {"query": "why does ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 fail"}
+    });
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ProviderNative {
+            provider: "anthropic".to_string(),
+            item: item.clone(),
+        }],
+    );
+
+    let persisted = session.redacted_for_export();
+    let ContentBlock::ProviderNative { item: exported, .. } = &persisted.messages[0].content[0]
+    else {
+        return Err(anyhow!("expected provider-native block"));
+    };
+    assert!(
+        !exported
+            .to_string()
+            .contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123")
+    );
+    // The live session keeps the item verbatim for replay.
+    let ContentBlock::ProviderNative { item: stored, .. } = &session.messages[0].content[0] else {
+        return Err(anyhow!("expected provider-native block"));
+    };
+    assert_eq!(stored, &item);
     Ok(())
 }
 
@@ -2466,4 +2601,254 @@ fn test_rewind_after_undo_uses_the_new_target_not_the_previous_one() {
     );
     assert_eq!(after.last().unwrap(), "prompt-6");
     assert_eq!(session.rewind_target_count(), 11);
+}
+
+#[test]
+fn restored_tool_image_boundaries_follow_returned_history_rows() {
+    let mut session = Session::create_with_id("image-boundaries".into(), None, None);
+    let text = |text: &str| ContentBlock::Text {
+        text: text.into(),
+        cache_control: None,
+    };
+    let result = |id: &str| ContentBlock::ToolResult {
+        tool_use_id: id.into(),
+        content: "read image".into(),
+        is_error: None,
+    };
+    let image = |data: &str| ContentBlock::Image {
+        media_type: "image/png".into(),
+        data: data.into(),
+    };
+    session.add_message(Role::User, vec![text("prompt")]);
+    session.add_message(
+        Role::Assistant,
+        vec![
+            text("before read"),
+            ContentBlock::ToolUse {
+                id: "read-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            },
+        ],
+    );
+    session.add_message(
+        Role::User,
+        vec![
+            result("read-1"),
+            image("one"),
+            image("two"),
+            result("read-2"),
+            image("three"),
+        ],
+    );
+    session.add_message(Role::Assistant, vec![text("after read")]);
+    let (messages, images) = render_messages_and_images(&session);
+    assert_eq!(
+        messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+        ["user", "assistant", "tool", "tool", "assistant"]
+    );
+    assert_eq!(
+        images
+            .iter()
+            .map(|i| i.history_message_index)
+            .collect::<Vec<_>>(),
+        [Some(3), Some(3), Some(4)]
+    );
+    assert_eq!(
+        messages[images[2].history_message_index.unwrap()].content,
+        "after read"
+    );
+    assert_eq!(
+        images[0].anchor,
+        Some(RenderedImageAnchor::ToolCall {
+            id: "read-1".into()
+        })
+    );
+
+    // Compaction adds a synthetic notice. Boundaries count returned rows, not
+    // stored message indices or user-prompt ordinals.
+    session.compaction = Some(StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+        compacted_count: 1,
+    });
+    let (messages, images, _) =
+        render_messages_and_images_with_compacted_history(&session, usize::MAX);
+    assert_eq!(messages[0].role, "system");
+    assert_eq!(
+        images
+            .iter()
+            .map(|i| i.history_message_index)
+            .collect::<Vec<_>>(),
+        [Some(4), Some(4), Some(5)]
+    );
+}
+
+#[test]
+fn restored_tool_image_boundary_can_be_history_end() {
+    let mut session = Session::create_with_id("image-tail-boundary".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "orphan".into(),
+                content: String::new(),
+                is_error: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "image".into(),
+            },
+        ],
+    );
+    let (messages, images) = render_messages_and_images(&session);
+    assert_eq!(images[0].history_message_index, Some(messages.len()));
+}
+
+#[test]
+fn rendered_image_history_boundary_is_backward_compatible() {
+    let legacy = serde_json::json!({"media_type": "image/png", "data": "bytes", "label": null,
+        "source": {"kind": "tool_result", "tool_name": "read"}, "anchor": {"kind": "tool_call", "id": "read-1"}});
+    let mut image: RenderedImage = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(image.history_message_index, None);
+    assert_eq!(serde_json::to_value(&image).unwrap(), legacy);
+    image.history_message_index = Some(2);
+    let encoded = serde_json::to_value(&image).unwrap();
+    assert_eq!(encoded["history_message_index"], 2);
+    assert_eq!(
+        serde_json::from_value::<RenderedImage>(encoded).unwrap(),
+        image
+    );
+}
+
+#[test]
+fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
+    let mut session = Session::create_with_id("cache_prompt_totals".into(), None, None);
+    for usage in [
+        // Inclusive OpenAI input: read and write are subsets.
+        StoredTokenUsage {
+            prompt_tokens: Some(10_000),
+            input_tokens: 10_000,
+            output_tokens: 100,
+            cache_read_input_tokens: Some(6_000),
+            cache_creation_input_tokens: Some(2_000),
+        },
+        // Anthropic uncached input: read and write are disjoint.
+        StoredTokenUsage {
+            prompt_tokens: Some(10_000),
+            input_tokens: 1_000,
+            output_tokens: 100,
+            cache_read_input_tokens: Some(7_000),
+            cache_creation_input_tokens: Some(2_000),
+        },
+    ] {
+        let json = serde_json::to_string(&usage).unwrap();
+        let restored: StoredTokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.prompt_tokens, Some(10_000));
+        session.add_message_ext(Role::Assistant, vec![], None, Some(restored));
+    }
+    let totals = session.token_usage_totals();
+    assert_eq!(totals.cache_prompt_tokens, Some(20_000));
+    assert_eq!(totals.cache_reported_input_tokens, 11_000);
+    assert_eq!(totals.cache_read_input_tokens, 13_000);
+    assert_eq!(totals.cache_creation_input_tokens, 4_000);
+    let legacy: StoredTokenUsage = serde_json::from_str(r#"{"input_tokens":10000,"output_tokens":100,"cache_read_input_tokens":6000,"cache_creation_input_tokens":2000}"#).unwrap();
+    assert_eq!(legacy.prompt_tokens, None);
+    session.add_message_ext(Role::Assistant, vec![], None, Some(legacy));
+    assert_eq!(session.token_usage_totals().cache_prompt_tokens, None);
+    assert_eq!(session.token_usage_totals().cache_read_input_tokens, 19_000);
+}
+
+#[test]
+fn system_prompt_persists_before_first_message_and_across_metadata_updates() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    for prompt in ["custom system prompt", ""] {
+        let mut session = Session::create(None, None);
+        assert_eq!(session.system_prompt, None);
+        session.system_prompt = Some(prompt.into());
+        session.save()?;
+        assert_eq!(
+            Session::load(&session.id)?.system_prompt.as_deref(),
+            Some(prompt)
+        );
+        assert_eq!(
+            Session::load_startup_stub(&session.id)?
+                .system_prompt
+                .as_deref(),
+            Some(prompt)
+        );
+        // Unchanged prompt survives metadata-only journal persistence too.
+        session.model = Some("test-model".into());
+        session.save()?;
+        assert_eq!(
+            Session::load(&session.id)?.system_prompt.as_deref(),
+            Some(prompt)
+        );
+        session.system_prompt = Some("replacement".into());
+        session.save()?;
+        assert_eq!(
+            Session::load_startup_stub(&session.id)?
+                .system_prompt
+                .as_deref(),
+            Some("replacement")
+        );
+        session.system_prompt = None;
+        session.save()?;
+        assert_eq!(Session::load(&session.id)?.system_prompt, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn system_prompt_missing_in_legacy_session_defaults_to_none() -> Result<()> {
+    let session = Session::create_with_id("legacy-prompt-test".into(), None, None);
+    let json = serde_json::to_value(&session)?;
+    assert!(json.get("system_prompt").is_none());
+    let restored: Session = serde_json::from_value(json)?;
+    assert_eq!(restored.system_prompt, None);
+    Ok(())
+}
+
+#[test]
+fn first_visible_user_prompt_becomes_the_generated_title() {
+    let mut session = Session::create_with_id("session_prompt_title_1".to_string(), None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "<system-reminder>\n# Session Context\n</system-reminder>".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message_with_display_role(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "background finished".into(),
+            cache_control: None,
+        }],
+        Some(StoredDisplayRole::BackgroundTask),
+    );
+    assert_eq!(session.title, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "<transcription>\nFix the   sidebar names\n</transcription>".into(),
+            cache_control: None,
+        }],
+    );
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "second prompt".into(),
+            cache_control: None,
+        }],
+    );
+    assert_eq!(session.display_title(), Some("Fix the sidebar names"));
+
+    session.rename_title(Some("Custom".into()));
+    assert_eq!(session.display_title(), Some("Custom"));
 }

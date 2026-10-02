@@ -31,7 +31,7 @@ pub(crate) enum ProviderAuthArg {
 #[command(version = jcode_build_meta::version())]
 #[command(about = "J-Code: A coding agent using Claude Max or ChatGPT Pro subscriptions")]
 pub(crate) struct Args {
-    /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
+    /// Initial provider to use (jcode, claude, openai, openai-api, openrouter, azure, opencode, opencode-go, zai, 302ai, baseten, conifer, cortecs, comtegra, deepseek, fpt, firmware, huggingface, moonshotai, nebius, scaleway, stackit, groq, mistral, perplexity, togetherai, deepinfra, xai, grok-build, nvidia-nim, lmstudio, ollama, chutes, cerebras, alibaba-coding-plan, openai-compatible, cursor, copilot, gemini, antigravity, google, or auto-detect). Interactive sessions can switch providers with /model.
     #[arg(short, long, default_value = "auto", global = true)]
     pub(crate) provider: ProviderChoice,
 
@@ -42,6 +42,18 @@ pub(crate) struct Args {
     /// Working directory to send to a remote server when using --socket
     #[arg(long, global = true)]
     pub(crate) remote_working_dir: Option<String>,
+
+    /// Run the UI locally and attach to the persistent Jcode server on this SSH host
+    #[arg(long, global = true, conflicts_with = "socket", value_name = "HOST")]
+    pub(crate) ssh: Option<String>,
+
+    /// Remote Jcode executable name or literal path (requires --ssh)
+    #[arg(long, global = true, requires = "ssh", value_name = "PATH")]
+    pub(crate) ssh_binary: Option<String>,
+
+    /// Remote daemon socket override, for isolated servers (requires --ssh)
+    #[arg(long, global = true, requires = "ssh", value_name = "PATH")]
+    pub(crate) ssh_server_socket: Option<String>,
 
     /// Skip the automatic update check
     #[arg(long, global = true)]
@@ -80,6 +92,11 @@ pub(crate) struct Args {
     /// never touches real auth state.
     #[arg(long = "onboarding-sim")]
     pub(crate) onboarding_sim: bool,
+
+    /// Launch the normal TUI, skip onboarding, then autoplay a safe simulation
+    /// of receiving, downloading, installing, and restarting after an update.
+    #[arg(long = "update-sim")]
+    pub(crate) update_sim: bool,
 
     /// Custom socket path for server/client communication
     #[arg(long, global = true)]
@@ -190,7 +207,7 @@ pub(crate) enum Command {
         #[arg(long, short = 'a')]
         account: Option<String>,
 
-        /// Do not try to open a browser locally. Useful over SSH or on headless machines.
+        /// Do not open a local browser. Show a login QR for another device (useful over SSH).
         #[arg(long, alias = "headless")]
         no_browser: bool,
 
@@ -213,6 +230,14 @@ pub(crate) enum Command {
         /// Resume a pending scriptable login flow that does not require callback/code input.
         #[arg(long, conflicts_with_all = ["print_auth_url", "callback_url", "auth_code"])]
         complete: bool,
+
+        /// Isolate temporary login state using 1-64 ASCII letters, digits, underscores or hyphens.
+        #[arg(long, value_parser = super::login::parse_login_flow_id)]
+        flow_id: Option<String>,
+
+        /// Cancel only this provider's pending flow. Does not remove saved credentials.
+        #[arg(long, requires = "flow_id", conflicts_with_all = ["print_auth_url", "callback_url", "auth_code", "complete", "account", "api_base", "api_key", "api_key_env"])]
+        cancel: bool,
 
         /// Save credentials without running the post-login live provider validation.
         /// Useful for offline setup, CI, or when entering credentials before network access is available.
@@ -375,14 +400,18 @@ pub(crate) enum Command {
         uninstall: bool,
     },
 
-    /// Install a launcher so jcode appears in your app launcher
+    /// Install platform launcher integration (Windows shortcut; macOS notification helper)
     SetupLauncher,
 
     /// Browser automation setup and status
     Browser {
-        /// Action (setup, status)
+        /// Action (setup, status, detect)
         #[arg(default_value = "setup")]
         action: String,
+
+        /// Browser to target: auto (default: detect your browser), firefox,
+        /// chrome, chromium, edge, brave, or safari
+        browser: Option<String>,
     },
 
     /// Replay a saved session in the TUI
@@ -559,6 +588,11 @@ pub(crate) enum Command {
         /// both ends of the bridge at the same path.
         #[arg(long = "api-socket")]
         api_socket: Option<String>,
+
+        /// Serve one API connection on stdin/stdout (for SSH SDK clients).
+        /// Starts the shared daemon if needed; does not create an API socket.
+        #[arg(long, conflicts_with = "api_socket")]
+        stdio: bool,
     },
 }
 
@@ -598,6 +632,11 @@ pub(crate) enum AccountCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ServerCommand {
+    /// Internal native client protocol bridge over stdin/stdout (for SSH attach)
+    #[cfg(unix)]
+    #[command(hide = true)]
+    Stdio,
+
     /// Start the background server if it is not already running.
     Start {
         /// Emit JSON instead of human-readable text
@@ -663,6 +702,100 @@ pub(crate) enum CloudCommand {
         #[command(subcommand)]
         action: CloudSessionsCommand,
     },
+
+    /// Move a live session (transcript, repo state, env notes) to a cloud host
+    /// and keep working there. Your local files stay editable. Git reconciles
+    /// both sides when the session comes back with `jcode cloud return`.
+    Move {
+        /// Session ID or name. Defaults to the session this command runs in.
+        #[arg(long)]
+        session: Option<String>,
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        /// Allow moving while the session is mid-turn (the agent itself runs /cloud).
+        #[arg(long)]
+        allow_active: bool,
+        /// Prepare and verify only. Do not hand ownership to the cloud host.
+        #[arg(long)]
+        dry_run: bool,
+        /// After a successful move, attach this terminal to the cloud session.
+        #[arg(long)]
+        attach: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Bring a moved session back: pull the cloud transcript and merge its git
+    /// work into your local checkout with a normal 3-way merge.
+    Return {
+        #[arg(long)]
+        session: Option<String>,
+        #[command(flatten)]
+        target: CloudMoveTarget,
+        /// Bring the work back as refs only (refs/jcode-cloud/<session>/*) without touching the working tree.
+        #[arg(long)]
+        refs_only: bool,
+        /// After returning, resume the session in this terminal.
+        #[arg(long)]
+        attach: bool,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show where moved sessions live and how their repos have diverged.
+    Where {
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Attach this terminal to a session that lives on a cloud host.
+    Attach {
+        #[arg(long)]
+        session: Option<String>,
+    },
+
+    /// Internal: remote side of `cloud move` (reads a bundle tarball on stdin).
+    #[command(hide = true)]
+    Receive {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Internal: remote side of `cloud move` commit phase.
+    #[command(hide = true)]
+    Activate {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+    },
+
+    /// Internal: remote side of `cloud return` (writes a bundle tarball to stdout).
+    #[command(hide = true)]
+    Export {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        epoch: u64,
+    },
+}
+
+#[derive(Parser, Debug, Clone, Default)]
+pub(crate) struct CloudMoveTarget {
+    /// SSH host alias for the cloud machine. Defaults to [cloud] host in config
+    /// or $JCODE_CLOUD_HOST.
+    #[arg(long)]
+    pub(crate) host: Option<String>,
+    /// Remote jcode binary (name or path). Defaults to `jcode`.
+    #[arg(long)]
+    pub(crate) remote_binary: Option<String>,
+    /// Local command used in place of `ssh <host>` (for tests and custom
+    /// transports). Receives the remote shell command as its final argument.
+    /// Also read from $JCODE_CLOUD_TRANSPORT.
+    #[arg(long, hide = true)]
+    pub(crate) transport: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1013,6 +1146,16 @@ pub(crate) enum ProviderCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
+    /// Import one selected OAuth login from a trusted client (never overwrites a store)
+    Import {
+        /// Read the private credential envelope from stdin, never from command arguments
+        #[arg(long, required = true)]
+        stdin: bool,
+
+        /// Emit a secret-free JSON acknowledgement
+        #[arg(long)]
+        json: bool,
+    },
     /// Show configured authentication status for model/tool providers
     Status {
         /// Emit JSON instead of plain text
@@ -1068,7 +1211,7 @@ pub(crate) enum MemoryCommand {
         /// Search query
         query: String,
 
-        /// Use semantic search (embedding-based) instead of keyword
+        /// Use Jev relevance decisions instead of local keyword search (requires Jev access)
         #[arg(short, long)]
         semantic: bool,
     },

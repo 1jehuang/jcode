@@ -788,6 +788,9 @@ pub fn native_credentials_present() -> bool {
     {
         return true;
     }
+    if crate::storage::running_with_sandboxed_home() {
+        return false;
+    }
     claude_code_keychain_item_exists()
 }
 

@@ -1,4 +1,4 @@
-use super::{Registry, Tool, ToolContext, ToolOutput};
+use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry};
 use crate::bus::{BatchSubcallProgress, BatchSubcallState};
 use crate::message::ToolCall;
 use anyhow::Result;
@@ -94,11 +94,11 @@ fn ordered_batch_subcalls(
 }
 
 pub struct BatchTool {
-    registry: Registry,
+    registry: WeakRegistry,
 }
 
 impl BatchTool {
-    pub fn new(registry: Registry) -> Self {
+    pub(super) fn new(registry: WeakRegistry) -> Self {
         Self { registry }
     }
 }
@@ -216,6 +216,10 @@ impl Tool for BatchTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("Batch tool registry is no longer available"))?;
         let input = normalize_batch_input(input);
         let params: BatchInput = serde_json::from_value(input)?;
 
@@ -246,7 +250,11 @@ impl Tool for BatchTool {
             .enumerate()
             .map(|(i, tc)| {
                 let (tool_name, parameters) = tc.resolved_parameters();
-                let tool_name = Registry::resolve_tool_name(&tool_name).to_string();
+                // Display and dispatch the canonical name (e.g. `functions.bash`
+                // -> `bash`) while keeping SDK custom tool names intact.
+                let tool_name =
+                    Registry::resolve_tool_name_for_session(&ctx.session_id, &tool_name)
+                        .to_string();
                 (i, tool_name, parameters)
             })
             .collect();
@@ -282,7 +290,7 @@ impl Tool for BatchTool {
         let mut stream: futures::stream::FuturesUnordered<_> = subcalls
             .iter()
             .map(|(i, tool_name, parameters)| {
-                let registry = self.registry.clone();
+                let registry = registry.clone();
                 let i = *i;
                 let tool_name = tool_name.clone();
                 let parameters = parameters.clone();
@@ -320,6 +328,7 @@ impl Tool for BatchTool {
 
         // Format results
         let mut output = String::new();
+        let mut images = Vec::new();
         let mut success_count = 0;
         let mut error_count = 0;
         let mut failed_tools = Vec::new();
@@ -329,6 +338,10 @@ impl Tool for BatchTool {
             match result {
                 Ok(out) => {
                     success_count += 1;
+                    // Preserve attachments in subcall order, just like the text.
+                    // The agent emits them against the visible parent batch call
+                    // and persists them with its aggregate tool result.
+                    images.extend(out.images);
                     let max_per_tool = 50_000 / num_tools.max(1);
                     if out.output.len() > max_per_tool {
                         output.push_str(crate::util::truncate_str(&out.output, max_per_tool));
@@ -362,7 +375,9 @@ impl Tool for BatchTool {
             success_count, error_count
         ));
 
-        Ok(ToolOutput::new(output))
+        let mut result = ToolOutput::new(output);
+        result.images = images;
+        Ok(result)
     }
 }
 

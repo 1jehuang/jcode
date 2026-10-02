@@ -30,7 +30,57 @@ impl Agent {
     }
 
     pub fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
-        self.provider.model_routes()
+        let mut routes = self.provider.model_routes();
+        crate::model_usage::enrich_routes(&mut routes);
+        routes
+    }
+
+    pub(super) fn begin_model_usage_turn(&mut self, message_id: &str) {
+        self.session.model_usage_turn_id = Some(format!("{}:{}", self.session.id, message_id));
+    }
+
+    pub(super) fn model_usage_turn_id(&mut self) -> String {
+        if let Some(id) = &self.session.model_usage_turn_id {
+            return id.clone();
+        }
+        // Old sessions and direct loop callers have no durable anchor yet.
+        // Internal reminders and tool-result rows do not start a logical turn.
+        let message_id = self
+            .session
+            .visible_conversation_messages()
+            .into_iter()
+            .rev()
+            .find(|message| {
+                message.role == Role::User
+                    && message.content.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text, .. }
+                    if !text.trim().is_empty() && !text.starts_with("[System reminder:"))
+                            || matches!(block, ContentBlock::Image { .. })
+                    })
+            })
+            .map(|message| message.id.clone())
+            .unwrap_or_else(|| "initial".to_string());
+        self.begin_model_usage_turn(&message_id);
+        self.session.model_usage_turn_id.clone().unwrap()
+    }
+
+    pub(super) fn record_model_turn_usage(&self, turn_id: &str) {
+        if self.session.is_debug {
+            return;
+        }
+        let Some(mut route) = crate::model_usage::serving_route(
+            self.provider.as_ref(),
+            self.session.route_api_method.as_deref(),
+        ) else {
+            return;
+        };
+        match crate::model_usage::record_turn(turn_id, &route) {
+            Ok(usage) => {
+                route.usage = Some(usage);
+                Bus::global().publish(BusEvent::ModelUsageUpdated(route));
+            }
+            Err(error) => logging::warn(&format!("Could not record model turn usage: {error}")),
+        }
     }
 
     pub fn model_catalog_snapshot(&self) -> jcode_provider_core::ModelCatalogSnapshot {
@@ -55,6 +105,21 @@ impl Agent {
         let mut manager = compaction.write().await;
         manager.set_mode(mode);
         Ok(())
+    }
+
+    fn refresh_compaction_budget(&self) {
+        let compaction = self.registry.compaction();
+        match compaction.try_write() {
+            Ok(mut manager) => manager.set_budget(self.provider.context_window()),
+            Err(_) => crate::logging::warn(
+                "Could not refresh compaction token budget after provider change: compaction manager is busy",
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn compaction_token_budget(&self) -> usize {
+        self.registry.compaction().read().await.token_budget()
     }
 
     pub fn provider_messages(&mut self) -> Vec<Message> {
@@ -100,6 +165,7 @@ impl Agent {
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
+        self.refresh_compaction_budget();
         self.persist_session_best_effort("route selection");
         self.log_env_snapshot("set_route_selection");
         Ok(())
@@ -128,6 +194,7 @@ impl Agent {
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
+        self.refresh_compaction_budget();
         self.persist_session_best_effort("model selection");
         self.log_env_snapshot("set_model");
         Ok(())
@@ -207,11 +274,30 @@ impl Agent {
         self.session.provider_key = provider_key;
     }
 
+    /// Bookmark or unbookmark the session, returning the effective label.
+    pub fn set_session_saved(
+        &mut self,
+        saved: bool,
+        label: Option<String>,
+    ) -> Result<Option<String>> {
+        if saved {
+            self.session.mark_saved(label);
+        } else {
+            self.session.unmark_saved();
+        }
+        self.session.save()?;
+        Ok(self.session.save_label.clone())
+    }
+
     pub fn rename_session_title(&mut self, title: Option<String>) -> Result<String> {
         self.session.rename_title(title);
         self.log_env_snapshot("rename_session");
         self.session.save()?;
         Ok(self.session.display_title_or_name().to_string())
+    }
+
+    pub fn session_display_title_or_name(&self) -> String {
+        self.session.display_title_or_name().to_string()
     }
 
     pub fn autoreview_enabled(&self) -> Option<bool> {

@@ -2,6 +2,83 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn credential_import_cli_requires_stdin_and_preserves_explicit_provider() {
+    for provider in ["openai", "claude"] {
+        let args = Args::try_parse_from([
+            "jcode",
+            "auth",
+            "import",
+            "--provider",
+            provider,
+            "--stdin",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(args.provider.as_arg_value(), provider);
+        assert!(matches!(
+            args.command,
+            Some(Command::Auth(AuthCommand::Import {
+                stdin: true,
+                json: true
+            }))
+        ));
+    }
+    for args in [
+        vec!["jcode", "auth", "import", "--provider", "openai"],
+        vec!["jcode", "auth", "import", "--stdin", "--token", "secret"],
+        vec!["jcode", "auth", "import", "--stdin", "--overwrite"],
+    ] {
+        assert!(Args::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
+fn native_ssh_attach_arguments_parse_and_do_not_steal_local_socket() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "--ssh",
+        "dev",
+        "--ssh-binary",
+        "/opt/jcode",
+        "--ssh-server-socket",
+        "/run/native/jcode.sock",
+        "--remote-working-dir",
+        "/srv/project",
+        "self-dev",
+    ])
+    .unwrap();
+    assert_eq!(args.ssh.as_deref(), Some("dev"));
+    assert_eq!(args.ssh_binary.as_deref(), Some("/opt/jcode"));
+    assert_eq!(
+        args.ssh_server_socket.as_deref(),
+        Some("/run/native/jcode.sock")
+    );
+    assert_eq!(args.remote_working_dir.as_deref(), Some("/srv/project"));
+    assert!(args.socket.is_none());
+    for argv in [
+        vec!["jcode", "--ssh", "dev", "--socket", "/local.sock"],
+        vec!["jcode", "--ssh-binary", "/opt/jcode"],
+        vec!["jcode", "--ssh-server-socket", "/remote.sock"],
+    ] {
+        assert!(Args::try_parse_from(argv).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_server_stdio_preserves_socket_override() {
+    let args =
+        Args::try_parse_from(["jcode", "--socket", "/run/native.sock", "server", "stdio"]).unwrap();
+    assert_eq!(args.socket.as_deref(), Some("/run/native.sock"));
+    assert!(matches!(
+        args.command,
+        Some(Command::Server {
+            action: ServerCommand::Stdio
+        })
+    ));
+}
+
+#[test]
 fn server_start_and_internal_keepalive_parse() {
     let args = Args::try_parse_from(["jcode", "server", "start", "--json"])
         .expect("server start should parse");
@@ -401,6 +478,8 @@ fn login_no_browser_flag_parses() {
             api_key,
             api_key_env,
             no_validate,
+            flow_id,
+            cancel,
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
@@ -415,6 +494,8 @@ fn login_no_browser_flag_parses() {
             assert!(api_key.is_none());
             assert!(api_key_env.is_none());
             assert!(!no_validate);
+            assert!(flow_id.is_none());
+            assert!(!cancel);
         }
         other => panic!("unexpected command: {:?}", other),
     }
@@ -434,6 +515,70 @@ fn login_accepts_provider_positional() {
             assert_eq!(provider, Some(ProviderChoice::Google));
         }
         other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
+fn login_scoped_flow_flags_parse_and_reject_unsafe_ids() {
+    for action in ["--print-auth-url", "--complete", "--cancel"] {
+        let args = Args::try_parse_from([
+            "jcode",
+            "login",
+            "--provider",
+            "openai",
+            "--flow-id",
+            "aB_09-safe",
+            action,
+            "--json",
+        ])
+        .unwrap();
+        assert!(
+            matches!(args.command, Some(Command::Login { flow_id: Some(id), .. }) if id == "aB_09-safe")
+        );
+    }
+    for id in [
+        "", ".", "..", "../other", "a/b", "a\\b", "a b", "a\n", "é", "a.json", "%2f", "x;touch",
+    ] {
+        assert!(
+            Args::try_parse_from(["jcode", "login", "--flow-id", id, "--print-auth-url"]).is_err(),
+            "accepted {id:?}"
+        );
+    }
+    assert!(Args::try_parse_from(["jcode", "login", "--flow-id", &"a".repeat(65)]).is_err());
+    assert!(Args::try_parse_from(["jcode", "login", "--flow-id", &"a".repeat(64)]).is_ok());
+    assert!(Args::try_parse_from(["jcode", "login", "openai", "--cancel"]).is_err());
+    for action in ["--print-auth-url", "--complete"] {
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                "login",
+                "openai",
+                "--flow-id",
+                "safe",
+                "--cancel",
+                action
+            ])
+            .is_err()
+        );
+    }
+    for input in ["--callback-url", "--auth-code"] {
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                "login",
+                "openai",
+                "--flow-id",
+                "safe",
+                "--cancel",
+                input,
+                "-"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["jcode", "login", "openai", "--flow-id", "safe", input, "-"])
+                .is_ok()
+        );
     }
 }
 
@@ -833,14 +978,17 @@ fn api_bridge_socket_flags_do_not_collide() {
     assert_eq!(args.socket.as_deref(), Some("/tmp/daemon.sock"));
     assert!(matches!(
         args.command,
-        Some(Command::ApiBridge { api_socket: Some(ref path) }) if path == "/tmp/api.sock"
+        Some(Command::ApiBridge { api_socket: Some(ref path), stdio: false }) if path == "/tmp/api.sock"
     ));
 
     // The bare form must resolve both paths from the environment.
     let bare = Args::try_parse_from(["jcode", "api-bridge"]).expect("bare api-bridge should parse");
     assert!(matches!(
         bare.command,
-        Some(Command::ApiBridge { api_socket: None })
+        Some(Command::ApiBridge {
+            api_socket: None,
+            stdio: false
+        })
     ));
 
     // `--socket` after the subcommand must not be silently accepted as the
@@ -849,8 +997,50 @@ fn api_bridge_socket_flags_do_not_collide() {
     assert!(
         matches!(
             ambiguous.map(|args| (args.socket, args.command)),
-            None | Some((Some(_), Some(Command::ApiBridge { api_socket: None })))
+            None | Some((
+                Some(_),
+                Some(Command::ApiBridge {
+                    api_socket: None,
+                    stdio: false
+                })
+            ))
         ),
         "`--socket` after api-bridge must bind the daemon socket, never the API socket"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
+    for command in ["api", "api-bridge"] {
+        let args = Args::try_parse_from([
+            "jcode",
+            "--no-update",
+            "--socket",
+            "/isolated/daemon.sock",
+            command,
+            "--stdio",
+        ])
+        .expect("stdio bridge must accept the API alias and daemon override");
+        assert_eq!(args.socket.as_deref(), Some("/isolated/daemon.sock"));
+        assert!(args.no_update);
+        assert!(matches!(
+            args.command,
+            Some(Command::ApiBridge {
+                api_socket: None,
+                stdio: true
+            })
+        ));
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                command,
+                "--stdio",
+                "--api-socket",
+                "/isolated/api.sock",
+            ])
+            .is_err(),
+            "stdio must not silently ignore an API socket override"
+        );
+    }
 }

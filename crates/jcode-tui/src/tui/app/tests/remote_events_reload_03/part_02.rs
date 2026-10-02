@@ -66,6 +66,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -108,6 +109,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             id: 1,
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "assistant".to_string(),
                 content: "server history replay".to_string(),
                 tool_calls: None,
@@ -143,6 +145,7 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
             compaction_mode: crate::config::CompactionMode::Reactive,
             activity: None,
             side_panel: crate::side_panel::SidePanelSnapshot::default(),
+            applets: Default::default(),
         },
         &mut remote,
     );
@@ -302,18 +305,21 @@ fn test_compacted_history_event_applies_expanded_window() {
             session_id: "session_lazy_history".to_string(),
             messages: vec![
                 crate::protocol::HistoryMessage {
+                    response_stats: None,
                     role: "system".to_string(),
                     content: "Earlier conversation compacted - 64 older historical messages hidden. Showing 64 of 128 compacted messages. Scroll to the top to load more.".to_string(),
                     tool_calls: None,
                     tool_data: None,
                 },
                 crate::protocol::HistoryMessage {
+                    response_stats: None,
                     role: "assistant".to_string(),
                     content: "older response".to_string(),
                     tool_calls: None,
                     tool_data: None,
                 },
                 crate::protocol::HistoryMessage {
+                    response_stats: None,
                     role: "user".to_string(),
                     content: "current prompt".to_string(),
                     tool_calls: None,

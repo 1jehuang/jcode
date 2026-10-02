@@ -12,8 +12,7 @@ ios_simulator_screenshot.png
 target-ttest/
 target-ttest*/
 
-# Offscreen frames written by `jcode-desktop2 --capture`. These are review
-# artefacts for a single change, not committed baselines.
+# Local capture artefacts are not committed baselines.
 captures/
 
 # Stray experiment/debug artifacts at the repo root. Real assets live under

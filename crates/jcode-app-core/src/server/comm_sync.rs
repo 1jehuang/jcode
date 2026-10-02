@@ -72,6 +72,7 @@ pub(super) struct MemberRuntimeExtras {
     pub(super) activity: Option<SessionActivitySnapshot>,
     pub(super) provider_name: Option<String>,
     pub(super) provider_model: Option<String>,
+    pub(super) provider_effort: Option<String>,
     pub(super) turn_count: Option<u64>,
     pub(super) recent_total_tokens: Option<u64>,
     pub(super) recent_output_tokens: Option<u64>,
@@ -97,19 +98,23 @@ pub(super) async fn member_runtime_extras(
         live_activity_snapshot(&connections, session_id, member_is_running)
     };
 
-    let (provider_name, provider_model) = {
+    let (provider_name, provider_model, provider_effort) = {
         let agent_sessions = sessions.read().await;
         if let Some(agent) = agent_sessions.get(session_id) {
             // Never block on a busy agent: token churn and turns come from the
             // lock-free metrics registry, so a missing provider name here just
             // means the agent is mid-turn.
             if let Ok(agent) = agent.try_lock() {
-                (Some(agent.provider_name()), Some(agent.provider_model()))
+                (
+                    Some(agent.provider_name()),
+                    Some(agent.provider_model()),
+                    agent.provider_reasoning_effort(),
+                )
             } else {
-                (None, None)
+                (None, None, None)
             }
         } else {
-            (None, None)
+            (None, None, None)
         }
     };
 
@@ -130,6 +135,7 @@ pub(super) async fn member_runtime_extras(
         activity,
         provider_name,
         provider_model,
+        provider_effort,
         turn_count: metrics.map(|m| m.turns),
         recent_total_tokens: metrics.map(|m| m.recent_total_tokens),
         recent_output_tokens: metrics.map(|m| m.recent_output_tokens),

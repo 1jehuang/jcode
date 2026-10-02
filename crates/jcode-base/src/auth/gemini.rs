@@ -53,6 +53,32 @@ pub fn has_api_key() -> bool {
     api_key().is_some()
 }
 
+/// True when the `gemini` provider must stay on Code Assist OAuth even though
+/// an API key exists (`JCODE_GEMINI_FORCE_OAUTH`, or `[provider]
+/// gemini_force_oauth = true`). Explicit environment overrides are applied by
+/// the reloadable config loader. `gemini-api` always uses the key.
+pub fn force_oauth() -> bool {
+    crate::config::config().provider.gemini_force_oauth
+}
+
+/// Configured Code Assist project, with explicit environment precedence.
+pub fn cloud_project() -> Option<String> {
+    crate::config::config()
+        .provider
+        .gemini_project
+        .as_deref()
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
+        .map(str::to_owned)
+}
+
+/// True when the `gemini` provider will actually send with an API key: a key
+/// is present and OAuth is not pinned. Use this, not `has_api_key`, when the
+/// question is "which route will `gemini` take".
+pub fn uses_api_key() -> bool {
+    !force_oauth() && has_api_key()
+}
+
 /// Persist a Gemini Developer API key to the `gemini.env` config file under the
 /// canonical `GEMINI_API_KEY` name.
 pub fn save_api_key(key: &str) -> Result<()> {
@@ -341,6 +367,7 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
             &auth_url,
             "Scan this QR on another device if this machine has no browser:",
             "    ",
+            crate::auth::browser_suppressed(no_browser),
         ) {
             eprintln!("{qr}\n");
         }
@@ -407,6 +434,7 @@ async fn manual_login(
         &auth_url,
         "Scan this QR on another device if needed:",
         "    ",
+        crate::auth::browser_suppressed(no_browser),
     ) {
         eprintln!("{qr}\n");
     }

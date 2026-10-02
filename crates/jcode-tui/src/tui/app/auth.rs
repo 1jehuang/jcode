@@ -16,7 +16,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::Arc;
 
 impl App {
-    fn open_auth_browser(url: &str) -> bool {
+    pub(super) fn open_auth_browser(url: &str) -> bool {
         // Honors --no-browser/NO_BROWSER/JCODE_NO_BROWSER and never opens real
         // browser windows from test binaries (login flows are exercised by TUI
         // tests; without this guard a test run pops OAuth pages on the
@@ -1777,7 +1777,7 @@ impl App {
         self.set_status_notice("Grok Build: preparing sign-in...");
         self.begin_pending_login(PendingLogin::GrokBuild);
         self.push_display_message(DisplayMessage::system(
-            "Grok Build Login\n\nJcode is preparing the managed provider backend. The xAI sign-in URL and device code will appear here. You do not need to install the Grok CLI.\n\nType /cancel to dismiss this login."
+            "Grok Build Login\n\nRequesting an xAI sign-in URL and device code. They will appear here. You do not need to install the Grok CLI.\n\nType /cancel to dismiss this login."
                 .to_string(),
         ));
 
@@ -1821,17 +1821,6 @@ impl App {
 
             match crate::auth::grok_build::complete_device_login(&client, &authorization).await {
                 Ok(()) => {
-                    // The ACP executable is a private provider backend, not an
-                    // authentication dependency. Provision it only after the
-                    // native OAuth flow has completed.
-                    if let Err(error) = crate::auth::grok_build::ensure_cli().await {
-                        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                            provider: "grok-build".to_string(),
-                            success: false,
-                            message: format!("Grok Build login succeeded, but its managed runtime could not be prepared: {error:#}"),
-                        }));
-                        return;
-                    }
                     Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                         provider: "grok-build".to_string(),
                         success: true,
@@ -2060,6 +2049,10 @@ impl App {
         }
 
         match pending {
+            PendingLogin::Remote => {
+                // SSH input must never fall through to laptop credential handlers.
+                self.append_ssh_login_input(&input);
+            }
             PendingLogin::ClaudeAccount {
                 verifier,
                 label,
@@ -2447,9 +2440,15 @@ impl App {
                             success: true,
                             message: format!(
                                 "{}.\n\n\
-                                 Stored at ~/.config/jcode/{}.\n\
+                                 Stored at {}.\n\
                                  {}{}",
-                                saved_label, env_file, guidance, model_hint
+                                saved_label,
+                                crate::storage::app_config_dir()
+                                    .expect("config directory resolved while saving API key")
+                                    .join(&env_file)
+                                    .display(),
+                                guidance,
+                                model_hint
                             ),
                         }));
                     }
@@ -2642,10 +2641,15 @@ impl App {
                         Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                             provider: "cursor".to_string(),
                             success: true,
-                            message: "Cursor API key saved.\n\n\
-                             Stored at ~/.config/jcode/cursor.env.\n\
-                             jcode will use it with the native Cursor HTTPS transport."
-                                .to_string(),
+                            message: format!(
+                                "Cursor API key saved.\n\n\
+                                 Stored at {}.\n\
+                                 jcode will use it with the native Cursor HTTPS transport.",
+                                crate::storage::app_config_dir()
+                                    .expect("config directory resolved while saving Cursor API key")
+                                    .join("cursor.env")
+                                    .display()
+                            ),
                         }));
                     }
                     Err(e) => {
@@ -3438,10 +3442,13 @@ impl App {
             success: true,
             message: format!(
                 "Azure OpenAI configuration saved.\n\n\
-                 Stored at ~/.config/jcode/{}.\n\
+                 Stored at {}.\n\
                  {}\n\n\
                  Use /model after your Azure deployment exists. If the model list looks stale, run /refresh-model-list.",
-                crate::auth::azure::ENV_FILE,
+                crate::storage::app_config_dir()
+                    .expect("config directory resolved while saving Azure configuration")
+                    .join(crate::auth::azure::ENV_FILE)
+                    .display(),
                 auth_note,
             ),
         }));

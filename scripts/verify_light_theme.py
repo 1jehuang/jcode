@@ -127,13 +127,14 @@ def main() -> int:
         print("FAIL: not enough SGR samples captured; TUI may not have rendered")
         return 1
 
-    # jcode's dim_color() is rgb(80,80,80); its lightness flip is (175,175,175).
-    # The dark run must use the native palette and the light run the flipped one.
+    # Simple inversion used to turn dim rgb(80,80,80) into unreadable pale
+    # rgb(175,175,175). Contrast repair now yields rgb(71,71,71) on the default
+    # light surface. Dark mode must retain its original palette.
     if (80, 80, 80) not in dark:
         print("FAIL: dark run missing native dim color (80,80,80)")
         return 1
-    if (175, 175, 175) not in light:
-        print(f"FAIL: light run missing flipped dim color (175,175,175); got {sorted(light)}")
+    if (71, 71, 71) not in light:
+        print(f"FAIL: light run missing readable dim color (71,71,71); got {sorted(light)}")
         return 1
     if (80, 80, 80) in light:
         print("FAIL: light run still emits native dim color (80,80,80)")
@@ -146,7 +147,7 @@ def main() -> int:
         print(f"FAIL: light run has no dark accents (min luminance {darkest_light:.2f})")
         return 1
 
-    print("PASS: white background detected; palette flipped for light theme")
+    print("PASS: white background detected; muted light-theme text has readable contrast")
     return 0
 
 

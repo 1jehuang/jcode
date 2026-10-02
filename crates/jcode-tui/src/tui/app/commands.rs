@@ -113,6 +113,7 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.last_todo_ownership_fingerprint = None;
     app.todo_gate_digest_delivered = false;
     cleared
 }
@@ -245,6 +246,7 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.last_todo_ownership_fingerprint = None;
     // Re-arming starts a fresh review cycle, so the deferred quality digest is
     // eligible to be delivered again for the upcoming work.
     app.todo_gate_digest_delivered = false;
@@ -364,6 +366,7 @@ pub(super) fn create_transfer_session_from_parent(
     let mut child = crate::session::Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = compaction;
+    child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();
@@ -959,7 +962,6 @@ fn parse_diff_mode_name(value: &str) -> Option<crate::config::DiffDisplayMode> {
         "full" | "full-inline" | "full_inline" | "fullinline" | "inline-full" => {
             Some(DiffDisplayMode::FullInline)
         }
-        "pinned" | "pin" | "pane" => Some(DiffDisplayMode::Pinned),
         "file" | "fullfile" | "full-file" => Some(DiffDisplayMode::File),
         _ => None,
     }
@@ -987,7 +989,7 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
 
     if arg.eq_ignore_ascii_case("status") {
         app.push_display_message(DisplayMessage::system(format!(
-            "Diff mode: {} (use /diff [off|inline|full|pinned|file] or /diff to cycle)",
+            "Diff mode: {} (use /diff [off|inline|full|file] or /diff to cycle)",
             app.diff_mode.label()
         )));
         return true;
@@ -996,7 +998,7 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
     match parse_diff_mode_name(arg) {
         Some(mode) => apply_diff_mode(app, mode),
         None => app.push_display_message(DisplayMessage::error(
-            "Usage: /diff [off|inline|full|pinned|file|cycle|status]".to_string(),
+            "Usage: /diff [off|inline|full|file|cycle|status]".to_string(),
         )),
     }
     true
@@ -1353,8 +1355,18 @@ fn handle_fork_command(app: &mut App, trimmed: &str) -> bool {
 /// as the first message of the forked session. Shared by `/btw <question>`,
 /// `/fork [prompt]`, and `/split`.
 pub(super) fn fork_session_with_prompt_local(app: &mut App, prompt: Option<&str>) {
-    let staged = prompt.map(|prompt| (prompt.to_string(), Vec::new()));
+    // Images attached to the input belong to the prompt being forked off, so
+    // they travel with it instead of lingering on the parent's next message.
+    let images = if prompt.is_some() {
+        std::mem::take(&mut app.pending_images)
+    } else {
+        Vec::new()
+    };
+    let staged = prompt.map(|prompt| (prompt.to_string(), images.clone()));
     if let Err(error) = launch_forked_session_local(app, staged) {
+        if !images.is_empty() {
+            app.pending_images = images;
+        }
         app.push_display_message(DisplayMessage::error(format!(
             "Failed to fork session: {}",
             error
@@ -1672,8 +1684,24 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if super::commands_cloud::parse_cloud_command(trimmed).is_some() {
+        let session_id = active_session_id(app);
+        super::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
+        return true;
+    }
+
     if trimmed == "/commit" {
         handle_commit_command_local(app);
+        return true;
+    }
+
+    if trimmed == "/merge" {
+        handle_merge_command_local(app);
+        return true;
+    }
+
+    if trimmed == "/merge-remote-release" {
+        handle_merge_remote_release_command_local(app);
         return true;
     }
 
@@ -2144,6 +2172,42 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
+pub(super) fn build_merge_prompt() -> String {
+    String::from(
+        "Merge the current Git branch into the repository's main or master branch, then leave HEAD attached to that destination branch in the session's working directory. \
+        This is an explicit request to integrate this branch and switch to the destination, not merely to reset HEAD. \
+        First inspect the repository, current branch, git status (including staged, unstaged, and untracked files), worktrees, and any merge/rebase/cherry-pick/revert in progress. \
+        If there are uncommitted changes, an operation in progress, or a detached/unborn HEAD, stop and explain without changing anything. Do not auto-commit, stash, clean, or discard work. \
+        Select an existing local main or master branch. If both exist, use the configured remote default only when it unambiguously names one of them; otherwise ask which to use. If neither exists, stop rather than inventing a destination. \
+        If already on the destination branch, report that and do nothing. If the destination is checked out in another worktree, stop rather than forcing a checkout or modifying that worktree. \
+        Record the source branch and both commit IDs, inspect the commits and diff being integrated, and honor the repository's validation requirements before merging. Stop if validation fails. \
+        Recheck that the worktree is clean and both branch tips are unchanged before switching. Use git switch to the destination and a normal non-interactive git merge --no-edit of the recorded source commit, allowing a fast-forward when possible. \
+        Never reset, rebase, squash, force-update refs, bypass hooks, push, delete branches, or include unrelated branches. \
+        If this merge conflicts, do not resolve conflicts automatically: abort only the merge you just started and return to the original branch when safe. If recovery fails, stop and report the exact state without destructive cleanup. \
+        After a successful merge, rerun the appropriate validation against the combined result. If it fails, report the failure and leave the completed merge intact rather than resetting it or claiming success. \
+        Verify the final branch, clean status, and that the source commit is an ancestor of HEAD before claiming success. Report the source, destination, resulting commit, validation, and that nothing was pushed.",
+    )
+}
+
+pub(super) fn build_merge_remote_release_prompt() -> String {
+    format!(
+        "Merge the current branch and then cut a remote release from the destination branch. Execute these two phases in order. \
+        Phase 1 (merge only, no push or release): {} \
+        Gate: proceed to Phase 2 only after Phase 1 successfully merges the source and all post-merge validation passes, \
+        HEAD is attached to the selected destination, the worktree is clean, and the recorded source commit is an ancestor of HEAD. \
+        If Phase 1 stops for any reason (including already being on the destination branch), has conflicts, fails validation, \
+        or needs clarification, stop the entire workflow without pushing, tagging, or releasing. \
+        The no-push rule and nothing-pushed report above apply to Phase 1 only. \
+        Phase 2 (remote release): stay on the verified destination branch and release its merged HEAD, never the original feature branch. \
+        Do not auto-commit any unexpected work that appears between phases. Stop if the destination branch or HEAD changes unexpectedly. \
+        Stop on any push failure before creating a tag or triggering a release. {} \
+        Finally report the merge source and destination, validation results, release version, push result, and remote release status. \
+        Distinguish a triggered remote workflow from a completed publication.",
+        build_merge_prompt(),
+        build_remote_release_prompt(),
+    )
+}
+
 pub(super) fn build_commit_prompt() -> String {
     "Make interactive, logical commits for the current uncommitted work. Inspect the git state first, including unstaged and staged changes. Group related changes into small coherent commits, staging only the files or hunks that belong together. Preserve unrelated user or agent work, do not discard changes, and do not amend existing commits unless clearly necessary. For each commit, use a concise conventional-style message when possible. Validate as appropriate for the changed files before committing, and report the commits created plus any remaining uncommitted changes.".to_string()
 }
@@ -2236,6 +2300,29 @@ fn handle_triage_command_local(app: &mut App, rest: &str) {
     }
 }
 
+pub(super) fn merge_launch_notice(interrupted: bool) -> String {
+    if interrupted {
+        "👉 Interrupting and starting merge into main/master...".to_string()
+    } else {
+        "🚀 Starting merge into main/master...".to_string()
+    }
+}
+
+fn handle_merge_command_local(app: &mut App) {
+    let prompt = build_merge_prompt();
+    if app.is_processing {
+        super::commands_improve::interrupt_and_queue_synthetic_message(
+            app,
+            prompt,
+            "Interrupting for /merge...",
+            merge_launch_notice(true),
+        );
+    } else {
+        app.push_display_message(DisplayMessage::system(merge_launch_notice(false)));
+        super::commands_improve::start_synthetic_user_turn(app, prompt);
+    }
+}
+
 pub(super) fn commit_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits...".to_string()
@@ -2265,6 +2352,14 @@ pub(super) fn fast_macos_release_launch_notice(interrupted: bool) -> String {
         "👉 Interrupting and starting logical commits + push + fast macOS release...".to_string()
     } else {
         "🚀 Starting logical commits + push + fast macOS release...".to_string()
+    }
+}
+
+pub(super) fn merge_remote_release_launch_notice(interrupted: bool) -> String {
+    if interrupted {
+        "👉 Interrupting and starting merge + push + remote release...".to_string()
+    } else {
+        "🚀 Starting merge + push + remote release...".to_string()
     }
 }
 
@@ -2332,6 +2427,23 @@ fn handle_fast_macos_release_command_local(app: &mut App) {
         );
     } else {
         app.push_display_message(DisplayMessage::system(fast_macos_release_launch_notice(
+            false,
+        )));
+        super::commands_improve::start_synthetic_user_turn(app, prompt);
+    }
+}
+
+fn handle_merge_remote_release_command_local(app: &mut App) {
+    let prompt = build_merge_remote_release_prompt();
+    if app.is_processing {
+        super::commands_improve::interrupt_and_queue_synthetic_message(
+            app,
+            prompt,
+            "Interrupting for /merge-remote-release...",
+            merge_remote_release_launch_notice(true),
+        );
+    } else {
+        app.push_display_message(DisplayMessage::system(merge_remote_release_launch_notice(
             false,
         )));
         super::commands_improve::start_synthetic_user_turn(app, prompt);
@@ -2751,6 +2863,18 @@ pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
 }
 
 pub(super) fn handle_dictation_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed == "/voice" {
+        app.toggle_voice_input();
+        return true;
+    }
+    if trimmed.starts_with("/voice ") {
+        let key = app.voice_input_key_label().unwrap_or("unbound").to_string();
+        app.push_display_message(DisplayMessage::error(format!(
+            "Usage: /voice (or {key}) starts recording, run it again to send, Esc cancels.\n\
+             Needs a Nari API key (NARI_API_KEY or ~/.config/jcode/nari.env)."
+        )));
+        return true;
+    }
     if trimmed == "/dictate" || trimmed == "/dictation" {
         app.handle_dictation_trigger();
         return true;

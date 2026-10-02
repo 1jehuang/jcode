@@ -170,6 +170,7 @@ pub async fn login(tier: GmailAccessTier, no_browser: bool) -> Result<GoogleToke
         &auth_url,
         "Scan this QR on another device if this machine has no browser:",
         "    ",
+        crate::auth::browser_suppressed(no_browser),
     ) {
         eprintln!("{qr}\n");
     }

@@ -208,7 +208,9 @@ impl Tool for ConversationSearchTool {
                             crate::message::ContentBlock::Reasoning { .. }
                             | crate::message::ContentBlock::ReasoningTrace { .. }
                             | crate::message::ContentBlock::AnthropicThinking { .. }
-                            | crate::message::ContentBlock::OpenAIReasoning { .. } => {}
+                            | crate::message::ContentBlock::OpenAIReasoning { .. }
+                            | crate::message::ContentBlock::ToolReference { .. }
+                            | crate::message::ContentBlock::ProviderNative { .. } => {}
                             crate::message::ContentBlock::Image { .. } => {
                                 output.push_str("[Image]\n");
                             }

@@ -148,6 +148,7 @@ impl MultiProvider {
         };
         let model_spec = match &api_method_kind {
             ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
+            ModelRouteApiMethod::GrokBuild => crate::provider::grok_build_model_spec(bare_name),
             ModelRouteApiMethod::ClaudeOAuth => format!("claude-oauth:{}", bare_name),
             ModelRouteApiMethod::AnthropicApiKey if provider_display == "Anthropic" => {
                 format!("claude-api:{}", bare_name)
@@ -168,6 +169,7 @@ impl MultiProvider {
 
         let provider_key = match &api_method_kind {
             ModelRouteApiMethod::JcodeSubscription => Some("jcode".to_string()),
+            ModelRouteApiMethod::GrokBuild => Some("grok-build".to_string()),
             ModelRouteApiMethod::AnthropicApiKey
                 if provider_display == "Anthropic"
                     && crate::provider::provider_for_model(bare_name) == Some("claude") =>
@@ -463,6 +465,9 @@ impl MultiProvider {
         {
             match ModelRouteApiMethod::parse(api_method) {
                 ModelRouteApiMethod::JcodeSubscription => return model.to_string(),
+                ModelRouteApiMethod::GrokBuild => {
+                    return crate::provider::grok_build_model_spec(model);
+                }
                 ModelRouteApiMethod::ClaudeOAuth => return format!("claude-oauth:{model}"),
                 ModelRouteApiMethod::AnthropicApiKey => return format!("claude-api:{model}"),
                 ModelRouteApiMethod::OpenAIOAuth => return format!("openai-oauth:{model}"),

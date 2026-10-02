@@ -496,7 +496,7 @@ impl Tool for BgTool {
                 "dry_run": { "type": "boolean", "description": "For cleanup, report what would be removed without deleting." },
                 "notify": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to notify on completion. Defaults to true." },
                 "wake": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to wake on completion. Defaults to true." },
-                "stall_wake_seconds": { "type": "integer", "description": "For delivery/watch: also wake the agent after this many seconds of no output/progress (min 30, resets on activity). Use for long jobs that may hang silently." },
+                "stall_wake_seconds": { "type": "integer", "description": "For delivery/watch: also wake after N seconds without output/progress (min 30). For jobs that may hang." },
                 "max_wait_seconds": { "type": "integer", "description": "For wait: max seconds to block. Default 60, cap 3600, 0 = immediate check." },
                 "return_on_progress": { "type": "boolean", "description": "For wait: return on the first progress/checkpoint event too. Defaults to true." },
                 "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "For multi-task wait, return on any completion, all completions, or first failure. Defaults to any." },

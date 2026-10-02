@@ -81,11 +81,24 @@ static SECRET_HARDEN_STATE: LazyLock<Mutex<SecretHardenState>> =
 mod active_pids;
 pub use active_pids::{
     SessionCounts, SessionPresence, StreamingGuard, active_pids_dir, active_session_ids,
-    find_active_session_id_by_pid, internal_pids_dir, mark_streaming, register_active_pid,
-    session_counts, session_is_internal, session_presence, set_session_internal,
-    streaming_pids_dir, unmark_streaming, unregister_active_pid, user_session_counts,
-    user_session_presence,
+    find_active_session_id_by_pid, internal_pids_dir, mark_streaming, prune_active_pids_owned_by,
+    register_active_pid, session_counts, session_is_internal, session_presence,
+    set_session_internal, streaming_pids_dir, streaming_session_ids, unmark_streaming,
+    unregister_active_pid, user_session_counts, user_session_presence,
 };
+
+mod session_lease;
+pub use session_lease::{
+    SessionLease, SessionLeaseBlock, read_session_lease, remove_session_lease, session_lease_block,
+    session_leases_dir, write_session_lease,
+};
+
+/// Serialize this crate's tests that mutate `JCODE_HOME`.
+#[cfg(test)]
+pub(crate) fn test_jcode_home_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Platform-aware runtime directory for sockets and ephemeral state.
 ///
@@ -154,6 +167,25 @@ pub fn jcode_dir() -> Result<PathBuf> {
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
     Ok(home.join(".jcode"))
+}
+
+/// Whether `JCODE_HOME` redirects this process away from the user's real
+/// `~/.jcode` directory.
+///
+/// Sandboxed runs must not consult machine-global resources, such as the macOS
+/// Keychain, that cannot be redirected beneath `JCODE_HOME`.
+pub fn running_with_sandboxed_home() -> bool {
+    let Some(configured) = std::env::var_os("JCODE_HOME").map(PathBuf::from) else {
+        return false;
+    };
+    let Some(default) = dirs::home_dir().map(|home| home.join(".jcode")) else {
+        return true;
+    };
+
+    match (configured.canonicalize(), default.canonicalize()) {
+        (Ok(configured), Ok(default)) => configured != default,
+        _ => configured != default,
+    }
 }
 
 pub fn logs_dir() -> Result<PathBuf> {

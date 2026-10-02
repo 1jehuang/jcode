@@ -10,12 +10,28 @@ use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const RELOAD_DISCONNECT_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
+pub(super) const IDLE_RECONNECT_GRACE: Duration = Duration::from_secs(30);
+
+// The last registered event sender remains on the member after it detaches.
+// It is therefore also an ownership witness: an old grace timer must not
+// remove a successor's session even if that successor has disconnected again.
+async fn attachment_was_replaced(
+    members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    original: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
+) -> bool {
+    members
+        .read()
+        .await
+        .get(session_id)
+        .is_none_or(|member| !member.event_tx.same_channel(original))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisconnectDisposition {
@@ -25,6 +41,8 @@ enum DisconnectDisposition {
 }
 
 fn disconnect_disposition(disconnected_while_processing: bool) -> DisconnectDisposition {
+    // Losing the UI is only a session crash when it interrupts unfinished work.
+    // In particular, force-quitting Desktop after Done is an ordinary close.
     if !disconnected_while_processing {
         return DisconnectDisposition::Closed;
     }
@@ -36,21 +54,36 @@ fn disconnect_disposition(disconnected_while_processing: bool) -> DisconnectDisp
     }
 }
 
-async fn session_has_live_successor(
-    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
-    session_id: &str,
+fn disconnected_while_processing(
+    client_is_processing: bool,
+    processing_task: Option<&tokio::task::JoinHandle<()>>,
 ) -> bool {
-    client_connections
-        .read()
-        .await
-        .values()
-        .any(|info| info.session_id == session_id)
+    // Socket EOF is prioritized over processing_done_rx. A finished task is
+    // authoritative even if the client's cached processing flag is still set.
+    processing_task
+        .map(|handle| !handle.is_finished())
+        .unwrap_or(client_is_processing)
+}
+
+/// Release transport-owned state without changing the live session or turn.
+pub(super) async fn detach_client_attachment(
+    session_id: &str,
+    connection_id: &str,
+    debug_id: &str,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    client_debug_state: &Arc<RwLock<ClientDebugState>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) {
+    client_debug_state.write().await.unregister(debug_id);
+    client_connections.write().await.remove(connection_id);
+    unregister_session_event_sender(swarm_members, session_id, connection_id).await;
 }
 
 #[expect(
     clippy::too_many_arguments,
     reason = "disconnect cleanup updates sessions, swarms, files, channels, debug state, and shutdown signals together"
 )]
+/// Returns the event task when a successor needs this lifecycle to finish its turn.
 pub(super) async fn cleanup_client_connection(
     sessions: &SessionAgents,
     client_session_id: &str,
@@ -73,37 +106,105 @@ pub(super) async fn cleanup_client_connection(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
-) -> Result<()> {
-    let disconnected_while_processing = client_is_processing
-        || processing_task
-            .as_ref()
-            .map(|handle| !handle.is_finished())
-            .unwrap_or(false);
-    let disposition = disconnect_disposition(disconnected_while_processing);
+    client_event_tx: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
+    idle_reconnect_grace: Duration,
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
+    let disposition = disconnect_disposition(disconnected_while_processing(
+        client_is_processing,
+        processing_task.as_ref(),
+    ));
+    let allow_reconnect = if disposition == DisconnectDisposition::Closed
+        && !crate::session::session_exists(client_session_id)
+    {
+        let agent = sessions.read().await.get(client_session_id).cloned();
+        agent.is_some_and(|agent| {
+            agent
+                .try_lock()
+                .is_ok_and(|agent| agent.visible_conversation_message_count() == 0)
+        })
+    } else {
+        false
+    };
 
-    {
-        let mut debug_state = client_debug_state.write().await;
-        debug_state.unregister(client_debug_id);
+    detach_client_attachment(
+        client_session_id,
+        client_connection_id,
+        client_debug_id,
+        client_connections,
+        client_debug_state,
+        swarm_members,
+    )
+    .await;
+
+    if allow_reconnect {
+        // Empty roots intentionally have no snapshot. A replacement UI/SDK
+        // connection needs a bounded opportunity to reclaim the live Agent,
+        // without creating history entries for every briefly opened panel.
+        // No registry or agent lock is held across the wait. Processing/crash
+        // cleanup never enters this path.
+        event_handle.abort();
+        crate::logging::info(&format!(
+            "Retaining idle unsaved session {} for reconnect grace",
+            client_session_id
+        ));
+        let deadline = tokio::time::Instant::now() + idle_reconnect_grace;
+        loop {
+            if attachment_was_replaced(swarm_members, client_session_id, client_event_tx).await
+                || client_connections
+                    .read()
+                    .await
+                    .values()
+                    .any(|info| info.session_id == client_session_id)
+            {
+                return Ok(None);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep_until(std::cmp::min(
+                deadline,
+                tokio::time::Instant::now() + Duration::from_millis(25),
+            ))
+            .await;
+        }
     }
-    {
-        let mut connections = client_connections.write().await;
-        connections.remove(client_connection_id);
-    }
-    unregister_session_event_sender(swarm_members, client_session_id, client_connection_id).await;
 
     // Release stale live ownership before slower cleanup so a reconnecting TUI can
     // reclaim the same session without tripping duplicate-attach guards.
     tokio::task::yield_now().await;
 
-    let successor_connected =
-        session_has_live_successor(client_connections, client_session_id).await;
-    if successor_connected {
+    // Resume claims use this same lock before accessing the sessions map.
+    // Keep it through destructive cleanup so a successor cannot be claimed
+    // between the check and session/status/control-handle removal.
+    let connections = client_connections.write().await;
+    let successor_connected = connections
+        .values()
+        .any(|info| info.session_id == client_session_id);
+    if successor_connected
+        || (allow_reconnect
+            && attachment_was_replaced(swarm_members, client_session_id, client_event_tx).await)
+    {
         crate::logging::info(&format!(
             "Skipping destructive disconnect cleanup for {} because another client is still attached",
             client_session_id
         ));
+        // The lifecycle, not the socket, owns completion bookkeeping. Return
+        // its writer handle so it can retain and await the task using the same
+        // continuation path as an explicitly detached remote turn. Merely
+        // dropping the JoinHandle here would lose completion/status handling.
+        if processing_task.is_some() {
+            return Ok(Some(event_handle));
+        }
         event_handle.abort();
-        return Ok(());
+        return Ok(None);
+    }
+
+    // A live processing task owns the agent mutex. Abort it before trying to
+    // persist the disconnect disposition; otherwise cleanup waits two seconds,
+    // times out, and leaves the durable session `Active` precisely when an
+    // interrupted desktop turn must become `Crashed`.
+    if let Some(handle) = processing_task.take() {
+        handle.abort();
     }
 
     {
@@ -251,21 +352,43 @@ pub(super) async fn cleanup_client_connection(
     remove_background_tool_signal(client_session_id);
     remove_session_interrupt_queue(soft_interrupt_queues, client_session_id).await;
 
-    if let Some(handle) = processing_task.take() {
-        handle.abort();
-    }
-
+    drop(connections);
     event_handle.abort();
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
+#[path = "client_disconnect_grace_tests.rs"]
+mod grace_tests;
+
+#[cfg(test)]
 mod tests {
-    use super::{DisconnectDisposition, disconnect_disposition};
+    use super::{DisconnectDisposition, disconnect_disposition, disconnected_while_processing};
 
     #[test]
     fn idle_disconnect_is_closed() {
         assert_eq!(disconnect_disposition(false), DisconnectDisposition::Closed);
+    }
+
+    #[tokio::test]
+    async fn completed_task_overrides_stale_processing_flag() {
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            disconnect_disposition(disconnected_while_processing(true, Some(&task))),
+            DisconnectDisposition::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn unfinished_task_is_processing_even_without_cached_flag() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        assert!(disconnected_while_processing(false, Some(&task)));
+        task.abort();
+        assert!(disconnected_while_processing(true, None));
+        assert!(!disconnected_while_processing(false, None));
     }
 
     #[test]
@@ -291,6 +414,7 @@ mod tests {
             disconnect_disposition(true),
             DisconnectDisposition::Reloading
         );
+        assert_eq!(disconnect_disposition(false), DisconnectDisposition::Closed);
         crate::server::clear_reload_marker();
         crate::env::remove_var("JCODE_RUNTIME_DIR");
     }

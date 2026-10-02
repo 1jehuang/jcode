@@ -26,10 +26,6 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Jcode.as_arg_value(), "jcode");
     assert_eq!(ProviderChoice::Claude.as_arg_value(), "claude");
     assert_eq!(ProviderChoice::AnthropicApi.as_arg_value(), "anthropic-api");
-    assert_eq!(
-        ProviderChoice::ClaudeSubprocess.as_arg_value(),
-        "claude-subprocess"
-    );
     assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
     assert_eq!(ProviderChoice::OpenaiApi.as_arg_value(), "openai-api");
     assert_eq!(ProviderChoice::Openrouter.as_arg_value(), "openrouter");
@@ -44,6 +40,7 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::TogetherAi.as_arg_value(), "togetherai");
     assert_eq!(ProviderChoice::Deepinfra.as_arg_value(), "deepinfra");
     assert_eq!(ProviderChoice::Fireworks.as_arg_value(), "fireworks");
+    assert_eq!(ProviderChoice::Novita.as_arg_value(), "novita");
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
     assert_eq!(ProviderChoice::GrokBuild.as_arg_value(), "grok-build");
@@ -68,6 +65,23 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Antigravity.as_arg_value(), "antigravity");
     assert_eq!(ProviderChoice::Google.as_arg_value(), "google");
     assert_eq!(ProviderChoice::Auto.as_arg_value(), "auto");
+}
+
+#[test]
+fn novita_cli_aliases_select_the_builtin_profile() {
+    use clap::ValueEnum;
+    for input in ["novita", "novita-ai", "novita.ai"] {
+        let choice = ProviderChoice::from_str(input, false).unwrap();
+        assert_eq!(choice, ProviderChoice::Novita);
+        assert_eq!(
+            profile_for_choice(&choice),
+            Some(provider_catalog::NOVITA_PROFILE)
+        );
+        assert_eq!(
+            login_provider_for_choice(&choice),
+            Some(provider_catalog::NOVITA_LOGIN_PROVIDER)
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -286,7 +300,11 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Hosted Models");
+    // Display name is Jcode Subscription since b7b5977f8 (subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME).
+    assert_eq!(
+        provider.name(),
+        crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+    );
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
@@ -1008,6 +1026,22 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         !message.contains("will not read them without confirmation"),
         "auto mode should skip untrusted external auth, not fail with the consent prompt error: {message}"
     );
+
+    // Production `serve` must bind before Desktop can sign in, without a
+    // launcher-specific deferred-auth environment variable.
+    let daemon_provider = init_provider_for_serve(&ProviderChoice::Auto, None)
+        .await
+        .expect("credential-free daemon should support onboarding");
+    let request_error = match daemon_provider.complete(&[], &[], "test", None).await {
+        Ok(_) => panic!("model work must not succeed without credentials"),
+        Err(err) => err.to_string(),
+    };
+    assert!(request_error.contains("not configured"), "{request_error}");
+    assert!(request_error.contains("/login"), "{request_error}");
+
+    // Serve opts in locally, rather than leaking a process-wide exemption.
+    assert!(std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_none());
+    assert!(init_provider(&ProviderChoice::Auto, None).await.is_err());
 
     for (key, value) in saved {
         if let Some(value) = value {

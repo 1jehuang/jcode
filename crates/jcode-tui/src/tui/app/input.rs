@@ -18,6 +18,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod drop_tests;
 /// Streaming reasoning region, split out to keep this file under the
 /// code-size budget. See the module docs for the byte-offset invariant.
 mod reasoning_region;
@@ -311,6 +313,9 @@ fn image_content(media_type: String, base64_data: String) -> ClipboardPasteConte
 }
 
 fn download_image_url_content(url: &str) -> Option<ClipboardPasteContent> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     super::download_image_url(url)
         .map(|(media_type, base64_data)| image_content(media_type, base64_data))
 }
@@ -381,6 +386,33 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
+        if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch",
+        ) {
+            return;
+        }
+        let content = super::read_clipboard_for_paste_with(
+            &super::ClipboardPasteKind::Smart,
+            || None,
+            || Some(("image/png".to_string(), "aW1hZ2U=".to_string())),
+            |_| panic!("clipboard image bytes must not fetch a URL"),
+        );
+        assert!(matches!(
+            content,
+            super::ClipboardPasteContent::Image { .. }
+        ));
+        assert!(super::download_image_url_content("http://127.0.0.1/secret.png").is_none());
+        let content = super::read_clipboard_for_paste_with(
+            &super::ClipboardPasteKind::Smart,
+            || Some("http://127.0.0.1/secret.png".to_string()),
+            || panic!("text must stay text"),
+            super::download_image_url_content,
+        );
+        assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
+    }
+
     use super::{
         ClipboardPasteContent, ClipboardPasteKind, dropped_image_files,
         is_clipboard_paste_shortcut, parse_dropped_paths, preferred_wayland_text_type,
@@ -624,7 +656,17 @@ pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_f
 use paste_guard::image_media_type;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
+    if app.append_ssh_login_input(&text) {
+        return;
+    }
     paste_guard::note_paste();
+    if crate::tui::is_ssh_remote() {
+        // Text paths refer to the remote machine. Do not stat/read laptop
+        // files or download image URLs automatically while attached over SSH.
+        handle_text_paste(app, text);
+        app.set_status_notice("SSH paste: text only. File paths refer to the remote host; paste image bytes from the clipboard to attach an image.");
+        return;
+    }
     // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
     // terminal always deliver text. Checking clipboard_image() here caused a bug where
     // text pastes were misidentified as images when the clipboard also had image data
@@ -689,9 +731,13 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     }
 }
 
-fn format_dropped_path(path: &std::path::Path, quote_whitespace: bool) -> String {
+fn format_dropped_path(path: &std::path::Path, quote_for_batch: bool) -> String {
     let value = path.to_string_lossy();
-    if quote_whitespace && value.chars().any(char::is_whitespace) {
+    if quote_for_batch
+        && value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '\\' | '\'' | '"'))
+    {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.into_owned()
@@ -711,10 +757,31 @@ fn dropped_image_files(text: &str) -> Option<Vec<(String, Vec<u8>)>> {
 }
 
 /// Terminal emulators normally send file drops as bracketed paste, but some send
-/// the path as ordinary key events. Promote a complete image-path-only composer
-/// value before command/skill routing so an absolute `/...` path is never treated
-/// as a slash command.
+/// the path as ordinary key events. Prepare a complete path-only composer before
+/// command/skill routing: attach images, or resolve quoting for ordinary files.
 pub(super) fn promote_dropped_images(app: &mut App) -> bool {
+    if attach_dropped_images(app) {
+        return true;
+    }
+    let Some(paths) = parse_dropped_paths(&app.input) else {
+        return false;
+    };
+    let normalized = paths
+        .iter()
+        .map(|path| format_dropped_path(path, paths.len() > 1))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized == app.input {
+        return false;
+    }
+    app.remember_input_undo_state();
+    app.input = normalized;
+    app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
+    true
+}
+
+fn attach_dropped_images(app: &mut App) -> bool {
     let Some(images) = dropped_image_files(&app.input) else {
         return false;
     };
@@ -736,6 +803,9 @@ pub(super) fn promote_dropped_images(app: &mut App) -> bool {
 }
 
 pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     let trimmed = text.trim();
     let literal_path = PathBuf::from(trimmed);
     if literal_path.is_file() {
@@ -1107,6 +1177,9 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
 }
 
 pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
+    if app.append_ssh_login_input(text) {
+        return true;
+    }
     if text.is_empty() {
         return false;
     }
@@ -1140,7 +1213,10 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     }
 
     insert_input_text(app, text);
-    promote_dropped_images(app);
+    // A key stream may still be receiving the rest of a multi-file drop. Do not
+    // strip quoting from a verified non-image prefix until submission, otherwise
+    // later paths make its now-unquoted spaces ambiguous.
+    attach_dropped_images(app);
     true
 }
 
@@ -1297,6 +1373,9 @@ pub(super) fn handle_prompt_history_navigation(
                 return history
                     .last()
                     .map(|prompt| {
+                        app.remember_input_undo_state();
+                        app.history_draft =
+                            Some((app.input.clone(), app.cursor_pos.min(app.input.len())));
                         app.input = prompt.clone();
                         app.cursor_pos = app.input.len();
                         app.reset_tab_completion();
@@ -1310,8 +1389,13 @@ pub(super) fn handle_prompt_history_navigation(
             KeyCode::Up => Some(current_index.saturating_sub(1)),
             KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
             KeyCode::Down => {
-                app.input.clear();
-                app.cursor_pos = 0;
+                if let Some((draft, cursor_pos)) = app.history_draft.take() {
+                    app.input = draft;
+                    app.cursor_pos = cursor_pos;
+                } else {
+                    app.input.clear();
+                    app.cursor_pos = 0;
+                }
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
                 return true;
@@ -1608,6 +1692,23 @@ impl App {
             .as_deref()
             .unwrap_or(&self.session.id)
             .to_string();
+        let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
+        let plan = crate::todo::load_plan(&todo_session_id).unwrap_or_default();
+        let todo_fingerprint =
+            serde_json::to_string(&(&todo_session_id, &todos, &plan, &goals)).ok();
+        if self.final_response_todo_fingerprint.is_some() {
+            if self.final_response_todo_fingerprint == todo_fingerprint {
+                // Check before timed reviews and deferred digests too: neither
+                // elapsed time nor a stale observation starts a new todo cycle.
+                return false;
+            }
+            self.final_response_todo_fingerprint = None;
+            self.todo_final_response_requested = false;
+            self.todo_gate_digest_delivered = false;
+            self.todo_completion_gate_attempts = 0;
+            self.todo_confidence_spike_challenged = false;
+            self.last_todo_ownership_fingerprint = None;
+        }
         if !todos.is_empty()
             && crate::todo::take_long_session_review_if_due(&todo_session_id).unwrap_or(false)
         {
@@ -1638,6 +1739,7 @@ impl App {
                 // simply do nothing this turn.
                 crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
                 self.todo_final_response_requested = false;
+                self.last_todo_ownership_fingerprint = None;
                 return false;
             }
             // Deferred quality checks land here, once, instead of interrupting
@@ -1648,22 +1750,39 @@ impl App {
             if self.deliver_deferred_gate_digest_if_needed() {
                 return true;
             }
-            let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
             let ownership_needs_followup =
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
+            let ownership_message =
+                crate::todo::build_todo_ownership_continuation_message(&todos, &goals);
+            // Only a different actionable gap merits another ownership turn.
+            // Reworded evidence, confidence updates and descriptive assessment
+            // changes must not re-arm a nudge the agent already received.
+            let ownership_fingerprint =
+                serde_json::to_string(&(&todo_session_id, &ownership_message)).ok();
+            if ownership_needs_followup
+                && ownership_fingerprint.is_some()
+                && self.last_todo_ownership_fingerprint == ownership_fingerprint
+            {
+                // The agent has already had a chance to address this exact
+                // assessment. Leave the honest scores intact and stop, rather
+                // than buying another turn that only repeats the final answer.
+                // Do not fall through to the successful-completion handoff.
+                crate::logging::info(
+                    "AUTO_POKE_DECISION action=idle reason=unchanged_ownership_assessment",
+                );
+                return false;
+            }
             if ownership_needs_followup && gate_budget_left {
+                self.last_todo_ownership_fingerprint = ownership_fingerprint;
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
                 crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
                 self.push_display_message(DisplayMessage::system(
                     "🔍 Checking end-to-end ownership before finishing...",
                 ));
-                self.queued_messages
-                    .push(crate::todo::build_todo_ownership_continuation_message(
-                        &todos, &goals,
-                    ));
+                self.queued_messages.push(ownership_message);
                 self.pending_queued_dispatch = true;
                 return true;
             }
@@ -1729,6 +1848,7 @@ impl App {
             self.todo_completion_gate_attempts = 0;
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
+                self.final_response_todo_fingerprint = todo_fingerprint;
                 self.push_display_message(DisplayMessage::system(format!(
                     "✅ All todos done. Completion confidence: {}.",
                     confidence_label
@@ -1748,6 +1868,7 @@ impl App {
         // latched until this point so the synthetic final-response turn cannot
         // retrigger the same evidence gate against unchanged completed todos.
         self.todo_confidence_spike_challenged = false;
+        self.last_todo_ownership_fingerprint = None;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
@@ -1790,6 +1911,9 @@ impl App {
     }
 
     pub(crate) fn toggle_next_prompt_new_session_routing(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "New-session routing") {
+            return;
+        }
         self.route_next_prompt_to_new_session = !self.route_next_prompt_to_new_session;
         if self.route_next_prompt_to_new_session {
             self.set_status_notice("Next prompt → new session");
@@ -1831,6 +1955,9 @@ impl App {
 
     /// Spawn a brand-new jcode session in a new terminal window.
     pub(crate) fn handle_new_terminal_hotkey(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Opening a sibling terminal") {
+            return;
+        }
         let cwd = commands::active_working_dir(self)
             .filter(|path| path.is_dir())
             .or_else(|| std::env::current_dir().ok())
@@ -1869,6 +1996,9 @@ fn input_routes_to_new_session(app: &App) -> bool {
 fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     if !input_routes_to_new_session(app) {
         return false;
+    }
+    if super::commands_dispatch::ssh_local_action_blocked(app, "Local new-session routing") {
+        return true;
     }
 
     app.route_next_prompt_to_new_session = false;
@@ -2299,6 +2429,14 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
 
+    if app
+        .toggle_keys
+        .diagram_pane_visibility
+        .matches(code, modifiers)
+    {
+        app.toggle_diagram_pane();
+        return true;
+    }
     if app.toggle_keys.side_panel.matches(code, modifiers) {
         app.toggle_side_panel();
         return true;
@@ -2326,6 +2464,9 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
     if app.dictation_key_matches(code, modifiers) {
+        if super::commands_dispatch::ssh_local_action_blocked(app, "Dictation setup") {
+            return true;
+        }
         app.handle_dictation_trigger();
         return true;
     }
@@ -2550,11 +2691,19 @@ pub(super) fn handle_modal_key(
     }
 
     if app.login_picker_overlay.is_some() {
+        if super::commands_dispatch::ssh_local_action_blocked(app, "Local login picker") {
+            app.login_picker_overlay = None;
+            return Ok(true);
+        }
         app.handle_login_picker_key(code, modifiers)?;
         return Ok(true);
     }
 
     if app.account_picker_overlay.is_some() {
+        if super::commands_dispatch::ssh_local_action_blocked(app, "Local account picker") {
+            app.account_picker_overlay = None;
+            return Ok(true);
+        }
         if let Some(command) = app.next_account_picker_action(code, modifiers)? {
             app.handle_account_picker_command(command);
         }
@@ -2601,7 +2750,12 @@ pub(super) fn handle_modal_key(
 }
 
 pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<bool> {
-    if app.changelog_scroll.is_some() {
+    // This overlay seam is shared by local/replay and live remote clients.
+    if app.panel_image_preview.is_some() {
+        if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+            app.close_panel_image_preview();
+        }
+    } else if app.changelog_scroll.is_some() {
         app.handle_changelog_key(code)?;
     } else if app.help_scroll.is_some() {
         app.handle_help_key(code)?;
@@ -2637,7 +2791,14 @@ pub(super) fn handle_global_control_shortcuts(
                 } else {
                     app.set_status_notice("Interrupting...");
                 }
+            } else if !app.input.is_empty() {
+                // First Ctrl+C: clear the input box
+                app.input.clear();
+                app.pending_images.clear();
+                app.cursor_pos = 0;
+                app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
             } else {
+                // Second Ctrl+C (input already empty): proceed with quit
                 app.handle_quit_request();
             }
             true
@@ -2795,6 +2956,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
 }
 
 pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
+    promote_dropped_images(app);
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
@@ -2841,6 +3003,15 @@ fn paste_placeholder(content: &str) -> String {
 
 impl App {
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
+        if self.remote_login.is_some() {
+            if matches!(
+                event.kind,
+                crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+            ) {
+                let _ = self.handle_key_press_event(event);
+            }
+            return;
+        }
         // Record the event if recording is active
         use crate::tui::test_harness::{TestEvent, record_event};
         let modifiers: Vec<String> = {
@@ -2899,9 +3070,16 @@ impl App {
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+        if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
+            return Ok(());
+        }
+
         // Alt+5 always starts the onboarding simulator from a pristine first
         // screen, even when another modal or a previous sim screen is active.
         if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
+            return Ok(());
+        }
+        if self.handle_update_sim_shortcut(code, modifiers) {
             return Ok(());
         }
 
@@ -3105,7 +3283,17 @@ impl App {
     fn commit_resize_redraw(&mut self, now: std::time::Instant) -> bool {
         self.last_resize_redraw = Some(now);
         self.resize_redraw_pending = false;
+        // A paused viewport holds a wrapped line index; capture the reading
+        // position in content coordinates before the rewrap, so the same
+        // message stays under the reader (issue #1412, persistent half).
+        self.capture_resize_anchor();
         self.handle_diagram_geometry_change();
+        // A resize rewraps the transcript, so the wrapped-line extent changes
+        // without the user scrolling. While following the tail that reads as a
+        // large append and the renderer starts its catch-up slide from the
+        // pre-resize offset, which looks like the view jumping up and sliding
+        // back down (issue #1412). Snap to the new bottom on the next frame.
+        crate::tui::ui::request_tail_follow_snap();
         true
     }
 
@@ -3136,6 +3324,9 @@ impl App {
     }
 
     pub(super) fn update_copy_badge_key_event(&mut self, event: crossterm::event::KeyEvent) {
+        if self.remote_login.is_some() {
+            return;
+        }
         use crossterm::event::{KeyCode, KeyEventKind, ModifierKeyCode};
 
         self.prune_copy_badge_ui();
@@ -3536,11 +3727,9 @@ impl App {
         // attempt's committed segments and never touches earlier turns.
         let to_remove = self.attempt_committed_assistant_messages;
         for _ in 0..to_remove {
-            if self
-                .display_messages
-                .last()
-                .is_some_and(|m| m.role == "assistant")
-            {
+            if self.display_messages.last().is_some_and(|m| {
+                m.role == "assistant" || super::state_ui_messages::is_attempt_provider_native_row(m)
+            }) {
                 let idx = self.display_messages.len() - 1;
                 self.remove_display_message(idx);
             } else {
@@ -3627,6 +3816,21 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        // Connected SSH input is dispatched through the wire client, never the
+        // local submit fallback (which reads skills and persists prompts).
+        if crate::tui::is_ssh_remote() {
+            let input = self.input.clone();
+            if super::commands_dispatch::dispatch_local_command(self, input.trim()) {
+                self.input.clear();
+                self.cursor_pos = 0;
+            } else {
+                super::commands_dispatch::ssh_local_action_blocked(
+                    self,
+                    "Local submission fallback",
+                );
+            }
+            return;
+        }
         promote_dropped_images(self);
         if self.activate_picker_from_preview() {
             return;
@@ -3673,7 +3877,8 @@ impl App {
         let trimmed = input.trim();
         let handled = super::commands_dispatch::dispatch_local_command(self, trimmed);
         if handled {
-            if trimmed.starts_with('/') {
+            let embedded = super::commands_dispatch::contains_registered_slash_command(trimmed);
+            if trimmed.starts_with('/') || embedded {
                 crate::telemetry::record_command_family(trimmed);
             }
             return;

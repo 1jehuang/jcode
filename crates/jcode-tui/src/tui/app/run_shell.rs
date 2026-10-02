@@ -119,7 +119,7 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
 }
 
 fn is_slash_command_input(input: &str) -> bool {
-    input.trim_start().starts_with('/')
+    super::has_safe_slash_command_token(input)
 }
 
 /// Whether the floating command-suggestion palette may be on screen for the
@@ -145,8 +145,7 @@ pub(crate) fn slash_command_palette_may_be_visible(
 ///
 /// Keep this in sync with `ui_input::draw_status`: these statuses can be safely
 /// refreshed by the one-cell spinner fast path when the status line is left aligned.
-/// Tool execution uses its own full-line activity indicator, and network waits use
-/// a static amber retry marker, so neither belongs here.
+/// Network waits use a static amber retry marker, so they do not belong here.
 pub(crate) fn status_uses_primary_spinner(status: &ProcessingStatus) -> bool {
     matches!(
         status,
@@ -154,6 +153,7 @@ pub(crate) fn status_uses_primary_spinner(status: &ProcessingStatus) -> bool {
             | ProcessingStatus::Connecting(_)
             | ProcessingStatus::Thinking(_)
             | ProcessingStatus::Streaming
+            | ProcessingStatus::RunningTool(_)
     )
 }
 
@@ -467,6 +467,8 @@ impl StatusSpinnerRenderer {
     ) -> Result<()> {
         // Painting a frame is progress, including during long streaming turns.
         crate::logging::watchdog::beat("tui.draw");
+        app.refresh_terminal_title_metrics();
+        app.sync_herdr_agent_state();
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -623,8 +625,9 @@ fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol
         1,
         // The spinner cell is patched outside the full-frame draw, so apply
         // light-theme adaptation here explicitly (no-op on dark themes).
-        Style::default().fg(jcode_tui_style::adapt_color_for_theme(
+        Style::default().fg(jcode_tui_style::adapt_foreground_for_display(
             jcode_tui_style::theme::ai_color(),
+            ratatui::style::Color::Reset,
         )),
     );
 }
@@ -757,6 +760,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: Some(self.session.id.clone()),
         })
@@ -768,6 +772,9 @@ impl App {
         mut terminal: DefaultTerminal,
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
+        if crate::tui::is_ssh_remote() {
+            self.session.working_dir = remote_working_dir.clone();
+        }
         super::terminal_liveness::capture_initial_tty();
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);
@@ -988,6 +995,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: if self.is_remote {
                 self.remote_session_id.clone()
@@ -1221,9 +1229,9 @@ mod tests {
     fn primary_spinner_statuses_are_explicit() {
         assert!(status_uses_primary_spinner(&ProcessingStatus::Sending));
         assert!(status_uses_primary_spinner(&ProcessingStatus::Streaming));
-        assert!(!status_uses_primary_spinner(
-            &ProcessingStatus::RunningTool("bash".to_string())
-        ));
+        assert!(status_uses_primary_spinner(&ProcessingStatus::RunningTool(
+            "bash".to_string()
+        )));
         assert!(!status_uses_primary_spinner(&ProcessingStatus::Idle));
         assert!(!status_uses_primary_spinner(
             &ProcessingStatus::WaitingForNetwork {

@@ -74,6 +74,8 @@ mod onboarding;
 mod output_style;
 #[path = "ui_overlays.rs"]
 mod overlays;
+#[path = "ui_panel_image_preview.rs"]
+pub(crate) mod panel_image_preview;
 #[path = "ui_pinned.rs"]
 mod pinned_ui;
 #[path = "ui_prepare.rs"]
@@ -139,6 +141,7 @@ pub(crate) use messages::{
     render_swarm_message, render_system_message, render_tool_message, render_usage_message,
 };
 pub(crate) use output_style::adapt_buffer_for_emoji_preference;
+use pinned_ui::draw_side_panel_markdown;
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
     debug_probe_side_panel_mermaid,
@@ -146,9 +149,6 @@ pub use pinned_ui::{
 pub(crate) use pinned_ui::{
     clear_side_panel_debug_snapshot, clear_side_panel_render_caches, prewarm_focused_side_panel,
     reset_side_panel_debug_stats, side_panel_debug_json, side_panel_debug_stats,
-};
-use pinned_ui::{
-    collect_pinned_diffs_cached, draw_pinned_content_cached, draw_side_panel_markdown,
 };
 #[cfg(test)]
 use transitions::extract_line_text;
@@ -217,10 +217,6 @@ static TAIL_CATCHUP_ACTIVE: std::sync::atomic::AtomicBool =
 #[cfg(not(test))]
 static TAIL_FOLLOW_SNAP_PENDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-/// Wrapped line indices where each user prompt starts (updated each render frame).
-/// Used by prompt-jump keybindings (Ctrl+5..9, Ctrl+[/]) for accurate positioning.
-#[cfg(not(test))]
-static LAST_USER_PROMPT_POSITIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 
 #[cfg(test)]
 thread_local! {
@@ -234,8 +230,8 @@ thread_local! {
     static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_TAIL_CATCHUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
-    static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
+    static TEST_LAST_CHAT_FRAME: RefCell<Option<Arc<PreparedChatFrame>>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
     static TEST_VISIBLE_EXPAND_EDIT_BADGE: Cell<bool> = const { Cell::new(false) };
@@ -320,43 +316,6 @@ pub fn last_diff_pane_max_scroll() -> usize {
     #[cfg(not(test))]
     {
         LAST_DIFF_PANE_MAX_SCROLL.load(Ordering::Relaxed)
-    }
-}
-
-/// Get the last known user prompt line positions (from the most recent render frame).
-/// Returns positions as wrapped line indices from the top of content.
-pub fn last_user_prompt_positions() -> Vec<usize> {
-    #[cfg(test)]
-    {
-        return TEST_LAST_USER_PROMPT_POSITIONS.with(|v| v.borrow().clone());
-    }
-    #[cfg(not(test))]
-    {
-        LAST_USER_PROMPT_POSITIONS
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default()
-    }
-}
-
-fn update_user_prompt_positions(positions: &[usize]) {
-    #[cfg(test)]
-    {
-        TEST_LAST_USER_PROMPT_POSITIONS.with(|v| {
-            let mut v = v.borrow_mut();
-            v.clear();
-            v.extend_from_slice(positions);
-        });
-        return;
-    }
-    #[cfg(not(test))]
-    {
-        let mutex = LAST_USER_PROMPT_POSITIONS.get_or_init(|| Mutex::new(Vec::new()));
-        if let Ok(mut v) = mutex.lock() {
-            v.clear();
-            v.extend_from_slice(positions);
-        }
     }
 }
 
@@ -510,9 +469,11 @@ pub(crate) fn set_tail_catchup_active(active: bool) {
 
 /// Request that the next tail-follow render land at the exact bottom.
 ///
-/// This is reserved for explicit navigation or composer actions. Automatic
-/// transcript growth does not set it, so large committed blocks still use the
-/// bounded catch-up animation.
+/// Set by explicit navigation and composer actions, and by a terminal resize,
+/// which rewraps the transcript and would otherwise look like a large append
+/// that the catch-up animation slides through. Automatic transcript growth does
+/// not set it, so large committed blocks still use the bounded catch-up
+/// animation.
 pub(crate) fn request_tail_follow_snap() {
     #[cfg(test)]
     {
@@ -561,10 +522,10 @@ use status_support::{
 };
 use theme_support::{
     accent_color, activity_indicator, activity_indicator_frame_index, ai_color, ai_text,
-    animated_tool_color, asap_color, blend_color, dim_color, file_link_color, header_icon_color,
-    header_name_color, header_session_color, pending_color, prompt_entry_bg_color,
-    prompt_entry_color, prompt_entry_shimmer_color, queued_color, rainbow_prompt_color,
-    system_message_color, tool_color, user_bg, user_color, user_text,
+    asap_color, blend_color, dim_color, file_link_color, header_icon_color, header_name_color,
+    header_session_color, pending_color, prompt_entry_bg_color, prompt_entry_color,
+    prompt_entry_shimmer_color, queued_color, rainbow_prompt_color, system_message_color,
+    tool_color, user_bg, user_color, user_text,
 };
 
 pub(crate) use jcode_tui_markdown::{CopyTargetKind, RawCopyTarget};
@@ -1445,6 +1406,17 @@ pub struct LayoutSnapshot {
 #[cfg(not(test))]
 static LAST_LAYOUT: OnceLock<Mutex<Option<LayoutSnapshot>>> = OnceLock::new();
 
+/// The prepared transcript frame the renderer last drew. The retained frame
+/// *is* the published geometry: it carries per-item row ranges and totals, so
+/// handlers outside `draw` can resolve a viewport anchor against it.
+#[cfg(not(test))]
+static LAST_CHAT_FRAME: OnceLock<Mutex<Option<Arc<PreparedChatFrame>>>> = OnceLock::new();
+
+#[cfg(not(test))]
+fn last_chat_frame_state() -> &'static Mutex<Option<Arc<PreparedChatFrame>>> {
+    LAST_CHAT_FRAME.get_or_init(|| Mutex::new(None))
+}
+
 #[cfg(not(test))]
 fn last_layout_state() -> &'static Mutex<Option<LayoutSnapshot>> {
     LAST_LAYOUT.get_or_init(|| Mutex::new(None))
@@ -1492,6 +1464,38 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
             .lock()
             .ok()
             .and_then(|snapshot| *snapshot)
+    }
+}
+
+/// Record the prepared transcript frame the renderer just drew.
+pub(crate) fn set_last_chat_frame(frame: Arc<PreparedChatFrame>) {
+    #[cfg(test)]
+    {
+        TEST_LAST_CHAT_FRAME.with(|slot| *slot.borrow_mut() = Some(frame));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(mut slot) = last_chat_frame_state().lock() {
+            *slot = Some(frame);
+        }
+    }
+}
+
+/// The prepared transcript frame the renderer last drew, if any.
+// First production consumer lands in epic #1411 phase 4/5a.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
+    #[cfg(test)]
+    {
+        return TEST_LAST_CHAT_FRAME.with(|slot| slot.borrow().clone());
+    }
+    #[cfg(not(test))]
+    {
+        last_chat_frame_state()
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 }
 
@@ -1577,13 +1581,15 @@ fn clear_test_render_state_locked() {
     set_last_total_wrapped_lines(0);
     set_last_resolved_chat_scroll(0);
     TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.set(false));
-    update_user_prompt_positions(&[]);
     // Flicker events recorded by sibling tests add a "⚠ flicker detected"
     // notification line to subsequent renders, shifting every layout-sensitive
     // assertion (click mapping, snapshot rows).
     frame_metrics::clear_flicker_frame_history_for_tests();
     TEST_LAST_LAYOUT.with(|snapshot| {
         *snapshot.borrow_mut() = None;
+    });
+    TEST_LAST_CHAT_FRAME.with(|slot| {
+        *slot.borrow_mut() = None;
     });
     TEST_LAST_STATUS_AREA.with(|snapshot| {
         *snapshot.borrow_mut() = None;
@@ -2661,12 +2667,11 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         Ok(()) => {}
         Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
-    // Adapt the finished frame for light backgrounds, then apply the user's
-    // configured colors, which must not be luminance-flipped. Working at the
-    // buffer level covers every widget and overlay without touching individual
-    // color call sites. See `palette::adapt_buffer_for_palette` for the ordering.
-    jcode_tui_style::adapt_buffer_for_theme(frame.buffer_mut());
-    jcode_tui_style::palette::adapt_buffer_for_palette(frame.buffer_mut());
+    // Adapt the finished frame at buffer level so every widget and overlay
+    // follows the same policy. User-configured colors remain exact.
+    // Attribute explicit palette overrides before light-theme contrast repair
+    // can make distinct muted source grays converge to the same rendered ink.
+    jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
     adapt_buffer_for_emoji_preference(frame.buffer_mut());
     // Cache eviction/clearing can outlive the last visible image. Carry Kitty
     // deletion commands on any completed frame so terminal-side pixel storage
@@ -2674,6 +2679,7 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
     crate::tui::mermaid::render_pending_terminal_image_cleanup(frame.buffer_mut());
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
+    panel_image_preview::clear_regions();
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
         return;
@@ -2692,6 +2698,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Uses Color::Reset (terminal default bg) so text selection highlighting works
     // natively in all terminal emulators.
     clear_area(frame, area);
+
+    if let Some(hash) = app.panel_image_preview() {
+        panel_image_preview::draw_preview(frame, area, hash);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
 
     if let Some(scroll) = app.changelog_scroll() {
         overlays::draw_changelog_overlay(frame, area, scroll, app);
@@ -2790,24 +2808,13 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let pane_position = app.diagram_pane_position();
     let has_side_panel_content = !swarm_page_active && app.side_panel().focused_page().is_some();
     let diff_mode = app.diff_mode();
-    let collect_diffs = diff_mode.is_pinned();
-    // Images now render inline in the transcript, so the side panel only handles
-    // pinned file diffs. `pin_images` no longer feeds the side-panel surface.
-    let has_pinned_content = if collect_diffs && !swarm_page_active {
-        collect_pinned_diffs_cached(app.display_messages(), app.display_messages_version())
-    } else {
-        false
-    };
     let has_file_diff_edits =
         !swarm_page_active && diff_mode.is_file() && app.has_display_edit_tool_messages();
-    let has_right_side_pane_content =
-        has_side_panel_content || has_pinned_content || has_file_diff_edits;
-    // The side panel is itself a single right-hand auxiliary surface and can render
-    // visual content such as Mermaid diagrams inline. Pinned image/file-diff content
-    // also uses that same right-hand surface. Do not also open the global pinned
-    // diagram pane while any right-hand side pane is visible, otherwise combinations
-    // like pinned images + Mermaid can produce chat + side pane + diagram triple-split
-    // layouts.
+    let has_right_side_pane_content = has_side_panel_content || has_file_diff_edits;
+    // Fullscreen side panel replaces the transcript area; status line and input stay.
+    let side_panel_fullscreen = has_side_panel_content && app.side_panel_fullscreen();
+    // Regular side-panel pages and full-file diffs share the right-hand surface.
+    // Suppress a separate diagram pane to avoid a triple-split layout.
     let suppress_side_diagram = has_right_side_pane_content;
     let pinned_diagram = if !swarm_page_active
         && diagram_mode == crate::config::DiagramDisplayMode::Pinned
@@ -2911,25 +2918,12 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         (area, None)
     };
 
-    let needs_side_pane = has_right_side_pane_content;
+    let needs_side_pane = has_right_side_pane_content && !side_panel_fullscreen;
 
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
         const MIN_CHAT_WIDTH: u16 = 20;
-        // Pinned images live in a tall narrow column, so a wide image fits to
-        // the pane width and ends up small with empty space below it. When the
-        // pane is showing image content (and the user has not manually resized
-        // it), widen the default split so images use more of the available
-        // horizontal space. Diffs/markdown keep the standard ratio.
-        let image_dominant_pane =
-            has_pinned_content && !has_file_diff_edits && !has_side_panel_content;
-        const ADAPTIVE_IMAGE_RATIO: u32 = 55;
-        let base_ratio = app.diagram_pane_ratio().clamp(25, 100) as u32;
-        let effective_ratio = if image_dominant_pane && !app.diagram_pane_ratio_user_adjusted() {
-            base_ratio.max(ADAPTIVE_IMAGE_RATIO)
-        } else {
-            base_ratio
-        };
+        let effective_ratio = app.diagram_pane_ratio().clamp(25, 100) as u32;
         let max_diff = chat_area.width.saturating_sub(MIN_CHAT_WIDTH);
         if max_diff >= MIN_DIFF_WIDTH {
             let diff_width = (((chat_area.width as u32 * effective_ratio) / 100) as u16)
@@ -3078,10 +3072,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     let show_donut = !onboarding_welcome && super::idle_donut_active(app);
     let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
-    let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
-    // Elastic overscroll status line revealed when the user scrolls past the
-    // bottom of the transcript. Rendered directly below the input line.
-    let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
+    let notification_height =
+        input_ui::notification_height(app, chat_area.width).min(chat_area.height.saturating_sub(4));
+    // Session status line (dir, branch, context, provider, model), always
+    // pinned directly below the input line.
+    let overscroll_height: u16 = 1;
     let fixed_height = 1
         + queued_height
         + swarm_strip_height
@@ -3092,22 +3087,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + overscroll_height
         + donut_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
     let available_height = chat_area.height;
-    // Overflow decisions (native scrollbar, and thus the wrap width) must not
-    // depend on the transient overscroll row. Otherwise revealing the line at
-    // the fits/overflows boundary flips the scrollbar on, re-wraps the whole
-    // transcript one column narrower, and the extra wrapped lines keep the
-    // scrollbar latched after the rebound: the screen visibly re-wraps twice
-    // per overscroll and can settle in a different state than it started
-    // (flicker). The packed/scrolling choice below still accounts for the real
-    // row so the elastic reveal remains a clean one-row slide.
-    //
-    // When the line is pinned permanently visible by config it is part of the
-    // stable layout, not a transient reveal, so it does count here.
-    let stable_fixed_height = if app.chat_overscroll_pinned() {
-        fixed_height
-    } else {
-        fixed_height - overscroll_height
-    };
+    let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {
         let started = Instant::now();
         let result =
@@ -3193,7 +3173,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = terminal_clear_collapsed
-        || (!swarm_page_active && content_height + fixed_height <= available_height);
+        || (!swarm_page_active
+            && !side_panel_fullscreen
+            && content_height + fixed_height <= available_height);
 
     // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
     // All vertical chunks are within the chat_area (left column).
@@ -3308,6 +3290,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     // Messages area is chunks[0] within the chat column (already excludes diagram).
     let messages_area = chunks[0];
+    let diff_pane_area = if side_panel_fullscreen {
+        Some(messages_area)
+    } else {
+        diff_pane_area
+    };
     let _ = swarm_strip_height;
     note_chat_layout(ChatLayoutMetrics {
         chat_area,
@@ -3317,7 +3304,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         chat_scrollbar_visible,
         use_packed_layout: use_packed,
         has_side_panel_content,
-        has_pinned_content,
         has_file_diff_edits,
     });
 
@@ -3354,7 +3340,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             centered: false,
             ..Default::default()
         }
-    } else if terminal_clear_collapsed {
+    } else if terminal_clear_collapsed || side_panel_fullscreen {
+        if side_panel_fullscreen {
+            clear_area(frame, messages_area);
+        }
         // Collapsed terminal-style clear: the messages chunk is zero-height, so
         // there is nothing to draw. Deliberately skip `draw_messages` so it does
         // not publish a zero-height viewport/max-scroll geometry that the scroll
@@ -3426,18 +3415,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app.diff_pane_scroll(),
                 app.diff_pane_focus(),
             );
-        } else if has_pinned_content {
-            if let Some(ref mut capture) = debug_capture {
-                capture.render_order.push("draw_pinned_content".to_string());
-            }
-            draw_pinned_content_cached(
-                frame,
-                diff_area,
-                app,
-                app.diff_pane_scroll(),
-                app.diff_line_wrap(),
-                app.diff_pane_focus(),
-            );
         }
     }
 
@@ -3472,7 +3449,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         draw_inline_ui(frame, app, chunks[5]);
     }
 
-    let input_cursor = input_ui::draw_input(
+    let _input_cursor = input_ui::draw_input(
         frame,
         app,
         chunks[7],
@@ -3500,6 +3477,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && !widget_data.is_empty()
         && !show_donut
         && !swarm_page_active
+        && !side_panel_fullscreen
     {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());
@@ -3575,18 +3553,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if visual_debug::overlay_enabled() {
         overlays::draw_debug_overlay(frame, &placements, &chunks);
     }
-
-    // Session facts use actual final-frame cells for collision detection. They
-    // prefer the composer chrome and may climb into a few transcript-tail rows
-    // only when the right suffix is genuinely unused.
-    input_ui::draw_right_fact_stack(
-        frame,
-        app,
-        messages_area,
-        chunks[7],
-        chat_scrollbar_visible,
-        input_cursor,
-    );
 
     // Command-suggestion popover: a late overlay pass so the palette floats
     // over existing rows (blank space, pinned footer, or the transcript tail)

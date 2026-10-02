@@ -596,7 +596,7 @@ fn test_copy_selection_mouse_click_does_not_enter_mode() {
 }
 
 #[test]
-fn test_copy_selection_mouse_drag_auto_copies_and_exits_mode() {
+fn test_copy_selection_mouse_drag_auto_copies_and_keeps_highlight() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_copy_test_app();
     let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -679,10 +679,13 @@ fn test_copy_selection_mouse_drag_auto_copies_and_exits_mode() {
     );
 
     assert!(!app.copy_selection_mode);
-    assert!(app.copy_selection_anchor.is_none());
-    assert!(app.copy_selection_cursor.is_none());
+    assert!(app.copy_selection_anchor.is_some());
+    assert!(app.copy_selection_cursor.is_some());
     assert!(copied.lock().unwrap().contains("println!(\"hello\");"));
-    assert_eq!(app.status_notice(), Some("Copied selection".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some("Copied selection · highlight remains visible".to_string())
+    );
 }
 
 #[test]
@@ -692,12 +695,14 @@ fn test_side_panel_mouse_drag_extracts_expected_text() {
     let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let copied_for_closure = copied.clone();
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "alpha\nbeta highlight target\ngamma".to_string(),
             updated_at_ms: 1,
@@ -999,6 +1004,99 @@ fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
     assert!(!crate::tui::TuiState::copy_selection_edge_autoscroll_active(
         &app
     ));
+}
+
+#[test]
+fn test_edge_autoscroll_is_one_line_per_tick_and_stops_on_release() {
+    // Regression for issue #1332: the drag-edge autoscroll used to be driven
+    // through the mouse-wheel momentum path. Every tick looked like a hard
+    // flick, so the queue saturated and the view scrolled ~3 lines/frame
+    // (~180 lines/s), then kept gliding after release while the leftover queue
+    // drained. It must move exactly one line per tick and stop dead on release.
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    let lines = (1..=200)
+        .map(|idx| format!("line {idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: lines,
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+
+    let backend = ratatui::backend::TestBackend::new(60, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let area = layout.messages_area;
+    let col = area.x + 1;
+
+    // Anchor mid-viewport, then drag onto the top boundary row.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row: area.y + area.height / 2,
+        modifiers: KeyModifiers::empty(),
+    });
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: col,
+        row: area.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    // The rate must follow the tick cadence, not the display refresh rate.
+    let interval = crate::tui::redraw_interval_with_policy(&app, &crate::perf::tui_policy());
+    assert_eq!(
+        interval,
+        crate::tui::redraw_schedule::REDRAW_COPY_AUTOSCROLL,
+        "drag-edge autoscroll must pin the tick to its own cadence"
+    );
+
+    // Held-still ticks move exactly one line each: never a velocity-scaled
+    // wheel notch (~3 lines/frame before the fix), and never accelerating.
+    for tick in 0..5 {
+        let before = app.scroll_offset();
+        assert!(app.progress_copy_selection_edge_autoscroll());
+        assert_eq!(
+            before.saturating_sub(app.scroll_offset()),
+            1,
+            "held tick {tick} must move exactly one line"
+        );
+    }
+
+    // Release: the autoscroll stops and nothing glides afterwards.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: col,
+        row: area.y,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(!app.progress_copy_selection_edge_autoscroll());
+    let settled = app.scroll_offset();
+    for _ in 0..10 {
+        assert!(!app.progress_copy_selection_edge_autoscroll());
+    }
+    assert_eq!(
+        app.scroll_offset(),
+        settled,
+        "the view must not drift after release (no momentum glide)"
+    );
 }
 
 #[test]
@@ -1475,6 +1573,8 @@ fn test_changelog_overlay_mouse_drag_release_copies_text() {
     // in the test environment, but the selection path must have run).
     assert!(matches!(
         app.status_notice().as_deref(),
-        Some("Copied selection") | Some("Failed to copy selection") | Some("Selection is empty")
+        Some("Copied selection · highlight remains visible")
+            | Some("Failed to copy selection")
+            | Some("Selection is empty")
     ));
 }

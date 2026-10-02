@@ -1,5 +1,6 @@
-use super::AmbientRunnerHandle;
-use crate::ambient::{Priority, ScheduleTarget, ScheduledItem};
+use super::{AmbientRunnerHandle, ambient_allowed};
+use crate::ambient::{AmbientStatus, Priority, ScheduleTarget, ScheduledItem};
+use crate::config::Config;
 use crate::message::{Message, Role, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use crate::session::Session;
@@ -11,12 +12,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+#[path = "runner_live_delivery_tests.rs"]
+mod live_delivery;
+
 struct EnvVarGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,
 }
 
 impl EnvVarGuard {
+    fn unset(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, prev }
+    }
+
     fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
@@ -35,6 +45,103 @@ impl Drop for EnvVarGuard {
 }
 
 struct TestProvider;
+
+struct ResetConfigCache;
+
+impl Drop for ResetConfigCache {
+    fn drop(&mut self) {
+        Config::invalidate_cache();
+    }
+}
+
+#[test]
+fn ambient_gate_tracks_config_toggles_and_preserves_disabled_override() {
+    let _guard = crate::storage::lock_test_env();
+    // Restore the process cache after JCODE_HOME is restored, including on panic.
+    let _cache = ResetConfigCache;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _enabled = EnvVarGuard::unset("JCODE_AMBIENT_ENABLED");
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
+
+    for enabled in [false, true, false] {
+        std::fs::write(&path, format!("[ambient]\nenabled = {enabled}\n"))
+            .expect("write ambient config");
+        // Exercise the iteration gate against reloaded on-disk config without
+        // relying on wall-clock sleeps. Config's fingerprint throttle is tested
+        // separately in jcode-base.
+        Config::invalidate_cache();
+
+        assert_eq!(ambient_allowed(&AmbientStatus::Idle), enabled);
+        assert_eq!(
+            ambient_allowed(&AmbientStatus::Scheduled {
+                next_wake: chrono::Utc::now(),
+            }),
+            enabled
+        );
+        assert!(
+            !ambient_allowed(&AmbientStatus::Disabled),
+            "an explicit stop must win even when config enables ambient"
+        );
+    }
+}
+
+#[tokio::test]
+async fn running_loop_observes_enable_edit_without_cache_invalidation() {
+    let _guard = crate::storage::lock_test_env();
+    let _cache = ResetConfigCache;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _enabled = EnvVarGuard::unset("JCODE_AMBIENT_ENABLED");
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
+    std::fs::write(
+        &path,
+        "[ambient]\nenabled = false\npause_on_active_session = true\n",
+    )
+    .expect("write disabled config");
+    Config::invalidate_cache();
+
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    // Pausing is an observable loop action that cannot invoke a model or tool.
+    *runner.inner.active_user_sessions.write().await = 1;
+    let task = tokio::spawn(runner.clone().run_loop(Arc::new(TestProvider)));
+    // On the current-thread test runtime, let run_loop reach its first sleep
+    // with the disabled startup configuration before editing the file.
+    tokio::task::yield_now().await;
+    let started_disabled =
+        runner.is_running().await && matches!(runner.state().await.status, AmbientStatus::Idle);
+
+    let edit = std::fs::write(
+        &path,
+        "[ambient]\nenabled = true\npause_on_active_session = true\n# edited\n",
+    );
+    // Deliberately do not invalidate Config's cache: exercise fingerprint
+    // detection and the real loop's next-wake behavior, not just its helper.
+    let observed = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            runner.nudge();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if matches!(runner.state().await.status, AmbientStatus::Paused { .. }) {
+                break;
+            }
+        }
+    })
+    .await;
+    task.abort();
+    let _ = task.await;
+
+    assert!(
+        started_disabled,
+        "loop must start idle with ambient disabled"
+    );
+    edit.expect("edit enabled config");
+    assert!(
+        observed.is_ok(),
+        "a running loop must observe the enable edit and pause for the active session"
+    );
+}
 
 #[derive(Clone, Default)]
 struct StreamingTestProvider {

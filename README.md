@@ -14,8 +14,6 @@ The most intelligent harness
 
 <a href="https://trendshift.io/repositories/25042?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-25042" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/25042" alt="1jehuang/jcode | Trendshift" width="250" height="55"></a>
 
-<a href="https://github.com/1jehuang/jcode/stargazers"><img src="docs/images/star-history.svg" alt="jcode cumulative GitHub stars over time, sampled weekly" width="700"></a>
-
 <a href="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.mp4">
   <img src="https://github.com/1jehuang/jcode/releases/download/readme-assets/jcode-yc-launch.webp" alt="jcode YC launch video" width="800">
 </a>
@@ -46,6 +44,23 @@ irm https://jcode.sh/install.ps1 | iex
 
 Need Homebrew, source builds, provider setup, or want an agent to set it up for you?
 [Jump to detailed installation](#detailed-installation).
+
+### Updating
+
+Run `/update` in the TUI to download the latest stable release in the background
+and reload with your session preserved. From a terminal, use `jcode update`, then
+restart the client. Both commands use the same update policy, including for dev builds.
+
+Older or equal release versions are skipped. For a development build, Jcode also
+compares the running binary's Git commit with the release tag. Builds ahead of,
+identical to, or diverged from the release are preserved. If ancestry cannot be
+verified locally or through GitHub, the update stops rather than risking a downgrade.
+The displayed dev patch includes a commit-count offset, so it is not used as a
+release version comparison.
+
+This is the default `features.update_channel = "stable"` behavior. An explicit
+`"main"` channel still opts into source-branch updates. Use `/rebuild` or the
+self-dev build workflow to rebuild your own checkout.
 
 ---
 
@@ -188,6 +203,31 @@ jcode is built to be as performant and resource efficient as possible. Every met
 
 </div>
 
+### Headless sessions (swarm workers)
+
+Swarm workers run headless, so this is the number that matters when you fan out
+agents. Each session completed 5 real model turns (file listing, file read, repo
+search, summary, reply) with tool calls, then total PSS of every process was
+measured. jcode sessions share one daemon; Claude Code runs one
+`claude -p --input-format stream-json` process per session. Both used
+`claude-sonnet-4-6`.
+
+<div align="center">
+
+| Concurrent headless sessions | jcode | Claude Code | Comparison |
+|---:|---:|---:|---:|
+| 1 | **32.6 MB** | 261.0 MB | **8.0× less RAM** |
+| 5 | **51.0 MB** | 908.6 MB | **17.8× less RAM** |
+| 10 | **66.7 MB** | 1749.7 MB | **26.2× less RAM** |
+| 20 | **90.6 MB** | 3376.8 MB | **37.3× less RAM** |
+| Each additional session | **~3.1 MB** | ~164 MB | **~54× less RAM** |
+
+</div>
+
+Measured 2026-09-29 on Linux with `jcode v0.89.19-dev` (default build, local
+embeddings not compiled in) and `Claude Code 2.1.267`. Reproduce with
+`python3 scripts/bench_headless_memory.py`.
+
 ### Time to first frame
 
 <div align="center">
@@ -269,7 +309,7 @@ versions tested for this corrected memory rerun:
 
 ## Memory (Agent memory)
 
-Jcode embeds each turn/response as a semantic vector. Every turn does queries a graph of memories to efficiently find related memory entries via a cosine similarity check. The embedding hits are fed into the conversation, or optionally uses a memory sideagent which verifies the memories are relevant, and potentially does more work for information retreival before injecting into the conversation. This results in a human like memory system which allows the agent to automatically recall relevant information to the conversation without actively calling memory tools or being a token burner. 
+Jcode embeds each turn/response as a semantic vector. Every turn does queries a graph of memories to efficiently find related memory entries via a cosine similarity check. The embedding hits are fed into the conversation, or optionally uses a memory sideagent which verifies the memories are relevant, and potentially does more work for information retrieval before injecting into the conversation. This results in a human like memory system which allows the agent to automatically recall relevant information to the conversation without actively calling memory tools or being a token burner.
 ot 
 To have memories which are retrieved, they must also be extracted and stored. Every so often (semantic drift, K turns since last extraction, session end, etc), memories are extracted via a memory sideagent, and put into the memory graph. 
 
@@ -292,6 +332,8 @@ Memories are automatically consolidated every so often via the ambient mode. Thi
 ---
 
 ## UI: Side panels, Diagrams, Info Widgets, rendering, scrolling, alignment
+
+The `panel` tool opens a new desktop panel from Markdown content or a linked Markdown/PDF file, and supports update, focus, close, and list actions. See [Desktop panels](docs/PANELS.md) for the API, PDF limits, and compatibility details.
 
 The side panel is a place for auxiliary information. Tell your jcode agent to load a file into the side panel and see it update in real time, or tell your agent to write directly to the side panel, or use it as a diff viewer. The side panel (and chat) is able to render mermaid diagrams inline. 
 <img width="2877" height="1762" alt="image" src="https://github.com/user-attachments/assets/6c7bec81-ef3f-434d-8a7b-d55f8a54e5cf" />
@@ -328,6 +370,21 @@ Agents are also able to spawn their own swarms autonomously. They have a swarm t
 
 ---
 
+Swarm modes keep root reasoning separate from worker effort. Configure each mode
+in `~/.jcode/config.toml`:
+
+```toml
+[agents]
+swarm_root_effort = "low"        # /effort swarm
+swarm_deep_root_effort = "high"  # /effort swarm-deep
+```
+
+Both default to `max`. Accepted levels are `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, and `max`, mapped to the provider's supported range. The effort
+switcher shows the configured root level. These settings do not change worker
+`swarm_effort`. Environment overrides are `JCODE_SWARM_ROOT_EFFORT` and
+`JCODE_SWARM_DEEP_ROOT_EFFORT`.
+
 ## OAuth and Providers
 
 jcode works with subscription-backed OAuth flows and many provider integrations, so you can use the models you already pay for and still fall back to direct API providers when needed.
@@ -341,6 +398,7 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Azure OpenAI** (`jcode login --provider azure`)
 - **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
 - **Fireworks** (`jcode login --provider fireworks`)
+- **Novita AI** (`jcode login --provider novita`, API key)
 - **MiniMax** (`jcode login --provider minimax`)
 - **Meta Model API / Muse** (`jcode login --provider meta-muse`)
 - **LM Studio** (`jcode login --provider lmstudio`)
@@ -348,6 +406,10 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Custom OpenAI-compatible endpoint** (`jcode login --provider openai-compatible`)
 
 For custom OpenAI-compatible endpoints, jcode now prompts for the API base and supports local localhost servers without requiring an API key.
+
+The native OpenAI providers use Responses WebSocket v2 with opportunistic
+background prewarming and HTTPS fallback. See [OpenAI WebSocket transport](docs/OPENAI_WEBSOCKET.md)
+for behavior, controls, and verification.
 
 ### Config-file setup for self-hosted endpoints and MCP
 
@@ -370,9 +432,10 @@ There are two ways to set one up:
   jcode login --provider opencode      # OpenCode Zen
   jcode login --provider moonshotai
   jcode login --provider meta-muse     # Meta Model API / Muse Spark
+  jcode login --provider yolo-auto     # Yolo-Auto
   ```
 
-  Built-in OpenAI-compatible profile ids include: `openrouter`, `orcarouter`, `deepseek`, `zai`, `kimi`, `moonshotai`, `meta-muse` (Meta Model API / Muse Spark), `opencode` (OpenCode Zen), `opencode-go`, `302ai`, `baseten`, `cortecs`, `huggingface`, `nebius`, `scaleway`, `stackit`, and `firmware`. Each profile only sets the endpoint and key variable; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list.
+  Built-in OpenAI-compatible profile ids include: `openrouter`, `orcarouter`, `deepseek`, `zai`, `kimi`, `moonshotai`, `meta-muse` (Meta Model API / Muse Spark), `yolo-auto` (Yolo-Auto), `opencode` (OpenCode Zen), `opencode-go`, `302ai`, `baseten`, `cortecs`, `huggingface`, `nebius`, `scaleway`, `stackit`, and `firmware`. Each profile only sets the endpoint and key variable; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list.
 
 - **Any other endpoint** — point jcode at an arbitrary OpenAI-compatible API (hosted or local) with `jcode login --provider openai-compatible` or the scriptable `jcode provider add` command described below.
 
@@ -451,10 +514,17 @@ base_url = "https://llm.example.com/v1"
 api_key_env = "JCODE_PROVIDER_MY_API_API_KEY"
 env_file = "provider-my-api.env"
 default_model = "my-model-id"
+# Optional: prevent model names such as `gpt-5-*` from automatically enabling
+# `reasoning_effort` on gateways that reject it.
+disable_reasoning_heuristics = true
 
 [[providers.my-api.models]]
 id = "my-model-id"
 context_window = 128000
+# Explicitly enable `/effort` and select this model's initial effort. Set
+# `reasoning = false` on an individual model to disable it instead.
+reasoning = true
+reasoning_effort = "high"
 ```
 
 Anthropic Messages-compatible gateways use the same named-profile surface with
@@ -568,10 +638,16 @@ Example MCP config:
       "args": ["--root", "/workspace"],
       "env": {},
       "shared": true
+    },
+    "websearch": {
+      "command": "/path/to/slow-mcp-server",
+      "timeout_secs": 120
     }
   }
 }
 ```
+
+Each request to an MCP server (`tools/call`, `tools/list`, `initialize`) times out after 30 seconds by default. Set `timeout_secs` on a server whose tools legitimately run longer.
 
 For headless or SSH sessions, OAuth-style providers support `jcode login --provider <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
 
@@ -609,8 +685,8 @@ The above image is the first page of provider logins
 ### Supported provider
 
 - **Native / first-party style providers:** `claude`, `openai`, `copilot`, `gemini`, `azure`, `alibaba-coding-plan`
-- **Aggregator / compatibility providers:** `openrouter`, `orcarouter`, `openai-compatible`
-- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
+- **Aggregator / compatibility providers:** `openrouter`, `orcarouter`, `yolo-auto`, `openai-compatible`
+- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `novita`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
 
 Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second. 
 
@@ -618,9 +694,9 @@ Jcode also supports easy multi-account switching. Ran out of tokens on your firs
 
 ## Customizability / Self-Dev
 
-Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self developement, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically. 
+Jcode is inventing a new form of customizability. One that doesn't limit you to what a plugin or extension can do. Tell your jcode agent to enter self dev mode, and it will start modifying its own source code. Jcode is optimized to iterate on itself. There is significant infrastructure around self development, which allows it to edit, build, and test its own source code, then reload its own binary and continue work in your (potentially many) sessions, fully automatically.
 
-It is reccomended that you use a frontier model for this. The jcode codebase is not a simple one, and weaker models can make subtle, breaking changes. GPT 5.5 or the latest available frontier model works well.
+It is recommended that you use a frontier model for this. The jcode codebase is not a simple one, and weaker models can make subtle, breaking changes. GPT 5.5 or the latest available frontier model works well.
 
 <!-- Add self-dev demo thumbnail/video and fuller writeup here. -->
 
@@ -634,7 +710,7 @@ Anthropic's Claude cache goes cold after 5 minutes. If you initiate Claude after
 
 jcode comes with instructions on how to set up Firefox Agent Bridge. Ask you agent to set it up, and then you will have browser automation in jcode as well. 
 
-Agent grep is a grep tool I made for the jcode agent. It adds file strucuture information (ie the list of functions, their displacement, etc) to the grep return, so that the agent can infer more of what the file doesn without actually reading the file. It also implements a harness-level integration that adaptively truncates returns based on what the agent has already seen. This saves on context a lot. 
+Agent grep is a grep tool I made for the jcode agent. It adds file structure information (ie the list of functions, their displacement, etc) to the grep return, so that the agent can infer more of what the file doesn without actually reading the file. It also implements a harness-level integration that adaptively truncates returns based on what the agent has already seen. This saves on context a lot.
 
 Inputs are by default interleaved with the working agent. It sends the input as soon as it safely can without breaking the KV cache. Submit with shift enter instead, and it will send a queue send, and wait for the agent to fully finish its turn before sending.
 
@@ -805,6 +881,7 @@ Set up jcode on this machine for me.
    - Azure OpenAI: `~/.config/jcode/azure-openai.env`, `AZURE_OPENAI_*`, or an existing `az login`
    - OpenRouter: `OPENROUTER_API_KEY`
    - Fireworks: `~/.config/jcode/fireworks.env`, `FIREWORKS_API_KEY`
+   - Novita AI: `~/.config/jcode/novita.env`, `NOVITA_API_KEY`
    - MiniMax: `~/.config/jcode/minimax.env`, `MINIMAX_API_KEY`
    - NVIDIA NIM: `~/.config/jcode/nvidia-nim.env`, `NVIDIA_API_KEY`
    - Alibaba Cloud Coding Plan: existing jcode config/env if present

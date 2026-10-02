@@ -89,18 +89,6 @@ run_ratchet "swallowed-error usage ratchet" check_swallowed_error_budget.py
 run_gate "crate dependency boundaries" python3 scripts/check_dependency_boundaries.py
 run_gate "wildcard re-export ratchet" python3 scripts/check_wildcard_reexport_budget.py
 
-# Frame-cost gate. desktop2's `build_scene` is a pure function of its model and
-# `states::NODES` enumerates the app's visual states, so frame cost is something
-# CI can evaluate rather than something a person has to notice by using the app.
-# The gate that matters is the work one ("an unchanged frame must not lay the
-# transcript out again"): it is exact, so it fires on any machine, unlike a
-# wall-clock budget that a fast box can hide.
-#
-# Not behind --skip-slow: the sweep is a few seconds, and a perf gate that only
-# runs on the slow path is a perf gate that does not run.
-run_gate "desktop2 frame budget (state-space sweep)" \
-    cargo test --profile selfdev -p jcode-desktop2 -j "$JOBS" profile:: -- --test-threads=1
-
 # Onboarding state-space invariants. The onboarding flow is a graph, and the
 # properties that keep users unstuck (no dead ends, every failure has a recovery
 # edge, an escape hatch everywhere, bounded keystrokes to a settled state) are

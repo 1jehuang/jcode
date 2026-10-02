@@ -84,3 +84,48 @@ async fn each_frame_starts_from_a_clean_buffer() {
     read_frame(&mut reader, &mut line).await.unwrap();
     assert_eq!(line, "second\n");
 }
+
+#[tokio::test]
+async fn aggregate_pdf_base64_payload_fits_transport_frame() {
+    // 32 MiB decoded budget expands to 44,739,244 base64 bytes.
+    let payload = "A".repeat((32 * 1024 * 1024_usize).div_ceil(3) * 4);
+    let input = format!("{{\"pdf_data\":\"{payload}\"}}\n");
+    let mut reader = BufReader::new(input.as_bytes());
+    let mut line = String::new();
+    assert_eq!(
+        read_frame(&mut reader, &mut line).await.unwrap(),
+        input.len()
+    );
+    assert_eq!(line, input);
+}
+
+#[tokio::test]
+async fn cancelled_frame_reads_preserve_utf8_prefix_and_report_full_length() {
+    let (mut writer, read) = tokio::io::duplex(128);
+    let mut reader = BufReader::new(read);
+    let mut frame = Vec::new();
+    let bytes = "{\"text\":\"é\"}\n".as_bytes();
+    let split = bytes.iter().position(|b| *b == 0xc3).unwrap() + 1;
+    writer.write_all(&bytes[..split]).await.unwrap();
+    tokio::select! {
+        biased;
+        result = read_frame_bytes(&mut reader, &mut frame) => panic!("partial frame completed: {result:?}"),
+        _ = std::future::ready(()) => {}
+    }
+    assert_eq!(frame, bytes[..split]);
+    writer.write_all(&bytes[split..]).await.unwrap();
+    assert_eq!(
+        read_frame_bytes(&mut reader, &mut frame).await.unwrap(),
+        bytes.len()
+    );
+    assert_eq!(frame, bytes);
+}
+
+#[tokio::test]
+async fn cancellation_does_not_reset_the_accumulated_frame_limit() {
+    let mut frame = vec![b'A'; MAX_FRAME_BYTES as usize - 2];
+    let mut reader = BufReader::new(&b"BCDE\n"[..]);
+    let error = read_frame_bytes(&mut reader, &mut frame).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(frame.len() as u64, MAX_FRAME_BYTES);
+}

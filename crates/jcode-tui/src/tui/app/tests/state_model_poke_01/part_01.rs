@@ -860,12 +860,14 @@ fn test_resize_resets_diagram_and_side_panel_diagram_view_to_fit() {
     app.diagram_scroll_x = 9;
     app.diagram_scroll_y = 4;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "```mermaid\nflowchart LR\nA-->B\n```".to_string(),
             updated_at_ms: 1,
@@ -898,12 +900,14 @@ fn test_side_panel_visibility_change_resets_diagram_fit_context() {
     app.diagram_scroll_x = 8;
     app.diagram_scroll_y = 3;
     app.set_side_panel_snapshot(crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("side".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "side".to_string(),
             title: "Side".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -926,12 +930,14 @@ fn test_goal_side_panel_focus_updates_status_notice() {
     let mut app = create_test_app();
 
     app.set_side_panel_snapshot(crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("goals".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "goals".to_string(),
             title: "Goals".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "# Goals".to_string(),
             updated_at_ms: 1,
@@ -940,12 +946,14 @@ fn test_goal_side_panel_focus_updates_status_notice() {
     assert_eq!(app.status_notice(), Some("Goals".to_string()));
 
     app.set_side_panel_snapshot(crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("goal.ship-mobile-mvp".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "goal.ship-mobile-mvp".to_string(),
             title: "Goal: Ship mobile MVP".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "# Goal: Ship mobile MVP".to_string(),
             updated_at_ms: 2,
@@ -964,12 +972,14 @@ fn test_side_panel_same_page_update_preserves_scroll_position() {
     app.diff_pane_scroll_x = 3;
 
     let first = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "plan.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "# Plan\n\nVersion 1".to_string(),
             updated_at_ms: 1,
@@ -980,12 +990,14 @@ fn test_side_panel_same_page_update_preserves_scroll_position() {
     app.diff_pane_scroll_x = 3;
 
     let second = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "plan.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "# Plan\n\nVersion 2".to_string(),
             updated_at_ms: 2,
@@ -1303,12 +1315,14 @@ fn test_mouse_scroll_over_tool_side_panel_scrolls_shared_right_pane_without_chan
     app.diff_pane_focus = false;
     app.diff_pane_auto_scroll = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,

@@ -73,5 +73,11 @@ dataset = "jcode_install_firehose"
 binding = "FIREHOSE_GEO"
 dataset = "jcode_geo_firehose"
 
+# Full raw concurrency payloads, including quality/version/presence metadata.
+# The main firehose has no concurrency fields. No old slot is repurposed.
+[[analytics_engine_datasets]]
+binding = "FIREHOSE_CONCURRENCY"
+dataset = "jcode_concurrency_firehose"
+
 [vars]
 ALLOWED_ORIGIN = "*"

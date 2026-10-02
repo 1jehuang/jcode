@@ -31,11 +31,11 @@ pub mod backend;
 pub(crate) mod color_support;
 mod core;
 pub(crate) mod fuzzy;
+pub mod herdr;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
-// so existing `crate::tui::image` / `crate::tui::image_metadata` paths keep working.
+// so existing `crate::tui::image` paths keep working.
 pub use jcode_terminal_image::display as image;
-use jcode_terminal_image::metadata as image_metadata;
 pub mod info_widget;
 mod info_widget_layout;
 mod info_widget_overview;
@@ -79,7 +79,7 @@ pub use crate::generated_image::{
     generated_image_side_panel_markdown, generated_image_side_panel_page_id,
     write_generated_image_side_panel_page,
 };
-pub use app::{App, CopyBadgeUiState, ProcessingStatus, RunResult};
+pub use app::{App, CloudHandoff, CopyBadgeUiState, ProcessingStatus, RunResult};
 
 use crate::message::ToolCall;
 use ratatui::prelude::Frame;
@@ -116,7 +116,7 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
         | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
-/// Enable Kitty keyboard protocol for unambiguous key reporting.
+/// Request Kitty keyboard reporting and tmux's extended-key mode.
 ///
 /// Intentionally avoid REPORT_ALL_KEYS_AS_ESCAPE_CODES for now. When that flag is enabled,
 /// terminals such as kitty/Alacritty/Warp can report printable keys as a base key plus
@@ -125,27 +125,227 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
 /// shifted symbols for every keyboard layout. Prefer the terminal-delivered printable character
 /// and only synthesize ASCII letter casing in the input fallback.
 ///
-/// Returns true if successfully enabled, false if the terminal doesn't support it.
+/// Returns whether the requests were written, not whether the terminal supports them.
 pub fn enable_keyboard_enhancement() -> bool {
-    use crossterm::event::PushKeyboardEnhancementFlags;
-    let result = crossterm::execute!(
-        std::io::stdout(),
-        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
-    )
-    .is_ok();
+    let result = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux()).is_ok();
     crate::logging::info(&format!(
-        "Kitty keyboard protocol: {}",
-        if result { "enabled" } else { "FAILED" }
+        "Keyboard enhancement request: {}",
+        if result { "sent" } else { "FAILED" }
     ));
     result
 }
 
-/// Disable Kitty keyboard protocol, restoring default key reporting.
+fn inside_tmux() -> bool {
+    std::env::var_os("TMUX").is_some_and(|value| !value.is_empty())
+}
+
+fn enable_keyboard_enhancement_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    use crossterm::event::PushKeyboardEnhancementFlags;
+    request_tmux_extended_keys_to(writer, inside_tmux)?;
+    crossterm::execute!(
+        writer,
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+    )
+}
+
+/// Reset tmux extended keys and pop Kitty keyboard reporting.
 pub fn disable_keyboard_enhancement() {
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::PopKeyboardEnhancementFlags
-    );
+    let _ = disable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux());
+}
+
+fn disable_keyboard_enhancement_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    if inside_tmux {
+        writer.write_all(b"\x1b[>4;0m")?;
+    }
+    crossterm::execute!(writer, crossterm::event::PopKeyboardEnhancementFlags)
+}
+
+fn request_tmux_extended_keys_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    if inside_tmux {
+        // `extended-keys on` needs modifyOtherKeys opt-in, not a Kitty push.
+        writer.write_all(b"\x1b[>4;2m")?;
+    }
+    Ok(())
+}
+
+fn reapply_keyboard_enhancement_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    request_tmux_extended_keys_to(writer, inside_tmux)?;
+    write!(writer, "\x1b[={}u", keyboard_enhancement_flags().bits())
+}
+
+/// Reassert terminal modes that terminals may clear while the TUI remains alive.
+///
+/// Kitty keyboard enhancement uses its `set` form rather than the stack-based
+/// `push`, keeping the shutdown pop balanced. Enabling focus reporting may itself
+/// produce a focus event, so focus-event handlers must pass `focus_change = false`.
+pub(crate) fn reapply_terminal_modes_to(
+    writer: &mut impl std::io::Write,
+    mouse_capture: bool,
+    keyboard_enhanced: bool,
+    focus_change: bool,
+) -> std::io::Result<()> {
+    use crossterm::QueueableCommand;
+    use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
+
+    writer.queue(EnableBracketedPaste)?;
+    if focus_change {
+        writer.queue(EnableFocusChange)?;
+    }
+    if mouse_capture {
+        writer.queue(EnableMouseCapture)?;
+        // Crossterm toggles Win32 console mouse input on Windows, but ConPTY
+        // hosts such as VS Code also need the VT tracking modes reasserted.
+        #[cfg(windows)]
+        writer.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h")?;
+    }
+    if keyboard_enhanced {
+        reapply_keyboard_enhancement_to(writer, inside_tmux())?;
+    }
+    writer.flush()
+}
+
+pub(crate) fn reapply_configured_terminal_modes_after_focus() {
+    let policy = crate::perf::tui_policy();
+    if let Err(error) = reapply_terminal_modes_after_focus_to(
+        &mut std::io::stdout(),
+        policy.enable_mouse_capture,
+        policy.enable_keyboard_enhancement,
+    ) {
+        crate::logging::warn(&format!("failed to reapply terminal modes: {error}"));
+    }
+}
+
+fn reapply_terminal_modes_after_focus_to(
+    writer: &mut impl std::io::Write,
+    mouse_capture: bool,
+    keyboard_enhanced: bool,
+) -> std::io::Result<()> {
+    reapply_terminal_modes_to(
+        writer,
+        mouse_capture,
+        keyboard_enhanced,
+        // Ghostty reports its current focus when mode 1004 is enabled. Re-arming
+        // it from FocusGained would feed that reply back into this handler forever.
+        // Startup and resume-after-editor still enable focus reporting normally.
+        false,
+    )
+}
+
+#[cfg(test)]
+mod terminal_mode_tests {
+    use super::{
+        disable_keyboard_enhancement_to, enable_keyboard_enhancement_to,
+        reapply_keyboard_enhancement_to, reapply_terminal_modes_after_focus_to,
+        reapply_terminal_modes_to,
+    };
+
+    #[test]
+    fn tmux_keyboard_lifecycle_requests_and_resets_extended_keys() {
+        let mut output = Vec::new();
+        enable_keyboard_enhancement_to(&mut output, true).unwrap();
+        assert_eq!(output, b"\x1b[>4;2m\x1b[>7u");
+
+        output.clear();
+        reapply_keyboard_enhancement_to(&mut output, true).unwrap();
+        assert_eq!(output, b"\x1b[>4;2m\x1b[=7u");
+
+        output.clear();
+        disable_keyboard_enhancement_to(&mut output, true).unwrap();
+        assert_eq!(output, b"\x1b[>4;0m\x1b[<1u");
+    }
+
+    #[test]
+    fn outside_tmux_keyboard_lifecycle_keeps_kitty_protocol_only() {
+        let mut output = Vec::new();
+        enable_keyboard_enhancement_to(&mut output, false).unwrap();
+        assert_eq!(output, b"\x1b[>7u");
+
+        output.clear();
+        reapply_keyboard_enhancement_to(&mut output, false).unwrap();
+        assert_eq!(output, b"\x1b[=7u");
+
+        output.clear();
+        disable_keyboard_enhancement_to(&mut output, false).unwrap();
+        assert_eq!(output, b"\x1b[<1u");
+    }
+
+    #[test]
+    fn reapply_omits_keyboard_protocols_when_disabled() {
+        let mut output = Vec::new();
+        reapply_terminal_modes_to(&mut output, false, false, false).unwrap();
+        assert_eq!(output, b"\x1b[?2004h");
+    }
+
+    #[test]
+    fn reapply_omits_mouse_sequences_when_capture_is_disabled() {
+        let mut output = Vec::new();
+        reapply_terminal_modes_to(&mut output, false, true, true).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("\x1b[?2004h\x1b[?1004h"));
+        assert!(!output.contains("\x1b[?1000h"));
+        assert!(output.contains("\x1b[="));
+    }
+
+    #[test]
+    fn reapply_emits_configured_idempotent_modes_without_keyboard_push() {
+        let mut output = Vec::new();
+        reapply_terminal_modes_to(&mut output, true, true, true).unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("\x1b[?2004h"));
+        assert!(output.contains("\x1b[?1004h"));
+        assert!(output.contains("\x1b[?1000h"));
+        assert!(output.contains("\x1b[="), "must set Kitty keyboard flags");
+        assert!(
+            !output.contains("\x1b[>7u"),
+            "must not push the Kitty keyboard stack"
+        );
+    }
+
+    #[test]
+    fn focus_reapply_preserves_other_modes_without_rearming_focus_reporting() {
+        for mouse_capture in [false, true] {
+            for keyboard_enhanced in [false, true] {
+                let mut output = Vec::new();
+                reapply_terminal_modes_after_focus_to(
+                    &mut output,
+                    mouse_capture,
+                    keyboard_enhanced,
+                )
+                .unwrap();
+
+                let output = String::from_utf8(output).unwrap();
+                assert!(output.starts_with("\x1b[?2004h"));
+                assert!(
+                    !output.contains("\x1b[?1004h"),
+                    "must not trigger a focus reply"
+                );
+                assert!(
+                    !output.contains("\x1b[?1004l"),
+                    "must keep focus reporting enabled"
+                );
+                assert_eq!(output.contains("\x1b[?1000h"), mouse_capture);
+                assert_eq!(output.contains("\x1b[=7u"), keyboard_enhanced);
+                assert!(
+                    !output.contains("\x1b[>7u"),
+                    "must not push the Kitty keyboard stack (tmux modifyOtherKeys is allowed)"
+                );
+            }
+        }
+    }
 }
 
 /// Hash a rendered image's transcript anchor into `hasher`. Shared by the
@@ -259,27 +459,17 @@ pub trait TuiState {
     fn terminal_clear_collapsed(&self) -> bool {
         false
     }
+    /// Content-coordinate reading position captured before a resize rewrapped
+    /// the transcript. The renderer resolves it against the frame it is drawing
+    /// so the anchored message stays under the reader.
+    fn pending_resize_anchor(&self) -> Option<jcode_tui_messages::ContentPos> {
+        None
+    }
     /// When older compacted history is being loaded in, this is the reader's
     /// captured distance (in wrapped lines) from the bottom of the transcript.
     /// The renderer uses it to keep the viewport anchored to the same content as
     /// older messages are prepended above, instead of snapping to the new top.
     fn pending_history_anchor_lines_from_bottom(&self) -> Option<usize> {
-        None
-    }
-    /// Whether the elastic overscroll status line (revealed by scrolling past
-    /// the bottom of the transcript) is currently shown.
-    fn chat_overscroll_active(&self) -> bool {
-        false
-    }
-    /// Whether the overscroll status line is pinned permanently visible by
-    /// config (`display.overscroll_status = "on"`). A pinned line is part of
-    /// the stable layout, unlike the transient elastic reveal.
-    fn chat_overscroll_pinned(&self) -> bool {
-        false
-    }
-    /// Seconds remaining in the overscroll dwell window, used to render the
-    /// `(overscroll x.x)` countdown. `None` when not shown.
-    fn chat_overscroll_remaining(&self) -> Option<f32> {
         None
     }
     /// Whether a mouse drag-selection is currently held at the top/bottom edge of
@@ -381,7 +571,7 @@ pub trait TuiState {
     fn is_canary(&self) -> bool;
     /// Whether running in replay mode
     fn is_replay(&self) -> bool;
-    /// Diff display mode (off/inline/full-inline/pinned/file)
+    /// Diff display mode (off/inline/full-inline/file)
     fn diff_mode(&self) -> crate::config::DiffDisplayMode;
     /// Current session ID (if available)
     fn current_session_id(&self) -> Option<String>;
@@ -401,6 +591,11 @@ pub trait TuiState {
     fn connected_clients(&self) -> Option<usize>;
     /// Short-lived notice shown in the status line (e.g., model switch, toggle diff)
     fn status_notice(&self) -> Option<String>;
+    /// Built-in voice input status while recording or transcribing:
+    /// `(recording, text)`. Shown ahead of every other notice.
+    fn voice_input_status(&self) -> Option<(bool, String)> {
+        None
+    }
     /// How long since the user last pressed a key, scrolled, or pasted, or
     /// `None` when they have not interacted yet.
     ///
@@ -551,11 +746,19 @@ pub trait TuiState {
     fn diff_pane_scroll_x(&self) -> i32;
     /// Zoom percentage for image widgets rendered inside the side panel.
     fn side_panel_image_zoom_percent(&self) -> u8;
+    /// Image shown in the dismissible full-screen panel preview.
+    fn panel_image_preview(&self) -> Option<u64> {
+        None
+    }
     /// Whether the pinned diff pane is focused
     fn diff_pane_focus(&self) -> bool;
     /// Session-scoped side panel state managed by the side_panel tool
     // ---- Side panel ----
     fn side_panel(&self) -> &crate::side_panel::SidePanelSnapshot;
+    /// Whether the side panel replaces the transcript (fullscreen mode).
+    fn side_panel_fullscreen(&self) -> bool {
+        false
+    }
     /// Whether to pin read images to a side pane
     fn pin_images(&self) -> bool;
     /// Whether inline transcript images render expanded. When false, each
@@ -582,8 +785,6 @@ pub trait TuiState {
     fn chat_native_scrollbar(&self) -> bool;
     /// Whether to show a native terminal scrollbar for the side panel
     fn side_panel_native_scrollbar(&self) -> bool;
-    /// Whether to wrap lines in the pinned diff pane
-    fn diff_line_wrap(&self) -> bool;
     /// Interactive inline UI state (picker-like flows shown above input)
     // ---- Inline ----
     fn inline_interactive_state(&self) -> Option<&InlineInteractiveState>;
@@ -655,8 +856,33 @@ pub trait TuiState {
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
     /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
+    /// Read-only reset guidance for the active OpenAI OAuth account.
+    fn openai_reset_hint(&self) -> Option<String> {
+        // SSH sessions may use a different login on the remote host. Local
+        // cached credits cannot establish reset availability for that account.
+        if self.is_processing() || is_ssh_remote() {
+            return None;
+        }
+        let auth_method = self.info_widget_data().auth_method;
+        if auth_method != info_widget::AuthMethod::OpenAIOAuth {
+            return None;
+        }
+        let usage = crate::usage::get_openai_usage_sync();
+        let account_label = crate::auth::codex::active_account_label();
+        crate::tui::ui::input_ui::openai_reset_status_hint(
+            auth_method,
+            &usage,
+            account_label.as_deref(),
+        )
+    }
     /// Whether the notification line has content to show
     fn has_notification(&self) -> bool {
+        if self.voice_input_status().is_some() {
+            return true;
+        }
+        if self.openai_reset_hint().is_some() {
+            return true;
+        }
         if self.copy_selection_status().is_some() {
             return true;
         }
@@ -681,7 +907,7 @@ pub trait TuiState {
                 return true;
             }
             if let Some(cache_info) = self.cache_ttl_status()
-                && (cache_info.is_cold || cache_info.expiring_soon())
+                && cache_info.expiry_notification_active()
             {
                 return true;
             }
@@ -712,13 +938,15 @@ pub(crate) fn connection_type_icon(connection_type: Option<&str>) -> Option<&'st
 /// Cache TTL information for the current provider
 #[derive(Debug, Clone)]
 pub struct CacheTtlInfo {
-    /// Seconds until cache expires (0 = already expired)
+    /// Provider retention varies, so this countdown cannot establish a hit or expiry.
+    pub is_estimate: bool,
+    /// Seconds until the retention window ends (estimated for some providers)
     pub remaining_secs: u64,
     /// Total TTL for this provider in seconds
     pub ttl_secs: u64,
-    /// Whether the cache is expired (cold)
+    /// Whether the retention window elapsed, not proof of eviction for estimates
     pub is_cold: bool,
-    /// How long ago the cache went cold, in seconds (0 while warm)
+    /// How long ago the retention window ended, in seconds (0 before it ends)
     pub cold_for_secs: u64,
     /// Estimated cached tokens (from last response's input tokens)
     pub cached_tokens: Option<u64>,
@@ -766,7 +994,13 @@ impl CacheTtlInfo {
     /// Whether the cache is warm but close enough to expiry that the
     /// countdown should be shown (and idle redraws kept alive).
     pub fn expiring_soon(&self) -> bool {
-        !self.is_cold && self.remaining_secs <= self.warn_window_secs()
+        !self.is_estimate && !self.is_cold && self.remaining_secs <= self.warn_window_secs()
+    }
+
+    /// Only known TTLs may drive proactive expiry UI. An estimate or minimum
+    /// lifetime says nothing about when the provider will actually evict cache.
+    pub fn expiry_notification_active(&self) -> bool {
+        !self.is_estimate && (self.is_cold || self.expiring_soon())
     }
 }
 
@@ -852,7 +1086,9 @@ fn min_cacheable_input_tokens(provider: &str, upstream_provider: Option<&str>) -
 }
 
 fn cache_expected_warm(cache_ttl: Option<&CacheTtlInfo>) -> bool {
-    cache_ttl.map(|info| !info.is_cold).unwrap_or(false)
+    cache_ttl
+        .map(|info| !info.is_cold && !info.is_estimate)
+        .unwrap_or(false)
 }
 
 /// Detect a KV/prompt-cache problem that is reliable enough to surface in the UI.
@@ -1219,6 +1455,15 @@ pub enum PickerAction {
     Model,
     Account(AccountPickerAction),
     Login(crate::provider_catalog::LoginProviderDescriptor),
+    /// Native SSH actions never dispatch through laptop-local authentication.
+    RemoteLogin {
+        provider: &'static str,
+        import: bool,
+    },
+    /// Explicit remote import offer/consent, never a local authentication action.
+    RemoteImportDecision {
+        accept: bool,
+    },
     Logout(crate::provider_catalog::LoginProviderDescriptor),
     LogoutAll,
     Usage {
@@ -1276,6 +1521,8 @@ impl InlineInteractiveState {
 fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
     match action {
         PickerAction::Model
+        | PickerAction::RemoteLogin { .. }
+        | PickerAction::RemoteImportDecision { .. }
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::SubagentModelChoice { .. }
@@ -1534,9 +1781,28 @@ pub struct PickerOption {
     pub estimated_reference_cost_micros: Option<u64>,
 }
 
+/// An SSH-backed socket is not a shared-filesystem local daemon. Keep this
+/// distinct from `App::is_remote`, which also describes ordinary local clients.
+pub(crate) fn ssh_remote_host() -> Option<String> {
+    std::env::var("JCODE_SSH_REMOTE")
+        .ok()
+        .filter(|host| !host.trim().is_empty())
+}
+
+pub(crate) fn is_ssh_remote() -> bool {
+    ssh_remote_host().is_some()
+}
+
 pub(crate) fn subscribe_metadata(
     remote_working_dir: Option<&str>,
 ) -> (Option<String>, Option<bool>) {
+    if is_ssh_remote() {
+        // Never infer a remote project (or self-dev mode) from the laptop cwd.
+        return (
+            remote_working_dir.map(str::to_string),
+            jcode_selfdev_types::client_selfdev_requested().then_some(true),
+        );
+    }
     let working_dir = std::env::current_dir().ok();
     resolve_subscribe_metadata(
         working_dir.as_deref(),
@@ -1665,6 +1931,7 @@ mod tests {
 
     fn warm_cache_ttl() -> CacheTtlInfo {
         CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 240,
             ttl_secs: 300,
             is_cold: false,
@@ -1675,12 +1942,21 @@ mod tests {
 
     fn cold_cache_ttl() -> CacheTtlInfo {
         CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 0,
             ttl_secs: 300,
             is_cold: true,
             cold_for_secs: 90,
             cached_tokens: Some(12_000),
         }
+    }
+
+    #[test]
+    fn cache_estimate_is_not_evidence_of_an_expected_warm_hit() {
+        let mut timer = warm_cache_ttl();
+        assert!(super::cache_expected_warm(Some(&timer)));
+        timer.is_estimate = true;
+        assert!(!super::cache_expected_warm(Some(&timer)));
     }
 
     #[test]

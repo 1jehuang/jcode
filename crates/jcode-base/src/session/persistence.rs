@@ -244,6 +244,7 @@ impl Session {
         let journal_entries = replay_stats.entries;
         let journal_ms = journal_start.elapsed().as_millis();
         let finalize_start = Instant::now();
+        session.backfill_prompt_title();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
@@ -335,6 +336,7 @@ impl Session {
         })?;
         let journal_ms = journal_start.elapsed().as_millis();
         let finalize_start = Instant::now();
+        session.backfill_prompt_title();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
@@ -372,9 +374,61 @@ impl Session {
     }
 
     pub fn save(&mut self) -> Result<()> {
+        self.save_inner(false)
+    }
+
+    /// Persist the session even when it has no visible conversation message
+    /// yet. Use this for sessions prepared by one process and attached to by
+    /// another (for example visible swarm spawns), where caller-configured
+    /// state such as model, provider, or effort must survive until attach.
+    pub fn save_prepared(&mut self) -> Result<()> {
+        self.save_inner(true)
+    }
+
+    fn save_inner(&mut self, force: bool) -> Result<()> {
+        // A session that migrated to another machine (or whose on-disk copy was
+        // replaced by a newer returned transcript) must not be overwritten by
+        // this stale in-memory copy.
+        if let Some(block) = self.migration_lease_block() {
+            crate::logging::warn(&format!("Session {} not persisted: {}", self.id, block));
+            return Ok(());
+        }
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
         let journal_path = session_journal_path_from_snapshot(&path);
+
+        // A newly opened panel contains only its hidden session-context message.
+        // Do not turn that implementation detail into a transcript on disk. Once
+        // the user (or a programmatic caller) adds a real conversation message,
+        // the normal first snapshot includes all of the accumulated context.
+        //
+        // A caller-chosen `title` (review/judge sessions, menubar sessions) is
+        // explicit state just like `custom_title`, so it must persist even
+        // before the first visible message (#1144). Otherwise later lookups by
+        // id find no file and silently treat the session as missing.
+        // Parent linkage is also explicit state: an empty fork carries only a
+        // hidden fork notice but must be loadable when its new client attaches.
+        // An explicit system prompt, including an empty string, must likewise
+        // survive attachment before the first visible message.
+        // Canary (self-dev) and debug markers are likewise explicit: the
+        // selfdev tool and debug-socket clients read them back from disk.
+        if !force
+            && !self.persist_state.snapshot_exists
+            && !self
+                .messages
+                .iter()
+                .any(super::is_visible_conversation_message)
+            && !self.saved
+            && self.custom_title.is_none()
+            && self.title.is_none()
+            && self.parent_id.is_none()
+            && self.system_prompt.is_none()
+            && !self.is_canary
+            && !self.is_debug
+        {
+            return Ok(());
+        }
+
         let start = std::time::Instant::now();
         let snapshot_bytes_before = file_len_or_zero(&path);
         let journal_bytes_before = file_len_or_zero(&journal_path);

@@ -193,7 +193,8 @@ pub fn install_panic_hook() {
                 telemetry::record_crash(&provider, &model, telemetry::SessionEndReason::Panic);
             }
 
-            if let Ok(mut session) = session::Session::load(&session_id)
+            if std::env::var_os("JCODE_SSH_REMOTE").is_none()
+                && let Ok(mut session) = session::Session::load(&session_id)
                 && should_record_panic_as_crash(&session.status)
             {
                 session.mark_crashed(Some(format!("Panic: {}", info)));
@@ -204,6 +205,9 @@ pub fn install_panic_hook() {
 }
 
 pub fn mark_current_session_crashed(message: String) {
+    if std::env::var_os("JCODE_SSH_REMOTE").is_some() {
+        return;
+    }
     if let Some(session_id) = get_current_session() {
         if let Some((provider, model)) = telemetry::current_provider_model() {
             telemetry::record_crash(&provider, &model, telemetry::SessionEndReason::Signal);
@@ -546,7 +550,11 @@ fn write_session_resume_hint(mut writer: impl Write, session_id: &str) -> io::Re
         "\x1b[33mSession \x1b[1m{}\x1b[0m\x1b[33m - to resume:\x1b[0m",
         session_name
     )?;
-    writeln!(writer, "  jcode --resume {}", session_id)?;
+    if let Some(command) = super::ssh::resume_hint(session_id) {
+        writeln!(writer, "  {command}")?;
+    } else {
+        writeln!(writer, "  jcode --resume {}", session_id)?;
+    }
     writeln!(writer)?;
     Ok(())
 }

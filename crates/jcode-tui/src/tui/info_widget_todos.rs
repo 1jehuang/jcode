@@ -513,9 +513,12 @@ fn todos_widget_label(data: &InfoWidgetData) -> &'static str {
 }
 
 /// Render todos widget content
-pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+///
+/// Border layout: `Todos 3/7 ●●●○○○○` top-left, confidence (and the flat
+/// list's feedback-loop score) top-right, `+N more` bottom-left.
+pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     if data.todos.is_empty() {
-        return Vec::new();
+        return Framed::default();
     }
 
     let mut lines: Vec<Line> = Vec::new();
@@ -531,7 +534,7 @@ pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         .filter(|t| t.status == "in_progress")
         .count();
 
-    // Header with progress + inline pip meter
+    // Title with progress + inline pip meter
     let mut header = vec![
         Span::styled(
             format!("{} ", todos_widget_label(data)),
@@ -542,34 +545,27 @@ pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
             Style::default().fg(rgb(140, 140, 150)),
         ),
     ];
-    let pip_budget = (inner.width.saturating_sub(12) / 2).clamp(0, 10) as usize;
+    let pip_budget = (inner.width.saturating_sub(14) / 2).clamp(0, 10) as usize;
     push_todo_pips(&mut header, data, pip_budget);
-    push_aggregate_confidence_suffix(&mut header, aggregate_todo_confidence(&data.todos));
+    let mut right: Vec<Span<'static>> = Vec::new();
+    push_aggregate_confidence_suffix(&mut right, aggregate_todo_confidence(&data.todos));
 
-    let available_lines = inner.height.saturating_sub(1) as usize; // Account for header
-    let budget = available_lines.clamp(1, 5);
+    // Every body row is an item now; the overflow count lives on the border.
+    let budget = (inner.height as usize).clamp(1, 5);
 
     // Grouped layout when any todo declares a group; otherwise the flat list.
     if let Some(groups) = grouped_todos(&data.todos) {
-        lines.push(Line::from(header));
         let (group_lines, shown) =
             render_grouped_todo_lines(&groups, &data.todo_goals, inner, false, budget);
         lines.extend(group_lines);
-        if total > shown {
-            lines.push(Line::from(vec![Span::styled(
-                format!("  +{} more", total - shown),
-                Style::default().fg(rgb(100, 100, 110)),
-            )]));
-        }
-        return lines;
+        return todos_framed(lines, header, right, total.saturating_sub(shown));
     }
 
     // Flat list: the whole list is one implicit goal, so its feedback-loop score
-    // (if recorded) lives on the header line.
+    // (if recorded) lives on the top border.
     if let Some(goal) = goal_for_group(&data.todo_goals, None) {
-        push_goal_loop_suffix(&mut header, goal);
+        push_goal_loop_suffix(&mut right, goal);
     }
-    lines.push(Line::from(header));
 
     // Sort todos: in_progress first, then pending, then completed
     let mut sorted_todos: Vec<&crate::todo::TodoItem> = data.todos.iter().collect();
@@ -580,17 +576,30 @@ pub(super) fn render_todos_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         push_todo_item_line(&mut lines, todo, inner, false, 0);
     }
 
-    // Show count of remaining items
     let shown = budget.min(sorted_todos.len());
-    if data.todos.len() > shown {
-        let remaining = data.todos.len() - shown;
-        lines.push(Line::from(vec![Span::styled(
-            format!("  +{} more", remaining),
-            Style::default().fg(rgb(100, 100, 110)),
-        )]));
-    }
+    todos_framed(lines, header, right, data.todos.len().saturating_sub(shown))
+}
 
-    lines
+fn todos_framed(
+    lines: Vec<Line<'static>>,
+    header: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    hidden: usize,
+) -> Framed {
+    let mut framed = Framed::body(lines).title(Line::from(header));
+    // The suffix helpers lead with a " · " separator; on its own slot the
+    // separator is noise.
+    let right: Vec<Span<'static>> = right
+        .into_iter()
+        .skip_while(|s| s.content.trim() == "·")
+        .collect();
+    if !right.is_empty() {
+        framed = framed.title_right(Line::from(right));
+    }
+    if hidden > 0 {
+        framed = framed.footer(frame::more(hidden));
+    }
+    framed
 }
 
 pub(super) fn render_todos_expanded(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {

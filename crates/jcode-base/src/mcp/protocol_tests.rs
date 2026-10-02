@@ -106,6 +106,40 @@ fn test_mcp_config_deserialization() {
 }
 
 #[test]
+fn test_mcp_config_timeout_secs_defaults_to_none_and_accepts_override() {
+    // Issues #802 / #1174: per-server reply timeout. Absent keeps the 30s
+    // default; an explicit value is honored.
+    let json = r#"{
+            "mcpServers": {
+                "fast": {"command": "fast-mcp"},
+                "slow": {"command": "slow-mcp", "timeout_secs": 120}
+            }
+        }"#;
+    let config: McpConfig = serde_json::from_str(json).unwrap();
+    let fast = config.servers.get("fast").unwrap();
+    let slow = config.servers.get("slow").unwrap();
+    assert_eq!(fast.timeout_secs, None);
+    assert_eq!(slow.timeout_secs, Some(120));
+    assert_eq!(
+        crate::mcp::request_timeout_for(fast),
+        crate::mcp::DEFAULT_MCP_REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        crate::mcp::request_timeout_for(slow),
+        std::time::Duration::from_secs(120)
+    );
+    // Zero is treated as "unset" rather than an instant timeout.
+    let zero = McpServerConfig {
+        timeout_secs: Some(0),
+        ..slow.clone()
+    };
+    assert_eq!(
+        crate::mcp::request_timeout_for(&zero),
+        crate::mcp::DEFAULT_MCP_REQUEST_TIMEOUT
+    );
+}
+
+#[test]
 fn test_mcp_config_empty() {
     let json = r#"{}"#;
     let config: McpConfig = serde_json::from_str(json).unwrap();
@@ -675,6 +709,61 @@ env = { TOKEN = "codex-inline-secret" }
         crate::env::remove_var("JCODE_HOME");
     }
     result.expect("live Claude and snapshot Codex assertions");
+}
+
+#[test]
+fn codex_import_preserves_enabled_false() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let codex_dir = home.path().join("external").join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("create codex config dir");
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"[mcp_servers.disabled_one]
+command = "disabled-bin"
+enabled = false
+
+[mcp_servers.active_one]
+command = "active-bin"
+"#,
+    )
+    .expect("write Codex config");
+
+    let result = std::panic::catch_unwind(|| {
+        let config = McpConfig::load_for_dir(None);
+        let disabled = config
+            .servers
+            .get("disabled_one")
+            .expect("disabled server is still imported");
+        assert!(
+            !disabled.is_enabled(),
+            "enabled = false must survive the import instead of silently activating the server"
+        );
+        assert!(
+            config
+                .servers
+                .get("active_one")
+                .expect("default-enabled server")
+                .is_enabled()
+        );
+
+        let snapshot =
+            std::fs::read_to_string(home.path().join("mcp.json")).expect("Codex snapshot");
+        assert!(
+            snapshot.contains(r#""enabled": false"#),
+            "snapshot should record the disabled state: {snapshot}"
+        );
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("codex enabled=false import assertions");
 }
 
 #[test]

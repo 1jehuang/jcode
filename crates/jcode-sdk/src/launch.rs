@@ -5,6 +5,7 @@
 //! home which the returned owner tears down on drop.
 
 use crate::errors::{Error, ErrorKind, Result};
+#[cfg(unix)]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -49,6 +50,23 @@ const EXTERNAL_CREDENTIAL_FILES: &[&str] = &[
     ".local/share/opencode/auth.json",
 ];
 
+/// Operator ownership mode for autonomous wake requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WakeMode {
+    #[default]
+    Internal,
+    External,
+}
+
+impl WakeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::External => "external",
+        }
+    }
+}
+
 /// Options for starting a private jcode instance.
 pub struct LaunchOptions {
     /// State directory for the instance. A temporary, drop-cleaned directory is
@@ -62,6 +80,14 @@ pub struct LaunchOptions {
     pub binary: Option<PathBuf>,
     /// Extra environment variables for the private instance.
     pub env: HashMap<OsString, OsString>,
+    /// Default model for spawned swarm workers, unless overridden per spawn.
+    /// `inherit` defaults to the coordinator's model and auth route.
+    /// This is applied as the operator-level
+    /// `JCODE_SWARM_MODEL` override and takes precedence over `env`.
+    pub swarm_model: Option<String>,
+    /// Who executes autonomous wake requests. Applied as the operator-level
+    /// `JCODE_WAKE_MODE` override and takes precedence over `env`.
+    pub wake_mode: Option<WakeMode>,
     /// How long to wait for the API socket to accept connections.
     pub startup_timeout: Duration,
     /// Forward the bridge's stderr instead of capturing it for startup errors.
@@ -91,6 +117,8 @@ impl Default for LaunchOptions {
             inherit_logins: true,
             binary: None,
             env: HashMap::new(),
+            swarm_model: None,
+            wake_mode: None,
             startup_timeout: Duration::from_secs(30),
             inherit_stderr: false,
             cleanup_timeout: Duration::from_secs(30),
@@ -172,11 +200,11 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
             remove_ephemeral_home(&jcode_home, Duration::ZERO);
         }
     };
-    if options.inherit_logins {
-        if let Err(error) = inherit_credentials(&user_jcode_home(), &jcode_home) {
-            cleanup_on_error();
-            return Err(error);
-        }
+    if options.inherit_logins
+        && let Err(error) = inherit_credentials(&user_jcode_home(), &jcode_home)
+    {
+        cleanup_on_error();
+        return Err(error);
     }
 
     let binary = options
@@ -205,6 +233,12 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         } else {
             Stdio::piped()
         });
+    if let Some(swarm_model) = options.swarm_model.as_deref() {
+        command.env("JCODE_SWARM_MODEL", swarm_model);
+    }
+    if let Some(wake_mode) = options.wake_mode {
+        command.env("JCODE_WAKE_MODE", wake_mode.as_str());
+    }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -395,7 +429,20 @@ fn link_credential_file(source: &Path, root: &Path, relative: &Path) -> Result<(
     let parent = ensure_instance_directory(root, parent_relative)?;
     let destination = parent.join(relative.file_name().unwrap_or_default());
     let _ = fs::remove_file(&destination);
+    link_file(source, &destination)
+}
+
+#[cfg(unix)]
+fn link_file(source: &Path, destination: &Path) -> Result<()> {
     std::os::unix::fs::symlink(source, destination).map_err(launch_io)
+}
+
+#[cfg(windows)]
+fn link_file(source: &Path, destination: &Path) -> Result<()> {
+    // Preserve rotating credentials rather than silently creating a stale copy.
+    // Windows may require Developer Mode or symlink privileges; report that OS
+    // error to the caller when links are unavailable.
+    std::os::windows::fs::symlink_file(source, destination).map_err(launch_io)
 }
 
 fn ensure_instance_directory(root: &Path, relative: &Path) -> Result<PathBuf> {
@@ -442,7 +489,7 @@ pub type Progress<'a> = dyn Fn(&str) + 'a;
 
 /// Whether anything is listening on a socket path.
 pub fn socket_accepts(path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
+    jcode_transport::is_socket_path(path)
 }
 
 /// Locate a sibling executable next to our own, falling back to `$PATH`.
@@ -464,9 +511,13 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         return Ok(());
     }
     let legacy = jcode_harness_api::legacy_socket_path();
+    let jcode = options
+        .binary
+        .clone()
+        .unwrap_or_else(|| sibling_exe("jcode"));
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
-        spawn_detached(&sibling_exe("jcode"), &["serve"]).map_err(|error| {
+        spawn_detached(&jcode, &["serve"]).map_err(|error| {
             Error::new(
                 ErrorKind::LaunchFailed,
                 format!("could not start the jcode runtime: {error}"),
@@ -475,10 +526,19 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         wait_for_socket(&legacy, "jcode runtime", options.start_timeout)?;
     }
     progress("starting harness API bridge...");
-    spawn_detached(&sibling_exe("jcode-harness-api-bridge"), &[]).map_err(|error| {
+    let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
+    let (bridge, bridge_args): (&Path, &[&str]) = if standalone_bridge.is_file() {
+        (&standalone_bridge, &[])
+    } else {
+        // Current Jcode distributions host the bridge as a CLI subcommand so a
+        // desktop bundle only needs to ship one companion executable. Keep the
+        // standalone lookup above for compatibility with older installations.
+        (&jcode, &["api-bridge"])
+    };
+    spawn_detached(bridge, bridge_args).map_err(|error| {
         Error::new(
             ErrorKind::LaunchFailed,
-            format!("could not start jcode-harness-api-bridge: {error}"),
+            format!("could not start the harness API bridge: {error}"),
         )
     })?;
     wait_for_socket(&api, "harness API bridge", options.start_timeout)
@@ -517,6 +577,7 @@ pub fn wait_for_socket(path: &Path, what: &str, timeout: Duration) -> Result<()>
     ))
 }
 
+#[cfg(unix)]
 fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
     let raw = fs::read(home.join("servers.json")).ok()?;
     let registry: Value = serde_json::from_slice(&raw).ok()?;
@@ -531,6 +592,7 @@ fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
     })
 }
 
+#[cfg(unix)]
 fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
     let Some(pid) = read_daemon_pid(home, runtime_dir) else {
         return;
@@ -550,6 +612,10 @@ fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
     }
 }
 
+#[cfg(not(unix))]
+fn stop_instance_daemon(_home: &Path, _runtime_dir: &Path) {}
+
+#[cfg(unix)]
 fn signal_process_group(pid: i32, signal: i32) {
     // SAFETY: `kill` does not retain pointers; both calls use validated pids.
     unsafe {
@@ -559,11 +625,13 @@ fn signal_process_group(pid: i32, signal: i32) {
     }
 }
 
+#[cfg(unix)]
 fn process_exists(pid: i32) -> bool {
     // SAFETY: signal 0 only probes whether the numeric pid exists.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+#[cfg(unix)]
 fn terminate_child(child: &mut Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
@@ -579,6 +647,17 @@ fn terminate_child(child: &mut Child) {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    // std's Windows Child::kill uses TerminateProcess. There is no portable
+    // graceful signal equivalent, so terminate immediately and reap it.
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -651,13 +730,100 @@ fn set_owner_only_file(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(launch_io)
 }
 
+#[cfg(not(unix))]
+fn set_owner_only_dir(_path: &Path) -> Result<()> {
+    // Windows access is controlled by inherited ACLs. std does not expose an
+    // owner-only ACL operation, and marking a path read-only is not equivalent.
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_file(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn launch_io(error: std::io::Error) -> Error {
     Error::new(ErrorKind::LaunchFailed, error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn swarm_model_reaches_runtime_and_overrides_generic_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let binary = sandbox.path().join("capture-env");
+        let captured = sandbox.path().join("swarm-model.txt");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' \"$JCODE_SWARM_MODEL\" > \"$CAPTURE_PATH\"\nexit 1\n",
+        )
+        .expect("write fake runtime");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("make fake runtime executable");
+
+        let mut options = LaunchOptions {
+            jcode_home: Some(sandbox.path().join("instance")),
+            inherit_logins: false,
+            binary: Some(binary),
+            swarm_model: Some("inherit".to_string()),
+            startup_timeout: Duration::from_secs(2),
+            ..LaunchOptions::default()
+        };
+        options.env.insert(
+            OsString::from("CAPTURE_PATH"),
+            captured.as_os_str().to_owned(),
+        );
+        options.env.insert(
+            OsString::from("JCODE_SWARM_MODEL"),
+            OsString::from("unwanted-model"),
+        );
+
+        assert!(
+            launch_instance(&options).is_err(),
+            "fake runtime should fail startup"
+        );
+        assert_eq!(
+            fs::read_to_string(captured).expect("captured model"),
+            "inherit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wake_mode_reaches_runtime_and_overrides_generic_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let binary = sandbox.path().join("capture-env");
+        let captured = sandbox.path().join("wake-mode.txt");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' \"$JCODE_WAKE_MODE\" > \"$CAPTURE_PATH\"\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut options = LaunchOptions {
+            jcode_home: Some(sandbox.path().join("instance")),
+            inherit_logins: false,
+            binary: Some(binary),
+            wake_mode: Some(WakeMode::External),
+            startup_timeout: Duration::from_secs(2),
+            ..LaunchOptions::default()
+        };
+        options
+            .env
+            .insert("CAPTURE_PATH".into(), captured.as_os_str().to_owned());
+        options
+            .env
+            .insert("JCODE_WAKE_MODE".into(), "internal".into());
+        assert!(launch_instance(&options).is_err());
+        assert_eq!(fs::read_to_string(captured).unwrap(), "external");
+    }
 
     #[test]
     fn dropping_an_ephemeral_instance_stops_its_bridge_and_removes_its_home() {

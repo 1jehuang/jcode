@@ -12,7 +12,7 @@ pub use jcode_message_types::{
     CacheControl, ConnectionPhase, ContentBlock, InputShellResult, Message, Role, StreamEvent,
     TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition, cache_relevant_message_hashes,
     cache_relevant_message_value, cache_relevant_messages, ends_with_fresh_user_turn,
-    extend_stable_hash, messages_with_dynamic_system_context, sanitize_tool_id,
+    extend_stable_hash, messages_with_dynamic_system_context, provider_native, sanitize_tool_id,
     stable_message_hash,
 };
 
@@ -104,6 +104,7 @@ pub fn redact_secrets(text: &str) -> String {
     let assignment_patterns = ASSIGNMENT_PATTERNS.get_or_init(|| {
         compile_static_regexes(&[
             r"(?m)^\s*(OPENROUTER_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(CONIFER_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENCODE_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENCODE_GO_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(ZHIPU_API_KEY\s*=\s*)[^\r\n]+",
@@ -128,6 +129,7 @@ pub fn redact_secrets(text: &str) -> String {
             r"(?m)^\s*(OLLAMA_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CHUTES_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CEREBRAS_API_KEY\s*=\s*)[^\r\n]+",
+            r"(?m)^\s*(BELVEDIR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENAI_COMPAT_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(ANTHROPIC_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(OPENAI_API_KEY\s*=\s*)[^\r\n]+",
@@ -142,6 +144,7 @@ pub fn redact_secrets(text: &str) -> String {
     let mut redacted = text.to_string();
     let mut redacted_keys: HashSet<String> = [
         "OPENROUTER_API_KEY",
+        "CONIFER_API_KEY",
         "OPENCODE_API_KEY",
         "OPENCODE_GO_API_KEY",
         "ZHIPU_API_KEY",
@@ -166,6 +169,7 @@ pub fn redact_secrets(text: &str) -> String {
         "OLLAMA_API_KEY",
         "CHUTES_API_KEY",
         "CEREBRAS_API_KEY",
+        "BELVEDIR_API_KEY",
         "OPENAI_COMPAT_API_KEY",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -371,6 +375,7 @@ pub fn generated_image_rendered_image(
 ) -> Option<jcode_session_types::RenderedImage> {
     let (media_type, data) = generated_image_payload(path, output_format)?;
     Some(jcode_session_types::RenderedImage {
+        history_message_index: None,
         media_type,
         data,
         label: Some(path.to_string()),

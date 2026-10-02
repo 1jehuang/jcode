@@ -16,6 +16,7 @@ fn cfg(command: &str, args: &[&str]) -> McpServerConfig {
         headers: HashMap::new(),
         enabled: None,
         disabled: None,
+        timeout_secs: None,
     }
 }
 

@@ -48,7 +48,8 @@ fn test_skill_prompt_integration() {
     let prompt = build_system_prompt(Some(skill_prompt), &[]);
 
     // The prompt should contain our default system prompt
-    assert!(prompt.contains("Your name is Jcode."));
+    // Identity line reworded in 24838926e ("docs: refine base agent guidance").
+    assert!(prompt.contains("You are Jcode."));
 
     // The prompt should contain the skill prompt
     assert!(prompt.contains(skill_prompt));
@@ -524,15 +525,6 @@ fn test_selfdev_prompt_uses_full_selfdev_instructions() {
 }
 
 #[test]
-fn test_selfdev_prompt_uses_desktop_focus_for_desktop_working_dir() {
-    let desktop_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
-    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop_dir));
-    assert!(prompt.contains("launched from the jcode-desktop2"));
-    assert!(prompt.contains("selfdev build target=desktop2"));
-    assert!(!prompt.contains("launched from the TUI/root jcode context"));
-}
-
-#[test]
 fn test_split_selfdev_prompt_defaults_to_tui_focus_for_repo_root() {
     let repo_dir = std::path::Path::new("/tmp/jcode");
     let (split, _info) = build_system_prompt_split(None, &[], true, None, Some(repo_dir));
@@ -554,6 +546,20 @@ fn test_selfdev_prompt_prefers_publish_flow_for_active_builds() {
     assert!(prompt.contains("scripts/dev_cargo.sh build --profile selfdev -p jcode --bin jcode"));
     assert!(prompt.contains("remote build host is configured"));
     assert!(prompt.contains("Do not wait for user input"));
+}
+
+#[test]
+fn test_selfdev_prompt_welcomes_outside_contributions() {
+    let full = build_system_prompt_with_selfdev(None, &[], true);
+    let (split, _) = build_system_prompt_split(None, &[], true, None, None);
+
+    for prompt in [&full, &split.static_part] {
+        assert!(prompt.contains("Pull requests from everyone are welcome"));
+        assert!(prompt.contains("Good PRs can be merged directly after review and validation"));
+        assert!(prompt.contains("Do not require a maintainer-authored rewrite"));
+        assert!(prompt.contains("preserve unrelated changes"));
+        assert!(prompt.contains("merge a PR without user authorization"));
+    }
 }
 
 #[test]
@@ -641,15 +647,6 @@ fn classify_effort_distinguishes_reasoning_from_swarm_modes() {
 }
 
 #[test]
-fn test_selfdev_prompt_uses_desktop2_focus_for_desktop2_working_dir() {
-    let desktop2_dir = std::path::Path::new("/tmp/jcode/crates/jcode-desktop2/src");
-    let (prompt, _info) = build_system_prompt_full(None, &[], true, None, Some(desktop2_dir));
-    assert!(prompt.contains("launched from the jcode-desktop2"));
-    assert!(prompt.contains("selfdev build target=desktop2"));
-    assert!(!prompt.contains("launched from the TUI/root jcode context"));
-}
-
-#[test]
 fn project_system_prompt_file_replaces_default_base_prompt() {
     use crate::prompt::load_base_system_prompt;
 
@@ -676,4 +673,227 @@ fn project_system_prompt_file_replaces_default_base_prompt() {
     assert_eq!(load_base_system_prompt(Some(&dir)), DEFAULT_SYSTEM_PROMPT);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+fn desktop_prompt_checkout() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("crates/jcode-desktop-ui/src")).unwrap();
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname = 'jcode-desktop'\nversion = '0.1.0'\n",
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn desktop_prompt_auto_detects_and_overrides_cli_in_full_and_split_modes() {
+    let root = desktop_prompt_checkout();
+    for relative in ["", "crates/jcode-desktop-ui/src"] {
+        let cwd = root.path().join(relative);
+        for cli_selfdev in [false, true] {
+            let (full, full_info) =
+                build_system_prompt_full(None, &[], cli_selfdev, None, Some(&cwd));
+            let (split, split_info) =
+                build_system_prompt_split(None, &[], cli_selfdev, None, Some(&cwd));
+            for prompt in [&full, &split.static_part] {
+                assert!(prompt.contains("# Jcode Desktop Self-Development Mode"));
+                assert!(prompt.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+                assert!(!prompt.contains("# Self-Development Mode"));
+                assert!(!prompt.contains("selfdev build target=tui"));
+                assert!(!prompt.contains("You are working on the jcode codebase itself."));
+            }
+            assert!(
+                !split
+                    .dynamic_part
+                    .contains("# Jcode Desktop Self-Development Mode")
+            );
+            assert_eq!(full_info.selfdev_chars, DESKTOP_SELFDEV_MODE_PROMPT.len());
+            assert_eq!(split_info.selfdev_chars, DESKTOP_SELFDEV_MODE_PROMPT.len());
+        }
+        assert!(build_session_context(Some(&cwd)).contains("Self-development mode: desktop"));
+    }
+}
+
+#[test]
+fn desktop_prompt_leaves_normal_and_cli_sessions_unchanged() {
+    assert!(!is_desktop_working_dir(None));
+    let unrelated = tempfile::tempdir().unwrap();
+    for cli_selfdev in [false, true] {
+        let (full, full_info) =
+            build_system_prompt_full(None, &[], cli_selfdev, None, Some(unrelated.path()));
+        let (split, split_info) =
+            build_system_prompt_split(None, &[], cli_selfdev, None, Some(unrelated.path()));
+        for prompt in [&full, &split.static_part] {
+            assert!(!prompt.contains("# Jcode Desktop Self-Development Mode"));
+            assert_eq!(prompt.contains("# Self-Development Mode"), cli_selfdev);
+        }
+        assert_eq!(full_info.selfdev_chars > 0, cli_selfdev);
+        assert_eq!(split_info.selfdev_chars > 0, cli_selfdev);
+    }
+    assert!(
+        !build_session_context(Some(unrelated.path())).contains("Self-development mode: desktop")
+    );
+}
+
+#[test]
+fn desktop_prompt_documents_safe_product_specific_workflow() {
+    for action in [
+        "status",
+        "build",
+        "reload",
+        "build-reload",
+        "reload-bridge",
+        "test",
+        "screenshot",
+        "inspect",
+    ] {
+        assert!(DESKTOP_SELFDEV_MODE_PROMPT.contains(&format!("`{action}`")));
+    }
+    for instruction in [
+        "desktop_selfdev",
+        "Ctrl+R",
+        "must not rebuild the CLI",
+        "preserving the current application state",
+        "require a safe restart, not UI hot reload",
+        "scripts/screenshot.py",
+        "Do not depend on niri",
+    ] {
+        assert!(
+            DESKTOP_SELFDEV_MODE_PROMPT.contains(instruction),
+            "missing {instruction}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_prompt_detects_symlinked_nested_working_directory() {
+    let root = desktop_prompt_checkout();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("renamed-ui");
+    std::os::unix::fs::symlink(root.path().join("crates/jcode-desktop-ui/src"), &link).unwrap();
+    let (full, _) = build_system_prompt_full(None, &[], false, None, Some(&link));
+    let (split, _) = build_system_prompt_split(None, &[], false, None, Some(&link));
+    assert!(full.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+    assert!(split.static_part.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+}
+
+// Restore JCODE_HOME even when a regression assertion panics.
+fn with_prompt_guidance_home(test: impl FnOnce(&Path)) {
+    let _guard = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    let home = tempfile::TempDir::new().unwrap();
+    let jcode_dir = home.path().join(".jcode");
+    std::fs::create_dir(&jcode_dir).unwrap();
+    crate::env::set_var("JCODE_HOME", &jcode_dir);
+    test(home.path());
+}
+
+#[test]
+fn prompt_guidance_same_project_and_global_paths_are_loaded_once() {
+    with_prompt_guidance_home(|home| {
+        let overlay = "shared overlay marker\n";
+        let tools = "shared preferred tools marker\n";
+        std::fs::write(home.join(".jcode/prompt-overlay.md"), overlay).unwrap();
+        std::fs::write(home.join(".jcode/preferred-tools.md"), tools).unwrap();
+
+        let (full, full_info) = build_system_prompt_full(None, &[], false, None, Some(home));
+        let (split, split_info) = build_system_prompt_split(None, &[], false, None, Some(home));
+        for prompt in [&full, &split.static_part] {
+            assert_eq!(prompt.matches(overlay.trim()).count(), 1);
+            assert_eq!(prompt.matches(tools.trim()).count(), 1);
+            assert!(prompt.contains("Project Prompt Overlay"));
+            assert!(prompt.contains("Project Preferred Tools"));
+            assert!(!prompt.contains("Global Prompt Overlay"));
+            assert!(!prompt.contains("Global Preferred Tools"));
+        }
+        for info in [full_info, split_info] {
+            assert_eq!(info.prompt_overlay_chars, overlay.len());
+            assert_eq!(info.preferred_tools_chars, tools.len());
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn prompt_guidance_symlink_aliases_are_loaded_once() {
+    with_prompt_guidance_home(|home| {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".jcode")).unwrap();
+        for name in ["prompt-overlay.md", "preferred-tools.md"] {
+            let global = home.join(".jcode").join(name);
+            std::fs::write(&global, "shared symlink guidance").unwrap();
+            std::os::unix::fs::symlink(&global, project.path().join(".jcode").join(name)).unwrap();
+        }
+        for (content, size) in [
+            load_prompt_overlay_files_from_dir(Some(project.path())),
+            load_preferred_tools_files_from_dir(Some(project.path())),
+        ] {
+            let content = content.unwrap();
+            assert_eq!(content.matches("shared symlink guidance").count(), 1);
+            assert!(content.starts_with("# Project"));
+            assert!(!content.contains("# Global"));
+            assert_eq!(size, "shared symlink guidance".len());
+        }
+    });
+}
+
+#[test]
+fn prompt_guidance_distinct_files_with_identical_contents_are_both_loaded() {
+    with_prompt_guidance_home(|home| {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".jcode")).unwrap();
+        for name in ["prompt-overlay.md", "preferred-tools.md"] {
+            for root in [home, project.path()] {
+                std::fs::write(root.join(".jcode").join(name), "identical guidance").unwrap();
+            }
+        }
+        for (content, size) in [
+            load_prompt_overlay_files_from_dir(Some(project.path())),
+            load_preferred_tools_files_from_dir(Some(project.path())),
+        ] {
+            let content = content.unwrap();
+            assert_eq!(content.matches("identical guidance").count(), 2);
+            assert!(content.find("# Project").unwrap() < content.find("# Global").unwrap());
+            assert_eq!(size, 2 * "identical guidance".len());
+        }
+    });
+}
+
+#[test]
+fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
+    with_prompt_guidance_home(|home| {
+        let project = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join(".jcode")).unwrap();
+        for name in ["prompt-overlay.md", "preferred-tools.md"] {
+            std::fs::write(home.join(".jcode").join(name), "global only").unwrap();
+        }
+        for unreadable in [false, true] {
+            if unreadable {
+                for name in ["prompt-overlay.md", "preferred-tools.md"] {
+                    std::fs::write(project.path().join(".jcode").join(name), [0xff]).unwrap();
+                }
+            }
+            for (content, size) in [
+                load_prompt_overlay_files_from_dir(Some(project.path())),
+                load_preferred_tools_files_from_dir(Some(project.path())),
+            ] {
+                let content = content.unwrap();
+                assert_eq!(content.matches("global only").count(), 1);
+                assert!(content.starts_with("# Global"));
+                assert!(!content.contains("# Project"));
+                assert_eq!(size, "global only".len());
+            }
+        }
+    });
 }

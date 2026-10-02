@@ -64,11 +64,23 @@ pub enum ImageExpandLevel {
 
 impl ImageExpandLevel {
     /// Next level in the click cycle (Fit -> Large -> Full -> Fit).
+    ///
+    /// Production now skips duplicate sizes via `navigation.rs`, so this is
+    /// only exercised by tests documenting the base cycle.
+    #[cfg(test)]
     pub(crate) fn next(self) -> Self {
         match self {
             ImageExpandLevel::Fit => ImageExpandLevel::Large,
             ImageExpandLevel::Large => ImageExpandLevel::Full,
             ImageExpandLevel::Full => ImageExpandLevel::Fit,
+        }
+    }
+
+    pub(crate) fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::Large,
+            2 => Self::Full,
+            _ => Self::Fit,
         }
     }
 
@@ -126,6 +138,13 @@ static PAYLOAD_RESTAGE_IDS: LazyLock<Mutex<HashSet<u64>>> =
 static PAYLOAD_RESTAGE_PENDING: AtomicBool = AtomicBool::new(false);
 static PAYLOAD_RESTAGE_ALL: AtomicBool = AtomicBool::new(false);
 const PAYLOAD_RESTAGE_MAX: usize = 512;
+
+pub(crate) fn payload_for_copy(id: u64) -> Option<(String, String)> {
+    PAYLOAD_REGISTRY
+        .lock()
+        .ok()
+        .and_then(|registry| registry.map.get(&id).cloned())
+}
 
 const PAYLOAD_REGISTRY_MAX: usize = 512;
 /// Byte budget for the payload registry. Entries hold the *full base64
@@ -847,7 +866,38 @@ pub(crate) fn fit_geometry_anchored(
     chat_width: u16,
     level: ImageExpandLevel,
 ) -> (u16, u16) {
-    fit_geometry_with_cap(width, height, chat_width, level.anchored_cap_rows())
+    match level {
+        ImageExpandLevel::Fit => {
+            fit_geometry_with_cap(width, height, chat_width, level.anchored_cap_rows())
+        }
+        ImageExpandLevel::Large | ImageExpandLevel::Full => mermaid::inline_fit_geometry_upscaled(
+            width,
+            height,
+            chat_width,
+            level.anchored_cap_rows(),
+        ),
+    }
+}
+
+fn register_level_geometries(item: &InlineImageItem, width: u16, fit: (u16, u16)) {
+    mermaid::register_inline_level_geometries(
+        item.id,
+        [
+            fit,
+            mermaid::inline_fit_geometry_upscaled(
+                item.width,
+                item.height,
+                width,
+                ImageExpandLevel::Large.anchored_cap_rows(),
+            ),
+            mermaid::inline_fit_geometry_upscaled(
+                item.width,
+                item.height,
+                width,
+                ImageExpandLevel::Full.anchored_cap_rows(),
+            ),
+        ],
+    );
 }
 
 /// Compute how many rows an inline image should occupy at `chat_width`, given a
@@ -920,6 +970,8 @@ pub(crate) fn anchored_image_lines(
     let mut lines = Vec::new();
     for item in items {
         let level = levels.expand_level(item.id);
+        let fit = fit_geometry_anchored(item.width, item.height, width, ImageExpandLevel::Fit);
+        register_level_geometries(item, width, fit);
         lines.push(Line::from(""));
         lines.push(image_label_line(item, width, images_visible, level));
         if images_visible {
@@ -961,6 +1013,8 @@ pub(crate) fn build_section(
 
     for item in items {
         let level = levels.expand_level(item.id);
+        let fit = fit_geometry(item.width, item.height, width, viewport_height);
+        register_level_geometries(item, width, fit);
         lines.push(image_label_line(item, width, images_visible, level));
 
         if images_visible {
@@ -968,12 +1022,13 @@ pub(crate) fn build_section(
             // cached, so a viewport-relative default fit is fine here. Expanded
             // levels use the discrete fixed caps so they grow predictably.
             let (rows, cols) = match level {
-                ImageExpandLevel::Fit => {
-                    fit_geometry(item.width, item.height, width, viewport_height)
-                }
-                _ => {
-                    fit_geometry_with_cap(item.width, item.height, width, level.anchored_cap_rows())
-                }
+                ImageExpandLevel::Fit => fit,
+                _ => mermaid::inline_fit_geometry_upscaled(
+                    item.width,
+                    item.height,
+                    width,
+                    level.anchored_cap_rows(),
+                ),
             };
             let region_start = lines.len();
             for _ in 0..rows {
@@ -1309,6 +1364,20 @@ mod tests {
     }
 
     #[test]
+    fn expanded_level_upscales_a_small_mermaid_render() {
+        // Mermaid's content-hugging PNG can be much smaller than the available
+        // transcript width. The old geometry refused to exceed native pixels,
+        // so clicking changed the level and toast but not the displayed size.
+        let fit = fit_geometry_anchored(100, 100, 80, ImageExpandLevel::Fit);
+        let large = fit_geometry_anchored(100, 100, 80, ImageExpandLevel::Large);
+
+        assert!(
+            large.0 > fit.0 && large.1 > fit.1,
+            "expanded geometry should visibly grow: fit={fit:?}, large={large:?}"
+        );
+    }
+
+    #[test]
     fn visible_label_line_stays_single_purpose_without_expand_badge() {
         // The label must stay a short single line: no expand badge, no dots.
         let line = image_label_line(&item(600, 400), 80, true, ImageExpandLevel::Fit);
@@ -1560,6 +1629,7 @@ mod tests {
         anchor: Option<crate::session::RenderedImageAnchor>,
     ) -> crate::session::RenderedImage {
         crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: TINY_PNG_B64.to_string(),
             label: Some("tiny.png".to_string()),
@@ -1601,6 +1671,7 @@ mod tests {
             .expect("encode fixture");
         let data = base64::engine::general_purpose::STANDARD.encode(png);
         let image = crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data,
             label: Some("hidden-fixture.png".to_string()),

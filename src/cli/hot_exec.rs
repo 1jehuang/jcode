@@ -249,38 +249,54 @@ fn claim_update_fetch_slot() -> bool {
     std::fs::write(&marker, b"").is_ok()
 }
 
-pub fn check_for_updates() -> Option<bool> {
-    let repo_dir = get_repo_dir()?;
+/// `None` means this local checkout has no tracking branch, not a failed check.
+pub fn check_for_updates() -> Result<Option<bool>> {
+    let repo_dir =
+        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode source repository"))?;
+    check_for_updates_in(&repo_dir, claim_update_fetch_slot)
+}
 
-    if claim_update_fetch_slot() {
-        let fetch = ProcessCommand::new("git")
-            .args(["fetch", "-q"])
-            .current_dir(&repo_dir)
-            .output()
-            .ok()?;
-
-        if !fetch.status.success() {
-            return None;
-        }
+pub(super) fn check_for_updates_in(
+    repo_dir: &std::path::Path,
+    claim_fetch: impl FnOnce() -> bool,
+) -> Result<Option<bool>> {
+    // Unlike @{u}, these commands distinguish a valid local branch without
+    // tracking from an inaccessible repository or a broken upstream ref.
+    let branch = source_update_git(repo_dir, &["rev-parse", "--symbolic-full-name", "HEAD"])?;
+    if branch == "HEAD" {
+        return Ok(None); // Detached source checkouts cannot be auto-updated either.
     }
-    // When the fetch slot was claimed by another recent process, still answer
-    // from the (fresh enough) local refs instead of skipping the check.
+    let upstream = source_update_git(repo_dir, &["for-each-ref", "--format=%(upstream)", &branch])?;
+    if upstream.is_empty() {
+        return Ok(None);
+    }
 
-    let behind = ProcessCommand::new("git")
-        .args(["rev-list", "--count", "HEAD..@{u}"])
-        .current_dir(&repo_dir)
+    // Do not fetch or claim the shared throttle slot for an untracked branch.
+    if claim_fetch() {
+        source_update_git(repo_dir, &["fetch", "-q"])?;
+    }
+    // When another process claimed the slot, use the fresh-enough local refs.
+    let behind = source_update_git(repo_dir, &["rev-list", "--count", "HEAD..@{u}"])?;
+    let count: u64 = behind.parse()?;
+    Ok(Some(count > 0))
+}
+
+fn source_update_git(repo_dir: &std::path::Path, args: &[&str]) -> Result<String> {
+    use anyhow::Context;
+
+    let output = ProcessCommand::new("git")
+        .args(args)
+        .current_dir(repo_dir)
         .output()
-        .ok()?;
-
-    if behind.status.success() {
-        let count: u32 = String::from_utf8_lossy(&behind.stdout)
-            .trim()
-            .parse()
-            .unwrap_or(0);
-        Some(count > 0)
-    } else {
-        None
+        .with_context(|| format!("Could not run git {}", args.join(" ")))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
 /// True when the source checkout has local commits that upstream lacks, so a
@@ -381,77 +397,45 @@ pub fn run_auto_update() -> Result<()> {
     ))
 }
 
+/// Explicit updates follow the configured channel for release and dev builds alike.
+/// Source rebuilds belong to self-dev and /rebuild, not the stable update path.
 pub fn run_update() -> Result<()> {
-    if update::is_release_build() {
-        update::print_centered("Checking GitHub for latest release...");
-        match update::check_for_update_blocking() {
-            Ok(Some(release)) => {
-                update::print_centered(&format!(
-                    "Downloading {} \u{2192} {}...",
-                    jcode_build_meta::version(),
-                    release.tag_name
-                ));
-                let _path =
-                    update::download_and_install_blocking_with_progress(&release, |progress| {
-                        update::print_centered(&format!(
-                            "{} {}",
-                            release.tag_name,
-                            update::format_download_progress_bar(progress)
-                        ));
-                    })?;
-                update::print_centered(&format!("✅ Updated to {}", release.tag_name));
-                reload_server_after_update("installed update");
-                update::print_centered("Restart jcode to use the new version.");
-            }
-            Ok(None) => {
-                if repair_stale_shared_server_after_update_check() {
-                    reload_server_after_update("repaired stale server target");
-                }
-                update::print_centered(&format!(
-                    "Already up to date ({})",
-                    jcode_build_meta::version()
-                ));
-            }
-            Err(e) => {
-                anyhow::bail!(
-                    "Update check failed: {}",
-                    update::summarize_update_error(&format!("{:#}", e))
-                );
-            }
+    update::print_centered("Checking GitHub for latest release...");
+    match update::check_for_update_blocking() {
+        Ok(Some(release)) => {
+            update::print_centered(&format!(
+                "Downloading {} \u{2192} {}...",
+                jcode_build_meta::version(),
+                release.tag_name
+            ));
+            let _path =
+                update::download_and_install_blocking_with_progress(&release, |progress| {
+                    update::print_centered(&format!(
+                        "{} {}",
+                        release.tag_name,
+                        update::format_download_progress_bar(progress)
+                    ));
+                })?;
+            update::print_centered(&format!("✅ Updated to {}", release.tag_name));
+            reload_server_after_update("installed update");
+            update::print_centered("Restart jcode to use the new version.");
         }
-        return Ok(());
+        Ok(None) => {
+            if repair_stale_shared_server_after_update_check() {
+                reload_server_after_update("repaired stale server target");
+            }
+            update::print_centered(&format!(
+                "Already up to date ({})",
+                jcode_build_meta::version()
+            ));
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "Update check failed: {}",
+                update::summarize_update_error(&format!("{:#}", e))
+            );
+        }
     }
-
-    let repo_dir =
-        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
-
-    update::print_centered(&format!("Updating jcode from {}...", repo_dir.display()));
-
-    update::print_centered("Pulling latest changes (fast-forward only)...");
-    update::run_git_pull_ff_only(&repo_dir, true)?;
-
-    update::print_centered("Building...");
-    let build_status = ProcessCommand::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(&repo_dir)
-        .status()?;
-
-    if !build_status.success() {
-        anyhow::bail!("cargo build failed");
-    }
-
-    if let Err(e) = build::install_local_release(&repo_dir) {
-        update::print_centered(&format!("Warning: install failed: {}", e));
-    }
-
-    let hash = ProcessCommand::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(&repo_dir)
-        .output()?;
-
-    let hash = String::from_utf8_lossy(&hash.stdout);
-    update::print_centered(&format!("Successfully updated to {}", hash.trim()));
-
     Ok(())
 }
 

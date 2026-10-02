@@ -173,7 +173,25 @@ fn judge_visible_tool_summary(tool: &ToolCall) -> Option<String> {
 fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<StoredMessage> {
     let mut transcript = Vec::new();
 
-    for rendered in crate::session::render_messages(parent_session) {
+    // The judge sees only what the user saw as the answer. Rendering honors the
+    // user's `reasoning_display` mode, so strip reasoning up front rather than
+    // letting a `Full` display preference leak hidden reasoning to the judge.
+    let mut visible_parent = parent_session.clone();
+    let mut messages = std::mem::take(&mut visible_parent.messages);
+    for message in &mut messages {
+        message.content.retain(|block| {
+            !matches!(
+                block,
+                ContentBlock::Reasoning { .. }
+                    | ContentBlock::ReasoningTrace { .. }
+                    | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::OpenAIReasoning { .. }
+            )
+        });
+    }
+    visible_parent.replace_messages(messages);
+
+    for rendered in crate::session::render_messages(&visible_parent) {
         match rendered.role.as_str() {
             "user" => {
                 if !rendered.content.trim().is_empty() {
@@ -273,6 +291,7 @@ fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: 
 /// else ever tells the client to drop the old session's pages. Shared by both
 /// `/clear` implementations so they cannot drift apart again.
 pub(crate) fn clear_side_panel_for_new_session(app: &mut App) {
+    app.close_panel_image_preview();
     app.apply_side_panel_snapshot(crate::side_panel::SidePanelSnapshot::default());
     app.last_side_panel_focus_id = None;
     app.diff_pane_scroll = 0;
@@ -305,6 +324,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.queued_messages.clear();
     app.pasted_contents.clear();
     app.pending_images.clear();
+    app.clear_inline_image_state();
     app.active_skill = None;
     app.improve_mode = None;
     let mut session = Session::create(None, None);
@@ -656,6 +676,7 @@ fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     let mut child = Session::create(Some(parent_session_id.clone()), None);
     child.replace_messages(app.session.messages.clone());
     child.compaction = app.session.compaction.clone();
+    child.system_prompt = app.session.system_prompt.clone();
     child.working_dir = app.session.working_dir.clone();
     child.model = app.session.model.clone();
     child.provider_key = app.session.provider_key.clone();

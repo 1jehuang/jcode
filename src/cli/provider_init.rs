@@ -24,14 +24,13 @@ use crate::external_auth::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderChoice {
     Jcode,
+    /// Native Claude (Anthropic OAuth/API). `claude-subprocess` is kept as a
+    /// hidden alias for old scripts; the Claude Code CLI subprocess transport
+    /// has been removed.
+    #[value(alias = "claude-subprocess")]
     Claude,
     #[value(alias = "claude-api", alias = "anthropic-key", alias = "claude-key")]
     AnthropicApi,
-    #[deprecated(
-        note = "Claude Code CLI subprocess transport is deprecated; use ProviderChoice::Claude for native Anthropic OAuth/API transport"
-    )]
-    #[value(alias = "claude-subprocess", hide = true)]
-    ClaudeSubprocess,
     Openai,
     #[value(
         alias = "openai-key",
@@ -61,6 +60,8 @@ pub enum ProviderChoice {
     #[value(alias = "302.ai")]
     Ai302,
     Baseten,
+    #[value(alias = "conifer-api")]
+    Conifer,
     Cortecs,
     #[value(alias = "cgc", alias = "comtegra-gpu-cloud")]
     Comtegra,
@@ -86,6 +87,8 @@ pub enum ProviderChoice {
     Deepinfra,
     #[value(alias = "fireworks-ai", alias = "fireworks.ai")]
     Fireworks,
+    #[value(alias = "novita-ai", alias = "novita.ai")]
+    Novita,
     #[value(alias = "minimax-ai", alias = "minimaxi")]
     Minimax,
     #[value(alias = "x.ai", alias = "x-ai", alias = "grok")]
@@ -107,12 +110,17 @@ pub enum ProviderChoice {
     MetaMuse,
     #[value(alias = "celeris-ai", alias = "celeris1", alias = "celeris-1")]
     Celeris,
+    YoloAuto,
     #[value(alias = "lm-studio")]
     Lmstudio,
     Ollama,
     Chutes,
     #[value(alias = "cerebrascode", alias = "cerberascode")]
     Cerebras,
+    #[value(alias = "belvedir.ai", alias = "belvedir-ai")]
+    Belvedir,
+    #[value(alias = "orca-router")]
+    Orcarouter,
     #[value(
         alias = "bailian",
         alias = "aliyun-bailian",
@@ -144,7 +152,6 @@ impl ProviderChoice {
             Self::Jcode => "jcode",
             Self::Claude => "claude",
             Self::AnthropicApi => "anthropic-api",
-            Self::ClaudeSubprocess => "claude-subprocess",
             Self::Openai => "openai",
             Self::OpenaiApi => "openai-api",
             Self::Openrouter => "openrouter",
@@ -156,6 +163,7 @@ impl ProviderChoice {
             Self::Kimi => "kimi",
             Self::Ai302 => "302ai",
             Self::Baseten => "baseten",
+            Self::Conifer => "conifer",
             Self::Cortecs => "cortecs",
             Self::Comtegra => "comtegra",
             Self::Deepseek => "deepseek",
@@ -172,6 +180,7 @@ impl ProviderChoice {
             Self::TogetherAi => "togetherai",
             Self::Deepinfra => "deepinfra",
             Self::Fireworks => "fireworks",
+            Self::Novita => "novita",
             Self::Minimax => "minimax",
             Self::Xai => "xai",
             Self::GrokBuild => "grok-build",
@@ -179,10 +188,13 @@ impl ProviderChoice {
             Self::XiaomiMimo => "xiaomi-mimo",
             Self::MetaMuse => "meta-muse",
             Self::Celeris => "celeris",
+            Self::YoloAuto => "yolo-auto",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
             Self::Chutes => "chutes",
             Self::Cerebras => "cerebras",
+            Self::Belvedir => "belvedir",
+            Self::Orcarouter => "orcarouter",
             Self::AlibabaCodingPlan => "alibaba-coding-plan",
             Self::OpenaiCompatible => "openai-compatible",
             Self::Cursor => "cursor",
@@ -209,10 +221,6 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::AnthropicApi,
         crate::provider_catalog::ANTHROPIC_API_LOGIN_PROVIDER,
-    ),
-    (
-        ProviderChoice::ClaudeSubprocess,
-        crate::provider_catalog::CLAUDE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Openai,
@@ -257,6 +265,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Baseten,
         crate::provider_catalog::BASETEN_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Conifer,
+        crate::provider_catalog::CONIFER_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Cortecs,
@@ -323,6 +335,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
         crate::provider_catalog::FIREWORKS_LOGIN_PROVIDER,
     ),
     (
+        ProviderChoice::Novita,
+        crate::provider_catalog::NOVITA_LOGIN_PROVIDER,
+    ),
+    (
         ProviderChoice::Minimax,
         crate::provider_catalog::MINIMAX_LOGIN_PROVIDER,
     ),
@@ -351,6 +367,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
         crate::provider_catalog::CELERIS_LOGIN_PROVIDER,
     ),
     (
+        ProviderChoice::YoloAuto,
+        crate::provider_catalog::YOLO_AUTO_LOGIN_PROVIDER,
+    ),
+    (
         ProviderChoice::Lmstudio,
         crate::provider_catalog::LMSTUDIO_LOGIN_PROVIDER,
     ),
@@ -365,6 +385,14 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Cerebras,
         crate::provider_catalog::CEREBRAS_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Belvedir,
+        crate::provider_catalog::BELVEDIR_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Orcarouter,
+        crate::provider_catalog::ORCAROUTER_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::AlibabaCodingPlan,
@@ -423,9 +451,7 @@ pub fn login_provider_for_choice(choice: &ProviderChoice) -> Option<LoginProvide
 pub fn choice_for_login_provider(provider: LoginProviderDescriptor) -> Option<ProviderChoice> {
     PROVIDER_CHOICE_LOGIN_PROVIDERS
         .iter()
-        .find(|(choice, candidate)| {
-            candidate.id == provider.id && !matches!(choice, ProviderChoice::ClaudeSubprocess)
-        })
+        .find(|(_, candidate)| candidate.id == provider.id)
         .map(|(choice, _)| *choice)
 }
 
@@ -611,30 +637,40 @@ impl AutoProviderAvailability {
     }
 }
 
-fn maybe_enable_config_default_provider_for_auto() -> Result<bool> {
+fn maybe_enable_compat_provider_for_auto() -> Result<bool> {
     let cfg = crate::config::config();
-    let Some(default_provider) = cfg
+    if let Some(default_provider) = cfg
         .provider
         .default_provider
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    else {
-        return Ok(false);
-    };
-
-    if let Some(profile) =
-        crate::provider_catalog::resolve_openai_compatible_profile_selection(default_provider)
     {
-        apply_openai_compatible_profile_env(Some(profile));
-        return Ok(provider::openrouter::has_credentials());
+        if let Some(profile) =
+            crate::provider_catalog::resolve_openai_compatible_profile_selection(default_provider)
+        {
+            apply_openai_compatible_profile_env(Some(profile));
+            return Ok(provider::openrouter::has_credentials());
+        }
+
+        if cfg.providers.contains_key(default_provider) {
+            crate::provider_catalog::apply_named_provider_profile_env_from_config(
+                default_provider,
+                cfg,
+            )?;
+            return Ok(provider::openrouter::has_credentials());
+        }
     }
 
-    if cfg.providers.contains_key(default_provider) {
-        crate::provider_catalog::apply_named_provider_profile_env_from_config(
-            default_provider,
-            cfg,
-        )?;
+    // No usable [provider] default: enable the first configured OpenAI-compatible
+    // profile (deepseek, xiaomi-mimo, ...) so `--provider auto` notices direct
+    // compat credentials instead of booting an empty deferred-auth MultiProvider.
+    if let Some(profile) = crate::provider_catalog::openai_compatible_profiles()
+        .iter()
+        .copied()
+        .find(|profile| crate::provider_catalog::openai_compatible_profile_is_configured(*profile))
+    {
+        apply_openai_compatible_profile_env(Some(profile));
         return Ok(provider::openrouter::has_credentials());
     }
 
@@ -1386,21 +1422,30 @@ pub async fn init_provider(
     choice: &ProviderChoice,
     model: Option<&str>,
 ) -> Result<Arc<dyn provider::Provider>> {
-    init_provider_with_options(choice, model, true, true).await
+    init_provider_with_options(choice, model, true, true, false).await
+}
+
+/// A daemon must expose account and sign-in APIs before credentials exist.
+/// Only auto-detection defers authentication; explicit provider errors remain fatal.
+pub async fn init_provider_for_serve(
+    choice: &ProviderChoice,
+    model: Option<&str>,
+) -> Result<Arc<dyn provider::Provider>> {
+    init_provider_with_options(choice, model, true, false, true).await
 }
 
 pub async fn init_provider_quiet(
     choice: &ProviderChoice,
     model: Option<&str>,
 ) -> Result<Arc<dyn provider::Provider>> {
-    init_provider_with_options(choice, model, false, true).await
+    init_provider_with_options(choice, model, false, true, false).await
 }
 
 pub async fn init_provider_for_validation(
     choice: &ProviderChoice,
     model: Option<&str>,
 ) -> Result<Arc<dyn provider::Provider>> {
-    init_provider_with_options(choice, model, false, false).await
+    init_provider_with_options(choice, model, false, false, false).await
 }
 
 #[allow(deprecated)]
@@ -1409,6 +1454,7 @@ async fn init_provider_with_options(
     model: Option<&str>,
     show_init_messages: bool,
     allow_login_bootstrap: bool,
+    allow_deferred_auth: bool,
 ) -> Result<Arc<dyn provider::Provider>> {
     // Provider construction resolves concrete runtimes through the base
     // crate's external-runtime registry (composition-root pattern). The
@@ -1461,19 +1507,6 @@ async fn init_provider_with_options(
             select_initial_model_provider("claude");
             Arc::new(provider::MultiProvider::with_preference_fast(false))
         }
-        ProviderChoice::ClaudeSubprocess => {
-            disable_subscription_runtime_mode();
-            ensure_claude_auth_allowed_for_explicit_choice()?;
-            crate::logging::warn(
-                "Using --provider claude-subprocess is deprecated and will be removed. Prefer `--provider claude`.",
-            );
-            crate::env::set_var("JCODE_USE_CLAUDE_CLI", "1");
-            init_notice(
-                "Using deprecated Claude subprocess transport as the initial provider (legacy compatibility mode)",
-            );
-            select_initial_model_provider("claude");
-            Arc::new(provider::MultiProvider::with_preference_fast(false))
-        }
         ProviderChoice::Openai => {
             disable_subscription_runtime_mode();
             ensure_openai_auth_allowed_for_explicit_choice()?;
@@ -1519,7 +1552,7 @@ async fn init_provider_with_options(
         }
         ProviderChoice::GrokBuild => {
             disable_subscription_runtime_mode();
-            init_notice("Using Grok Build subscription via the authenticated Grok CLI");
+            init_notice("Using Grok Build subscription (Grok CLI login, direct HTTPS)");
             clear_initial_model_provider();
             crate::env::set_var("JCODE_ACTIVE_PROVIDER", "grok-build");
             crate::provider::external::instantiate_external_provider(
@@ -1555,6 +1588,7 @@ async fn init_provider_with_options(
         | ProviderChoice::Zai
         | ProviderChoice::Ai302
         | ProviderChoice::Baseten
+        | ProviderChoice::Conifer
         | ProviderChoice::Cortecs
         | ProviderChoice::Comtegra
         | ProviderChoice::Deepseek
@@ -1572,16 +1606,20 @@ async fn init_provider_with_options(
         | ProviderChoice::TogetherAi
         | ProviderChoice::Deepinfra
         | ProviderChoice::Fireworks
+        | ProviderChoice::Novita
         | ProviderChoice::Minimax
         | ProviderChoice::Xai
         | ProviderChoice::NvidiaNim
         | ProviderChoice::XiaomiMimo
         | ProviderChoice::MetaMuse
         | ProviderChoice::Celeris
+        | ProviderChoice::YoloAuto
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama
         | ProviderChoice::Chutes
         | ProviderChoice::Cerebras
+        | ProviderChoice::Belvedir
+        | ProviderChoice::Orcarouter
         | ProviderChoice::AlibabaCodingPlan
         | ProviderChoice::GeminiApi
         | ProviderChoice::OpenaiCompatible => {
@@ -1738,7 +1776,7 @@ async fn init_provider_with_options(
                 }
 
                 if !has_openrouter {
-                    has_openrouter = maybe_enable_config_default_provider_for_auto()?;
+                    has_openrouter = maybe_enable_compat_provider_for_auto()?;
                 }
 
                 has_other_provider = has_openai
@@ -1789,18 +1827,15 @@ async fn init_provider_with_options(
                 Arc::new(multi)
             } else {
                 let non_interactive = std::env::var("JCODE_NON_INTERACTIVE").is_ok();
-                // Deferred-auth bootstrap: the interactive TUI server is spawned
-                // headless (JCODE_NON_INTERACTIVE) but the user logs in *inside*
-                // the TUI on a fresh install. Rather than bail, boot an empty
-                // MultiProvider with no configured credentials yet. The TUI's
-                // `/login` flow then activates a provider via the normal
-                // auth-changed path (MultiProvider::on_auth_changed hot-inits the
-                // newly logged-in provider). Only the actual TUI server opts in
-                // via JCODE_DEFERRED_AUTH_BOOTSTRAP, so `jcode run` and other
-                // genuinely headless callers still fail loudly.
-                if std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_some() {
+                // Both Desktop and TUI clients authenticate through the running
+                // daemon. Keep request-time auth checks, but let the control plane
+                // start with an empty provider. Other CLI entry points retain their
+                // guard unless the interactive TUI explicitly opts in.
+                if allow_deferred_auth
+                    || std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_some()
+                {
                     crate::logging::info(
-                        "No credentials configured; booting deferred-auth MultiProvider for in-TUI onboarding login",
+                        "No credentials configured; booting deferred-auth MultiProvider for client onboarding",
                     );
                     let multi = provider::MultiProvider::from_auth_status(availability.auth_status);
                     crate::env::set_var("JCODE_ACTIVE_PROVIDER", multi.name().to_lowercase());

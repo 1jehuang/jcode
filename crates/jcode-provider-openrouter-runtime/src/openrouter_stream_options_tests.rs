@@ -9,6 +9,7 @@ fn direct_openai_compatible_chat_request_requests_usage_chunk() {
         supports_provider_features: false,
         supports_model_catalog: false,
         send_openrouter_headers: false,
+        conversation_id: new_conversation_id(),
         ..make_custom_compatible_provider()
     };
 
@@ -52,6 +53,7 @@ fn direct_openai_compatible_chat_request_allows_stream_options_override() {
         supports_provider_features: false,
         supports_model_catalog: false,
         send_openrouter_headers: false,
+        conversation_id: new_conversation_id(),
         extra_body: Some(serde_json::Map::from_iter([(
             "stream_options".to_string(),
             serde_json::json!({"include_usage": false}),

@@ -37,6 +37,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "claude-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -45,6 +46,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "openai-api-key".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -53,6 +55,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "openai-api-key".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ]
@@ -1671,7 +1674,7 @@ fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
     assert!(app.queued_messages.is_empty());
     assert!(matches!(app.onboarding_phase(), Some(OnboardingPhase::Suggestions)));
     assert!(app.status_notice.as_ref().is_some_and(|(notice, _)| {
-        notice.contains("No recent Git repository found")
+        notice.contains("No active Git repository found")
     }));
 }
 
@@ -1711,8 +1714,18 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
 
         // Enter commits "Send everything": usage on, content sharing on.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-        assert!(crate::telemetry::is_enabled());
-        assert!(crate::telemetry::content_sharing_enabled());
+        if !crate::telemetry::opt_out_forced_by_env() {
+            assert!(crate::telemetry::is_enabled());
+            assert!(crate::telemetry::content_sharing_enabled());
+        }
+        let no_telemetry_marker = std::path::Path::new(
+            &std::env::var_os("JCODE_HOME").expect("temporary JCODE_HOME"),
+        )
+        .join("no_telemetry");
+        assert!(
+            !no_telemetry_marker.exists(),
+            "Send everything must remove the persisted opt-out marker"
+        );
         // We are back on the summary screen with the import still pending.
         match app.onboarding_phase() {
             Some(OnboardingPhase::Login {
@@ -1753,15 +1766,33 @@ fn telemetry_page_send_nothing_disables_telemetry_and_esc_goes_back() {
             app.onboarding_phase(),
             Some(OnboardingPhase::Login { import: Some(_) })
         ));
-        assert!(crate::telemetry::is_enabled());
+        if !crate::telemetry::opt_out_forced_by_env() {
+            assert!(crate::telemetry::is_enabled());
+        }
 
         // Reopen, walk down to "Send nothing", commit.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
+        // In the dependency build used by this crate, telemetry-core is not
+        // compiled with cfg(test), so the in-app opt-out event would otherwise
+        // use the real delivery path. Keep the UI preconditions above free of
+        // inherited opt-out env, then force opt-out only for the commit action:
+        // telemetry-core sees delivery blocked by env while still writing the
+        // no_telemetry marker that this test verifies after the guard drops.
+        let delivery_block = EnvRestoreGuard::set("JCODE_NO_TELEMETRY", "1");
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
+        drop(delivery_block);
         assert!(!crate::telemetry::is_enabled());
         assert!(!crate::telemetry::content_sharing_enabled());
+        let no_telemetry_marker = std::path::Path::new(
+            &std::env::var_os("JCODE_HOME").expect("temporary JCODE_HOME"),
+        )
+        .join("no_telemetry");
+        assert!(
+            no_telemetry_marker.exists(),
+            "Send nothing must persist the opt-out marker"
+        );
     });
 }
 

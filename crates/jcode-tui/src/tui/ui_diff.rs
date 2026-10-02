@@ -42,7 +42,7 @@ pub(super) fn diff_change_counts_for_tool(tool: &ToolCall, content: &str) -> (us
         return (additions, deletions);
     }
 
-    match tools_ui::canonical_tool_name(&tool.name) {
+    match tools_ui::edit_render_name(&tool.name, &tool.input) {
         "edit" => {
             diff_counts_from_input_pair(&tool.input, "old_string", "new_string").unwrap_or((0, 0))
         }
@@ -158,7 +158,7 @@ fn diff_counts_from_strings(old: &str, new: &str) -> (usize, usize) {
 }
 
 pub(super) fn generate_diff_lines_from_tool_input(tool: &ToolCall) -> Vec<ParsedDiffLine> {
-    match tools_ui::canonical_tool_name(&tool.name) {
+    match tools_ui::edit_render_name(&tool.name, &tool.input) {
         "edit" => {
             let old = tool
                 .input

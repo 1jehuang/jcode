@@ -200,21 +200,30 @@ pub fn build_chat_messages(
                             reasoning_content.push_str(text);
                         }
                         ContentBlock::ToolUse {
-                            id, name, input, ..
+                            id,
+                            name,
+                            input,
+                            thought_signature,
                         } => {
                             let args = if input.is_object() {
                                 serde_json::to_string(input).unwrap_or_default()
                             } else {
                                 "{}".to_string()
                             };
-                            tool_calls.push(serde_json::json!({
+                            let mut tool_call = serde_json::json!({
                                 "id": sanitize_tool_id(id),
                                 "type": "function",
                                 "function": {
                                     "name": name,
                                     "arguments": args
                                 }
-                            }));
+                            });
+                            if let Some(signature) = thought_signature {
+                                tool_call["extra_content"] = serde_json::json!({
+                                    "google": { "thought_signature": signature }
+                                });
+                            }
+                            tool_calls.push(tool_call);
                             tool_calls_seen.insert(id.clone());
                             if let Some(output) = pending_tool_results.remove(id) {
                                 post_tool_outputs.push((id.clone(), output));
@@ -617,6 +626,46 @@ mod request_tests {
                 "role": "user",
                 "content": "[Recovered orphaned tool output: call_orphan]\norphan result"
             })]
+        );
+    }
+
+    #[test]
+    fn multi_turn_replay_preserves_vertex_tool_call_thought_signatures() {
+        let signed_turn = |id: &str, signature: &str| Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.to_string(),
+                name: "read".to_string(),
+                input: json!({"path": format!("{id}.txt")}),
+                thought_signature: Some(signature.to_string()),
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        };
+        let messages = vec![
+            Message::user("first"),
+            signed_turn("call_1", "signature-one"),
+            Message::tool_result("call_1", "first result", false),
+            Message::user("second"),
+            signed_turn("call_2", "signature-two"),
+            Message::tool_result("call_2", "second result", false),
+        ];
+
+        let api_messages = build_chat_messages(&messages, "", false, false, false);
+        let assistant_calls = api_messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .map(|message| &message["tool_calls"][0])
+            .collect::<Vec<_>>();
+
+        assert_eq!(assistant_calls.len(), 2);
+        assert_eq!(
+            assistant_calls[0]["extra_content"]["google"]["thought_signature"],
+            "signature-one"
+        );
+        assert_eq!(
+            assistant_calls[1]["extra_content"]["google"]["thought_signature"],
+            "signature-two"
         );
     }
 }

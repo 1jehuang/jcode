@@ -3,6 +3,13 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+mod title;
+mod transcription;
+pub use title::prompt_title;
+pub use transcription::{
+    TRANSCRIPTION_CLOSE, TRANSCRIPTION_OPEN, strip_transcription, wrap_transcription,
+};
+
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
 /// `jcode-session-types` so the foundation/import layer can match on it without
@@ -46,8 +53,33 @@ impl ResumeTarget {
     }
 }
 
+/// Durable usage for one user turn, summed across its assistant/tool rounds.
+/// Input is the raw provider-reported count, not normalized across providers.
+/// Cache reads may be included in input (OpenAI) or separate (Anthropic).
+/// Missing telemetry is unknown, not zero. Counts are absent if any assistant
+/// round lacks that metric. This is not a session total or a billing estimate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ResponseStats {
+    /// Whole-turn wall-clock seconds, including tools. Currently not persisted,
+    /// so restored history leaves this absent. Never inferred from tool timings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMessage {
+    /// Present only on the final visible assistant row of a completed stored
+    /// user turn. Tool-only intermediate rounds contribute to these totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_stats: Option<ResponseStats>,
     pub role: String,
     pub content: String,
     pub tool_calls: Vec<String>,
@@ -109,6 +141,13 @@ pub struct RenderedImage {
     /// bottom of the transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<RenderedImageAnchor>,
+    /// Insert before this zero-based entry in the accompanying History.messages
+    /// array (including hidden/system/tool rows). Its length means append.
+    /// Set for restored tool images, whose tool-call row may not be exposed by
+    /// a client. Absent on live events and older servers. Preserve vector order
+    /// for multiple images at the same boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_message_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -249,6 +288,10 @@ pub enum StoredDisplayRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredTokenUsage {
+    /// Full prompt size resolved per request, before provider identity can change.
+    /// Older records lack this and cannot safely reconstruct mixed-provider totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1063,4 +1106,19 @@ mod session_search_tests {
         assert!(fenced.starts_with("````text\n"));
         assert!(fenced.ends_with("\n````"));
     }
+}
+
+/// Why a turn stopped abnormally. Natural completion has no stop reason.
+/// Unknown future reasons remain decodable by older clients.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStopReason {
+    Interrupted,
+    Failure,
+    /// A caught runtime panic, not an inference from a lost connection.
+    Crash,
+    ProviderGuardrail,
+    LimitReached,
+    #[serde(other)]
+    Unknown,
 }

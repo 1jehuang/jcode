@@ -384,11 +384,12 @@ fn test_comm_assign_next_roundtrip() -> Result<()> {
         prefer_spawn: Some(true),
         spawn_if_needed: Some(true),
         message: Some("Take the next runnable task.".to_string()),
-        model: Some("gpt-5.5".to_string()),
+        model: Some("openai-api:gpt-5.5".to_string()),
         effort: Some("low".to_string()),
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"comm_assign_next\""));
+    assert!(json.contains("\"model\":\"openai-api:gpt-5.5\""));
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 60);
     let Request::CommAssignNext {
@@ -411,7 +412,7 @@ fn test_comm_assign_next_roundtrip() -> Result<()> {
     assert_eq!(prefer_spawn, Some(true));
     assert_eq!(spawn_if_needed, Some(true));
     assert_eq!(message.as_deref(), Some("Take the next runnable task."));
-    assert_eq!(model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(model.as_deref(), Some("openai-api:gpt-5.5"));
     assert_eq!(effort.as_deref(), Some("low"));
     Ok(())
 }
@@ -461,9 +462,9 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert!(json.contains("\"type\":\"comm_spawn\""));
     assert!(json.contains("\"request_nonce\":\"planner-fresh-123\""));
     assert!(json.contains("\"spawn_mode\":\"headless\""));
-    assert!(json.contains("\"model\":\"openai-api:gpt-5.5\""));
     assert!(json.contains("\"effort\":\"low\""));
     assert!(json.contains("\"label\":\"review auth flow\""));
+    assert!(json.contains("\"model\":\"openai-api:gpt-5.5\""));
     let decoded = parse_request_json(&json)?;
     assert_eq!(decoded.id(), 59);
     let Request::CommSpawn {
@@ -492,16 +493,74 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
 }
 
 #[test]
-fn test_comm_spawn_decodes_without_model_or_effort() -> Result<()> {
-    // Older clients omit the model/effort fields entirely.
-    let json = r#"{"type":"comm_spawn","id":60,"session_id":"sess_coord"}"#;
-    let decoded = parse_request_json(json)?;
-    let Request::CommSpawn { model, effort, label, .. } = decoded else {
-        return Err(anyhow!("expected CommSpawn"));
-    };
-    assert_eq!(model, None);
-    assert_eq!(effort, None);
-    assert_eq!(label, None);
+fn test_comm_spawn_and_assign_next_decode_model_without_effort() -> Result<()> {
+    for request_type in ["comm_spawn", "comm_assign_next"] {
+        let json = serde_json::json!({
+            "type": request_type,
+            "id": 60,
+            "session_id": "sess_coord",
+            "model": "gpt-5.5"
+        });
+        let decoded = parse_request_json(&json.to_string())?;
+        match decoded {
+            Request::CommSpawn {
+                model,
+                effort,
+                label,
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("gpt-5.5"));
+                assert_eq!(effort, None);
+                assert_eq!(label, None);
+            }
+            Request::CommAssignNext { model, effort, .. } => {
+                assert_eq!(model.as_deref(), Some("gpt-5.5"));
+                assert_eq!(effort, None);
+            }
+            _ => return Err(anyhow!("expected spawn or assign_next")),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_comm_spawn_and_assign_next_roundtrip_omitted_or_null_model() -> Result<()> {
+    for request_type in ["comm_spawn", "comm_assign_next"] {
+        for explicit_null in [false, true] {
+            // Older clients omit the optional field. Explicit null must also work.
+            let mut json = serde_json::json!({
+                "type": request_type,
+                "id": 60,
+                "session_id": "sess_coord"
+            });
+            if explicit_null {
+                json["model"] = serde_json::Value::Null;
+            }
+            let decoded = parse_request_json(&json.to_string())?;
+            let encoded = serde_json::to_string(&decoded)?;
+            let roundtripped = parse_request_json(&encoded)?;
+            for request in [decoded, roundtripped] {
+                assert_eq!(request.id(), 60);
+                match request {
+                    Request::CommSpawn {
+                        model,
+                        effort,
+                        label,
+                        ..
+                    } => {
+                        assert_eq!(model, None);
+                        assert_eq!(effort, None);
+                        assert_eq!(label, None);
+                    }
+                    Request::CommAssignNext { model, effort, .. } => {
+                        assert_eq!(model, None);
+                        assert_eq!(effort, None);
+                    }
+                    _ => return Err(anyhow!("expected spawn or assign_next")),
+                }
+            }
+        }
+    }
     Ok(())
 }
 

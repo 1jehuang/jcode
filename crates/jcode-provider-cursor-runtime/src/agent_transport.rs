@@ -12,25 +12,22 @@
 //! * Connect streaming framing: each message is `[1 flag byte][4-byte BE len]
 //!   [payload]`. Flag `0x01` = payload gzip-compressed, `0x02` = end-of-stream
 //!   trailer (JSON, `{}` on success or `{"error":...}`).
-//! * The logical `RunInput` is split across several request frames, each
-//!   carrying a different top-level protobuf field:
-//!   - frame 0 = field 1 (`RunRequest`: prompt, model, model catalog),
-//!   - frame 1 = field 2 (environment/tool context),
-//!   - then a short sequence of small field-3/5/7 marker frames.
+//! * frame 0 = field 1 (`RunRequest`: prompt, model, MCP tools, catalog),
+//! * subsequent context, tool-result, and key/value messages are exchanged on
+//!   the same open bidirectional stream as requested by the server.
 //! * The client keeps the request stream **open** while reading the response,
-//!   emitting periodic `f7:''` heartbeats (~5s) and pacing marker frames as the
-//!   server streams, half-closing only after the server completes. Sending the
-//!   whole body then immediately half-closing yields only keepalives / an
-//!   `internal: No exec result` error, so the pacing is load-bearing.
+//!   emitting periodic `f7:''` heartbeats (~5s) and only half-closing after the
+//!   server completes.
 //!
 //! Response text arrives as `f1.f1.f1` string chunks (assistant answer) and
 //! `f1.f4.f1` chunks (reasoning). A trailing flag-`0x02` frame closes the turn.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use flate2::read::GzDecoder;
 use tokio::sync::mpsc;
@@ -42,16 +39,59 @@ use jcode_message_types::StreamEvent;
 const AGENT_HOST: &str = "agentn.global.api5.cursor.sh";
 const AGENT_PATH: &str = "/agent.v1.AgentService/Run";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-/// Client version advertised to Cursor's agent service. Must track a currently
-/// served `cursor-agent` CLI build; override at runtime with
-/// `JCODE_CURSOR_CLI_VERSION` if Cursor moves the floor.
-const CLI_CLIENT_VERSION_DEFAULT: &str = "cli-2026.07.08-0c04a8a";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Fallback client build advertised to Cursor's agent service when no local
+/// `cursor-agent` installation is available. Prefer the installed build below:
+/// Cursor gates AgentService features on this value and rejects stale clients.
+const CLI_CLIENT_VERSION_DEFAULT: &str = "cli-2026.08.25-3e8eec8";
 
-fn cli_client_version() -> String {
-    std::env::var("JCODE_CURSOR_CLI_VERSION")
+fn stream_debug(message: impl std::fmt::Display) {
+    if std::env::var_os("CURSOR_STREAM_DEBUG").is_some() {
+        eprintln!("cursor-stream: {message}");
+    }
+}
+
+fn valid_cli_build_id(value: &str) -> bool {
+    let Some((date, commit)) = value.split_once('-') else {
+        return false;
+    };
+    let mut date_parts = date.split('.');
+    matches!(
+        (date_parts.next(), date_parts.next(), date_parts.next(), date_parts.next()),
+        (Some(year), Some(month), Some(day), None)
+            if year.len() == 4
+                && month.len() == 2
+                && day.len() == 2
+                && year.chars().all(|ch| ch.is_ascii_digit())
+                && month.chars().all(|ch| ch.is_ascii_digit())
+                && day.chars().all(|ch| ch.is_ascii_digit())
+    ) && !commit.is_empty()
+        && commit.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn installed_cli_build_id() -> Option<String> {
+    let shim = jcode_base::storage::user_home_path(".local/bin/cursor-agent").ok()?;
+    let resolved = std::fs::canonicalize(shim).ok()?;
+    let mut components = resolved.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == "versions" {
+            let version = components.next()?.as_os_str().to_str()?.to_string();
+            return valid_cli_build_id(&version).then_some(version);
+        }
+    }
+    None
+}
+
+pub(crate) fn cli_client_version() -> String {
+    if let Some(version) = std::env::var("JCODE_CURSOR_CLI_VERSION")
         .ok()
         .map(|raw| raw.trim().to_string())
         .filter(|raw| !raw.is_empty())
+    {
+        return version;
+    }
+    installed_cli_build_id()
+        .map(|version| format!("cli-{version}"))
         .unwrap_or_else(|| CLI_CLIENT_VERSION_DEFAULT.to_string())
 }
 
@@ -159,7 +199,7 @@ fn agent_host_from_cursor_cli_config() -> Option<String> {
 /// 1. `JCODE_CURSOR_AGENT_HOST` / `CURSOR_AGENT_HOST` (explicit override)
 /// 2. `~/.cursor/cli-config.json` regional endpoint cached by `cursor-agent`
 /// 3. the `global` host, as a last-resort fallback
-fn agent_host() -> String {
+pub(crate) fn agent_host() -> String {
     for var in ["JCODE_CURSOR_AGENT_HOST", "CURSOR_AGENT_HOST"] {
         if let Ok(raw) = std::env::var(var) {
             // Normalize overrides too. These get copied straight out of
@@ -206,29 +246,248 @@ fn field_str(field: u64, s: &str) -> Vec<u8> {
     field_ld(field, s.as_bytes())
 }
 
-/// Wrap a protobuf message payload in a Connect data frame (flag 0, uncompressed).
+pub(crate) fn routed_prompt(
+    prompt: &str,
+    system: &str,
+    tools: &[jcode_message_types::ToolDefinition],
+) -> String {
+    let mut sections = Vec::with_capacity(3);
+    if !system.trim().is_empty() {
+        sections.push(system.trim().to_string());
+    }
+    if !tools.is_empty() {
+        let aliases = crate::wire::mcp_wire_aliases(tools);
+        let names = tools
+            .iter()
+            .filter_map(|tool| aliases.get(&tool.name))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        sections.push(format!(
+            "TOOL ROUTING CONSTRAINT (highest priority): You have no built-in tools. \
+             The only executable tools are these MCP tools: {names}. \
+             Call the matching cc_* MCP tool directly and wait for its result. \
+             Never call Read, Write, Edit, Shell, Bash, Glob, Grep, or another built-in tool."
+        ));
+    }
+    sections.push(prompt.to_string());
+    sections.join("\n\n")
+}
+
+/// Wrap a protobuf message payload in a Connect data frame using the same
+/// threshold as connect-es. Large tool results and context messages must carry
+/// the gzip flag when the request advertises gzip content encoding.
 fn connect_frame(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 5);
-    out.push(0);
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
+    crate::wire::connect_frame(payload)
+}
+
+/// Encode the model descriptor used by the current Cursor AgentService.
+///
+/// The service expects the selected model in both the requested-model field and
+/// the catalog field. The `fast` value is represented as the string-valued
+/// metadata entry used by the official CLI, rather than as the legacy boolean
+/// field that older bridges emitted.
+fn encode_model_meta(name: &str, fast: bool) -> Vec<u8> {
+    let mut out = field_str(1, name);
+    let mut fast_entry = field_str(1, "fast");
+    fast_entry.extend(field_str(2, if fast { "true" } else { "false" }));
+    out.extend(field_ld(3, &fast_entry));
     out
 }
 
-/// `{f1: name, f3: {f1:'fast', f2:'true'|'false'}}` model descriptor.
-fn encode_model_meta(name: &str, fast: bool) -> Vec<u8> {
-    let mut out = field_str(1, name);
-    let mut kv = field_str(1, "fast");
-    kv.extend(field_str(2, if fast { "true" } else { "false" }));
-    out.extend(field_ld(3, &kv));
-    out
+/// A Cursor model selection split into the base id the AgentService accepts
+/// and the separately-encoded `fast` parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModel {
+    pub id: String,
+    pub fast: bool,
+}
+
+/// Resolve a jcode/catalog model id into Cursor's base id plus `fast` param.
+///
+/// Cursor identifies models by *base id* (`composer-2.5`, `grok-4.6`,
+/// `claude-opus-5`) and carries speed/effort/thinking as separate params.
+/// Older catalogs, persisted sessions, and usage labels use composite strings
+/// (`cursor-grok-4.6-high-fast`, `claude-opus-5-thinking-high`,
+/// `composer-2.5-fast`) that the backend rejects with
+/// `ERROR_BAD_MODEL_NAME: Unknown model ID` (issue #1226).
+///
+/// `fast_override` is the user's `/fast` choice. `None` keeps the model's own
+/// default: an explicit `-fast` suffix wins, and Composer defaults to Fast,
+/// matching Cursor's API (`composer-2.5` with no params runs the Fast variant).
+pub(crate) fn resolve_model_id(model: &str, fast_override: Option<bool>) -> ResolvedModel {
+    resolve_model_id_with_catalog(model, fast_override, &[])
+}
+
+/// Split a catalog-style id into (base, has_fast_suffix, has_effort_suffix).
+fn split_model_suffixes(model: &str) -> (&str, bool, bool) {
+    let mut name = model;
+    let mut fast = false;
+    let mut effort = false;
+    const SUFFIXES: &[&str] = &[
+        "-fast",
+        "-xhigh",
+        "-high",
+        "-medium",
+        "-low",
+        "-minimal",
+        "-max",
+        "-thinking",
+    ];
+    loop {
+        let mut stripped_any = false;
+        for suffix in SUFFIXES {
+            if let Some(stripped) = name.strip_suffix(suffix)
+                && !stripped.is_empty()
+            {
+                if *suffix == "-fast" {
+                    fast = true;
+                } else {
+                    effort = true;
+                }
+                name = stripped;
+                stripped_any = true;
+                break;
+            }
+        }
+        if !stripped_any {
+            break;
+        }
+    }
+    (name, fast, effort)
+}
+
+/// Models whose bare base id Cursor rejects, mapped to the catalog entry
+/// Cursor itself labels with the plain display name. Used only when the live
+/// catalog is unavailable. Verified against AgentService on 2026-09-29:
+/// `grok-4.6` -> `ERROR_BAD_MODEL_NAME`, `cursor-grok-4.6-high` ("Grok 4.6")
+/// is accepted.
+const OFFLINE_CATALOG_ALIASES: &[(&str, &str)] = &[("grok-4.6", "cursor-grok-4.6-high")];
+
+/// Resolve a jcode model id against Cursor's live `GetUsableModels` catalog.
+///
+/// Cursor's AgentService accepts the exact catalog ids it advertises
+/// (`cursor-grok-4.6-high`, `claude-opus-5-5-medium`, `grok-4.7-high-fast`)
+/// but only *some* bare base ids (`grok-4.7`, `composer-2.5` work, while
+/// `grok-4.6`, `claude-opus-5-5` are rejected with `ERROR_BAD_MODEL_NAME`).
+/// So an id that is in the catalog is sent verbatim, and a base id is mapped
+/// onto the catalog variant that matches it. Only when there is no catalog
+/// entry at all do we fall back to stripping suffixes.
+pub(crate) fn resolve_model_id_with_catalog(
+    model: &str,
+    fast_override: Option<bool>,
+    catalog: &[String],
+) -> ResolvedModel {
+    let mut name = model.trim();
+    name = name.strip_prefix("cursor:").unwrap_or(name);
+    let in_catalog = |id: &str| catalog.iter().any(|entry| entry == id);
+
+    // 1. Exact catalog id: send verbatim, honoring /fast by switching to the
+    //    sibling `-fast` variant when one exists.
+    if in_catalog(name) {
+        let (_, suffix_fast, _) = split_model_suffixes(name);
+        let mut id = name.to_string();
+        let mut fast = suffix_fast;
+        match fast_override {
+            Some(true) if !suffix_fast && in_catalog(&format!("{name}-fast")) => {
+                id = format!("{name}-fast");
+                fast = true;
+            }
+            Some(false) if suffix_fast => {
+                let slow = name.strip_suffix("-fast").unwrap_or(name);
+                if in_catalog(slow) {
+                    id = slow.to_string();
+                    fast = false;
+                }
+            }
+            _ => {}
+        }
+        if name.starts_with("composer-") && fast_override.is_none() {
+            fast = true;
+        }
+        return ResolvedModel {
+            id,
+            fast: fast_override.unwrap_or(fast),
+        };
+    }
+
+    // 2. Base or legacy composite id: map onto a catalog variant with the same
+    //    base. Prefer an entry without an effort suffix, then `-high` (what
+    //    Cursor labels as the plain model name), then anything else.
+    let stripped_prefix = name.strip_prefix("cursor-").unwrap_or(name);
+    let (base, suffix_fast, _) = split_model_suffixes(stripped_prefix);
+    let want_fast = fast_override.unwrap_or(suffix_fast);
+    if !catalog.is_empty() {
+        let mut best: Option<(u8, &String)> = None;
+        for entry in catalog {
+            let entry_unprefixed = entry.strip_prefix("cursor-").unwrap_or(entry);
+            let (entry_base, entry_fast, entry_effort) = split_model_suffixes(entry_unprefixed);
+            if entry_base != base {
+                continue;
+            }
+            let effort_rank = if !entry_effort {
+                0
+            } else if entry_unprefixed.contains("-high") && !entry_unprefixed.contains("-xhigh") {
+                1
+            } else {
+                2
+            };
+            let rank = effort_rank * 2 + u8::from(entry_fast != want_fast);
+            if best.is_none_or(|(best_rank, _)| rank < best_rank) {
+                best = Some((rank, entry));
+            }
+        }
+        if let Some((_, entry)) = best
+            && entry != base
+        {
+            let (_, entry_fast, _) = split_model_suffixes(entry);
+            return ResolvedModel {
+                id: entry.clone(),
+                fast: fast_override.unwrap_or(entry_fast),
+            };
+        }
+    }
+
+    // 3. No catalog match: known offline aliases, then the base id.
+    if let Some((_, alias)) = OFFLINE_CATALOG_ALIASES
+        .iter()
+        .find(|(bare, _)| *bare == base)
+    {
+        return ResolvedModel {
+            id: if want_fast {
+                format!("{alias}-fast")
+            } else {
+                (*alias).to_string()
+            },
+            fast: want_fast,
+        };
+    }
+    let name = base;
+    let default_fast = suffix_fast || name.starts_with("composer-");
+    ResolvedModel {
+        id: name.to_string(),
+        fast: fast_override.unwrap_or(default_fast),
+    }
 }
 
 /// Build the request frames for a single-shot prompt turn.
 ///
-/// Returns the ordered list of Connect frames that constitute the streamed
-/// `RunInput`: `RunRequest`, environment context, then marker frames.
-fn build_run_frames(prompt: &str, model: &str, cwd: &str) -> Vec<Vec<u8>> {
+/// Returns the initial Connect frame for the streamed `RunInput`.
+///
+/// The current connect-es client sends only `AgentRunRequest` up front. The
+/// server requests environment context and other execution messages on the
+/// same bidirectional stream later. Sending the old captured context and marker
+/// frames proactively is tolerated for plain chat but causes current Cursor
+/// tool turns to remain in an unacknowledged state.
+fn build_run_frames(
+    prompt: &str,
+    model: &ResolvedModel,
+    _cwd: &str,
+    tools: &[jcode_message_types::ToolDefinition],
+    request_id: &str,
+) -> Vec<Vec<u8>> {
+    let fast = model.fast;
+    let model = model.id.as_str();
     let conv = Uuid::new_v4().to_string();
     let msg = Uuid::new_v4().to_string();
 
@@ -242,45 +501,36 @@ fn build_run_frames(prompt: &str, model: &str, cwd: &str) -> Vec<Vec<u8>> {
 
     let mut req = field_str(1, "");
     req.extend(messages);
-    req.extend(field_str(4, ""));
+    if !tools.is_empty() {
+        if let Ok(mcp_tools_bytes) = crate::wire::encode_mcp_tools(tools) {
+            req.extend(field_ld(4, &mcp_tools_bytes));
+        }
+    } else {
+        req.extend(field_str(4, ""));
+    }
     req.extend(field_str(5, &conv));
-    req.extend(field_ld(9, &encode_model_meta(model, false)));
+    // AgentRunRequest.f9 is a model descriptor. Omitting the `fast` metadata can
+    // leave AgentService at HTTP 200 with only heartbeats instead of starting
+    // the turn.
+    let selected_model = encode_model_meta(model, fast);
+    // ModelDetails (f3) carries the canonical/display model identity used by the
+    // current AgentService model resolver. The server accepts the request without
+    // it, but may leave the stream pending while resolving the model.
+    let mut model_details = field_str(1, model);
+    model_details.extend(field_str(3, model));
+    model_details.extend(field_str(4, model));
+    req.extend(field_ld(3, &model_details));
+    req.extend(field_ld(9, &selected_model));
     req.extend(field_varint(12, 0));
-    // minimal catalog: a "default" entry plus the target model
-    req.extend(field_ld(14, &field_str(1, "default")));
-    req.extend(field_ld(14, &encode_model_meta(model, false)));
+    // The catalog contains the default entry followed by the selected model.
+    // Both entries use the same `{name, fast}` metadata shape as cursor-agent.
+    req.extend(field_ld(14, &encode_model_meta("default", false)));
+    req.extend(field_ld(14, &encode_model_meta(model, fast)));
     req.extend(field_str(16, &conv));
+    req.extend(field_str(25, request_id));
     let frame0 = connect_frame(&field_ld(1, &req));
 
-    // frame 1: field 2 = environment context (env block only, no tools/skills)
-    let mut env = field_str(1, "linux");
-    env.extend(field_str(2, cwd));
-    env.extend(field_str(3, "bash"));
-    env.extend(field_str(10, "UTC"));
-    env.extend(field_str(11, cwd));
-    env.extend(field_varint(14, 1));
-    env.extend(field_varint(16, 1));
-    env.extend(field_varint(19, 0));
-    env.extend(field_varint(20, 0));
-    env.extend(field_str(21, cwd));
-    env.extend(field_varint(22, 0));
-    let ctx_payload = field_ld(
-        2,
-        &field_ld(10, &field_ld(1, &field_ld(1, &field_ld(4, &env)))),
-    );
-    let frame1 = connect_frame(&ctx_payload);
-
-    // marker frames streamed after the context.
-    let mut frames = vec![frame0, frame1];
-    frames.push(connect_frame(&field_ld(5, &field_str(1, "")))); // f5{f1:''}
-    frames.push(connect_frame(&field_ld(3, &field_str(3, "")))); // f3{f3:''}
-    for n in 1..=8u64 {
-        // f3{f1:N, f3:''}
-        let mut m = field_varint(1, n);
-        m.extend(field_str(3, ""));
-        frames.push(connect_frame(&field_ld(3, &m)));
-    }
-    frames
+    vec![frame0]
 }
 
 /// A single `f7:''` heartbeat frame.
@@ -293,29 +543,29 @@ fn heartbeat_frame() -> Vec<u8> {
 // --------------------------------------------------------------------------
 
 /// Incrementally decode Connect frames from a byte buffer, returning
-/// `(flag, payload, consumed)` for the next complete frame or `None`.
-fn next_frame(buf: &[u8]) -> Option<(u8, Vec<u8>, usize)> {
+/// `(flag, payload, consumed)` for the next complete frame or `Ok(None)`.
+/// Malformed compressed frames are rejected instead of being passed to the
+/// protobuf parser as if they were valid uncompressed data.
+fn next_frame(buf: &[u8]) -> Result<Option<(u8, Vec<u8>, usize)>> {
     if buf.len() < 5 {
-        return None;
+        return Ok(None);
     }
     let flag = buf[0];
     let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
     let end = 5 + len;
     if buf.len() < end {
-        return None;
+        return Ok(None);
     }
     let mut payload = buf[5..end].to_vec();
     if flag & 0x01 != 0 {
         // gzip-compressed payload
         let mut decoded = Vec::new();
-        if GzDecoder::new(&payload[..])
+        GzDecoder::new(&payload[..])
             .read_to_end(&mut decoded)
-            .is_ok()
-        {
-            payload = decoded;
-        }
+            .context("Invalid gzip payload in Cursor agent stream")?;
+        payload = decoded;
     }
-    Some((flag, payload, end))
+    Ok(Some((flag, payload, end)))
 }
 
 /// Minimal protobuf reader that extracts assistant text chunks from a response
@@ -427,6 +677,31 @@ fn extract_answer_text(payload: &[u8]) -> Option<String> {
     None
 }
 
+/// Extract reasoning delta (thinking text) from one response message payload.
+/// The reasoning chunk shape is `f1 { f4 { f1: <str> } }`.
+pub(crate) fn extract_thinking_text(payload: &[u8]) -> Option<String> {
+    for f1 in iter_fields(payload) {
+        if f1.field != 1 || f1.wire != 2 {
+            continue;
+        }
+        for f4 in iter_fields(f1.data) {
+            if f4.field != 4 || f4.wire != 2 {
+                continue;
+            }
+            for leaf in iter_fields(f4.data) {
+                if leaf.field == 1
+                    && leaf.wire == 2
+                    && let Ok(s) = std::str::from_utf8(leaf.data)
+                    && !s.is_empty()
+                {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 // --------------------------------------------------------------------------
 // TLS + HTTP/2 bidirectional client
 // --------------------------------------------------------------------------
@@ -441,11 +716,56 @@ fn tls_config() -> Arc<tokio_rustls::rustls::ClientConfig> {
     Arc::new(config)
 }
 
+pub(crate) fn parse_tool_request_id(request_id: &str) -> (u32, &str) {
+    let mut parts = request_id.splitn(3, ':');
+    let _stream_uuid = parts.next();
+    let id = parts
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(1);
+    (id, parts.next().unwrap_or(""))
+}
+
+pub(crate) fn resolve_native_tool_name(
+    advertised_name: &str,
+    auxiliary_name: &str,
+    tools: &[jcode_message_types::ToolDefinition],
+) -> String {
+    let candidates = [auxiliary_name, advertised_name];
+    let aliases = crate::wire::mcp_wire_aliases(tools);
+    for tool in tools {
+        let wire_name = aliases.get(&tool.name).map(String::as_str).unwrap_or("");
+        let safe_bare_name = crate::wire::mcp_bare_name(wire_name);
+        if candidates.iter().any(|candidate| {
+            !candidate.is_empty()
+                && (*candidate == tool.name
+                    || *candidate == wire_name
+                    || *candidate == safe_bare_name)
+        }) {
+            return tool.name.clone();
+        }
+    }
+
+    if auxiliary_name.is_empty() {
+        crate::wire::mcp_bare_name(advertised_name).to_string()
+    } else {
+        auxiliary_name.to_string()
+    }
+}
+
 /// Run one Cursor agent turn and forward assistant text as [`StreamEvent`]s.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_agent_turn(
     access_token: &str,
     prompt: &str,
     model: &str,
+    fast_override: Option<bool>,
+    model_catalog: &[String],
+    logical_session_id: Option<&str>,
+    stream_uuid: &str,
+    tools: &[jcode_message_types::ToolDefinition],
+    system: &str,
+    tool_result_rx: &mut mpsc::Receiver<jcode_provider_core::NativeToolResult>,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
     use h2::client;
@@ -465,41 +785,65 @@ pub async fn run_agent_turn(
         .await;
 
     // Establish TLS + HTTP/2.
-    let tcp = tokio::net::TcpStream::connect((host.as_str(), 443))
-        .await
-        .with_context(|| format!("Failed to connect to {host}:443"))?;
+    let tcp = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect((host.as_str(), 443)),
+    )
+    .await
+    .with_context(|| format!("Timed out connecting to {host}:443"))?
+    .with_context(|| format!("Failed to connect to {host}:443"))?;
     tcp.set_nodelay(true).ok();
     let connector = TlsConnector::from(tls_config());
     let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.clone())
         .context("Invalid Cursor agent host name")?;
-    let tls = connector
-        .connect(server_name, tcp)
+    let tls = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, tcp))
         .await
+        .context("Timed out during TLS handshake with Cursor agent host")?
         .context("TLS handshake with Cursor agent host failed")?;
 
-    let (h2, connection) = client::handshake(tls)
+    let (h2, connection) = tokio::time::timeout(CONNECT_TIMEOUT, client::handshake(tls))
         .await
+        .context("Timed out during HTTP/2 handshake with Cursor agent host")?
         .context("HTTP/2 handshake with Cursor agent host failed")?;
     // Drive the connection in the background.
     let conn_task = tokio::spawn(async move {
         let _ = connection.await;
     });
-    let mut h2 = h2.ready().await.context("HTTP/2 connection not ready")?;
+    let mut h2 = tokio::time::timeout(CONNECT_TIMEOUT, h2.ready())
+        .await
+        .context("Timed out waiting for HTTP/2 connection readiness")?
+        .context("HTTP/2 connection not ready")?;
 
     let request_id = Uuid::new_v4().to_string();
+    let session_id = logical_session_id
+        .map(|id| Uuid::new_v5(&Uuid::NAMESPACE_DNS, id.as_bytes()))
+        .unwrap_or_else(Uuid::new_v4)
+        .to_string();
+    let traceparent = format!(
+        "00-{}-{}-01",
+        Uuid::new_v4().simple(),
+        &Uuid::new_v4().simple().to_string()[..16]
+    );
+    let blob_encryption_key = Uuid::new_v4().simple().to_string();
     let request = Request::builder()
         .method(Method::POST)
         .uri(format!("https://{host}{AGENT_PATH}"))
         .header("authorization", format!("Bearer {access_token}"))
         .header("connect-accept-encoding", "gzip,br")
+        .header("connect-content-encoding", "gzip")
         .header("connect-protocol-version", "1")
+        .header("te", "trailers")
         .header("content-type", "application/connect+proto")
+        .header("backend-traceparent", &traceparent)
+        .header("traceparent", &traceparent)
         .header("user-agent", "connect-es/1.6.1")
+        .header("x-blob-encryption-key", blob_encryption_key)
         .header("x-cursor-client-type", "cli")
         .header("x-cursor-client-version", cli_client_version())
         .header("x-ghost-mode", "true")
         .header("x-request-id", &request_id)
         .header("x-original-request-id", &request_id)
+        .header("x-session-id", &session_id)
         .body(())
         .context("Failed to build Cursor agent request")?;
 
@@ -507,33 +851,55 @@ pub async fn run_agent_turn(
         .send_request(request, false)
         .context("Failed to send Cursor agent request headers")?;
 
-    let session_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, access_token.as_bytes()).to_string();
     let _ = tx.send(Ok(StreamEvent::SessionId(session_id))).await;
 
-    // Sender task: stream the request frames paced like the real client, then
-    // heartbeat until the response completes. The pacing is load-bearing: the
-    // server treats the marker frames as end-of-input and returns
-    // `internal: No exec result` if they arrive before it has begun streaming.
-    let frames = build_run_frames(prompt, model, &cwd);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(32);
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let prompt = routed_prompt(prompt, system, tools);
+    let resolved_model = resolve_model_id_with_catalog(model, fast_override, model_catalog);
+    stream_debug(format_args!(
+        "model requested={model} resolved={} fast={}",
+        resolved_model.id, resolved_model.fast
+    ));
+    let frames = build_run_frames(&prompt, &resolved_model, &cwd, tools, &request_id);
     let sender = tokio::spawn(async move {
         for (idx, frame) in frames.into_iter().enumerate() {
             if send_stream.send_data(Bytes::from(frame), false).is_err() {
                 return;
             }
-            // frame 0 (RunRequest) and frame 1 (context) need the most settle
-            // time before the marker frames follow.
+            // Drain any pending outbound frames between initial pace delays
+            while let Ok(outbound_frame) = outbound_rx.try_recv() {
+                if send_stream
+                    .send_data(Bytes::from(outbound_frame), false)
+                    .is_err()
+                {
+                    return;
+                }
+            }
             let pace = match idx {
                 0 => Duration::from_millis(1500),
                 1 => Duration::from_millis(800),
                 _ => Duration::from_millis(400),
             };
-            tokio::time::sleep(pace).await;
+            tokio::select! {
+                _ = tokio::time::sleep(pace) => {}
+                Some(outbound_frame) = outbound_rx.recv() => {
+                    if send_stream.send_data(Bytes::from(outbound_frame), false).is_err() {
+                        return;
+                    }
+                }
+            }
         }
         let mut ticker = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
         loop {
             tokio::select! {
                 _ = &mut stop_rx => break,
+                Some(frame) = outbound_rx.recv() => {
+                    if send_stream.send_data(Bytes::from(frame), false).is_err() {
+                        return;
+                    }
+                }
                 _ = ticker.tick() => {
                     if send_stream.send_data(Bytes::from(heartbeat_frame()), false).is_err() {
                         return;
@@ -545,39 +911,137 @@ pub async fn run_agent_turn(
     });
 
     // Receiver: read response body frames and forward assistant text.
-    let response = response
-        .await
-        .context("Cursor agent request failed before response headers")?;
+    let response = match tokio::time::timeout(CONNECT_TIMEOUT, response).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            let _ = stop_tx.send(());
+            sender.abort();
+            conn_task.abort();
+            return Err(error).context("Cursor agent request failed before response headers");
+        }
+        Err(_) => {
+            let _ = stop_tx.send(());
+            sender.abort();
+            conn_task.abort();
+            return Err(anyhow!(
+                "Timed out waiting for Cursor agent response headers"
+            ));
+        }
+    };
     let status = response.status();
+    stream_debug(format_args!("response status={status}"));
     let mut body = response.into_body();
     let mut pending: Vec<u8> = Vec::new();
     let mut error_message: Option<String> = None;
     let mut got_text = false;
+    let mut in_thinking = false;
+    let mut active_tool_calls: usize = 0;
+    let mut blob_store: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    let mut terminal_frame = false;
+    let mut idle_finished = false;
+    let mut stream_error: Option<anyhow::Error> = None;
 
-    // Idle timeouts guard against the server holding the stream open. Cursor
-    // keeps the response side open after the assistant message when it expects
-    // a tool exec-result (which this text-only transport never sends), so we
-    // finish the turn once output goes quiet. The first-byte budget is longer
-    // because generation can take a few seconds to start.
-    let first_byte_timeout = Duration::from_secs(60);
-    let idle_timeout = Duration::from_secs(4);
+    // Idle timeouts guard against the server holding the stream open after
+    // the assistant message. The first-byte budget is longer because reasoning
+    // models can think for a while before streaming. The post-text budget has
+    // to tolerate mid-answer pauses (reasoning models such as Grok routinely
+    // go quiet for several seconds while planning a tool call); a 4s budget
+    // cut those turns off with a "timed out" error after partial output.
+    let first_byte_timeout = Duration::from_secs(120);
+    let idle_timeout = Duration::from_secs(30);
+    let tool_exec_timeout = Duration::from_secs(300);
+    // Heartbeat, KV, and acknowledgement frames are transport activity, not
+    // model progress. Keep a phase deadline so a server that only emits those
+    // frames cannot keep a user-facing turn alive forever.
+    let mut phase_started = Instant::now();
+    let mut last_meaningful = phase_started;
 
     'read: loop {
-        let budget = if got_text {
-            idle_timeout
+        let budget = if active_tool_calls > 0 {
+            tool_exec_timeout.saturating_sub(last_meaningful.elapsed())
+        } else if got_text {
+            idle_timeout.saturating_sub(last_meaningful.elapsed())
         } else {
-            first_byte_timeout
+            first_byte_timeout.saturating_sub(phase_started.elapsed())
         };
-        let next = match tokio::time::timeout(budget, body.data()).await {
-            Ok(Some(chunk)) => chunk,
-            // Stream closed cleanly, or idle (server likely waiting for a tool
-            // exec-result we never send): finish the turn either way.
-            Ok(None) | Err(_) => break 'read,
+        let next = tokio::select! {
+            res = tokio::time::timeout(budget, body.data()) => {
+                match res {
+                    Ok(Some(Ok(chunk))) => {
+                        chunk
+                    }
+                    Ok(Some(Err(error))) => {
+                        stream_error = Some(error.into());
+                        break 'read;
+                    }
+                    Ok(None) => {
+                        if !terminal_frame {
+                            stream_error = Some(anyhow!(
+                                "Cursor agent stream ended before an authoritative terminal frame"
+                            ));
+                        }
+                        break 'read;
+                    }
+                    Err(_) => {
+                        if got_text && active_tool_calls == 0 {
+                            // The answer was delivered and the server just
+                            // never sent its trailer. Finish the turn with
+                            // what we have instead of discarding it.
+                            stream_debug(format_args!(
+                                "idle after text; finishing turn without trailer"
+                            ));
+                            idle_finished = true;
+                        } else {
+                            stream_error = Some(anyhow!(
+                                "Cursor agent stream timed out waiting for meaningful progress"
+                            ));
+                        }
+                        break 'read;
+                    }
+                }
+            }
+            Some(tool_res) = tool_result_rx.recv() => {
+                let (id_u32, exec_id) = parse_tool_request_id(&tool_res.request_id);
+                let raw_content = if tool_res.is_error {
+                    tool_res.result.error.unwrap_or_default()
+                } else {
+                    tool_res.result.output.unwrap_or_default()
+                };
+                let redacted = jcode_base::message::redact_secrets(&raw_content);
+                let mcp_res_bytes = crate::wire::encode_mcp_success_result(
+                    id_u32,
+                    exec_id,
+                    &redacted,
+                    tool_res.is_error,
+                );
+                let agent_client_bytes = crate::wire::encode_agent_client_exec_message(&mcp_res_bytes);
+                let connect_bytes = crate::wire::connect_frame(&agent_client_bytes);
+                let _ = outbound_tx.send(connect_bytes).await;
+                active_tool_calls = active_tool_calls.saturating_sub(1);
+                phase_started = Instant::now();
+                last_meaningful = phase_started;
+                got_text = false;
+                continue 'read;
+            }
         };
-        let chunk = next.context("Cursor agent response stream error")?;
+        let chunk = next;
         let _ = body.flow_control().release_capacity(chunk.len());
+        stream_debug(format_args!("response chunk={}", chunk.len()));
         pending.extend_from_slice(&chunk);
-        while let Some((flag, payload, consumed)) = next_frame(&pending) {
+        loop {
+            let frame = match next_frame(&pending) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(error) => {
+                    stream_error = Some(error);
+                    break 'read;
+                }
+            };
+            let (flag, payload, consumed) = frame;
+            stream_debug(format_args!(
+                "frame flag={flag:#04x} payload_len={}",
+                payload.len()
+            ));
             pending.drain(..consumed);
             if flag & 0x02 != 0 {
                 // end-of-stream trailer (JSON). Detect errors, then finish.
@@ -587,12 +1051,383 @@ pub async fn run_agent_turn(
                 {
                     error_message = Some(err.to_string());
                 }
+                terminal_frame = true;
                 break 'read;
             }
             if let Some(text) = extract_answer_text(&payload) {
+                if in_thinking {
+                    let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+                    in_thinking = false;
+                }
                 got_text = true;
+                last_meaningful = Instant::now();
                 if tx.send(Ok(StreamEvent::TextDelta(text))).await.is_err() {
                     break 'read;
+                }
+                continue;
+            }
+            if let Some(thinking) = extract_thinking_text(&payload) {
+                if !in_thinking {
+                    let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
+                    in_thinking = true;
+                }
+                last_meaningful = Instant::now();
+                if tx
+                    .send(Ok(StreamEvent::ThinkingDelta(thinking)))
+                    .await
+                    .is_err()
+                {
+                    break 'read;
+                }
+                continue;
+            }
+            if let Some(used_tokens) = crate::wire::extract_checkpoint_used_tokens(&payload) {
+                last_meaningful = Instant::now();
+                let _ = tx
+                    .send(Ok(StreamEvent::TokenUsage {
+                        input_tokens: Some(used_tokens),
+                        output_tokens: Some(0),
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                    }))
+                    .await;
+                continue;
+            }
+            // KV server messages are emitted throughout a turn, including
+            // ordinary chat. They must be acknowledged or Cursor keeps the
+            // bidirectional stream alive indefinitely.
+            let mut kv_server_data: Option<&[u8]> = None;
+            for f in crate::wire::iter_fields(&payload) {
+                if f.field == 4 && f.wire == 2 {
+                    kv_server_data = Some(f.data);
+                    break;
+                }
+            }
+            if let Some(data) = kv_server_data {
+                let mut kv_id = 0u32;
+                let mut get_blob_id: Option<Vec<u8>> = None;
+                let mut set_blob: Option<(Vec<u8>, Vec<u8>)> = None;
+                for field in crate::wire::iter_fields(data) {
+                    match field.field {
+                        1 if field.wire == 0 => kv_id = field.varint as u32,
+                        2 if field.wire == 2 => {
+                            let id = crate::wire::iter_fields(field.data)
+                                .find(|f| f.field == 1 && f.wire == 2)
+                                .map(|f| f.data.to_vec());
+                            get_blob_id = id;
+                        }
+                        3 if field.wire == 2 => {
+                            let mut id = None;
+                            let mut blob = None;
+                            for f in crate::wire::iter_fields(field.data) {
+                                if f.field == 1 && f.wire == 2 {
+                                    id = Some(f.data.to_vec());
+                                } else if f.field == 2 && f.wire == 2 {
+                                    blob = Some(f.data.to_vec());
+                                }
+                            }
+                            if let (Some(id), Some(blob)) = (id, blob) {
+                                set_blob = Some((id, blob));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((id, blob)) = set_blob {
+                    blob_store.insert(id, blob);
+                    let _ = outbound_tx
+                        .send(crate::wire::connect_frame(
+                            &crate::wire::encode_kv_set_blob_ack(kv_id),
+                        ))
+                        .await;
+                } else if let Some(id) = get_blob_id {
+                    let blob = blob_store.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+                    let _ = outbound_tx
+                        .send(crate::wire::connect_frame(
+                            &crate::wire::encode_kv_get_blob_result(kv_id, blob),
+                        ))
+                        .await;
+                }
+                continue;
+            }
+
+            // Check for ExecServerMessage (field 2 of AgentServerMessage)
+            let mut exec_server_data: Option<&[u8]> = None;
+            for f in crate::wire::iter_fields(&payload) {
+                if f.field == 2 && f.wire == 2 {
+                    exec_server_data = Some(f.data);
+                    break;
+                }
+            }
+            if let Some(data) = exec_server_data
+                && let Ok(msg) = crate::wire::decode_exec_server_message(data)
+            {
+                use crate::wire::ExecServerMessageVariant;
+                match msg.variant {
+                    ExecServerMessageVariant::Mcp(mcp_args) => {
+                        if in_thinking {
+                            let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+                            in_thinking = false;
+                        }
+                        // Cursor echoes the advertised wire name in `name`,
+                        // but the original registry name is carried in
+                        // `tool_name`. Prefer the latter so sanitizing a
+                        // name for Cursor's identifier grammar does not
+                        // break local MCP dispatch.
+                        let bare_tool_name =
+                            resolve_native_tool_name(&mcp_args.name, &mcp_args.tool_name, tools);
+                        let corr_request_id = format!("{}:{}:{}", stream_uuid, msg.id, msg.exec_id);
+                        active_tool_calls += 1;
+                        last_meaningful = Instant::now();
+                        if tx
+                            .send(Ok(StreamEvent::NativeToolCall {
+                                request_id: corr_request_id,
+                                tool_name: bare_tool_name,
+                                input: mcp_args.args,
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break 'read;
+                        }
+                    }
+                    ExecServerMessageVariant::RequestContext(_) => {
+                        // The current AgentService request-context ack is intentionally
+                        // empty. Tool definitions already travel in RunRequest.mcp_tools;
+                        // echoing them here double-advertises the tools and can leave the
+                        // server at HTTP 200 with no response frames.
+                        let res_bytes =
+                            crate::wire::encode_request_context_result(msg.id, &msg.exec_id, &[]);
+                        // `encode_request_context_result` already returns
+                        // the AgentClientMessage wrapper (field 2). Do not
+                        // wrap it a second time, or AgentService keeps the
+                        // stream open and emits only heartbeats.
+                        let connect_bytes = crate::wire::connect_frame(&res_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::Shell(args) => {
+                        let rej = crate::wire::reject_shell_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.command,
+                            &args.working_directory,
+                            crate::wire::native_shell_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::Write(args) => {
+                        let rej = crate::wire::reject_write_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.path,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::Delete(args) => {
+                        let rej = crate::wire::reject_delete_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.path,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::Grep(_) => {
+                        let rej = crate::wire::reject_grep_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::Read(args) => {
+                        let rej = crate::wire::reject_read_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.path,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::Ls(args) => {
+                        let rej = crate::wire::reject_ls_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.path,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::Diagnostics(args) => {
+                        let rej = crate::wire::reject_diagnostics_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.path,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::ShellStream(_) => {
+                        let rej = crate::wire::reject_shell_stream_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            crate::wire::native_shell_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::BackgroundShellSpawn(args) => {
+                        let rej = crate::wire::reject_background_shell_spawn_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.command,
+                            &args.working_directory,
+                            crate::wire::native_shell_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::ListMcpResources(_) => {
+                        let rej = crate::wire::reject_list_mcp_resources_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::ReadMcpResource(args) => {
+                        let rej = crate::wire::reject_read_mcp_resource_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.uri,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::Fetch(args) => {
+                        let rej = crate::wire::reject_fetch_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            &args.url,
+                            crate::wire::native_fetch_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::RecordScreen(_) => {
+                        let rej = crate::wire::reject_record_screen_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::ComputerUse(_) => {
+                        let rej = crate::wire::reject_computer_use_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            crate::wire::native_local_exec_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::WriteShellStdin(_) => {
+                        let rej = crate::wire::reject_write_shell_stdin_exec(
+                            msg.id,
+                            &msg.exec_id,
+                            crate::wire::native_shell_disabled_message(false),
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::McpState(args) => {
+                        stream_debug(format_args!(
+                            "mcp_state requested servers={:?} kick_only={}",
+                            args.server_identifiers, args.kick_only
+                        ));
+                        let res = crate::wire::encode_mcp_state_result(
+                            msg.id,
+                            &msg.exec_id,
+                            &args,
+                            tools,
+                        )
+                        .unwrap_or_else(|error| {
+                            crate::wire::encode_mcp_state_error(
+                                msg.id,
+                                &msg.exec_id,
+                                &format!("jcode could not describe its tools: {error}"),
+                            )
+                        });
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&res);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::McpAllowlistPrecheck {
+                        provider_identifier,
+                    } => {
+                        let allowlisted = provider_identifier == crate::wire::JCODE_TOOL_PROVIDER;
+                        stream_debug(format_args!(
+                            "mcp allowlist precheck provider={provider_identifier} allowlisted={allowlisted}"
+                        ));
+                        let res = crate::wire::encode_allowlist_precheck_result(
+                            msg.id,
+                            &msg.exec_id,
+                            42,
+                            allowlisted,
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&res);
+                        let _ = outbound_tx
+                            .send(crate::wire::connect_frame(&agent_bytes))
+                            .await;
+                    }
+                    ExecServerMessageVariant::OtherAllowlistPrecheck(field) => {
+                        stream_debug(format_args!("allowlist precheck field={field} denied"));
+                        let res = crate::wire::encode_allowlist_precheck_result(
+                            msg.id,
+                            &msg.exec_id,
+                            field,
+                            false,
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&res);
+                        let _ = outbound_tx
+                            .send(crate::wire::connect_frame(&agent_bytes))
+                            .await;
+                    }
+                    ExecServerMessageVariant::Unknown(field, _) => {
+                        // An unanswered exec request stalls AgentService with
+                        // heartbeat-only frames. Make that visible instead of
+                        // silently waiting out the idle timeout.
+                        jcode_base::logging::warn(&format!(
+                            "Cursor agent sent unsupported exec request field {field}; the turn may stall"
+                        ));
+                        stream_debug(format_args!("unsupported exec field={field}"));
+                    }
                 }
             }
         }
@@ -602,13 +1437,25 @@ pub async fn run_agent_turn(
     let _ = sender.await;
     conn_task.abort();
 
+    if in_thinking {
+        let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+    }
+
+    if let Some(err) = stream_error {
+        anyhow::bail!("{err}");
+    }
     if let Some(err) = error_message {
         anyhow::bail!("Cursor agent stream error: {err}");
     }
     if !status.is_success() {
         anyhow::bail!("Cursor agent request failed with HTTP {status}");
     }
-    let _ = got_text;
+    if !terminal_frame && !idle_finished {
+        anyhow::bail!(
+            "Cursor agent stream ended without a terminal frame{}",
+            if got_text { " after text output" } else { "" }
+        );
+    }
 
     let _ = tx
         .send(Ok(StreamEvent::MessageEnd {
@@ -621,6 +1468,222 @@ pub async fn run_agent_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usable_model_decoder_reads_wire_ids_and_deduplicates() {
+        let response = ["composer-2.5", "gpt-5.4-high", "composer-2.5"]
+            .into_iter()
+            .flat_map(|model| field_ld(1, &field_str(1, model)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            crate::decode_agent_models(&response).unwrap(),
+            vec!["composer-2.5", "gpt-5.4-high"]
+        );
+    }
+
+    /// Issue #1226 and the Cursor support guidance: the AgentService accepts
+    /// only base ids, with speed/effort carried as separate params.
+    #[test]
+    fn resolve_model_id_reduces_composite_ids_to_base_ids() {
+        let cases = [
+            // Cursor rejects bare `grok-4.6` (ERROR_BAD_MODEL_NAME); its
+            // catalog only serves the `cursor-grok-4.6-*` ids.
+            (
+                "cursor-grok-4.6-high-fast",
+                "cursor-grok-4.6-high-fast",
+                true,
+            ),
+            ("grok-4.6", "cursor-grok-4.6-high", false),
+            ("grok-4.7", "grok-4.7", false),
+            ("claude-opus-5-thinking-high", "claude-opus-5", false),
+            ("claude-opus-5-thinking-high-fast", "claude-opus-5", true),
+            ("gpt-5.4-high", "gpt-5.4", false),
+            ("gpt-5.6-sol-xhigh", "gpt-5.6-sol", false),
+            ("gemini-3.7-flash-high", "gemini-3.7-flash", false),
+            ("gemini-3.1-pro", "gemini-3.1-pro", false),
+            ("sonnet-4.6", "sonnet-4.6", false),
+            ("cursor:grok-4.6", "cursor-grok-4.6-high", false),
+        ];
+        for (input, id, fast) in cases {
+            assert_eq!(
+                resolve_model_id(input, None),
+                ResolvedModel {
+                    id: id.to_string(),
+                    fast
+                },
+                "{input}"
+            );
+        }
+    }
+
+    /// Cursor: `composer-2.5` with no params defaults to the Fast variant.
+    /// Live catalog (GetUsableModels, 2026-09-29): exact ids pass through,
+    /// base ids map to the variant Cursor labels with the plain model name.
+    #[test]
+    fn resolve_model_id_uses_live_catalog_ids() {
+        let catalog: Vec<String> = [
+            "composer-2.5",
+            "composer-2.5-fast",
+            "grok-4.7-high",
+            "grok-4.7-high-fast",
+            "grok-4.7-low",
+            "cursor-grok-4.6-low",
+            "cursor-grok-4.6-high",
+            "cursor-grok-4.6-high-fast",
+            "cursor-grok-4.6-xhigh",
+            "claude-opus-5-5-low",
+            "claude-opus-5-5-high",
+            "claude-opus-5-5-high-fast",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let r = |m: &str, f: Option<bool>| resolve_model_id_with_catalog(m, f, &catalog);
+
+        // Exact ids are sent verbatim.
+        assert_eq!(r("cursor-grok-4.6-xhigh", None).id, "cursor-grok-4.6-xhigh");
+        assert_eq!(r("grok-4.7-low", None).id, "grok-4.7-low");
+        // Bare base ids Cursor rejects map onto the catalog.
+        assert_eq!(r("grok-4.6", None).id, "cursor-grok-4.6-high");
+        assert_eq!(r("grok-4.6", Some(true)).id, "cursor-grok-4.6-high-fast");
+        assert_eq!(r("cursor:grok-4.6", None).id, "cursor-grok-4.6-high");
+        assert_eq!(r("claude-opus-5-5", None).id, "claude-opus-5-5-high");
+        assert_eq!(r("grok-4.7", None).id, "grok-4.7-high");
+        // /fast toggles between catalog siblings.
+        let fast = r("cursor-grok-4.6-high", Some(true));
+        assert_eq!(
+            (fast.id.as_str(), fast.fast),
+            ("cursor-grok-4.6-high-fast", true)
+        );
+        let slow = r("cursor-grok-4.6-high-fast", Some(false));
+        assert_eq!(
+            (slow.id.as_str(), slow.fast),
+            ("cursor-grok-4.6-high", false)
+        );
+        // Composer keeps its Fast default.
+        let composer = r("composer-2.5", None);
+        assert_eq!(
+            (composer.id.as_str(), composer.fast),
+            ("composer-2.5", true)
+        );
+        // Unknown models fall back to the base id.
+        assert_eq!(r("gpt-5.4-high", None).id, "gpt-5.4");
+    }
+
+    #[test]
+    fn composer_defaults_to_fast_and_respects_override() {
+        assert!(resolve_model_id("composer-2.5", None).fast);
+        assert_eq!(
+            resolve_model_id("composer-2.5-fast", None).id,
+            "composer-2.5"
+        );
+        assert_eq!(resolve_model_id("composer-2-fast", None).id, "composer-2");
+        assert!(!resolve_model_id("composer-2.5", Some(false)).fast);
+        assert!(resolve_model_id("grok-4.6", Some(true)).fast);
+        assert!(!resolve_model_id("grok-4.6-high-fast", Some(false)).fast);
+    }
+
+    #[test]
+    fn run_request_encodes_base_id_and_fast_param() {
+        let frame = build_run_frames(
+            "hi",
+            &resolve_model_id("cursor-grok-4.6-high-fast", None),
+            "/tmp",
+            &[],
+            "req",
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        let (_, payload, _) = next_frame(&frame).unwrap().unwrap();
+        let run_request = iter_fields(&payload)
+            .find(|field| field.field == 1 && field.wire == 2)
+            .unwrap();
+        let requested_model = iter_fields(run_request.data)
+            .find(|field| field.field == 9 && field.wire == 2)
+            .unwrap();
+        let id = iter_fields(requested_model.data)
+            .find(|field| field.field == 1 && field.wire == 2)
+            .and_then(|field| std::str::from_utf8(field.data).ok());
+        assert_eq!(id, Some("cursor-grok-4.6-high-fast"));
+        let fast = iter_fields(requested_model.data)
+            .find(|field| field.field == 3 && field.wire == 2)
+            .and_then(|meta| {
+                iter_fields(meta.data)
+                    .find(|field| field.field == 2 && field.wire == 2)
+                    .and_then(|field| std::str::from_utf8(field.data).ok())
+            });
+        assert_eq!(fast, Some("true"));
+    }
+
+    #[test]
+    fn run_request_uses_current_model_metadata_shape() {
+        let frame = build_run_frames(
+            "hello",
+            &resolve_model_id("composer-2.5", Some(false)),
+            "/tmp",
+            &[],
+            "request-id",
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        let (_, payload, _) = next_frame(&frame).unwrap().unwrap();
+        let run_request = iter_fields(&payload)
+            .find(|field| field.field == 1 && field.wire == 2)
+            .unwrap();
+
+        let requested_model = iter_fields(run_request.data)
+            .find(|field| field.field == 9 && field.wire == 2)
+            .unwrap();
+        assert_eq!(
+            iter_fields(requested_model.data)
+                .find(|field| field.field == 1 && field.wire == 2)
+                .and_then(|field| std::str::from_utf8(field.data).ok()),
+            Some("composer-2.5")
+        );
+        let fast_metadata = iter_fields(requested_model.data)
+            .find(|field| field.field == 3 && field.wire == 2)
+            .unwrap();
+        assert_eq!(
+            iter_fields(fast_metadata.data)
+                .find(|field| field.field == 1 && field.wire == 2)
+                .and_then(|field| std::str::from_utf8(field.data).ok()),
+            Some("fast")
+        );
+        assert_eq!(
+            iter_fields(fast_metadata.data)
+                .find(|field| field.field == 2 && field.wire == 2)
+                .and_then(|field| std::str::from_utf8(field.data).ok()),
+            Some("false")
+        );
+        assert!(iter_fields(run_request.data).any(|field| field.field == 3 && field.wire == 2));
+
+        let catalog_entries = iter_fields(run_request.data)
+            .filter(|field| field.field == 14 && field.wire == 2)
+            .collect::<Vec<_>>();
+        let catalog_ids = catalog_entries
+            .iter()
+            .map(|field| {
+                iter_fields(field.data)
+                    .find(|nested| nested.field == 1 && nested.wire == 2)
+                    .and_then(|nested| std::str::from_utf8(nested.data).ok())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(catalog_ids, vec!["default", "composer-2.5"]);
+        for entry in catalog_entries {
+            let metadata = iter_fields(entry.data)
+                .find(|field| field.field == 3 && field.wire == 2)
+                .unwrap();
+            assert_eq!(
+                iter_fields(metadata.data)
+                    .find(|field| field.field == 1 && field.wire == 2)
+                    .and_then(|field| std::str::from_utf8(field.data).ok()),
+                Some("fast")
+            );
+        }
+    }
 
     /// Regression test for issue #637: teams routed to a region reject the
     /// hardcoded `global` agent host, so a regional endpoint expressed as a full
@@ -693,8 +1756,14 @@ mod tests {
 
     #[test]
     fn frames_are_well_formed_connect_frames() {
-        let frames = build_run_frames("hi", "composer-2.5", "/tmp");
-        assert!(frames.len() >= 4);
+        let frames = build_run_frames(
+            "hi",
+            &resolve_model_id("composer-2.5", None),
+            "/tmp",
+            &[],
+            "req",
+        );
+        assert!(!frames.is_empty());
         for frame in &frames {
             assert!(frame.len() >= 5);
             let len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
@@ -709,11 +1778,63 @@ mod tests {
 
     #[test]
     fn frame0_contains_prompt_and_model() {
-        let frames = build_run_frames("PROMPT_MARKER", "composer-2.5", "/tmp");
+        let frames = build_run_frames(
+            "PROMPT_MARKER",
+            &resolve_model_id("composer-2.5", None),
+            "/tmp",
+            &[],
+            "req",
+        );
         let frame0 = &frames[0];
         let hay = String::from_utf8_lossy(frame0);
         assert!(hay.contains("PROMPT_MARKER"));
         assert!(hay.contains("composer-2.5"));
+    }
+
+    #[test]
+    fn frame0_advertises_mcp_tools() {
+        let tool = jcode_message_types::ToolDefinition {
+            name: "read_file".to_string(),
+            description: "Read a file".to_string(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            defer_loading: false,
+        };
+        let frames = build_run_frames(
+            "hi",
+            &resolve_model_id("composer-2.5", None),
+            "/tmp",
+            &[tool],
+            "req",
+        );
+        let frame0 = &frames[0];
+        let hay = String::from_utf8_lossy(frame0);
+        assert!(hay.contains("read_file"));
+        assert!(hay.contains("Read a file"));
+    }
+
+    #[test]
+    fn routed_prompt_uses_the_same_collision_safe_aliases_as_wire_tools() {
+        let tools = vec![
+            jcode_message_types::ToolDefinition {
+                name: "mcp__server-a__tool.name".to_string(),
+                description: "First".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                defer_loading: false,
+            },
+            jcode_message_types::ToolDefinition {
+                name: "mcp__server_a__tool_name".to_string(),
+                description: "Second".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                defer_loading: false,
+            },
+        ];
+        let prompt = routed_prompt("Do the task", "", &tools);
+        let aliases = crate::wire::mcp_wire_aliases(&tools);
+        for tool in &tools {
+            assert!(prompt.contains(aliases.get(&tool.name).unwrap()));
+        }
+        assert!(prompt.contains("__"));
+        assert!(!prompt.contains("mcp__server-a__tool.name"));
     }
 
     #[test]
@@ -732,13 +1853,14 @@ mod tests {
         let f4 = field_ld(4, &leaf);
         let top = field_ld(1, &f4);
         assert_eq!(extract_answer_text(&top), None);
+        assert_eq!(extract_thinking_text(&top).as_deref(), Some("thinking"));
     }
 
     #[test]
     fn next_frame_parses_uncompressed() {
         let payload = field_str(1, "hello");
         let frame = connect_frame(&payload);
-        let (flag, out, consumed) = next_frame(&frame).unwrap();
+        let (flag, out, consumed) = next_frame(&frame).unwrap().unwrap();
         assert_eq!(flag, 0);
         assert_eq!(consumed, frame.len());
         assert_eq!(out, payload);

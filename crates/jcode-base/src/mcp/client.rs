@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -19,10 +19,26 @@ pub struct McpHandle {
     pub(crate) name: String,
     request_id: Arc<AtomicU64>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    /// Set by the reader on stdout EOF: no reply can arrive, so requests fail fast.
+    closed: Arc<AtomicBool>,
     writer_tx: mpsc::Sender<String>,
     server_info: Arc<std::sync::RwLock<Option<ServerInfo>>>,
     capabilities: Arc<std::sync::RwLock<ServerCapabilities>>,
     tools: Arc<std::sync::RwLock<Vec<McpToolDef>>>,
+    /// Reply timeout applied to every request on this server.
+    request_timeout: std::time::Duration,
+}
+
+/// Default reply timeout when a server config does not set `timeout_secs`.
+pub const DEFAULT_MCP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Resolve the per-request reply timeout for a server config.
+pub fn request_timeout_for(config: &McpServerConfig) -> std::time::Duration {
+    config
+        .timeout_secs
+        .filter(|secs| *secs > 0)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(DEFAULT_MCP_REQUEST_TIMEOUT)
 }
 
 impl McpHandle {
@@ -34,6 +50,9 @@ impl McpHandle {
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
+            if self.closed.load(Ordering::SeqCst) {
+                anyhow::bail!("MCP server '{}' exited (stdout closed)", self.name);
+            }
             pending.insert(id, tx);
         }
 
@@ -43,10 +62,16 @@ impl McpHandle {
             .await
             .context("Failed to send request")?;
 
-        let response = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+        let response = tokio::time::timeout(self.request_timeout, rx)
             .await
-            .context("Request timeout")?
-            .context("Channel closed")?;
+            .with_context(|| {
+                format!(
+                    "Request timeout after {}s (raise `timeout_secs` for MCP server '{}' if its tools legitimately run longer)",
+                    self.request_timeout.as_secs(),
+                    self.name
+                )
+            })?
+            .with_context(|| format!("MCP server '{}' exited (stdout closed)", self.name))?;
 
         if let Some(err) = &response.error {
             anyhow::bail!("MCP error {}: {}", err.code, err.message);
@@ -211,6 +236,8 @@ impl McpClient {
 
         // Spawn reader task
         let pending_clone = Arc::clone(&pending);
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_clone = Arc::clone(&closed);
         let reader_name = name.clone();
         let mut reader = BufReader::new(stdout);
         tokio::spawn(async move {
@@ -246,16 +273,22 @@ impl McpClient {
                     }
                 }
             }
+            // Server can never reply now: drop in-flight senders, fail later requests fast.
+            let mut pending = pending_clone.lock().await;
+            closed_clone.store(true, Ordering::SeqCst);
+            pending.clear();
         });
 
         let handle = McpHandle {
             name: name.clone(),
             request_id: Arc::new(AtomicU64::new(1)),
             pending,
+            closed,
             writer_tx,
             server_info: Arc::new(std::sync::RwLock::new(None)),
             capabilities: Arc::new(std::sync::RwLock::new(ServerCapabilities::default())),
             tools: Arc::new(std::sync::RwLock::new(Vec::new())),
+            request_timeout: request_timeout_for(config),
         };
 
         let mut client = Self { handle, child };
@@ -469,7 +502,29 @@ done
             headers: std::collections::HashMap::new(),
             enabled: None,
             disabled: None,
+            timeout_secs: None,
         }
+    }
+
+    #[tokio::test]
+    async fn connect_fails_fast_when_server_exits_before_initialize() {
+        // A server that prints to stderr and exits before answering
+        // `initialize` must fail connect promptly, even with a huge
+        // `timeout_secs` (previously the pending request waited it out).
+        let config = McpServerConfig {
+            command: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "echo boom >&2; exit 1".to_string()],
+            timeout_secs: Some(86_400),
+            ..fake_server_config()
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            McpClient::connect("dead".to_string(), &config),
+        )
+        .await
+        .expect("connect must not hang on a server that exited");
+        let err = format!("{:#}", result.err().expect("connect must fail"));
+        assert!(err.contains("exited"), "unexpected error: {err}");
     }
 
     #[tokio::test]

@@ -121,7 +121,8 @@ pub fn claude_id_has_parseable_version(model: &str) -> bool {
 
 /// Whether [`anthropic_context_mode`]'s answer for `model` comes from a
 /// generation whose long-context behavior was verified against the live
-/// Anthropic API, as opposed to the optimistic default for new generations.
+/// Anthropic API or official model specifications, rather than the optimistic
+/// default for new generations.
 ///
 /// Callers use this to decide precedence: a verified classification beats the
 /// live catalog (whose `max_input_tokens` over-advertises 1M for 200K-capped
@@ -135,12 +136,26 @@ pub fn anthropic_context_mode_is_verified(model: &str) -> bool {
     };
     match family {
         // Opus/Sonnet 3.x-4.8 and Sonnet 5 were probed with raw long-context
-        // requests on a live subscription.
-        Some("opus") => version <= (4, 8),
+        // requests on a live subscription. Opus 5.5 is documented as native 1M.
+        Some("opus") => version <= (4, 8) || version == (5, 5),
         Some("sonnet") => version <= (5, 0),
         Some("haiku") => version <= (4, 5),
         _ => false,
     }
+}
+
+/// Models whose adaptive thinking is mandatory. Match normalized versions, not
+/// prefixes, so Opus 5 and Fable 5 keep their existing optional-thinking behavior.
+/// Verified against the Opus 5.5 migration guide (2026-09-22).
+pub fn anthropic_thinking_always_on(model: &str) -> bool {
+    let base = normalized_claude_caps_key(model);
+    if !base.starts_with("claude-") {
+        return false;
+    }
+    matches!(
+        parse_claude_family_version(&base),
+        (Some("opus"), Some((5, 5))) | (Some("fable"), Some((5, 1)))
+    )
 }
 
 /// Maximum output tokens Anthropic's synchronous Messages API accepts for a
@@ -167,6 +182,7 @@ pub fn anthropic_max_output_tokens(model: &str) -> u32 {
         "claude-sonnet-5",
         "claude-sonnet-4-6",
         "claude-sonnet-4.6",
+        "claude-fable-5-1",
         "claude-fable-5",
         "claude-fable",
         "claude-mythos",
@@ -419,6 +435,42 @@ mod tests {
     use crate::ALL_CLAUDE_MODELS;
 
     #[test]
+    fn opus_55_documented_capabilities_and_mandatory_thinking() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-opus-5.5",
+            "CLAUDE-OPUS-5-5-20260922[1m]",
+        ] {
+            assert!(anthropic_thinking_always_on(model), "{model}");
+            assert_eq!(
+                anthropic_context_mode(model),
+                AnthropicContextMode::Native1M
+            );
+            assert!(anthropic_context_mode_is_verified(model));
+            assert_eq!(anthropic_max_output_tokens(model), 128_000);
+            let caps = anthropic_reasoning_caps(model);
+            assert!(
+                caps.adaptive_thinking
+                    && caps.output_effort
+                    && caps.xhigh_effort
+                    && caps.max_effort
+            );
+            assert!(!caps.manual_thinking);
+        }
+        assert!(anthropic_thinking_always_on("claude-fable-5-1"));
+        assert!(anthropic_thinking_always_on("claude-fable-5.1-20260828"));
+        for model in [
+            "claude-opus-5",
+            "claude-fable-5",
+            "claude-opus-4-8",
+            "claude-opus-5-50",
+            "other-opus-5-5",
+        ] {
+            assert!(!anthropic_thinking_always_on(model), "{model}");
+        }
+    }
+
+    #[test]
     fn model_suffix_helpers_require_explicit_1m_suffix() {
         assert!(!anthropic_effectively_1m("claude-opus-4-6"));
         assert!(anthropic_effectively_1m("claude-opus-4-6[1m]"));
@@ -466,6 +518,7 @@ mod tests {
         // Full ladder: Fable 5 (live 2026-07-01), Sonnet 5 (live 2026-07-07),
         // Opus 5 (live 2026-07-24), Opus 4.7/4.8.
         for model in [
+            "claude-fable-5-1",
             "claude-fable-5",
             "claude-sonnet-5",
             "claude-opus-5",

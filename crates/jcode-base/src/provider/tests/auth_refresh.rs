@@ -75,7 +75,6 @@ fn test_on_auth_changed_hot_initializes_openai_and_marks_routes_available() {
         let _enter = runtime.enter();
 
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
@@ -87,7 +86,6 @@ fn test_on_auth_changed_hot_initializes_openai_and_marks_routes_available() {
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::OpenAI),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenAI),
             routes_memo: std::sync::Mutex::new(None),
@@ -143,7 +141,6 @@ fn test_on_auth_changed_refreshes_existing_openai_provider_credentials() {
         .expect("save fresh test OpenAI auth");
 
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(Some(Arc::clone(&existing) as Arc<dyn Provider>)),
             copilot_api: RwLock::new(None),
@@ -155,7 +152,6 @@ fn test_on_auth_changed_refreshes_existing_openai_provider_credentials() {
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::OpenAI),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::OpenAI),
             routes_memo: std::sync::Mutex::new(None),
@@ -181,7 +177,6 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
         let _enter = runtime.enter();
 
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
@@ -193,7 +188,6 @@ fn test_on_auth_changed_hot_initializes_anthropic_and_marks_routes_available() {
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::Claude),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Claude),
             routes_memo: std::sync::Mutex::new(None),
@@ -227,7 +221,6 @@ fn test_on_auth_changed_hot_initializes_anthropic_from_api_key_and_marks_routes_
         let _enter = runtime.enter();
 
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
@@ -239,7 +232,6 @@ fn test_on_auth_changed_hot_initializes_anthropic_from_api_key_and_marks_routes_
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::Claude),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Claude),
             routes_memo: std::sync::Mutex::new(None),
@@ -292,7 +284,6 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
         let _enter = runtime.enter();
 
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
@@ -304,7 +295,6 @@ fn test_anthropic_model_routes_keep_plain_4_6_available_without_extra_usage() {
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::Claude),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Claude),
             routes_memo: std::sync::Mutex::new(None),
@@ -358,7 +348,6 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
                 let _enter = runtime.enter();
 
                 let provider = MultiProvider {
-                    claude: RwLock::new(None),
                     anthropic: RwLock::new(None),
                     openai: RwLock::new(None),
                     copilot_api: RwLock::new(None),
@@ -370,7 +359,6 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
                     openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
                     active_openai_compatible_profile: RwLock::new(None),
                     active: RwLock::new(ActiveProvider::OpenRouter),
-                    use_claude_cli: false,
                     startup_notices: RwLock::new(Vec::new()),
                     initial_provider: Some(ActiveProvider::OpenRouter),
                     routes_memo: std::sync::Mutex::new(None),
@@ -399,7 +387,6 @@ fn test_on_auth_changed_preserves_openrouter_model_and_explicit_provider_pin() {
                 let runtime = enter_test_runtime();
                 let _enter = runtime.enter();
                 let provider = MultiProvider {
-                    claude: RwLock::new(None),
                     anthropic: RwLock::new(None),
                     openai: RwLock::new(None),
                     copilot_api: RwLock::new(None),
@@ -411,7 +398,6 @@ fn test_on_auth_changed_preserves_openrouter_model_and_explicit_provider_pin() {
                     openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
                     active_openai_compatible_profile: RwLock::new(None),
                     active: RwLock::new(ActiveProvider::OpenRouter),
-                    use_claude_cli: false,
                     startup_notices: RwLock::new(Vec::new()),
                     initial_provider: Some(ActiveProvider::OpenRouter),
                     routes_memo: std::sync::Mutex::new(None),
@@ -457,7 +443,6 @@ fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
             });
 
             let provider = MultiProvider {
-                claude: RwLock::new(None),
                 anthropic: RwLock::new(None),
                 openai: RwLock::new(None),
                 copilot_api: RwLock::new(None),
@@ -469,7 +454,6 @@ fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
                 active_openai_compatible_profile: RwLock::new(None),
                 active: RwLock::new(ActiveProvider::Copilot),
-                use_claude_cli: false,
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: Some(ActiveProvider::Copilot),
                 routes_memo: std::sync::Mutex::new(None),
@@ -539,7 +523,6 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
         .expect("save expired antigravity auth");
 
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
@@ -551,7 +534,6 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::Antigravity),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Antigravity),
             routes_memo: std::sync::Mutex::new(None),
@@ -570,7 +552,6 @@ fn test_on_auth_changed_hot_initializes_antigravity_when_tokens_exist_but_are_ex
 #[test]
 fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entries() {
     let provider = MultiProvider {
-        claude: RwLock::new(None),
         anthropic: RwLock::new(None),
         openai: RwLock::new(None),
         copilot_api: RwLock::new(None),
@@ -582,7 +563,6 @@ fn test_multi_provider_antigravity_routes_do_not_include_legacy_duplicate_entrie
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
         active_openai_compatible_profile: RwLock::new(None),
         active: RwLock::new(ActiveProvider::Antigravity),
-        use_claude_cli: false,
         startup_notices: RwLock::new(Vec::new()),
         initial_provider: Some(ActiveProvider::Antigravity),
         routes_memo: std::sync::Mutex::new(None),
@@ -613,6 +593,7 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             api_method: "openrouter".to_string(),
             available: true,
             detail: "fast, 5m ago".to_string(),
+            usage: None,
             cheapness: None,
         }],
         vec![ModelRoute {
@@ -621,6 +602,7 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             api_method: "openrouter".to_string(),
             available: true,
             detail: "fast, 6m ago".to_string(),
+            usage: None,
             cheapness: None,
         }],
     );
@@ -642,6 +624,7 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             api_method: "openrouter".to_string(),
             available: true,
             detail: "fast, 5m ago".to_string(),
+            usage: None,
             cheapness: None,
         }],
         vec![ModelRoute {
@@ -650,6 +633,7 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             api_method: "openrouter".to_string(),
             available: true,
             detail: "cached, 6m ago".to_string(),
+            usage: None,
             cheapness: None,
         }],
     );
@@ -705,7 +689,6 @@ fn test_on_auth_changed_hot_initializes_gemini_and_marks_routes_available() {
         .expect("save test Gemini auth");
 
         let provider = MultiProvider {
-            claude: RwLock::new(None),
             anthropic: RwLock::new(None),
             openai: RwLock::new(None),
             copilot_api: RwLock::new(None),
@@ -717,7 +700,6 @@ fn test_on_auth_changed_hot_initializes_gemini_and_marks_routes_available() {
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(ActiveProvider::Gemini),
-            use_claude_cli: false,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: Some(ActiveProvider::Gemini),
             routes_memo: std::sync::Mutex::new(None),
@@ -749,7 +731,6 @@ fn test_on_auth_changed_hot_initializes_cursor_and_marks_routes_available() {
             });
 
             let provider = MultiProvider {
-                claude: RwLock::new(None),
                 anthropic: RwLock::new(None),
                 openai: RwLock::new(None),
                 copilot_api: RwLock::new(None),
@@ -761,7 +742,6 @@ fn test_on_auth_changed_hot_initializes_cursor_and_marks_routes_available() {
                 openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
                 active_openai_compatible_profile: RwLock::new(None),
                 active: RwLock::new(ActiveProvider::Cursor),
-                use_claude_cli: false,
                 startup_notices: RwLock::new(Vec::new()),
                 initial_provider: Some(ActiveProvider::Cursor),
                 routes_memo: std::sync::Mutex::new(None),

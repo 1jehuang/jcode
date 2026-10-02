@@ -950,6 +950,7 @@ fn render_mermaid_deferred_inner(
     stream_scope: Option<u64>,
 ) -> Option<RenderResult> {
     let hash = hash_content(content);
+    crate::remember_mermaid_source(hash, content);
     let (node_count, edge_count) = estimate_diagram_size(content);
 
     if node_count > MAX_NODES || edge_count > MAX_EDGES {
@@ -1102,6 +1103,7 @@ fn render_mermaid_sized_internal(
 
     // Calculate content hash for caching
     let hash = hash_content(content);
+    crate::remember_mermaid_source(hash, content);
     let render_profile = current_render_profile();
 
     // Estimate complexity for sizing

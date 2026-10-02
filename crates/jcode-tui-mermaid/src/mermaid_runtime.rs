@@ -80,6 +80,106 @@ fn detect_multiplexer_from_env() -> Multiplexer {
     )
 }
 
+/// Adjust a detected protocol for multiplexer limitations.
+///
+/// ratatui-image renders Kitty graphics exclusively through Unicode
+/// placeholders (`U=1` virtual placements). Zellij implements the Kitty
+/// graphics protocol but rejects `U=1` with `ENOTSUPPORTED`, so the image
+/// never appears and the reserved area renders blank. `KITTY_WINDOW_ID` leaks
+/// into Zellij panes from an outer kitty, and the stdio probe succeeds because
+/// Zellij answers Kitty queries, so both detection paths would pick Kitty.
+/// Fall back to halfblocks (Mermaid then shows its source) unless the user
+/// opts in with `JCODE_ZELLIJ_KITTY_IMAGES=1`, for Zellij builds that add
+/// placeholder support.
+pub(super) fn adjust_protocol_for_multiplexer(
+    protocol: ProtocolType,
+    multiplexer: Multiplexer,
+    zellij_kitty_opt_in: bool,
+) -> ProtocolType {
+    if protocol == ProtocolType::Kitty && multiplexer == Multiplexer::Zellij && !zellij_kitty_opt_in
+    {
+        ProtocolType::Halfblocks
+    } else {
+        protocol
+    }
+}
+
+fn zellij_kitty_images_opt_in() -> bool {
+    std::env::var("JCODE_ZELLIJ_KITTY_IMAGES")
+        .ok()
+        .as_deref()
+        .and_then(parse_env_bool)
+        .unwrap_or(false)
+}
+
+fn apply_multiplexer_protocol_limits(picker: &mut Picker, multiplexer: Multiplexer) {
+    let current = picker.protocol_type();
+    let adjusted =
+        adjust_protocol_for_multiplexer(current, multiplexer, zellij_kitty_images_opt_in());
+    if adjusted != current {
+        crate::log_info(&format!(
+            "Image protocol {:?} unusable inside {} (no Kitty unicode placeholder support); using {:?}. Set JCODE_ZELLIJ_KITTY_IMAGES=1 to override",
+            current,
+            multiplexer.label(),
+            adjusted
+        ));
+        picker.set_protocol_type(adjusted);
+    }
+}
+
+fn tmux_reports_native_sixel(sixel_support: &str, client_termfeatures: &str) -> bool {
+    sixel_support.trim() == "1"
+        && client_termfeatures
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .any(|feature| feature == "sixel")
+}
+
+fn tmux_has_native_sixel() -> bool {
+    if detect_multiplexer_from_env() != Multiplexer::Tmux {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "#{sixel_support}\n#{client_termfeatures}",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let output = String::from_utf8_lossy(&output.stdout);
+    let mut lines = output.lines();
+    tmux_reports_native_sixel(
+        lines.next().unwrap_or_default(),
+        lines.next().unwrap_or_default(),
+    )
+}
+
+/// Construct image state while allowing a sixel-capable tmux to retain images
+/// in its own screen buffer. Other protocols and older tmux versions keep the
+/// upstream ratatui-image passthrough behavior.
+pub(super) fn new_resize_protocol(picker: &Picker, image: DynamicImage) -> StatefulProtocol {
+    if picker.protocol_type() == ProtocolType::Sixel
+        && *TMUX_NATIVE_SIXEL.get_or_init(tmux_has_native_sixel)
+    {
+        let source = ImageSource::new(image, picker.font_size(), image::Rgba([0, 0, 0, 0]));
+        StatefulProtocol::new(
+            source,
+            picker.font_size(),
+            StatefulProtocolType::Sixel(Sixel {
+                is_tmux: false,
+                ..Sixel::default()
+            }),
+        )
+    } else {
+        picker.new_resize_protocol(image)
+    }
+}
+
 fn parse_env_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -163,6 +263,16 @@ pub(super) fn infer_protocol_from_env(
             return Some(ProtocolType::Iterm2);
         }
         return None;
+    }
+
+    // foot has built-in sixel support (since 1.2.0, no libsixel) and sets
+    // TERM=foot with no TERM_PROGRAM, so TERM is the signal. foot only
+    // advertises DA1 attribute 4 when sixel is enabled at runtime
+    // ([tweak].sixel=no) and compile time, so a disabled-sixel foot is still
+    // mis-detected here; JCODE_MERMAID_PICKER_PROBE=1 probes the real DA1 and
+    // overrides the protocol with the truthful answer.
+    if term.starts_with("foot") || term_program.contains("foot") {
+        return Some(ProtocolType::Sixel);
     }
 
     if term.contains("sixel") {
@@ -331,10 +441,12 @@ pub fn init_picker() {
             env_protocol,
             probe_override
         ));
-        match mode {
-            PickerInitMode::Fast => Some(fast_picker()),
-            PickerInitMode::Probe => Some(probe_picker()),
-        }
+        let mut picker = match mode {
+            PickerInitMode::Fast => fast_picker(),
+            PickerInitMode::Probe => probe_picker(),
+        };
+        apply_multiplexer_protocol_limits(&mut picker, multiplexer);
+        Some(picker)
     });
     // Note: the SVG font-DB prewarm is intentionally NOT triggered here.
     // init_picker() runs on every TUI startup, and the font load is only
@@ -720,6 +832,15 @@ mod tests {
             infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
             Some(ProtocolType::Sixel)
         );
+        assert_eq!(
+            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
+            Some(ProtocolType::Sixel)
+        );
+        // foot sets TERM=foot but no TERM_PROGRAM.
+        assert_eq!(
+            infer_protocol_from_env(Some("foot"), None, None, None),
+            Some(ProtocolType::Sixel)
+        );
     }
 
     #[test]
@@ -732,10 +853,6 @@ mod tests {
                 Some("stale-kitty-window")
             ),
             Some(ProtocolType::Iterm2)
-        );
-        assert_eq!(
-            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
-            None
         );
         assert_eq!(
             infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None),
@@ -810,6 +927,43 @@ mod tests {
             ),
             Multiplexer::Herdr
         );
+    }
+
+    #[test]
+    fn native_tmux_sixel_requires_server_and_client_support() {
+        assert!(tmux_reports_native_sixel(
+            "1\n",
+            "256,clipboard,mouse,sixel,title"
+        ));
+        assert!(tmux_reports_native_sixel("1", "RGB sixel hyperlinks"));
+        assert!(!tmux_reports_native_sixel("0", "sixel"));
+        assert!(!tmux_reports_native_sixel("1", "256,clipboard,mouse"));
+        assert!(!tmux_reports_native_sixel("1", "sixel-overwrite"));
+    }
+
+    #[test]
+    fn zellij_downgrades_kitty_placeholders_unless_opted_in() {
+        // Zellij rejects U=1 virtual placements, the only Kitty mode
+        // ratatui-image uses, so Kitty would render blank there.
+        assert_eq!(
+            adjust_protocol_for_multiplexer(ProtocolType::Kitty, Multiplexer::Zellij, false),
+            ProtocolType::Halfblocks
+        );
+        assert_eq!(
+            adjust_protocol_for_multiplexer(ProtocolType::Kitty, Multiplexer::Zellij, true),
+            ProtocolType::Kitty
+        );
+        // Zellij's Sixel passthrough and other multiplexers are untouched.
+        assert_eq!(
+            adjust_protocol_for_multiplexer(ProtocolType::Sixel, Multiplexer::Zellij, false),
+            ProtocolType::Sixel
+        );
+        for mux in [Multiplexer::None, Multiplexer::Tmux, Multiplexer::Herdr] {
+            assert_eq!(
+                adjust_protocol_for_multiplexer(ProtocolType::Kitty, mux, false),
+                ProtocolType::Kitty
+            );
+        }
     }
 
     #[test]

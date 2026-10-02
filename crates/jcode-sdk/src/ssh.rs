@@ -1,0 +1,980 @@
+//! System OpenSSH transport. Authentication and host aliases come from the user's SSH setup.
+
+use crate::{ConnectOptions, Error, ErrorKind, Result, Transport};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Connect to the user's persistent native harness on an SSH host.
+///
+/// The remote installation must support `jcode api --stdio`. No software is
+/// installed or updated. Unknown host keys must first be verified using SSH.
+/// The remote login shell must accept POSIX shell syntax. Authentication uses
+/// system SSH config, keys and agent, without password/host-key prompts. SSH
+/// forwarding, connection multiplexing and configured local commands are disabled
+/// so the SDK owns exactly one foreground SSH connection.
+///
+/// ```no_run
+/// use jcode_sdk::{JcodeClient, SshConnectOptions};
+/// let client = JcodeClient::connect_ssh(SshConnectOptions::new("desktop"))?;
+/// let sessions = client.list_sessions()?;
+/// // Dropping the last clone closes SSH, not the remote shared daemon.
+/// drop(client);
+/// # Ok::<(), jcode_sdk::Error>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct SshConnectOptions {
+    /// SSH config alias, hostname, IP address, or `user@host`. Not a shell command.
+    pub host: String,
+    /// Override the port from SSH config.
+    pub port: Option<u16>,
+    /// Override the user from SSH config. Do not also put a user in `host`.
+    pub user: Option<String>,
+    /// Remote executable name or literal path (no shell expansion).
+    pub remote_binary: String,
+    /// Total SSH startup and API handshake deadline, independent of request_timeout.
+    pub connect_timeout: Duration,
+    pub client_name: String,
+    pub request_timeout: Option<Duration>,
+    /// Private key used exclusively for this connection (`IdentitiesOnly`).
+    /// Managed hosts authorize a fresh key per connection, so agent and
+    /// configured identities are never offered.
+    pub identity_file: Option<std::path::PathBuf>,
+    /// Pinned host keys. When set, the user's and system known_hosts files are
+    /// not consulted, and an unknown or changed host key fails the connection.
+    pub known_hosts_file: Option<std::path::PathBuf>,
+    /// Ignore `~/.ssh/config` and the system SSH config (`-F /dev/null`). The
+    /// destination must then be a literal hostname or address.
+    pub isolated_config: bool,
+}
+
+impl Default for SshConnectOptions {
+    fn default() -> Self {
+        let defaults = ConnectOptions::default();
+        Self {
+            host: String::new(),
+            port: None,
+            user: None,
+            remote_binary: "jcode".into(),
+            connect_timeout: Duration::from_secs(30),
+            client_name: defaults.client_name,
+            request_timeout: defaults.request_timeout,
+            identity_file: None,
+            known_hosts_file: None,
+            isolated_config: false,
+        }
+    }
+}
+
+impl SshConnectOptions {
+    pub fn new(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            ..Self::default()
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        let invalid = |message| Error::new(ErrorKind::InvalidOption, message);
+        // OpenSSH may interpolate %h/%r into configured ProxyCommand shells.
+        // Validate even though Command itself does not invoke a local shell.
+        let valid_user = |s: &str| {
+            !s.is_empty()
+                && !s.starts_with('-')
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        };
+        let (user, host) = match self.host.split_once('@') {
+            Some((user, host)) if valid_user(user) && self.user.is_none() => (Some(user), host),
+            Some(_) => {
+                return Err(invalid(
+                    "SSH host must be a hostname or user@hostname; do not specify the user twice",
+                ));
+            }
+            None => (None, self.host.as_str()),
+        };
+        let _ = user;
+        if host.is_empty()
+            || host.starts_with('-')
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.-:[]%".contains(&b))
+        {
+            return Err(invalid(
+                "invalid SSH host: use an SSH alias, hostname, or IP address, not options or a command",
+            ));
+        }
+        if self.user.as_deref().is_some_and(|s| !valid_user(s)) {
+            return Err(invalid("invalid SSH user"));
+        }
+        if self.port == Some(0) {
+            return Err(invalid("SSH port must be between 1 and 65535"));
+        }
+        if self.remote_binary.is_empty()
+            || self.remote_binary.starts_with('-')
+            || self.remote_binary.chars().any(char::is_control)
+        {
+            return Err(invalid(
+                "remote_binary must be an executable name or literal path without control characters",
+            ));
+        }
+        for (name, path) in [
+            ("identity_file", &self.identity_file),
+            ("known_hosts_file", &self.known_hosts_file),
+        ] {
+            if let Some(path) = path {
+                let text = path.to_string_lossy();
+                // OpenSSH expands % and ~ tokens in these options.
+                if !path.is_absolute() || text.contains('%') || text.chars().any(char::is_control) {
+                    return Err(invalid(match name {
+                        "identity_file" => {
+                            "identity_file must be an absolute path without % or control characters"
+                        }
+                        _ => {
+                            "known_hosts_file must be an absolute path without % or control characters"
+                        }
+                    }));
+                }
+            }
+        }
+        if self.connect_timeout.is_zero() || self.connect_timeout > Duration::from_secs(3600) {
+            return Err(invalid(
+                "SSH connect_timeout must be greater than zero and at most one hour",
+            ));
+        }
+        // Keep the first frame below pipe capacity so even a stalled SSH
+        // process cannot block the hello write before its timed reply wait.
+        if self.client_name.len() > 1024
+            || serde_json::to_string(&self.client_name).map_or(true, |s| s.len() > 2048)
+        {
+            return Err(invalid("SSH client_name must be at most 1024 bytes"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn command(&self) -> Result<Command> {
+        self.command_with_control(None)
+    }
+
+    fn command_with_control(&self, control: Option<(&std::path::Path, bool)>) -> Result<Command> {
+        let remote = format!(
+            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
+            shell_quote(&self.remote_binary)
+        );
+        self.command_for(control, &remote)
+    }
+
+    /// Run a POSIX shell script on the host with the same authentication,
+    /// host-key pinning and hardening as the API connection.
+    ///
+    /// The script travels on stdin (`sh -s`), never in argv, so it may carry
+    /// secrets. `$JCODE_BIN` names the configured remote binary. The process is
+    /// killed when `timeout` elapses. Output is returned even on a non-zero exit.
+    pub fn run_script(&self, script: &[u8], timeout: Duration) -> Result<std::process::Output> {
+        let remote = format!(
+            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; JCODE_BIN={}; export JCODE_BIN; exec sh -s",
+            shell_quote(&self.remote_binary)
+        );
+        let mut command = self.command_for(None, &remote)?;
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|e| Error::new(ErrorKind::Transport, format!("could not start ssh: {e}")))?;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let script = script.to_vec();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&script);
+        });
+        let read = |mut pipe: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = pipe.by_ref().take(1024 * 1024).read_to_end(&mut bytes);
+                bytes
+            })
+        };
+        let stdout = read(Box::new(child.stdout.take().expect("piped stdout")));
+        let stderr = read(Box::new(child.stderr.take().expect("piped stderr")));
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| Error::new(ErrorKind::Transport, format!("ssh wait failed: {e}")))?
+            {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::new(ErrorKind::Timeout, "remote script timed out"));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let _ = writer.join();
+        Ok(std::process::Output {
+            status,
+            stdout: stdout.join().unwrap_or_default(),
+            stderr: stderr.join().unwrap_or_default(),
+        })
+    }
+
+    fn command_for(
+        &self,
+        control: Option<(&std::path::Path, bool)>,
+        remote: &str,
+    ) -> Result<Command> {
+        self.validate()?;
+        let mut command = Command::new("ssh");
+        if self.isolated_config {
+            command.args(["-F", "/dev/null"]);
+        }
+        if let Some(identity) = &self.identity_file {
+            command
+                .arg("-o")
+                .arg(format!("IdentityFile={}", identity.display()))
+                .args(["-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none"]);
+        }
+        if let Some(known) = &self.known_hosts_file {
+            command
+                .arg("-o")
+                .arg(format!("UserKnownHostsFile={}", known.display()))
+                .args([
+                    "-o",
+                    "GlobalKnownHostsFile=/dev/null",
+                    "-o",
+                    "UpdateHostKeys=no",
+                ]);
+        }
+        command.args([
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ForwardAgent=no",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=2",
+            "-o",
+            "PermitLocalCommand=no",
+            "-o",
+            "ForkAfterAuthentication=no",
+            "-o",
+            "StdinNull=no",
+            "-o",
+            "RemoteCommand=none",
+        ]);
+        command
+            .arg("-o")
+            .arg(if control.is_some_and(|(_, master)| master) {
+                "SessionType=none"
+            } else {
+                "SessionType=default"
+            });
+        if let Some((path, master)) = control {
+            command.arg("-o").arg(if master {
+                "ControlMaster=yes"
+            } else {
+                "ControlMaster=no"
+            });
+            command
+                .args(["-o", "ControlPersist=no", "-S"])
+                .arg(path.to_string_lossy().replace('%', "%%"));
+            if !master {
+                // OpenSSH normally falls back to a new connection if multiplexing
+                // fails. Never invoke the user's costly SSH/SSM proxy in that case.
+                command.args(["-o", "ProxyCommand=/bin/false", "-o", "ProxyJump=none"]);
+            }
+        } else {
+            command.args(["-o", "ControlMaster=no", "-S", "none"]);
+        }
+        command.arg("-o").arg(format!(
+            "ConnectTimeout={}",
+            self.connect_timeout.as_secs().max(1)
+        ));
+        if let Some(port) = self.port {
+            command.arg("-p").arg(port.to_string());
+        }
+        if let Some(user) = &self.user {
+            command.arg("-l").arg(user);
+        }
+        // SSH joins remote arguments into shell source. Supply exactly one;
+        // callers quote the executable as a literal POSIX shell word.
+        command.arg("--").arg(&self.host);
+        if !control.is_some_and(|(_, master)| master) {
+            command.arg(remote);
+        }
+        Ok(command)
+    }
+}
+
+/// An opt-in, run-scoped authenticated SSH connection shared by independent clients.
+///
+/// `new` validates options but performs no network I/O. Clones share one lazily
+/// started foreground OpenSSH master. Each `connect` starts a separate remote
+/// `jcode api --stdio` bridge, never a clone of an attached API connection.
+/// Returned clients retain the master even if all public transport handles drop.
+/// The final owner kills/reaps only its own master/process group and removes its
+/// private 0700 temporary directory. No remote daemon is stopped.
+///
+/// Options and target identity are immutable per instance. SSH config is resolved
+/// at first connection, not watched: replace this object when config/alias targets
+/// change. A failed/dead master is not restarted and channels never fall back to
+/// a fresh authenticated connection. Replace the owner explicitly to reconnect.
+/// Server `MaxSessions` limits apply (commonly 10 channels per master). Failed
+/// connection attempts are safe to retry with a new owner, but session creation
+/// requests must never be retried automatically after an ambiguous disconnect.
+///
+/// This synchronous API has bounded startup, not an asynchronous cancellation
+/// token. Run it on a blocking worker. Dropping an unstarted owner is immediate.
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct SharedSshTransport {
+    inner: Arc<SharedSshInner>,
+}
+
+/// A non-owning pool entry. Idle entries cannot keep a VM's SSH connection alive.
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct WeakSharedSshTransport {
+    inner: std::sync::Weak<SharedSshInner>,
+}
+
+#[cfg(unix)]
+impl WeakSharedSshTransport {
+    pub fn upgrade(&self) -> Option<SharedSshTransport> {
+        self.inner
+            .upgrade()
+            .map(|inner| SharedSshTransport { inner })
+    }
+}
+
+#[cfg(unix)]
+struct SharedSshInner {
+    options: SshConnectOptions,
+    // Drop the process before the directory, even on setup errors.
+    master: Mutex<Option<Result<Arc<SshProcess>>>>,
+    directory: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl SharedSshTransport {
+    pub fn downgrade(&self) -> WeakSharedSshTransport {
+        WeakSharedSshTransport {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    pub fn new(options: SshConnectOptions) -> Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        options.validate()?;
+        let directory = tempfile::Builder::new()
+            .prefix("jcode-ssh-")
+            .tempdir()
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::ConnectFailed,
+                    format!("private SSH directory: {e}"),
+                )
+            })?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::ConnectFailed,
+                    format!("private SSH permissions: {e}"),
+                )
+            })?;
+        if directory.path().join("master").as_os_str().len() >= 100 {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "temporary directory path is too long for an SSH control socket",
+            ));
+        }
+        Ok(Self {
+            inner: Arc::new(SharedSshInner {
+                options,
+                master: Mutex::new(None),
+                directory,
+            }),
+        })
+    }
+
+    /// Open an independent API connection. The deadline includes waiting for
+    /// concurrent initial setup, master authentication, and the API handshake.
+    pub fn connect(&self) -> Result<crate::JcodeClient> {
+        self.connect_with(|command| command)
+    }
+
+    fn connect_with(&self, configure: impl Fn(Command) -> Command) -> Result<crate::JcodeClient> {
+        let deadline = std::time::Instant::now() + self.inner.options.connect_timeout;
+        let socket = self.inner.directory.path().join("master");
+        let timeout = || {
+            Error::new(
+                ErrorKind::StartupTimeout,
+                "shared SSH startup and handshake timed out",
+            )
+        };
+        // A timed acquisition prevents queued concurrent callers exceeding their
+        // own budget while a single caller authenticates the initial master.
+        let mut state = loop {
+            match self.inner.master.try_lock() {
+                Ok(state) => break state,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(Error::new(
+                        ErrorKind::ConnectFailed,
+                        "shared SSH setup was interrupted",
+                    ));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(timeout());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        };
+        if state.is_none() {
+            *state = Some((|| {
+                let transport = SshTransport::spawn_command(configure(
+                    self.inner
+                        .options
+                        .command_with_control(Some((&socket, true)))?,
+                ))?;
+                let process = Arc::clone(&transport.process);
+                drop(transport);
+                loop {
+                    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                        return Ok(process);
+                    }
+                    let exited = process.stderr_done.lock().ok().is_some_and(|done| {
+                        done.as_ref().is_some_and(|rx| {
+                            !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
+                        })
+                    });
+                    if exited || std::time::Instant::now() >= deadline {
+                        process.shutdown();
+                        return Err(Error::new(
+                            if exited {
+                                ErrorKind::ConnectFailed
+                            } else {
+                                ErrorKind::StartupTimeout
+                            },
+                            process.diagnostic(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })());
+        }
+        state
+            .as_ref()
+            .expect("initialized master")
+            .as_ref()
+            .map_err(Clone::clone)?;
+        drop(state);
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(timeout)?;
+        // Even if the socket disappears after setup, ProxyCommand=false ensures
+        // OpenSSH cannot silently establish a second authenticated connection.
+        let mut transport = SshTransport::spawn_command(configure(
+            self.inner
+                .options
+                .command_with_control(Some((&socket, false)))?,
+        ))?;
+        let process = Arc::get_mut(&mut transport.process).expect("new SSH process");
+        process.shared_owner = Mutex::new(Some(Arc::clone(&self.inner)));
+        process.was_shared = true;
+        let mut options = self.inner.options.clone();
+        options.connect_timeout = remaining;
+        crate::JcodeClient::over_ssh(transport, options)
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+const STDERR_LIMIT: usize = 16 * 1024;
+
+#[cfg(all(test, unix))]
+#[path = "ssh_integration_tests.rs"]
+mod integration_tests;
+
+#[cfg(all(test, unix))]
+#[path = "shared_ssh_tests.rs"]
+mod shared_tests;
+
+pub(crate) struct SshProcess {
+    pub(crate) timed_out: AtomicBool,
+    child: Mutex<Option<Child>>,
+    status: Mutex<Option<std::process::ExitStatus>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    stderr_done: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    // Session channels retain the master even after the public owner is dropped.
+    #[cfg(unix)]
+    shared_owner: Mutex<Option<Arc<SharedSshInner>>>,
+    #[cfg(unix)]
+    pub(crate) was_shared: bool,
+}
+
+impl SshProcess {
+    #[cfg(unix)]
+    pub(crate) fn shared_transport(&self) -> Option<SharedSshTransport> {
+        self.shared_owner
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|inner| SharedSshTransport {
+                inner: Arc::clone(inner),
+            })
+    }
+
+    pub(crate) fn startup_deadline(
+        self: &Arc<Self>,
+        timeout: Duration,
+    ) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+        let (cancel, cancelled) = std::sync::mpsc::channel();
+        let process = Arc::clone(self);
+        let watchdog = std::thread::spawn(move || {
+            if matches!(
+                cancelled.recv_timeout(timeout),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ) {
+                process.timed_out.store(true, Ordering::Release);
+                process.shutdown();
+            }
+        });
+        (cancel, watchdog)
+    }
+
+    pub(crate) fn shutdown(&self) {
+        if let Ok(mut child) = self.child.lock()
+            && let Some(mut child) = child.take()
+        {
+            // A dedicated process group also closes ProxyCommand helpers.
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            if let Ok(status) = child.wait()
+                && let Ok(mut saved) = self.status.lock()
+            {
+                *saved = Some(status);
+            }
+        }
+        // Retained EventStreams can outlive the last client. A closed channel
+        // must not retain an otherwise idle authenticated master.
+        #[cfg(unix)]
+        if let Ok(mut owner) = self.shared_owner.lock() {
+            owner.take();
+        }
+        // Usually EOF arrives immediately. Never hang cleanup on an inherited
+        // stderr handle held by a configured external SSH helper.
+        if let Ok(mut done) = self.stderr_done.lock()
+            && let Some(done) = done.take()
+        {
+            let _ = done.recv_timeout(Duration::from_millis(100));
+        }
+    }
+
+    pub(crate) fn diagnostic(&self) -> String {
+        let detail = self
+            .stderr
+            .lock()
+            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+            .unwrap_or_default();
+        let status = self
+            .status
+            .lock()
+            .ok()
+            .and_then(|s| *s)
+            .map(|s| format!(" ({s})"))
+            .unwrap_or_default();
+        format!(
+            "SSH harness connection closed{status}. Check SSH authentication and known_hosts, and that remote jcode supports `api --stdio`.{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" SSH stderr: {detail}")
+            }
+        )
+    }
+}
+
+impl Drop for SshProcess {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+pub(crate) struct SshTransport {
+    pub(crate) process: Arc<SshProcess>,
+    reader: Option<std::process::ChildStdout>,
+    writer: Option<std::process::ChildStdin>,
+}
+
+impl SshTransport {
+    pub(crate) fn spawn(options: &SshConnectOptions) -> Result<Self> {
+        Self::spawn_command(options.command()?)
+    }
+
+    pub(crate) fn spawn_command(mut command: Command) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                Error::new(
+                    ErrorKind::ConnectFailed,
+                    format!("could not start system ssh: {error}"),
+                )
+            })?;
+        let reader = child.stdout.take();
+        let writer = child.stdin.take();
+        let mut stderr_pipe = child.stderr.take().expect("piped stderr");
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let buffer = Arc::clone(&stderr);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut chunk = [0; 4096];
+            loop {
+                match stderr_pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut bytes) = buffer.lock() {
+                            bytes.extend_from_slice(&chunk[..n]);
+                            if bytes.len() > STDERR_LIMIT {
+                                let excess = bytes.len() - STDERR_LIMIT;
+                                bytes.drain(..excess);
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+            let _ = done_tx.send(());
+        });
+        let process = Arc::new(SshProcess {
+            timed_out: AtomicBool::new(false),
+            child: Mutex::new(Some(child)),
+            status: Mutex::new(None),
+            stderr,
+            stderr_done: Mutex::new(Some(done_rx)),
+            #[cfg(unix)]
+            shared_owner: Mutex::new(None),
+            #[cfg(unix)]
+            was_shared: false,
+        });
+        Ok(Self {
+            process,
+            reader,
+            writer,
+        })
+    }
+}
+
+impl Transport for SshTransport {
+    fn shutdown_handle(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let process = Arc::clone(&self.process);
+        Some(Arc::new(move || process.shutdown()))
+    }
+
+    fn split(mut self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)> {
+        Ok((
+            Box::new(BufReader::new(self.reader.take().expect("SSH stdout"))),
+            Box::new(self.writer.take().expect("SSH stdin")),
+        ))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::{
+        JcodeClient,
+        api::{API_VERSION_MAJOR, ApiEvent, ServerFrame},
+    };
+    use std::time::Instant;
+
+    fn fake(script: &str) -> (SshTransport, u32) {
+        let mut command = Command::new("/bin/sh");
+        command.env_clear().args(["-c", script]);
+        let transport = SshTransport::spawn_command(command).unwrap();
+        let pid = transport
+            .process
+            .child
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .id();
+        (transport, pid)
+    }
+
+    fn options() -> SshConnectOptions {
+        SshConnectOptions {
+            connect_timeout: Duration::from_millis(150),
+            request_timeout: None,
+            ..SshConnectOptions::new("fake-host")
+        }
+    }
+
+    fn assert_reaped(pid: u32) {
+        let result = unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(result, -1, "SSH child was not reaped");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    fn hello() -> String {
+        serde_json::to_string(&ServerFrame::reply(
+            1,
+            ApiEvent::HelloOk {
+                version: API_VERSION_MAJOR,
+                server: "fake-ssh".into(),
+                capabilities: vec![],
+            },
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn rejects_hosts_that_can_inject_options_or_shell_commands() {
+        for host in [
+            "",
+            "-oProxyCommand=evil",
+            "host name",
+            "host;touch x",
+            "$(evil)",
+            "x`evil`",
+            "x\ny",
+            "ssh://host",
+            "a@b@c",
+            "-user@host",
+        ] {
+            assert!(
+                SshConnectOptions::new(host).command().is_err(),
+                "accepted {host:?}"
+            );
+        }
+        for host in [
+            "desktop",
+            "user@host.example",
+            "127.0.0.1",
+            "[::1]",
+            "fe80::1%eth0",
+        ] {
+            assert!(
+                SshConnectOptions::new(host).command().is_ok(),
+                "rejected {host}"
+            );
+        }
+        let mut opts = options();
+        opts.user = Some("root;evil".into());
+        assert!(opts.command().is_err());
+        opts.user = None;
+        opts.port = Some(0);
+        assert!(opts.command().is_err());
+        opts.port = None;
+        opts.connect_timeout = Duration::ZERO;
+        assert!(opts.command().is_err());
+        opts.connect_timeout = Duration::from_secs(2);
+        opts.client_name = "\0".repeat(1024);
+        assert!(opts.command().is_err());
+    }
+
+    #[test]
+    fn managed_hosts_use_only_the_supplied_identity_and_pinned_host_keys() {
+        let mut opts = options();
+        opts.host = "203.0.113.7".into();
+        opts.user = Some("ec2-user".into());
+        opts.identity_file = Some("/run/jcode/key".into());
+        opts.known_hosts_file = Some("/run/jcode/known_hosts".into());
+        opts.isolated_config = true;
+        let command = opts.command().unwrap();
+        let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert!(args.windows(2).any(|a| a == ["-F", "/dev/null"]));
+        for expected in [
+            "IdentityFile=/run/jcode/key",
+            "IdentitiesOnly=yes",
+            "IdentityAgent=none",
+            "UserKnownHostsFile=/run/jcode/known_hosts",
+            "GlobalKnownHostsFile=/dev/null",
+            "StrictHostKeyChecking=yes",
+            "BatchMode=yes",
+        ] {
+            assert!(args.contains(&expected), "missing {expected}: {args:?}");
+        }
+        for bad in ["relative/key", "/tmp/%h", "/tmp/a\nb"] {
+            let mut opts = opts.clone();
+            opts.identity_file = Some(bad.into());
+            assert!(opts.command().is_err(), "accepted identity {bad:?}");
+            let mut opts = opts.clone();
+            opts.identity_file = None;
+            opts.known_hosts_file = Some(bad.into());
+            assert!(opts.command().is_err(), "accepted known_hosts {bad:?}");
+        }
+    }
+
+    #[test]
+    fn preserves_system_ssh_configuration_without_weakening_host_verification() {
+        let mut opts = options();
+        opts.port = Some(2222);
+        opts.user = Some("alice".into());
+        opts.remote_binary = "/opt/a b/jcode'$(false)".into();
+        let command = opts.command().unwrap();
+        let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(command.get_program(), "ssh");
+        assert!(args.contains(&"StrictHostKeyChecking=yes"));
+        assert!(args.contains(&"BatchMode=yes"));
+        assert!(!args.contains(&"-F"));
+        assert!(!args.iter().any(|arg| arg.contains("KnownHostsFile")));
+        assert!(args.windows(2).any(|a| a == ["-p", "2222"]));
+        assert!(args.windows(2).any(|a| a == ["-l", "alice"]));
+        assert_eq!(args[args.len() - 2], "fake-host");
+        assert!(args.last().unwrap().ends_with(" --no-update api --stdio"));
+        let quoted = shell_quote(&opts.remote_binary);
+        let output = Command::new("/bin/sh")
+            .args(["-c", &format!("printf '%s' {quoted}")])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            opts.remote_binary
+        );
+    }
+
+    #[test]
+    fn handshake_timeout_is_bounded_even_without_request_timeout_and_reaps_child() {
+        let (transport, pid) = fake("echo 'waiting for remote jcode' >&2; exec /bin/sleep 30");
+        let start = Instant::now();
+        let error = JcodeClient::over_ssh(transport, options()).err().unwrap();
+        assert_eq!(error.kind, ErrorKind::StartupTimeout);
+        assert!(error.message.contains("waiting for remote jcode"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn ssh_stderr_is_reported_and_failed_child_is_reaped() {
+        let (transport, pid) = fake("echo 'Permission denied (publickey)' >&2; exit 255");
+        let error = JcodeClient::over_ssh(transport, options()).err().unwrap();
+        assert!(
+            error.message.contains("Permission denied (publickey)"),
+            "{error}"
+        );
+        assert!(error.message.contains("api --stdio"));
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn final_clone_drop_kills_and_reaps_but_earlier_clone_drop_does_not() {
+        let pong = serde_json::to_string(&ServerFrame::reply(2, ApiEvent::Pong)).unwrap();
+        let script = format!(
+            "read -r hello; printf '%s\\n' {}; read -r ping; printf '%s\\n' {}; exec /bin/sleep 30",
+            shell_quote(&hello()),
+            shell_quote(&pong)
+        );
+        let (transport, pid) = fake(&script);
+        let client = JcodeClient::over_ssh(transport, options()).unwrap();
+        assert!(client.socket_path().as_os_str().is_empty());
+        let clone = client.clone();
+        drop(client);
+        clone.ping().unwrap();
+        let start = Instant::now();
+        drop(clone);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn malformed_handshake_closes_owned_ssh_process() {
+        let (transport, pid) = fake("read -r hello; echo 'not JSON'; exec /bin/sleep 30");
+        assert!(JcodeClient::over_ssh(transport, options()).is_err());
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn dropping_unconnected_transport_reaps_ssh() {
+        let (transport, pid) = fake("exec /bin/sleep 30");
+        drop(transport);
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn startup_watchdog_interrupts_a_blocked_hello_write() {
+        let (transport, pid) = fake("exec /bin/sleep 30");
+        let mut opts = options();
+        // Bypass public validation to exercise the process watchdog, rather
+        // than depending on a platform's pipe capacity for startup safety.
+        opts.client_name = "x".repeat(1024 * 1024);
+        let start = Instant::now();
+        let error = JcodeClient::over_ssh(transport, opts).err().unwrap();
+        assert_eq!(error.kind, ErrorKind::StartupTimeout);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn established_disconnect_fails_requests_with_ssh_stderr_and_reaps() {
+        let script = format!(
+            "read -r hello; printf '%s\\n' {}; read -r ping; echo 'remote channel failed' >&2; exit 17",
+            shell_quote(&hello())
+        );
+        let (transport, pid) = fake(&script);
+        let client = JcodeClient::over_ssh(transport, options()).unwrap();
+        let error = client.ping().unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Disconnected);
+        assert!(error.message.contains("remote channel failed"), "{error}");
+        assert!(client.is_closed());
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn streaming_disconnect_preserves_ssh_stderr() {
+        let script = format!(
+            "read -r hello; printf '%s\\n' {}; read -r message; echo 'stream channel failed' >&2; exit 17",
+            shell_quote(&hello())
+        );
+        let (transport, pid) = fake(&script);
+        let client = JcodeClient::over_ssh(transport, options()).unwrap();
+        let error = client
+            .run("fake-session", "test", crate::RunOptions::default())
+            .unwrap_err();
+        assert!(error.message.contains("stream channel failed"), "{error}");
+        assert_reaped(pid);
+    }
+
+    #[test]
+    fn stderr_is_bounded_and_drained_without_backpressure() {
+        let script = "i=0; while [ $i -lt 5000 ]; do echo 'a fairly long SSH diagnostic line' >&2; i=$((i+1)); done; echo FINAL_DIAGNOSTIC >&2; exit 255";
+        let (transport, pid) = fake(script);
+        let mut opts = options();
+        opts.connect_timeout = Duration::from_secs(5);
+        let error = JcodeClient::over_ssh(transport, opts).err().unwrap();
+        assert!(error.message.contains("FINAL_DIAGNOSTIC"));
+        assert!(error.message.len() < STDERR_LIMIT + 1024);
+        assert_reaped(pid);
+    }
+}

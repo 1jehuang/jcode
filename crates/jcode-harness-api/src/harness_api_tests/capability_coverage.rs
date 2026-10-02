@@ -6,7 +6,7 @@
 //! API crate, and the gap only shows up when someone tries to build a real
 //! client and finds they cannot switch models.
 //!
-//! So the reference clients are the specification. The TUI and desktop2 are
+//! So the reference clients are the specification. The TUI is
 //! complete, shipping clients of the same daemon; every request they send is
 //! by definition something a client needs. This test diffs that set against
 //! the API surface and fails when an unreviewed gap appears.
@@ -28,6 +28,7 @@ enum Disposition {
     ClientInternal,
     /// A real gap. Worth exposing, not yet done. Every entry needs a reason
     /// that says what a client cannot build without it.
+    #[allow(dead_code)] // Empty today; the ledger keeps the slot for future gaps.
     Gap(&'static str),
 }
 
@@ -37,7 +38,7 @@ use Disposition::{ClientInternal, Covered, Gap};
 ///
 /// Sorted by name so additions produce clean diffs.
 const LEDGER: &[(&str, Disposition)] = &[
-    ("BackgroundTool", ClientInternal),
+    ("BackgroundTool", Covered),
     ("Cancel", Covered),
     ("CancelSoftInterrupts", Covered),
     ("Clear", Covered),
@@ -47,6 +48,8 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("GetCompactedHistory", ClientInternal),
     ("GetHistory", Covered),
     ("GetModelCatalog", Covered),
+    // Create/attach session bootstrap requests state through the API bridge.
+    ("GetState", Covered),
     ("InputShell", ClientInternal),
     ("Message", Covered),
     ("NotifyAuthChanged", Covered),
@@ -65,6 +68,7 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetReasoningEffort", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
+    ("SetSessionSaved", Covered),
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),
@@ -73,19 +77,20 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("Subscribe", Covered),
     ("SwitchAnthropicAccount", ClientInternal),
     ("SwitchOpenAiAccount", ClientInternal),
+    ("InvalidateOpenAiUsage", Covered),
     ("Transcript", ClientInternal),
     ("Transfer", ClientInternal),
     ("TriggerMemoryExtraction", ClientInternal),
 ];
 
-/// Requests the reference clients (TUI, desktop2) send to the daemon.
+/// Requests the reference clients (TUI) send to the daemon.
 fn reference_client_requests() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for dir in ["../jcode-tui/src", "../jcode-desktop2/src"] {
+    {
+        let dir = "../jcode-tui/src";
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
         collect_requests(&root, &mut found);
     }
-    // The desktop2 client speaks the *API*, so its `ApiRequest::` uses are
     // covered by construction and would otherwise pollute the diff.
     for api_only in [
         "CreateSession",

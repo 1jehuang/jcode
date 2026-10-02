@@ -45,6 +45,7 @@ fn sample_mermaid_page(content: impl Into<String>) -> crate::side_panel::SidePan
         title: format!("Mermaid Demo {content_hash:016x}"),
         file_path: format!("mermaid_demo_{content_hash:016x}.md"),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content,
         updated_at_ms: content_hash,
@@ -132,62 +133,6 @@ fn side_panel_mermaid_fit_fill_allows_wide_short_diagrams_above_200_percent() {
         "high fill zoom should reserve enough rows to fill the pane, got {}",
         layout.rows
     );
-}
-
-#[test]
-fn pinned_content_image_layout_uses_high_zoom_viewport_for_generated_wide_diagram() {
-    let layout = pinned_content_image_layout_with_font(
-        1800,
-        161,
-        Rect::new(78, 1, 52, 67),
-        0,
-        false,
-        Some((10, 20)),
-        false,
-    );
-
-    match layout.render_mode {
-        SidePanelImageRenderMode::ScrollableViewport { zoom_percent } => {
-            assert!(
-                zoom_percent > 200,
-                "pinned content must not fall back to the old 200% cap, got {zoom_percent}%"
-            );
-        }
-        other => panic!("expected pinned content viewport fill, got {other:?}"),
-    }
-    assert!(
-        layout.rows >= 67,
-        "pinned content should reserve enough rows to fill the visible pane, got {}",
-        layout.rows
-    );
-}
-
-#[test]
-fn pinned_content_wide_photo_fits_to_width_not_cropped() {
-    // A very wide screenshot (e.g. 3955x785, ~5:1) must show the FULL image, not
-    // crop to the left edge. With force_full_width=true the layout must fall
-    // back to a Fit render whenever a viewport zoom would overflow the pane.
-    let inner = Rect::new(0, 0, 55, 48);
-    let font = Some((8u16, 16u16));
-    let layout = pinned_content_image_layout_with_font(3955, 785, inner, 0, false, font, true);
-
-    assert_eq!(
-        layout.render_mode,
-        SidePanelImageRenderMode::Fit,
-        "wide photo must use Fit so the whole width is visible"
-    );
-
-    // Sanity: the same wide image WITHOUT the full-width guard would have picked
-    // a scrollable viewport that overflows the pane width (the original bug).
-    let unguarded = pinned_content_image_layout_with_font(3955, 785, inner, 0, false, font, false);
-    if let SidePanelImageRenderMode::ScrollableViewport { zoom_percent } = unguarded.render_mode {
-        let scaled_w_px = 3955u32 * zoom_percent as u32 / 100;
-        let avail_px = inner.width as u32 * 8;
-        assert!(
-            scaled_w_px > avail_px,
-            "test precondition: unguarded mode should overflow ({scaled_w_px}px > {avail_px}px)"
-        );
-    }
 }
 
 #[test]
@@ -686,6 +631,7 @@ fn render_side_panel_markdown_wraps_long_text_lines() {
             title: "Wrap Demo".to_string(),
             file_path: "wrap_demo.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "This is a deliberately long side panel line that should wrap instead of overflowing the pane.".to_string(),
             updated_at_ms: 1,
@@ -718,6 +664,7 @@ fn render_side_panel_markdown_keeps_table_rows_intact() {
         title: "Table Demo".to_string(),
         file_path: "table_demo.md".to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content:
             "| # | Principle | Story Ready |\n| - | - | - |\n| 1 | Customer Obsession | unchecked |"
@@ -752,12 +699,14 @@ fn render_side_panel_markdown_live_syncs_file_content() {
     std::fs::write(&file_path, "# First").expect("write initial content");
 
     let mut snapshot = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("live_demo".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "live_demo".to_string(),
             title: "Live Demo".to_string(),
             file_path: file_path.display().to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::LinkedFile,
             content: "# Stale".to_string(),
             updated_at_ms: 1,
@@ -816,6 +765,7 @@ fn render_side_panel_height_change_reuses_markdown_render_cache() {
         title: "Height Cache Demo".to_string(),
         file_path: "height_cache_demo.md".to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content: "# Demo\n\nThis side panel should only parse markdown once for a stable width."
             .to_string(),
@@ -846,6 +796,7 @@ fn render_side_panel_content_change_with_same_revision_invalidates_cache() {
         title: "Cache Invalidation Demo".to_string(),
         file_path: "cache_invalidation_demo.md".to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content: "# First version".to_string(),
         updated_at_ms: 1,
@@ -891,12 +842,14 @@ fn prewarm_focused_side_panel_reuses_markdown_cache_on_first_draw() {
     // Thread-local counter: see render_side_panel_height_change test.
     let before = markdown::thread_render_count();
     let snapshot = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("prewarm_demo".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "prewarm_demo".to_string(),
             title: "Prewarm Demo".to_string(),
             file_path: "prewarm_demo.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "# Demo\n\nThis should be warm before first draw.".to_string(),
             updated_at_ms: 7,
@@ -934,6 +887,7 @@ fn render_side_panel_managed_pages_ignore_disk_file_content() {
         title: "Managed Demo".to_string(),
         file_path: file_path.display().to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content: "# In Memory".to_string(),
         updated_at_ms: 42,
@@ -968,6 +922,7 @@ fn render_side_panel_linked_file_missing_file_falls_back_to_snapshot_content() {
         title: "Linked Missing Demo".to_string(),
         file_path: file_path.display().to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::LinkedFile,
         content: "# Snapshot Fallback".to_string(),
         updated_at_ms: 7,

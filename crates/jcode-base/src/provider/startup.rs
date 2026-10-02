@@ -69,9 +69,6 @@ impl MultiProvider {
                 if let Some(anthropic) = self.anthropic_provider() {
                     anthropic.invalidate_credentials().await;
                 }
-                if let Some(claude) = self.claude_provider() {
-                    claude.invalidate_credentials().await;
-                }
             }
             ActiveProvider::OpenAI => {
                 if let Some(openai) = self.openai_provider() {
@@ -127,25 +124,13 @@ impl MultiProvider {
         let has_bedrock_creds = bedrock::BedrockProvider::has_credentials();
         let has_openrouter_creds = openrouter::has_credentials();
 
-        let use_claude_cli = std::env::var("JCODE_USE_CLAUDE_CLI")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        if use_claude_cli {
+        if std::env::var_os("JCODE_USE_CLAUDE_CLI").is_some() {
             crate::logging::warn(
-                "JCODE_USE_CLAUDE_CLI is deprecated and will be removed. Direct Anthropic API transport is the default.",
+                "JCODE_USE_CLAUDE_CLI has been removed and is ignored. Claude uses the direct Anthropic transport.",
             );
         }
 
-        let claude = if has_claude_creds && use_claude_cli {
-            crate::logging::info(
-                "Using deprecated Claude CLI provider (forced by JCODE_USE_CLAUDE_CLI=1)",
-            );
-            external::instantiate_expected_external_provider(external::CLAUDE_CLI_RUNTIME)
-        } else {
-            None
-        };
-
-        let anthropic = if has_claude_creds && !use_claude_cli {
+        let anthropic = if has_claude_creds {
             let provider =
                 external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME);
             let active_profile_is_anthropic = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
@@ -256,7 +241,7 @@ impl MultiProvider {
         );
         let availability = ProviderAvailability {
             openai: openai.is_some(),
-            claude: claude.is_some() || anthropic.is_some(),
+            claude: anthropic.is_some(),
             copilot: copilot_api.is_some(),
             antigravity: antigravity_provider.is_some(),
             gemini: gemini_provider.is_some(),
@@ -323,7 +308,6 @@ impl MultiProvider {
         }
 
         let result = Self {
-            claude: RwLock::new(claude),
             anthropic: RwLock::new(anthropic),
             openai: RwLock::new(openai),
             copilot_api: RwLock::new(copilot_api),
@@ -335,7 +319,6 @@ impl MultiProvider {
             openai_compatible_profiles: RwLock::new(HashMap::new()),
             active_openai_compatible_profile: RwLock::new(None),
             active: RwLock::new(active),
-            use_claude_cli,
             startup_notices: RwLock::new(Vec::new()),
             initial_provider,
             routes_memo: Mutex::new(None),
@@ -364,12 +347,7 @@ impl MultiProvider {
         result.spawn_openai_catalog_refresh_if_needed();
         result.auto_select_active_multi_account();
         crate::logging::info(&format!(
-            "[TIMING] provider_init: claude={}, anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, bedrock={}, openrouter={}, total={}ms",
-            result
-                .claude
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_some(),
+            "[TIMING] provider_init: anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, bedrock={}, openrouter={}, total={}ms",
             result
                 .anthropic
                 .read()
@@ -435,26 +413,28 @@ impl MultiProvider {
     }
 
     pub(super) fn spawn_anthropic_catalog_refresh_if_needed(&self) {
-        let provider: Arc<dyn Provider> = if let Some(anthropic) = self.anthropic_provider() {
-            anthropic
-        } else if let Some(claude) = self.claude_provider() {
-            claude
-        } else {
+        let api_stale = anthropic::load_anthropic_api_key().is_ok()
+            && should_refresh_anthropic_model_catalog_for_scope(
+                &anthropic_catalog_scope_for_route(false),
+            );
+        let oauth_stale = auth::claude::load_credentials().is_ok()
+            && should_refresh_anthropic_model_catalog_for_scope(
+                &anthropic_catalog_scope_for_route(true),
+            );
+        if !api_stale && !oauth_stale {
+            return;
+        }
+        let Some(provider) = self.anthropic_provider() else {
             return;
         };
-
-        let Some(scope) = begin_anthropic_model_catalog_refresh() else {
-            return;
-        };
-
+        // The direct runtime multiplexes API key and OAuth. Its prefetch owns
+        // independent scoped refresh guards, including when invoked elsewhere.
         tokio::spawn(async move {
             if let Err(err) = provider.prefetch_models().await {
                 crate::logging::info(&format!(
-                    "Failed to refresh Anthropic model catalog from provider bootstrap: {}",
-                    err
+                    "Failed to refresh Anthropic model catalogs: {err}"
                 ));
             }
-            finish_anthropic_model_catalog_refresh_for_scope(&scope);
         });
     }
 

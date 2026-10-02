@@ -218,7 +218,9 @@ fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
     );
     // ...but maps to the strongest real effort when building the request.
     assert_eq!(
-        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max"))
+            .as_deref(),
         Some("max")
     );
     assert_eq!(
@@ -246,7 +248,9 @@ fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
         &[],
         false,
         Some(DEFAULT_MAX_OUTPUT_TOKENS),
-        provider.api_reasoning_effort(Some("swarm")).as_deref(),
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("swarm"), Some("max"))
+            .as_deref(),
         None,
         None,
         None,
@@ -352,5 +356,128 @@ fn test_build_response_request_passes_system_prompt_through_verbatim() {
             serde_json::json!(system),
             "system prompt must not be rewritten (is_chatgpt_mode={is_chatgpt_mode})"
         );
+    }
+}
+
+#[tokio::test]
+async fn configured_swarm_root_effort_resolves_without_changing_stored_mode() {
+    let provider = OpenAIProvider::new_browser_only();
+    *provider.model.write().await = "gpt-5.6".to_string();
+    provider.model_reasoning_efforts.write().unwrap().insert(
+        "gpt-5.6".to_string(),
+        vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+    );
+    for mode in ["swarm", "swarm-deep"] {
+        provider.set_reasoning_effort(mode).unwrap();
+        for (configured, expected) in [
+            ("low", "low"),
+            ("medium", "medium"),
+            ("max", "xhigh"),
+            ("none", "low"),
+            ("minimal", "low"),
+        ] {
+            let effort =
+                provider.api_reasoning_effort_with_swarm_root(Some(mode), Some(configured));
+            assert_eq!(effort.as_deref(), Some(expected));
+            let request = OpenAIProvider::build_response_request(
+                "gpt-5.6",
+                "system".into(),
+                &[],
+                &[],
+                false,
+                Some(DEFAULT_MAX_OUTPUT_TOKENS),
+                effort.as_deref(),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(request["reasoning"]["effort"], expected);
+            assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
+        }
+    }
+    provider.model_reasoning_efforts.write().unwrap().insert(
+        "gpt-5.6".to_string(),
+        vec!["none".into(), "low".into(), "max".into()],
+    );
+    for mode in ["swarm", "swarm-deep"] {
+        let effort = provider.api_reasoning_effort_with_swarm_root(Some(mode), Some("none"));
+        let request = OpenAIProvider::build_response_request(
+            "gpt-5.6",
+            "system".into(),
+            &[],
+            &[],
+            false,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            effort.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(request["reasoning"]["effort"], "none");
+    }
+    assert_eq!(
+        provider
+            .api_reasoning_effort_with_swarm_root(Some("high"), Some("low"))
+            .as_deref(),
+        Some("high")
+    );
+}
+
+#[test]
+fn configured_swarm_root_effort_reads_real_config() {
+    // Run this single test in a child process so changing config cannot race
+    // other provider tests or reuse an already-initialized global config cache.
+    if std::env::var_os("JCODE_TEST_SWARM_ROOT_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
+            .env("JCODE_SWARM_ROOT_EFFORT", "low")
+            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
+            .output()
+            .expect("run isolated config test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let provider = OpenAIProvider::new_browser_only();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        *provider.model.write().await = "gpt-5.6".into();
+    });
+    provider.model_reasoning_efforts.write().unwrap().insert(
+        "gpt-5.6".into(),
+        vec!["none".into(), "low".into(), "max".into()],
+    );
+    for (mode, expected) in [("swarm", "low"), ("swarm-deep", "none")] {
+        provider.set_reasoning_effort(mode).unwrap();
+        let effort = provider.api_reasoning_effort(provider.reasoning_effort().as_deref());
+        let request = OpenAIProvider::build_response_request(
+            "gpt-5.6",
+            "system".into(),
+            &[],
+            &[],
+            false,
+            Some(DEFAULT_MAX_OUTPUT_TOKENS),
+            effort.as_deref(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(request["reasoning"]["effort"], expected);
+        assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
     }
 }

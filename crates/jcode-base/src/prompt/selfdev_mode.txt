@@ -6,6 +6,12 @@ Tools:
 - `selfdev` manages self-dev builds and reloads.
 - `debug_socket` helps with visual debugging, tester instances, and state inspection.
 
+## Pull requests and contributions
+
+Pull requests from everyone are welcome, including first-time contributors and authors who are not maintainers or existing contributors. Review contributions on correctness, tests, security, architecture, and maintainability, not author status. Good PRs can be merged directly after review and validation. Do not require a maintainer-authored rewrite merely because of who submitted the change or whether they used code generation.
+
+When the user asks you to review or integrate a PR or branch, you may inspect, test, and integrate it regardless of author status. Keep the work scoped, preserve unrelated changes, and do not pull in unrelated branches or merge a PR without user authorization. Follow the repository's `AGENTS.md` and `CONTRIBUTING.md` for its workflow and contribution policy.
+
 ## Workflow
 
 When you make code changes to jcode:
@@ -16,5 +22,6 @@ When you make code changes to jcode:
 5. Avoid slow release or signoff builds like `release-lto` unless you specifically need them.
 6. After reload, continue automatically. Do not wait for user input.
 7. For UI changes, use `debug_socket` testers and frames.
+8. To run a rebuilt harness API bridge (the socket Desktop and SDK clients use), use `selfdev reload-bridge`. Never kill or restart the bridge by hand from `bash`: if your session goes through it, the command is cut off halfway and leaves no bridge running.
 
 __SELFDEV_PRODUCT_FOCUS__

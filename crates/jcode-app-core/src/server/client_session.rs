@@ -18,6 +18,7 @@ use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::WriteHalf;
 use anyhow::Result;
+use futures::FutureExt;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -898,6 +899,17 @@ pub(super) async fn handle_subscribe(
         session_id: client_session_id.to_string(),
     });
     let _ = client_event_tx.send(ServerEvent::Done { id });
+    prewarm_idle_agent(agent);
+}
+
+fn prewarm_idle_agent(agent: &Arc<Mutex<Agent>>) -> bool {
+    // Poll local preparation once, without holding the agent across a yield.
+    // If a registry/provider lock would wait, abandon this optional attempt.
+    // Only the provider's network task can outlive this call.
+    let Ok(guard) = agent.try_lock() else {
+        return false;
+    };
+    guard.prewarm_provider().now_or_never().is_some()
 }
 
 async fn subscribe_should_mark_ready(
@@ -1160,6 +1172,18 @@ async fn claim_live_target_agent(
         .get(session_id)
         .filter(|existing| !Arc::ptr_eq(existing, source_agent))
         .cloned()?;
+    // A session that migrated back from another machine has a newer transcript
+    // on disk than this live agent. Never reattach to the stale copy. The
+    // caller then restores from disk and replaces the map entry.
+    if target
+        .try_lock()
+        .is_ok_and(|agent| agent.session_copy_is_stale())
+    {
+        crate::logging::info(&format!(
+            "Resume of {session_id}: live agent is older than the migrated transcript on disk; reloading"
+        ));
+        return None;
+    }
 
     let info = connections.get_mut(client_connection_id)?;
     info.session_id = session_id.to_string();
@@ -1203,6 +1227,7 @@ pub(super) async fn handle_resume_session(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    supports_pdf_panels: bool,
 ) -> Result<Arc<Mutex<Agent>>> {
     let resume_start = Instant::now();
     let incoming_client_instance_id = client_instance_id.map(str::to_string);
@@ -1386,6 +1411,7 @@ pub(super) async fn handle_resume_session(
             server_name,
             server_icon,
             None,
+            supports_pdf_panels,
         )
         .await?;
         let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -1553,11 +1579,6 @@ pub(super) async fn handle_resume_session(
         }
     }
 
-    {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.mark_closed();
-    }
-
     let (result, is_canary) = {
         let mut agent_guard = agent.lock().await;
         let result =
@@ -1677,6 +1698,7 @@ pub(super) async fn handle_resume_session(
                 server_name,
                 server_icon,
                 Some(was_interrupted),
+                supports_pdf_panels,
             )
             .await?;
             let _ = client_event_tx.send(ServerEvent::Done { id });

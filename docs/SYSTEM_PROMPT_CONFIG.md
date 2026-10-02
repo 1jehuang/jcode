@@ -8,7 +8,9 @@ files, so you can tune agent behavior without rebuilding.
 1. **Base system prompt** — built-in `crates/jcode-base/src/prompt/system_prompt.md`,
    overridable by file (see below).
 2. Capability modules (e.g. Mermaid guidance).
-3. Self-dev guidance (self-dev sessions only).
+3. Product-specific self-dev guidance. Sessions rooted in a Jcode Desktop
+   checkout automatically receive the Desktop prompt and `desktop_selfdev` tool,
+   separate from CLI/TUI self-dev flags, `selfdev`, and `debug_socket`.
 4. `AGENTS.md` — project `./AGENTS.md` and global `~/AGENTS.md`.
 5. Prompt overlay — `./.jcode/prompt-overlay.md` and `~/.jcode/prompt-overlay.md`.
 6. Preferred tools — `./.jcode/preferred-tools.md` and `~/.jcode/preferred-tools.md`.
@@ -21,7 +23,11 @@ Append instructions without touching the default prompt:
 - `~/.jcode/prompt-overlay.md` — applies everywhere.
 - `./.jcode/prompt-overlay.md` — applies to one project.
 
-Both are included when present.
+Both are included when present. For layers 4–6, if the project and global paths
+resolve to the same canonical path (for example, when working in `$HOME` or using
+symlink aliases), the file is included once under its project heading. Distinct
+files are still both included, even when their contents match. The global
+`.jcode` directory respects `JCODE_HOME` when set.
 
 ## Replacing the base prompt
 
@@ -46,3 +52,26 @@ This replaces only the base prompt. AGENTS.md, overlays, skills, and memory stil
   Use `/swarm-prompt` to edit the active project or global file. New agents load
   the latest contents immediately; already-running agents keep the prompt they
   captured at session creation so their tool definition and context cache stay stable.
+
+## Direct SDK overrides
+
+SDK callers can replace the **complete assembled system prompt** when creating a
+session, without writing files:
+
+```typescript
+const session = await client.createSession({
+  workingDir: process.cwd(),
+  systemPrompt: "You are a concise programming tutor.",
+});
+```
+
+Rust callers use `create_session_with_options(CreateSessionOptions {
+working_dir: None, system_prompt: Some("You are a concise programming tutor.".into())
+})`. The existing `create_session(working_dir)` API remains available.
+
+Unlike `system-prompt.md`, which replaces only the base layer, this option replaces
+all assembled prompt layers. Omit the option to retain normal Jcode prompting.
+An empty string explicitly selects an empty system prompt. The override belongs
+to that session and is persisted for resume and inherited by forks. Attaching to
+an existing session does not change its prompt. This requires a daemon version
+that supports the `system_prompt` session-creation field.

@@ -58,13 +58,6 @@ pub(crate) fn tool_smoke_skip_detail_for_choice(
         );
     }
 
-    if matches!(choice, super::provider_init::ProviderChoice::GrokBuild) {
-        return Some(
-            "Skipped: Grok Build executes its isolated ACP coding-tool loop internally; it does not expose Jcode tool calls for the outer auth-test harness. Basic provider smoke validates the subscription transport."
-                .to_string(),
-        );
-    }
-
     if matches!(choice, super::provider_init::ProviderChoice::Fpt) {
         let model = effective_openai_compatible_auth_test_model(
             crate::provider_catalog::FPT_PROFILE,
@@ -306,6 +299,9 @@ async fn run_provider_tool_smoke_for_choice(
             crate::session::Session::create(None, None),
             Some(allowed_tools),
         );
+        // The smoke test checks for an exact reply. Memory recall (and any
+        // plan-limit notice it raises) would add unrelated text to it.
+        agent.set_memory_enabled(false);
         let transcript_start = agent.messages().len();
         let output = agent.run_once_capture(prompt).await.with_context(|| {
             format!(
@@ -342,7 +338,9 @@ fn validate_auth_test_tool_smoke_transcript(
     for message in messages {
         for block in &message.content {
             match block {
-                crate::message::ContentBlock::ToolUse { id, name, input, .. } => {
+                crate::message::ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     tool_uses.push((id.as_str(), name.as_str(), input));
                 }
                 crate::message::ContentBlock::ToolResult {
@@ -366,7 +364,9 @@ fn validate_auth_test_tool_smoke_transcript(
         id: tool_id.to_string(),
         name: tool_name.to_string(),
         input: input.clone(),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     if let Some(error) = tool_call.validation_error() {
         anyhow::bail!("tool smoke emitted invalid tool call: {error}");
     }
@@ -467,6 +467,23 @@ where
 
 pub(crate) fn auth_test_error_is_retryable(err: &anyhow::Error) -> bool {
     let text = format!("{err:#}").to_ascii_lowercase();
+    // A hard quota exhaustion ("usage limit reached, resets in 28d") cannot
+    // change within one auth-test run, so retrying it only burns the 120s
+    // smoke timeout up to three times (#1148). Check these deterministic
+    // markers before the generic transient 429 needles below.
+    if [
+        "usage_limit_reached",
+        "usage limit has been reached",
+        "usage limit reached",
+        "insufficient_quota",
+        "quota exceeded",
+        "quota_exceeded",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+    {
+        return false;
+    }
     [
         "http 429",
         "too many requests",
@@ -598,7 +615,9 @@ mod auth_tool_smoke_tests {
                 vec![crate::message::ContentBlock::ToolUse {
                     id: "call_1".to_string(),
                     name: AUTH_TEST_TOOL_NAME.to_string(),
-                    input: serde_json::json!({"command": AUTH_TEST_TOOL_COMMAND}), thought_signature: None, }],
+                    input: serde_json::json!({"command": AUTH_TEST_TOOL_COMMAND}),
+                    thought_signature: None,
+                }],
             ),
             stored_message(
                 crate::message::Role::User,

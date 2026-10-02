@@ -81,8 +81,6 @@ pub enum DiffDisplayMode {
         alias = "full"
     )]
     FullInline,
-    /// Show diffs in a dedicated pinned pane.
-    Pinned,
     /// Show full file with diff highlights in side panel, synced to scroll position.
     File,
 }
@@ -96,24 +94,19 @@ impl DiffDisplayMode {
         matches!(self, Self::FullInline)
     }
 
-    pub fn is_pinned(&self) -> bool {
-        matches!(self, Self::Pinned)
-    }
-
     pub fn is_file(&self) -> bool {
         matches!(self, Self::File)
     }
 
     pub fn has_side_pane(&self) -> bool {
-        matches!(self, Self::Pinned | Self::File)
+        matches!(self, Self::File)
     }
 
     pub fn cycle(self) -> Self {
         match self {
             Self::Off => Self::Inline,
             Self::Inline => Self::FullInline,
-            Self::FullInline => Self::Pinned,
-            Self::Pinned => Self::File,
+            Self::FullInline => Self::File,
             Self::File => Self::Off,
         }
     }
@@ -123,32 +116,44 @@ impl DiffDisplayMode {
             Self::Off => "OFF",
             Self::Inline => "Inline",
             Self::FullInline => "Inline Full",
-            Self::Pinned => "Pinned",
             Self::File => "File",
         }
     }
 }
 
-/// When to show the overscroll status line (model/provider/context info below
-/// the input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OverscrollStatusMode {
-    /// Never show the status line.
-    Off,
-    /// Always show the status line below the input.
-    On,
-    /// Elastic reveal: show it briefly when scrolling past the bottom (default).
-    #[default]
-    Overscroll,
-}
+#[cfg(test)]
+mod diff_display_mode_tests {
+    use super::DiffDisplayMode;
 
-impl OverscrollStatusMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::On => "on",
-            Self::Overscroll => "overscroll",
+    #[test]
+    fn diff_mode_cycle_keeps_inline_and_file_modes() {
+        use DiffDisplayMode::*;
+        let mut mode = Off;
+        for expected in [Inline, FullInline, File, Off, Inline] {
+            mode = mode.cycle();
+            assert_eq!(mode, expected);
+        }
+        for mode in [Off, Inline, FullInline, File] {
+            assert_eq!(mode.has_side_pane(), mode == File);
+            assert_eq!(mode.is_inline(), matches!(mode, Inline | FullInline));
+            assert_eq!(mode.is_full_inline(), mode == FullInline);
+            assert_eq!(mode.is_file(), mode == File);
+        }
+    }
+
+    #[test]
+    fn diff_mode_remaining_values_round_trip() {
+        for mode in [
+            DiffDisplayMode::Off,
+            DiffDisplayMode::Inline,
+            DiffDisplayMode::FullInline,
+            DiffDisplayMode::File,
+        ] {
+            let encoded = serde_json::to_string(&mode).unwrap();
+            assert_eq!(
+                serde_json::from_str::<DiffDisplayMode>(&encoded).unwrap(),
+                mode
+            );
         }
     }
 }
@@ -327,6 +332,7 @@ pub enum CrossProviderFailoverMode {
     #[default]
     Countdown,
     /// Do not resend the prompt to another provider automatically.
+    #[serde(alias = "off", alias = "false", alias = "disabled", alias = "none")]
     Manual,
 }
 
@@ -340,7 +346,7 @@ impl CrossProviderFailoverMode {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "manual" => Some(Self::Manual),
+            "manual" | "off" | "false" | "disabled" | "none" => Some(Self::Manual),
             "countdown" | "auto" | "automatic" => Some(Self::Countdown),
             _ => None,
         }
@@ -380,6 +386,16 @@ pub struct CompactionConfig {
 
     /// [semantic] Number of recent turns to look at for building the "current goal" embedding
     pub goal_window_turns: usize,
+
+    /// Hard cap on the token budget compaction measures against, regardless of
+    /// the model's advertised context window. 0 = no cap (use the model window).
+    ///
+    /// Every turn re-sends the whole transcript, so on a 1M-window model the
+    /// default 80%-of-window trigger lets a session reach ~800k tokens per
+    /// request before anything folds. Set this to e.g. 200000 to compact earlier
+    /// on large-window providers. This bounds the compaction trigger budget,
+    /// not the final request size when recent messages cannot be compacted.
+    pub max_context_tokens: usize,
 }
 
 impl Default for CompactionConfig {
@@ -395,6 +411,7 @@ impl Default for CompactionConfig {
             topic_shift_threshold: 0.45,
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
+            max_context_tokens: 0,
         }
     }
 }
@@ -413,9 +430,12 @@ pub enum NamedProviderType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NamedProviderAuth {
+    #[serde(alias = "Bearer", alias = "BEARER")]
     #[default]
     Bearer,
+    #[serde(alias = "Header", alias = "HEADER")]
     Header,
+    #[serde(alias = "None", alias = "NONE")]
     None,
 }
 
@@ -423,6 +443,18 @@ pub enum NamedProviderAuth {
 #[serde(default)]
 pub struct NamedProviderModelConfig {
     pub id: String,
+    /// Explicitly enable or disable `/effort` for this model. When omitted,
+    /// the provider-level setting and built-in model-family detection apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// Reasoning effort selected when this model becomes active. This overrides
+    /// `[provider].openai_reasoning_effort` for this model only.
+    #[serde(
+        default,
+        alias = "reasoning-effort",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reasoning_effort: Option<String>,
     #[serde(
         default,
         alias = "context_limit",
@@ -480,6 +512,10 @@ pub struct NamedProviderConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub supports_reasoning_effort: Option<bool>,
+    /// Disable model-name based reasoning detection for this profile. Explicit
+    /// provider/model capability settings continue to work.
+    #[serde(default, alias = "disable-reasoning-heuristics")]
+    pub disable_reasoning_heuristics: bool,
 }
 
 impl Default for NamedProviderConfig {
@@ -502,6 +538,7 @@ impl Default for NamedProviderConfig {
             models: Vec::new(),
             extra_body: None,
             supports_reasoning_effort: None,
+            disable_reasoning_heuristics: false,
         }
     }
 }
@@ -525,9 +562,19 @@ pub struct AgentsConfig {
     ///
     /// Leave unset (or use `"inherit"` / `"coordinator"`) to have spawned swarm
     /// agents inherit the spawning coordinator's model. Set to a concrete model
-    /// string only when you deliberately want every swarm worker pinned to a
-    /// specific model regardless of which model spawned them.
+    /// string to change the worker default. An explicit `model` in the swarm
+    /// tool overrides this default for newly spawned workers.
     pub swarm_model: Option<String>,
+    /// Optional default reasoning effort for spawned swarm/subagent sessions
+    /// (`"low"`, `"medium"`, `"high"`, ...). Applied when a `swarm spawn`
+    /// call does not pass an explicit `effort`. Leave unset to let workers
+    /// inherit the provider-wide reasoning effort.
+    pub swarm_effort: Option<String>,
+    /// Root reasoning effort in light swarm mode. Unset or invalid means `max`.
+    /// This does not change worker effort (`swarm_effort`).
+    pub swarm_root_effort: Option<String>,
+    /// Root reasoning effort in deep swarm mode. Unset or invalid means `max`.
+    pub swarm_deep_root_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
     /// Maximum percentage (1-90) of the chat column height the inline swarm
@@ -541,41 +588,29 @@ pub struct AgentsConfig {
     /// as chips on a single row.
     #[serde(default)]
     pub swarm_strip_layout: SwarmStripLayout,
-    /// Optional default model override for the memory sidecar.
+    /// Jev Decisions provider for recall: auto, openrouter, typesafe, aimlapi,
+    /// or jcode. Auto uses a provider-specific BYOK credential before Jcode.
+    #[serde(default = "default_memory_jev_provider")]
+    pub memory_jev_provider: String,
+    /// Minimum Jev relevance probability. Invalid values fail closed.
+    #[serde(default = "default_memory_jev_threshold")]
+    pub memory_jev_threshold: f32,
+    /// Optional model override for memory extraction only, never recall.
     pub memory_model: Option<String>,
-    /// Whether memory should use the sidecar for relevance/extraction.
-    ///
-    /// Defaults to `true`: the LLM precision-judge path is the only memory mode
-    /// that is reliably productive (injection precision ~1.0), so memory uses it
-    /// by default. Set to `false` only to deliberately opt into the lower-
-    /// precision no-LLM hybrid path. When sidecar mode is on but no LLM backend
-    /// is reachable, the memory runtime goes dormant instead of degrading to the
-    /// no-LLM path.
+    /// Whether optional automatic memory extraction may use a text-generating
+    /// sidecar. Recall always uses Jev and is independent of this setting.
     #[serde(default = "default_memory_sidecar_enabled")]
     pub memory_sidecar_enabled: bool,
-    /// Minimum turns between Mode-2 memory reranks (cadence floor). The
-    /// expensive listwise LLM rerank runs at most once per this many turns;
-    /// skipped turns fall back to hybrid-ordered surfacing. A topic change or
-    /// the first turn always forces a rerank regardless of cadence. 0 or 1 =
-    /// rerank every turn (no gating). Default 3.
+    /// Legacy setting, retained for config compatibility. Jev recall ignores it.
     #[serde(default = "default_memory_rerank_cadence")]
     pub memory_rerank_cadence: usize,
-    /// Number of independent LLM rerank "judges" to run per fired rerank. Their
-    /// votes are combined and only memories meeting `memory_rerank_min_agree`
-    /// agreement are injected. 1 = single judge (cheapest). 2 = two judges must
-    /// agree, which lifts injection precision to ~1.0 with ~100% clean-rate on
-    /// no-memory turns (offline adjudication), at 2 LLM calls per fired turn.
+    /// Legacy setting, retained for config compatibility. Jev recall ignores it.
     #[serde(default = "default_memory_rerank_votes")]
     pub memory_rerank_votes: usize,
-    /// Minimum judge agreement (of `memory_rerank_votes`) required to inject a
-    /// memory. Clamped to 1..=votes. Higher = stricter precision, lower recall.
+    /// Legacy setting, retained for config compatibility. Jev recall ignores it.
     #[serde(default = "default_memory_rerank_min_agree")]
     pub memory_rerank_min_agree: usize,
-    /// Which embedding backend memory dense-retrieval uses: `"local"` (bundled
-    /// all-MiniLM-L6-v2 ONNX, default, no network) or `"openai"` (remote
-    /// OpenAI/openai-compatible `/v1/embeddings`, opt-in, requires an
-    /// `OPENAI_API_KEY`). A keyless `"openai"` setting silently degrades to
-    /// local. Env override: `JCODE_MEMORY_EMBEDDING_BACKEND`.
+    /// Legacy benchmark/debug embedding backend. Jev recall never uses it.
     #[serde(default = "default_memory_embedding_backend")]
     pub memory_embedding_backend: String,
     /// OpenAI embedding model name when `memory_embedding_backend = "openai"`.
@@ -609,6 +644,14 @@ fn default_memory_embedding_backend() -> String {
     "local".to_string()
 }
 
+fn default_memory_jev_provider() -> String {
+    "auto".to_string()
+}
+
+fn default_memory_jev_threshold() -> f32 {
+    0.8
+}
+
 fn default_memory_sidecar_enabled() -> bool {
     true
 }
@@ -629,9 +672,14 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             swarm_model: None,
+            swarm_effort: None,
+            swarm_root_effort: None,
+            swarm_deep_root_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
             swarm_gallery_max_pct: None,
             swarm_strip_layout: SwarmStripLayout::default(),
+            memory_jev_provider: default_memory_jev_provider(),
+            memory_jev_threshold: default_memory_jev_threshold(),
             memory_model: None,
             memory_sidecar_enabled: default_memory_sidecar_enabled(),
             memory_rerank_cadence: default_memory_rerank_cadence(),
@@ -643,6 +691,24 @@ impl Default for AgentsConfig {
             memory_embedding_dim: None,
             swarm_max_concurrent_agents: default_swarm_max_concurrent_agents(),
         }
+    }
+}
+
+impl AgentsConfig {
+    /// Resolve a swarm mode's root effort without allowing orchestration
+    /// sentinels to recurse into another mode. Unknown values preserve the
+    /// historical maximum-effort behavior without invalidating other settings.
+    pub fn root_effort_for_swarm(&self, deep: bool) -> &'static str {
+        let configured = if deep {
+            self.swarm_deep_root_effort.as_deref()
+        } else {
+            self.swarm_root_effort.as_deref()
+        };
+        let value = configured.unwrap_or("max").trim();
+        ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+            .into_iter()
+            .find(|level| level.eq_ignore_ascii_case(value))
+            .unwrap_or("max")
     }
 }
 
@@ -828,6 +894,12 @@ impl<'de> Deserialize<'de> for HookCommands {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {
+    /// Synchronous input transformers run before each tool call. Each receives
+    /// the tool input JSON on stdin and may print replacement JSON on stdout.
+    /// Empty stdout or any failure leaves the input unchanged.
+    pub pre_tool_transform: Option<HookCommands>,
+    /// Max milliseconds to wait for each input transformer (default: 500).
+    pub pre_tool_transform_timeout_ms: u64,
     /// Runs when an agent turn begins (after the user message is added and
     /// before the model starts generating). Fires before the first `pre_tool`,
     /// so integrations can detect that the agent is actively working even while
@@ -862,6 +934,8 @@ pub struct HooksConfig {
 impl Default for HooksConfig {
     fn default() -> Self {
         Self {
+            pre_tool_transform: None,
+            pre_tool_transform_timeout_ms: 500,
             turn_start: None,
             turn_end: None,
             session_start: None,
@@ -972,6 +1046,8 @@ pub struct KeybindingsConfig {
     pub copy_selection_toggle: String,
     /// Toggle the diagram pane position (default: "alt+t")
     pub diagram_pane_toggle: String,
+    /// Show/hide the pinned diagram pane (default: "alt+shift+m")
+    pub diagram_pane_visibility_toggle: String,
     /// Toggle typing scroll lock (default: "alt+s")
     pub typing_scroll_lock_toggle: String,
     /// Cycle inline diff display mode (default: "alt+g")
@@ -992,6 +1068,9 @@ pub struct KeybindingsConfig {
     /// Open the `/resume` session picker (default: "cmd+b" on macOS, "alt+r"
     /// elsewhere). Set "" to disable.
     pub open_resume: String,
+    /// Start/stop built-in voice input (default: "ctrl+space"). Speech streams
+    /// to Nari and the transcript is sent as a prompt. Set "" to disable.
+    pub voice_input: String,
     /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
     /// Ctrl+Enter performs the alternate action.
     pub session_picker_enter: SessionPickerResumeAction,
@@ -1030,6 +1109,7 @@ impl Default for KeybindingsConfig {
             side_panel_toggle: get("side_panel_toggle", "alt+m"),
             copy_selection_toggle: get("copy_selection_toggle", "alt+y"),
             diagram_pane_toggle: get("diagram_pane_toggle", "alt+t"),
+            diagram_pane_visibility_toggle: get("diagram_pane_visibility_toggle", "alt+shift+m"),
             typing_scroll_lock_toggle: get("typing_scroll_lock_toggle", "alt+s"),
             diff_mode_cycle: get("diff_mode_cycle", "alt+g"),
             info_widget_toggle: get("info_widget_toggle", "alt+i"),
@@ -1044,6 +1124,7 @@ impl Default for KeybindingsConfig {
                     "alt+r"
                 },
             ),
+            voice_input: get("voice_input", "ctrl+space"),
             session_picker_enter: SessionPickerResumeAction::CurrentTerminal,
         }
     }
@@ -1131,6 +1212,12 @@ pub enum WebSearchEngine {
     /// `JCODE_SEARXNG_URL` env var) to point at a SearXNG instance. Useful on
     /// hosts where DuckDuckGo/Bing block the request via TLS fingerprinting.
     Searxng,
+    /// Provider-native server-side search (Anthropic `web_search`, OpenAI
+    /// Responses `web_search`). Search runs on the model provider's side, so it
+    /// works on hosts where scraping is blocked and needs no extra API key.
+    /// When the active provider/model does not support it, the local
+    /// `websearch` tool is used with `fallback_engines` instead.
+    Native,
 }
 
 impl WebSearchEngine {
@@ -1139,6 +1226,7 @@ impl WebSearchEngine {
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
             Self::Searxng => "searxng",
+            Self::Native => "native",
         }
     }
 
@@ -1147,8 +1235,14 @@ impl WebSearchEngine {
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
             "searxng" | "searx" => Some(Self::Searxng),
+            "native" | "provider" => Some(Self::Native),
             _ => None,
         }
+    }
+
+    /// True for engines the local `websearch` tool can run itself.
+    pub fn is_local(self) -> bool {
+        !matches!(self, Self::Native)
     }
 }
 
@@ -1172,6 +1266,26 @@ pub struct WebSearchConfig {
     pub searxng_url: Option<String>,
     /// Environment variable containing the SearXNG base URL.
     pub searxng_url_env: String,
+    /// Prefer the model provider's own server-side search whenever the active
+    /// provider/model supports it (Anthropic first-party API, OpenAI
+    /// Responses). The local `websearch` tool is then replaced by the hosted
+    /// one. Providers without native search keep the local tool and `engine`.
+    /// Default true. `engine = "native"` also turns this on.
+    pub prefer_native: bool,
+    /// Maximum provider-native searches per request.
+    /// Anthropic bills roughly $10 per 1,000 searches on API keys, so this caps
+    /// spend. Anthropic only; OpenAI has no per-request cap.
+    pub native_max_uses: Option<u32>,
+    /// Restrict provider-native search to these domains. Mutually exclusive
+    /// with `native_blocked_domains` (Anthropic rejects both).
+    pub native_allowed_domains: Vec<String>,
+    /// Never return results from these domains (Anthropic only).
+    pub native_blocked_domains: Vec<String>,
+    /// Anthropic server tool version, e.g. "web_search_20250305" (default) or
+    /// "web_search_20260209". Newer versions are sent with
+    /// `allowed_callers = ["direct"]` so models without programmatic tool
+    /// calling are not rejected.
+    pub native_anthropic_tool_version: String,
 }
 
 impl Default for WebSearchConfig {
@@ -1184,7 +1298,24 @@ impl Default for WebSearchConfig {
             bing_market: "en-US".to_string(),
             searxng_url: None,
             searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
+            prefer_native: true,
+            native_max_uses: Some(DEFAULT_NATIVE_WEB_SEARCH_MAX_USES),
+            native_allowed_domains: Vec::new(),
+            native_blocked_domains: Vec::new(),
+            native_anthropic_tool_version: DEFAULT_ANTHROPIC_WEB_SEARCH_TOOL.to_string(),
         }
+    }
+}
+
+/// Default cap on provider-native searches per request.
+pub const DEFAULT_NATIVE_WEB_SEARCH_MAX_USES: u32 = 5;
+/// Default Anthropic web search server tool version.
+pub const DEFAULT_ANTHROPIC_WEB_SEARCH_TOOL: &str = "web_search_20250305";
+
+impl WebSearchConfig {
+    /// True when provider-native search should be used where available.
+    pub fn native_enabled(&self) -> bool {
+        self.prefer_native || self.engine == WebSearchEngine::Native
     }
 }
 
@@ -1199,6 +1330,8 @@ pub struct ProviderConfig {
     pub openai_reasoning_effort: Option<String>,
     /// Reasoning effort for Anthropic Messages API output_config (none|low|medium|high|xhigh; max aliases to strongest supported)
     pub anthropic_reasoning_effort: Option<String>,
+    /// Request one-hour Anthropic prompt caching instead of five minutes.
+    pub anthropic_cache_ttl_1h: bool,
     /// OpenAI transport mode (auto|websocket|https)
     pub openai_transport: Option<String>,
     /// OpenAI service tier override (priority|flex)
@@ -1217,6 +1350,16 @@ pub struct ProviderConfig {
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
+    /// Pin the `gemini` provider to Code Assist OAuth even when a Gemini
+    /// Developer API key (`gemini.env` / `GEMINI_API_KEY`) is present. Without
+    /// this an API key silently wins and every turn bills per token on the
+    /// key's project. `JCODE_GEMINI_FORCE_OAUTH` overrides this value.
+    pub gemini_force_oauth: bool,
+    /// Google Cloud project for Gemini Code Assist OAuth. Workspace accounts
+    /// require one; without it every turn fails with "requires setting
+    /// GOOGLE_CLOUD_PROJECT". `GOOGLE_CLOUD_PROJECT` (or its legacy `_ID`
+    /// alias) overrides this value. Config values are never exported to env.
+    pub gemini_project: Option<String>,
     /// When set (non-empty), /model only lists routes from these providers.
     /// Entries match provider labels ("openai", "anthropic", "copilot",
     /// "openrouter", ...), api methods ("claude-oauth",
@@ -1243,6 +1386,7 @@ impl Default for ProviderConfig {
             default_provider: None,
             openai_reasoning_effort: Some("low".to_string()),
             anthropic_reasoning_effort: None,
+            anthropic_cache_ttl_1h: true,
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),
             openai_native_compaction_mode: "auto".to_string(),
@@ -1251,6 +1395,8 @@ impl Default for ProviderConfig {
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
             copilot_premium: None,
+            gemini_force_oauth: false,
+            gemini_project: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
             max_retries: 8,
@@ -1482,12 +1628,22 @@ pub struct PowerConfig {
     /// Honored by the shared `jcode serve` daemon. The `JCODE_DISABLE_POWER_INHIBIT`
     /// environment variable forces this off regardless of the config value.
     pub prevent_sleep_while_streaming: bool,
+
+    /// Also keep working when the lid closes on macOS and Windows while a
+    /// session is streaming. Linux always blocks lid-close suspend as part of
+    /// `prevent_sleep_while_streaming`. On Windows jcode temporarily sets the
+    /// active power plan's lid close action to "Do nothing". On macOS it runs
+    /// `sudo -n pmset -a disablesleep 1`, which requires a passwordless sudoers
+    /// rule and is skipped otherwise. Original settings are journaled and
+    /// restored when work finishes, including after a crash. Default: true.
+    pub block_lid_close: bool,
 }
 
 impl Default for PowerConfig {
     fn default() -> Self {
         Self {
             prevent_sleep_while_streaming: true,
+            block_lid_close: true,
         }
     }
 }

@@ -1,5 +1,6 @@
 use super::super::{PendingRemoteMessage, PendingSplitPrompt};
 use super::*;
+use crate::tui::app as app_mod;
 
 #[expect(
     clippy::too_many_arguments,
@@ -83,6 +84,24 @@ pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> 
         .is_some_and(|message| message.content == app.input)
 }
 
+/// Restore the visible user turn for a startup prompt that was sent before the
+/// bootstrap History payload arrived. History replaces all display messages,
+/// and the server does not emit a separate user-message event for this request.
+pub(in crate::tui::app) fn restore_pending_startup_prompt_echo(app: &mut App) {
+    let Some(prompt) = app.pending_startup_prompt_echo.take() else {
+        return;
+    };
+    let already_visible = app
+        .display_messages()
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .is_some_and(|message| message.content == prompt);
+    if !already_visible {
+        app.push_display_message(DisplayMessage::user(prompt));
+    }
+}
+
 pub(in crate::tui::app) async fn submit_prepared_remote_input(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -153,6 +172,22 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
 ) -> Result<()> {
     let raw_input = prepared.raw_input.clone();
 
+    if crate::tui::is_ssh_remote() {
+        let trimmed = prepared.expanded.trim();
+        if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
+            return Ok(());
+        }
+        if matches!(
+            trimmed.split_whitespace().next(),
+            Some("/cancel" | "/stop" | "/help" | "/?" | "/commands" | "/diff")
+        ) {
+            app_mod::commands_dispatch::dispatch_local_command(app, trimmed);
+            return Ok(());
+        }
+        // Only the server knows remote skills and their multi-word names.
+        return submit_prepared_remote_input(app, remote, prepared).await;
+    }
+
     // Text that merely starts with `/` is not necessarily a command. A terminal
     // file drop (`/tmp/shot.png`) or a bare path (`/home/me/notes`) is ordinary
     // user input. Routing those through `App::submit_input` stages a *local*
@@ -167,7 +202,8 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     let trimmed = raw_input.trim();
     let is_command_shaped = trimmed == "/?"
         || (input::parse_dropped_paths(&raw_input).is_none()
-            && snapshot.resolve_invocation(&raw_input).is_some());
+            && (snapshot.resolve_invocation(&raw_input).is_some()
+                || app_mod::commands_dispatch::contains_registered_slash_command(trimmed)));
     if !is_command_shaped {
         return submit_prepared_remote_input(app, remote, prepared).await;
     }
@@ -488,6 +524,67 @@ pub(in crate::tui::app) fn apply_transcript_event(
     }
 
     app.follow_chat_bottom_for_typing();
+}
+
+/// Composer state set aside while a voice transcript is sent as its own
+/// prompt, so text the user already typed is neither sent nor lost.
+struct StashedDraft {
+    input: String,
+    cursor_pos: usize,
+    pasted_contents: Vec<String>,
+    pending_images: Vec<(String, String)>,
+    undo: Vec<(String, usize)>,
+}
+
+fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {
+    let stash = StashedDraft {
+        input: std::mem::take(&mut app.input),
+        cursor_pos: std::mem::take(&mut app.cursor_pos),
+        pasted_contents: std::mem::take(&mut app.pasted_contents),
+        pending_images: std::mem::take(&mut app.pending_images),
+        undo: std::mem::take(&mut app.input_undo_stack),
+    };
+    app.input = jcode_session_types::wrap_transcription(transcript);
+    app.cursor_pos = app.input.len();
+    stash
+}
+
+fn restore_draft_after_voice(app: &mut App, stash: StashedDraft) {
+    // Submission consumes the composer. Anything left means it was kept (for
+    // example an oversized prompt), which must not be silently replaced.
+    if !app.input.is_empty() {
+        return;
+    }
+    app.input = stash.input;
+    app.cursor_pos = stash.cursor_pos.min(app.input.len());
+    app.pasted_contents = stash.pasted_contents;
+    app.pending_images = stash.pending_images;
+    app.input_undo_stack = stash.undo;
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+}
+
+/// Send a built-in voice transcript from a local (in-process) session. It is
+/// wrapped in `<transcription>` tags, sent as soon as possible like Enter
+/// (steering an active turn), and the typed draft is left untouched.
+pub(in crate::tui::app) fn submit_voice_transcript(app: &mut App, transcript: &str) {
+    let stash = stash_draft_for_voice(app, transcript);
+    submit_transcript_input(app);
+    restore_draft_after_voice(app, stash);
+    app.follow_chat_bottom_for_typing();
+}
+
+/// Remote-session counterpart of [`submit_voice_transcript`].
+pub(in crate::tui::app) async fn submit_remote_voice_transcript(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    transcript: &str,
+) -> Result<()> {
+    let stash = stash_draft_for_voice(app, transcript);
+    let result = submit_remote_transcript_input(app, remote).await;
+    restore_draft_after_voice(app, stash);
+    app.follow_chat_bottom_for_typing();
+    result
 }
 
 pub(in crate::tui::app) async fn apply_remote_transcript_event(

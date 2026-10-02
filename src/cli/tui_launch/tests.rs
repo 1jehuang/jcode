@@ -109,7 +109,14 @@ fn spawn_resume_in_new_terminal_uses_handterm_exec_mode() {
     assert!(launched);
 
     let lines = wait_for_lines(&output_path, 5);
-    assert_eq!(lines[0], cwd.to_string_lossy());
+    // The fake terminal records the shell's physical cwd; on macOS the temp dir
+    // is reached through the /var -> /private/var symlink (#1153).
+    assert_eq!(
+        lines[0],
+        cwd.canonicalize()
+            .expect("canonicalize cwd")
+            .to_string_lossy()
+    );
     assert_eq!(lines[1], "--backend");
     assert_eq!(lines[2], "gpu");
     assert_eq!(lines[3], "--exec");
@@ -178,7 +185,14 @@ fn spawn_selfdev_in_new_terminal_uses_handterm_exec_mode() {
     assert!(launched);
 
     let lines = wait_for_lines(&output_path, 5);
-    assert_eq!(lines[0], cwd.to_string_lossy());
+    // The fake terminal records the shell's physical cwd; on macOS the temp dir
+    // is reached through the /var -> /private/var symlink (#1153).
+    assert_eq!(
+        lines[0],
+        cwd.canonicalize()
+            .expect("canonicalize cwd")
+            .to_string_lossy()
+    );
     assert_eq!(lines[1], "--backend");
     assert_eq!(lines[2], "gpu");
     assert_eq!(lines[3], "--exec");

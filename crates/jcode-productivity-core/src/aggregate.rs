@@ -104,7 +104,12 @@ pub fn build_report(scan: ScanResult) -> ProductivityReport {
 
     // Tool-derived activity buckets.
     let tool = |name: &str| tools.get(name).copied().unwrap_or(0);
-    r.code_edits = tool("edit") + tool("write") + tool("multiedit") + tool("apply_patch");
+    r.code_edits = tool("edit")
+        + tool("write")
+        + tool("multiedit")
+        + tool("apply_patch")
+        + tool("patch")
+        + tool("replace");
     r.commands_run = tool("bash");
     r.searches = tool("grep") + tool("agentgrep") + tool("glob");
     r.web_actions = tool("browser") + tool("websearch") + tool("webfetch");

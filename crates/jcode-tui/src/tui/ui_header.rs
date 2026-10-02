@@ -36,6 +36,26 @@ pub(crate) fn set_unseen_changelog_entries_override_for_tests(entries: Option<Ve
     *guard = entries;
 }
 
+/// Keep an override in place only while its owning render test is in scope.
+/// Callers must hold the shared render-state test lock before creating this guard.
+#[cfg(test)]
+pub(crate) struct ChangelogEntriesOverrideGuard;
+
+#[cfg(test)]
+pub(crate) fn scoped_unseen_changelog_entries_override_for_tests(
+    entries: Vec<String>,
+) -> ChangelogEntriesOverrideGuard {
+    set_unseen_changelog_entries_override_for_tests(Some(entries));
+    ChangelogEntriesOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for ChangelogEntriesOverrideGuard {
+    fn drop(&mut self) {
+        set_unseen_changelog_entries_override_for_tests(None);
+    }
+}
+
 pub(crate) fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -846,8 +866,17 @@ fn build_header_lines_with_auth(
 
     // Auth inventory: `/login` heading, then one provider per line (dim
     // hollow dot for unconfigured providers).
-    let auth_lines = build_auth_status_lines(auth, active);
-    let login_heading = "/login to add provider".to_string();
+    let (login_heading, auth_lines) = if let Some(host) = crate::tui::ssh_remote_host() {
+        // The native protocol reports the active route, not a complete remote
+        // credential inventory. Do not render the laptop's (or an empty)
+        // inventory as if it described providers configured on the server.
+        (format!("/login to authenticate on {host}"), Vec::new())
+    } else {
+        (
+            "/login to add provider".to_string(),
+            build_auth_status_lines(auth, active),
+        )
+    };
     lines.push(
         Line::from(Span::styled(
             login_heading,
@@ -982,7 +1011,7 @@ pub(super) fn build_updates_box_lines(width: u16, max_lines: usize) -> Vec<Line<
 /// Build both header sections from one authentication snapshot. Credential
 /// discovery can touch several files on Windows, so the render path must not
 /// repeat it for the persistent and secondary portions of the same frame.
-pub(super) fn build_header_sections(
+pub(in crate::tui) fn build_header_sections(
     app: &dyn TuiState,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
@@ -1005,6 +1034,26 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::OnceLock;
+
+    #[test]
+    fn changelog_override_is_cleared_after_a_render_test_panics() {
+        let _lock = crate::tui::ui::render_state_test_lock();
+        let panic = std::panic::catch_unwind(|| {
+            let _fixture = scoped_unseen_changelog_entries_override_for_tests(vec![
+                "temporary changelog entry".to_owned(),
+            ]);
+            assert_eq!(unseen_changelog_entries(), ["temporary changelog entry"]);
+            panic!("injected render failure");
+        });
+        assert!(panic.is_err());
+        assert!(
+            unseen_changelog_entries_override()
+                .lock()
+                .unwrap()
+                .is_none(),
+            "a failed render test must not leak its changelog fixture"
+        );
+    }
 
     struct MockProvider;
 

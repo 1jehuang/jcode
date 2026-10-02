@@ -110,12 +110,20 @@ impl Agent {
             return false;
         }
 
-        reason.contains("incomplete")
+        // Anthropic pauses long server-tool turns (web search) with
+        // `pause_turn`; resending the conversation resumes them.
+        Self::is_pause_turn_stop_reason(&reason)
+            || reason.contains("incomplete")
             || reason.contains("max_output_tokens")
             || reason.contains("max_tokens")
             || reason.contains("length")
             || reason.contains("trunc")
             || reason.contains("commentary")
+    }
+
+    /// Anthropic `pause_turn`: the provider paused a long server-tool turn.
+    pub(crate) fn is_pause_turn_stop_reason(stop_reason: &str) -> bool {
+        stop_reason.trim().eq_ignore_ascii_case("pause_turn")
     }
 
     /// True when the provider's stop reason indicates a model-side
@@ -252,6 +260,11 @@ impl Agent {
         if Self::is_guardrail_stop_reason(stop_reason) {
             return Ok(false);
         }
+        // A paused server-tool turn is resumed by the incomplete-response path,
+        // which must not see an injected user message first.
+        if stop_reason.is_some_and(Self::is_pause_turn_stop_reason) {
+            return Ok(false);
+        }
         if *attempts >= Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS {
             return Ok(false);
         }
@@ -308,6 +321,18 @@ impl Agent {
         }
 
         *attempts += 1;
+
+        if Self::is_pause_turn_stop_reason(stop_reason) {
+            // Resend the paused assistant turn unchanged: no synthetic user
+            // message, or the API cannot resume the server tool loop.
+            logging::info(&format!(
+                "Response paused with stop_reason='pause_turn'; resuming (attempt {}/{})",
+                attempts,
+                Self::MAX_INCOMPLETE_CONTINUATION_ATTEMPTS
+            ));
+            return Ok(true);
+        }
+
         logging::warn(&format!(
             "Response ended with stop_reason='{}'; requesting continuation (attempt {}/{})",
             stop_reason,

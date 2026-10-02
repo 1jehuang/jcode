@@ -1,3 +1,5 @@
+mod response_stats;
+
 use super::{Session, StoredDisplayRole};
 use crate::message::{ContentBlock, Role, ToolCall};
 use jcode_config_types::ReasoningDisplayMode;
@@ -395,6 +397,7 @@ pub fn render_messages_and_images_with_compacted_history(
             )
         };
         rendered.push(RenderedMessage {
+            response_stats: None,
             role: "system".to_string(),
             content,
             tool_calls: Vec::new(),
@@ -423,6 +426,7 @@ pub fn render_messages_and_images_with_compacted_history(
         // check happened, so replace the body with a one-liner.
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
+                response_stats: None,
                 role: "system".to_string(),
                 content: summary.to_string(),
                 tool_calls: Vec::new(),
@@ -497,6 +501,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
+                            response_stats: None,
                             role: role.to_string(),
                             content: combined,
                             tool_calls: tool_calls.clone(),
@@ -517,6 +522,7 @@ pub fn render_messages_and_images_with_compacted_history(
                     current_tool = tool_data.clone();
 
                     rendered.push(RenderedMessage {
+                        response_stats: None,
                         role: "tool".to_string(),
                         content: content.clone(),
                         tool_calls: Vec::new(),
@@ -533,6 +539,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);
                     let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                     images.push(RenderedImage {
+                        history_message_index: current_tool.as_ref().map(|_| rendered.len()),
                         media_type: media_type.clone(),
                         data: data.clone(),
                         label: current_tool
@@ -549,7 +556,60 @@ pub fn render_messages_and_images_with_compacted_history(
                         pending_prompt_image_indices.push(images.len() - 1);
                     }
                 }
-                ContentBlock::OpenAICompaction { .. } => {}
+                ContentBlock::ProviderNative { provider, item } => {
+                    use jcode_message_types::provider_native::provider_native_display;
+                    let Some(display) = provider_native_display(provider, item) else {
+                        continue;
+                    };
+                    let Some(output) = display.output else {
+                        // Call start: remember the input for the result row.
+                        let input = display.input.unwrap_or(serde_json::Value::Null);
+                        tool_map.insert(
+                            display.id.clone(),
+                            ToolCall {
+                                intent: ToolCall::intent_from_input(&input),
+                                id: display.id,
+                                name: display.name,
+                                input,
+                                thought_signature: None,
+                            },
+                        );
+                        continue;
+                    };
+                    // Flush text streamed before the search so order matches live.
+                    let combined = format!("{}{}", reasoning, text);
+                    if !combined.is_empty() {
+                        text.clear();
+                        reasoning.clear();
+                        rendered.push(RenderedMessage {
+                            response_stats: None,
+                            role: role.to_string(),
+                            content: combined,
+                            tool_calls: std::mem::take(&mut tool_calls),
+                            tool_data: None,
+                            stored_index: Some(stored_index),
+                        });
+                    }
+                    let tool_data = tool_map.get(&display.id).cloned().unwrap_or_else(|| {
+                        let input = display.input.clone().unwrap_or(serde_json::Value::Null);
+                        ToolCall {
+                            intent: ToolCall::intent_from_input(&input),
+                            id: display.id.clone(),
+                            name: display.name.clone(),
+                            input,
+                            thought_signature: None,
+                        }
+                    });
+                    rendered.push(RenderedMessage {
+                        response_stats: None,
+                        role: "tool".to_string(),
+                        content: output,
+                        tool_calls: Vec::new(),
+                        tool_data: Some(tool_data),
+                        stored_index: Some(stored_index),
+                    });
+                }
+                ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
             }
         }
 
@@ -559,6 +619,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 user_prompt_count += 1;
             }
             rendered.push(RenderedMessage {
+                response_stats: None,
                 role: role.to_string(),
                 content: combined,
                 tool_calls,
@@ -577,5 +638,6 @@ pub fn render_messages_and_images_with_compacted_history(
         }
     }
 
+    response_stats::attach(&session.messages, &mut rendered);
     (rendered, images, compacted_info)
 }

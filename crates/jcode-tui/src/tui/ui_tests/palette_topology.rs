@@ -14,11 +14,12 @@ use jcode_tui_style::palette::role_for_rendered;
 use ratatui::style::Color;
 use std::collections::BTreeMap;
 
+type RoleAreas = BTreeMap<&'static str, u32>;
+type RoleAdjacency = BTreeMap<(&'static str, &'static str), u32>;
+
 /// Render a set of representative frames and tally role area plus adjacency.
-fn measure() -> (
-    BTreeMap<&'static str, u32>,
-    BTreeMap<(&'static str, &'static str), u32>,
-) {
+fn measure() -> (RoleAreas, RoleAdjacency) {
+    let _lock = super::viewport_snapshot_test_lock();
     // Attribution matches rendered RGB back to role defaults, so the frame
     // must be rendered in truecolor. A hosted CI runner without COLORTERM
     // detects 256-color and quantizes every cell, which pushed most colors
@@ -49,6 +50,12 @@ fn measure() -> (
                 DisplayMessage::error("something failed"),
             ],
             input: "next question".to_string(),
+            // Measure intentional adjacent prompt colors rather than relying
+            // on incidental startup/flicker warnings to provide a fifth edge.
+            queued_messages: vec![
+                "first queued question".into(),
+                "second queued question".into(),
+            ],
             ..Default::default()
         };
 

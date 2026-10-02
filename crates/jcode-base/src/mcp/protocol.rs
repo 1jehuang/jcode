@@ -221,6 +221,12 @@ pub struct McpServerConfig {
     /// both are present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    /// Per-request reply timeout in seconds for this server (tools/call,
+    /// tools/list, initialize). Absent keeps the default of 30s. Servers whose
+    /// tools legitimately run long (multi-engine web search, browser fetch, PDF
+    /// extraction) can raise it here (issues #802, #1174).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 impl McpServerConfig {
@@ -504,6 +510,11 @@ impl McpConfig {
                         .get("shared")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(true);
+                    // Codex uses `enabled = false` to keep a server registered
+                    // but not started; carrying it over keeps disabled servers
+                    // disabled after the one-time import instead of silently
+                    // activating them.
+                    let enabled = server.get("enabled").and_then(|v| v.as_bool());
                     config.servers.insert(
                         name.clone(),
                         McpServerConfig {
@@ -514,8 +525,9 @@ impl McpConfig {
                             transport: None,
                             url: None,
                             headers: std::collections::HashMap::new(),
-                            enabled: None,
+                            enabled,
                             disabled: None,
+                            timeout_secs: None,
                         },
                     );
                 }

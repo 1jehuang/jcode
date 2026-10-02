@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 fn ctx() -> RiskContext {
     RiskContext {
+        scratch_dir: None,
         working_dir: Some(PathBuf::from("/home/u/proj")),
         home_dir: Some(PathBuf::from("/home/u")),
     }

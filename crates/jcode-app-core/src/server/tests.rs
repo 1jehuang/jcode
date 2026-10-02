@@ -169,6 +169,9 @@ impl ScopedEnvVar {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
+        // Config is cached with a recheck interval; config-backed env vars
+        // such as JCODE_WAKE_MODE must be observed immediately.
+        crate::config::invalidate_config_cache();
         Self { key, prev }
     }
 }
@@ -180,6 +183,7 @@ impl Drop for ScopedEnvVar {
         } else {
             crate::env::remove_var(self.key);
         }
+        crate::config::invalidate_config_cache();
     }
 }
 
@@ -417,6 +421,189 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
                 .content_preview()
                 .contains("**Background task** `bgwake`")
     }));
+}
+
+#[tokio::test]
+async fn external_background_task_wake_emits_request_without_starting_turn() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _wake_mode = ScopedEnvVar::set("JCODE_WAKE_MODE", "external");
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("must not run".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let provider_dyn: Arc<dyn Provider> = provider;
+    let agent = test_agent(provider_dyn).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let initial_message_count = agent.lock().await.messages().len();
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        agent.clone(),
+    )])));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        attached_swarm_member(&session_id, member_event_tx),
+    )])));
+    let task = BackgroundTaskCompleted {
+        task_id: "external-wake".to_string(),
+        tool_name: "bash".to_string(),
+        display_name: None,
+        session_id: session_id.clone(),
+        status: BackgroundTaskStatus::Completed,
+        exit_code: Some(0),
+        output_preview: "done\n".to_string(),
+        output_file: std::env::temp_dir().join("external-wake.output"),
+        duration_secs: 0.1,
+        notify: false,
+        wake: true,
+    };
+    let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
+
+    dispatch_background_task_completion(
+        &task,
+        &sessions,
+        &soft_interrupt_queues,
+        &swarm_members,
+        &swarms_by_id,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let event = timeout(Duration::from_secs(2), member_event_rx.recv())
+        .await
+        .expect("external wake request should arrive promptly")
+        .expect("member event stream should remain open");
+    match event {
+        ServerEvent::WakeRequested {
+            session_id: event_session_id,
+            reason,
+            notification,
+        } => {
+            assert_eq!(event_session_id, session_id);
+            assert_eq!(reason, "background_task_completed");
+            assert!(notification.contains("**Background task** `external-wake`"));
+        }
+        other => panic!("unexpected external wake event: {other:?}"),
+    }
+
+    assert!(
+        timeout(Duration::from_millis(100), member_event_rx.recv())
+            .await
+            .is_err(),
+        "external mode must not stream an autonomous model turn"
+    );
+    assert_eq!(agent.lock().await.messages().len(), initial_message_count);
+    assert!(soft_interrupt_queues.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
+    // Regression for #1152: the idle check used to drop its try_lock guard
+    // before the turn started, so two concurrent wakes could both succeed.
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        agent.clone(),
+    )])));
+    let (member_event_tx, _member_event_rx) = mpsc::unbounded_channel();
+    let member = attached_swarm_member(&session_id, member_event_tx);
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+
+    let first = super::live_turn::idle_live_agent(&session_id, &sessions, &swarm_members).await;
+    assert!(first.is_some(), "idle live session should be reservable");
+
+    let second = super::live_turn::idle_live_agent(&session_id, &sessions, &swarm_members).await;
+    assert!(
+        second.is_none(),
+        "second reservation must fail while the first guard is alive"
+    );
+
+    drop(first);
+    let third = super::live_turn::idle_live_agent(&session_id, &sessions, &swarm_members).await;
+    assert!(
+        third.is_some(),
+        "reservation is available again once released"
+    );
+}
+
+#[tokio::test]
+async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
+    // Greptile review on #1166: releasing the guard before the terminal status
+    // write let a newer wake's `running` be overwritten by this turn's `ready`.
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("done".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let agent = test_agent(provider_dyn).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        agent.clone(),
+    )])));
+    let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
+    let member = attached_swarm_member(&session_id, member_event_tx);
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(session_id.clone(), member)])));
+    let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
+    let ctx = super::live_turn::LiveTurnSwarmContext::new(
+        &swarm_members,
+        &swarms_by_id,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    );
+
+    let started = super::live_turn::run_live_turn_if_idle(
+        &session_id,
+        "first wake",
+        None,
+        &sessions,
+        ctx.clone(),
+    )
+    .await;
+    assert!(started);
+
+    // Wait for the terminal Done fanout.
+    timeout(Duration::from_secs(2), async {
+        loop {
+            match member_event_rx.recv().await {
+                Some(ServerEvent::Done { .. }) => return,
+                Some(_) => continue,
+                None => panic!("member stream closed"),
+            }
+        }
+    })
+    .await
+    .expect("wake turn should finish");
+
+    // Whenever a second reservation succeeds, the first turn must already have
+    // published its terminal status: the guard outlives the status update.
+    let reacquired = timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(guard) =
+                super::live_turn::idle_live_agent(&session_id, &sessions, &swarm_members).await
+            {
+                return guard;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("reservation should be released after the turn");
+    let status = swarm_members
+        .read()
+        .await
+        .get(&session_id)
+        .map(|m| m.status.clone());
+    assert_eq!(status.as_deref(), Some("ready"));
+    drop(reacquired);
 }
 
 #[tokio::test]

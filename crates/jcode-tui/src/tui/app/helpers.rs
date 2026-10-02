@@ -125,6 +125,14 @@ pub(crate) fn invalidate_ambient_info_cache() {
 pub(crate) fn open_path_or_url_detached(
     target: impl AsRef<std::ffi::OsStr>,
 ) -> std::io::Result<()> {
+    if crate::tui::is_ssh_remote() {
+        let target = target.as_ref().to_string_lossy();
+        if !target.starts_with("https://") && !target.starts_with("http://") {
+            return Err(std::io::Error::other(
+                "remote file opening is unavailable over SSH; open it on the remote host or ask the agent to read it",
+            ));
+        }
+    }
     if crate::auth::browser_suppressed(false) {
         return Err(std::io::Error::other(
             "opening files/URLs is suppressed (NO_BROWSER/JCODE_NO_BROWSER or test harness)",
@@ -214,15 +222,8 @@ pub(super) fn ctrl_bracket_fallback_to_esc(code: &mut KeyCode, modifiers: &mut K
     if !modifiers.contains(KeyModifiers::CONTROL) {
         return;
     }
-    match code {
-        KeyCode::Esc => {
-            *code = KeyCode::Char('[');
-        }
-        KeyCode::Char('5') => {
-            // Legacy tty mapping for Ctrl+]
-            *code = KeyCode::Char(']');
-        }
-        _ => {}
+    if *code == KeyCode::Esc {
+        *code = KeyCode::Char('[');
     }
 }
 
@@ -403,7 +404,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
                 None => *sink = Some(text.to_string()),
             }
         }
-        return true;
+        true
     }
 
     #[cfg(not(test))]
@@ -504,6 +505,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
 /// terminal emulator to set the system clipboard without needing a local
 /// display server, making it work over SSH, inside Docker, and under tmux
 /// (with `set -g set-clipboard on`). Returns false if stdout is not a TTY.
+#[cfg_attr(test, allow(dead_code))]
 fn copy_to_clipboard_osc52(text: &str) -> bool {
     use base64::Engine as _;
     use std::io::{IsTerminal, Write};
@@ -518,10 +520,29 @@ fn copy_to_clipboard_osc52(text: &str) -> bool {
     out.write_all(seq.as_bytes()).is_ok() && out.flush().is_ok()
 }
 
-pub(super) fn effort_display_label(effort: &str) -> &str {
+pub(crate) fn effort_display_label(effort: &str) -> &str {
+    effort_display_label_with_root(effort, crate::prompt::swarm_root_reasoning_effort(effort))
+}
+
+// Keep finite, validated effort labels static so autocomplete can share them
+// without allocations or leaking dynamically formatted strings.
+fn effort_display_label_with_root<'a>(effort: &'a str, root: Option<&str>) -> &'a str {
+    macro_rules! swarm_label {
+        ($mode:literal, $detail:literal) => {
+            match root.unwrap_or("max") {
+                "none" => concat!($mode, " (None + ", $detail, ") [Beta]"),
+                "minimal" => concat!($mode, " (Minimal + ", $detail, ") [Beta]"),
+                "low" => concat!($mode, " (Low + ", $detail, ") [Beta]"),
+                "medium" => concat!($mode, " (Medium + ", $detail, ") [Beta]"),
+                "high" => concat!($mode, " (High + ", $detail, ") [Beta]"),
+                "xhigh" => concat!($mode, " (xHigh + ", $detail, ") [Beta]"),
+                _ => concat!($mode, " (Max + ", $detail, ") [Beta]"),
+            }
+        };
+    }
     match effort {
-        "swarm" => "Swarm (light fan-out) [Beta]",
-        "swarm-deep" => "Swarm Deep (Max + task graph) [Beta]",
+        "swarm" => swarm_label!("Swarm", "light fan-out"),
+        "swarm-deep" => swarm_label!("Swarm Deep", "task graph"),
         "max" => "Max",
         "xhigh" => "xHigh",
         "high" => "High",
@@ -934,6 +955,57 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
     None
 }
 
+pub(super) fn copy_image_to_clipboard(media_type: &str, base64_data: &str) -> bool {
+    use base64::Engine;
+    use std::borrow::Cow;
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data) else {
+        return false;
+    };
+    // `wl-copy` keeps serving the selection after this function returns. A
+    // short-lived arboard owner can disappear as soon as Clipboard is dropped.
+    if std::env::var("WAYLAND_DISPLAY").is_ok()
+        && let Ok(mut child) = std::process::Command::new("wl-copy")
+            .args(["--type", media_type])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    {
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(&bytes).is_ok());
+        if wrote && child.wait().is_ok_and(|status| status.success()) {
+            return true;
+        }
+    }
+    let Ok(decoded) = image::load_from_memory_with_format(
+        &bytes,
+        match media_type {
+            "image/jpeg" => image::ImageFormat::Jpeg,
+            "image/gif" => image::ImageFormat::Gif,
+            "image/webp" => image::ImageFormat::WebP,
+            _ => image::ImageFormat::Png,
+        },
+    ) else {
+        return false;
+    };
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| {
+            clipboard.set_image(arboard::ImageData {
+                width: width as usize,
+                height: height as usize,
+                bytes: Cow::Owned(rgba.into_raw()),
+            })
+        })
+        .is_ok()
+}
+
 /// Extract an image URL from text that looks like an HTML img tag or a bare image URL.
 /// Returns the URL if found.
 pub(super) fn extract_image_url(text: &str) -> Option<String> {
@@ -1020,39 +1092,76 @@ pub(super) fn encode_rgba_as_png(width: usize, height: usize, rgba: &[u8]) -> Op
     Some(buf)
 }
 
+#[cfg(test)]
 pub(super) fn gather_git_info() -> Option<GitInfo> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
+    GIT_INFO_CACHE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|(_, cached, _)| cached.clone()))
+}
+
+#[cfg(not(test))]
+pub(super) fn gather_git_info() -> Option<GitInfo> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(5);
 
-    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-        if let Some((ts, cached, refreshing)) = guard.as_mut() {
-            if ts.elapsed() < TTL {
-                return cached.clone();
+    // Tests never probe the live repository. The probe runs on a background
+    // thread and writes its answer into this process-global cache, so the
+    // first test to call this gets `None` while every later test in the same
+    // binary silently inherits the developer's real branch and dirty counts.
+    // That made frame assertions depend on how many tests ran before them and
+    // on whether the checkout happened to be clean.
+    //
+    // Tests that want git data seed it explicitly with
+    // `seed_git_info_cache_for_tests`, which marks the entry `refreshing` and
+    // is honored by the read below.
+    #[cfg(test)]
+    {
+        return GIT_INFO_CACHE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(_, cached, _)| cached.clone()))
+            .flatten();
+    }
+
+    #[cfg(not(test))]
+    {
+        if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+            if let Some((ts, cached, refreshing)) = guard.as_mut() {
+                if ts.elapsed() < TTL {
+                    return cached.clone();
+                }
+                if *refreshing {
+                    return cached.clone();
+                }
+                let stale = cached.clone();
+                *refreshing = true;
+                std::thread::spawn(|| {
+                    let result = gather_git_info_inner();
+                    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+                        *guard = Some((Instant::now(), result, false));
+                    }
+                });
+                return stale;
             }
-            if *refreshing {
-                return cached.clone();
-            }
-            let stale = cached.clone();
-            *refreshing = true;
+
+            *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
             std::thread::spawn(|| {
                 let result = gather_git_info_inner();
                 if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
                     *guard = Some((Instant::now(), result, false));
                 }
             });
-            return stale;
         }
-
-        *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
-        std::thread::spawn(|| {
-            let result = gather_git_info_inner();
-            if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                *guard = Some((Instant::now(), result, false));
-            }
-        });
+        None
     }
-    None
 }
 
 /// Fetch a session's todos plus its goal-level assessments through the same
@@ -1061,6 +1170,9 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {
+    if crate::tui::is_ssh_remote() {
+        return (Vec::new(), Vec::new());
+    }
     use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(1);
@@ -1117,10 +1229,15 @@ pub(super) fn gather_todos_and_goals_for_session(
 }
 
 pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidgetData> {
-    use std::time::Instant;
+    if crate::tui::is_ssh_remote() {
+        // The cache and queue are laptop-local. The native protocol does not
+        // currently carry remote scheduler state, so leave both widget/footer
+        // absent instead of displaying unrelated local tasks.
+        return None;
+    }
     const TTL: Duration = Duration::from_secs(2);
 
-    if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
+    let refresh = if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
         if let Some((ts, cached_enabled, cached, refreshing)) = guard.as_mut() {
             if *cached_enabled == ambient_enabled && ts.elapsed() < TTL {
                 return cached.clone();
@@ -1135,30 +1252,54 @@ pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidget
             };
             *refreshing = true;
             *cached_enabled = ambient_enabled;
-            std::thread::spawn(move || {
-                let result = gather_ambient_info_inner(ambient_enabled);
-                if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
-                    *guard = Some((Instant::now(), ambient_enabled, result, false));
-                }
-            });
-            return stale;
+            // Refresh after the guard is dropped: the synchronous test path
+            // re-locks the cache when storing the result, so refreshing while
+            // the guard is still alive would self-deadlock.
+            Some((stale, false))
+        } else {
+            *guard = Some((
+                backdated_now(TTL + Duration::from_secs(1)),
+                ambient_enabled,
+                None,
+                true,
+            ));
+            Some((None, true))
         }
+    } else {
+        None
+    };
 
-        *guard = Some((
-            backdated_now(TTL + Duration::from_secs(1)),
-            ambient_enabled,
-            None,
-            true,
-        ));
+    let (stale, _first_fill) = refresh?;
+    spawn_ambient_info_refresh(ambient_enabled);
+    stale
+}
+
+/// Refresh the ambient cache off the render path.
+///
+/// Under `cfg(test)` there is no render loop to serve, and the background
+/// refresh is exactly what makes the suite parallel-unsafe: it re-reads the
+/// queue under whatever `JCODE_HOME` is current when the thread runs, not when
+/// it was queued, so an in-flight refresh can overwrite the cleared process
+/// cache with data loaded from another test's temp home (upstream #596). The
+/// synchronous tests read via `gather_ambient_info_inner` directly, so keeping
+/// the refresh inline under tests is both correct and deterministic.
+fn spawn_ambient_info_refresh(ambient_enabled: bool) {
+    #[cfg(test)]
+    {
+        let result = gather_ambient_info_inner(ambient_enabled);
+        if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
+            *guard = Some((std::time::Instant::now(), ambient_enabled, result, false));
+        }
+    }
+    #[cfg(not(test))]
+    {
         std::thread::spawn(move || {
             let result = gather_ambient_info_inner(ambient_enabled);
             if let Ok(mut guard) = AMBIENT_INFO_CACHE.lock() {
-                *guard = Some((Instant::now(), ambient_enabled, result, false));
+                *guard = Some((std::time::Instant::now(), ambient_enabled, result, false));
             }
         });
     }
-
-    None
 }
 
 fn gather_ambient_info_inner(ambient_enabled: bool) -> Option<AmbientWidgetData> {
@@ -1260,10 +1401,22 @@ pub(crate) fn format_countdown_until(target: chrono::DateTime<chrono::Utc>) -> S
     }
 }
 
-fn gather_git_info_inner() -> Option<GitInfo> {
-    use std::process::Command;
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn gather_git_info_inner() -> Option<GitInfo> {
+    gather_git_info_in(None)
+}
 
-    let in_repo = Command::new("git")
+/// Git status for `dir` (or the process working directory when `None`).
+pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInfo> {
+    let git = || {
+        let mut cmd = std::process::Command::new("git");
+        if let Some(dir) = dir {
+            cmd.current_dir(dir);
+        }
+        cmd
+    };
+
+    let in_repo = git()
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .ok()
@@ -1274,7 +1427,7 @@ fn gather_git_info_inner() -> Option<GitInfo> {
         return None;
     }
 
-    let branch = Command::new("git")
+    let branch = git()
         .args(["branch", "--show-current"])
         .output()
         .ok()
@@ -1291,9 +1444,18 @@ fn gather_git_info_inner() -> Option<GitInfo> {
     let mut modified = 0;
     let mut staged = 0;
     let mut untracked = 0;
-    let mut dirty_files = Vec::new();
+    let mut all_files: Vec<crate::tui::info_widget::DirtyFile> = Vec::new();
 
-    if let Ok(output) = Command::new("git").args(["status", "--porcelain"]).output()
+    let repo_root = git()
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+
+    if let Ok(output) = git()
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
         && output.status.success()
     {
         let status = String::from_utf8_lossy(&output.stdout);
@@ -1316,13 +1478,54 @@ fn gather_git_info_inner() -> Option<GitInfo> {
                 }
             }
 
-            if dirty_files.len() < 10 {
-                dirty_files.push(file_path);
-            }
+            all_files.push(crate::tui::info_widget::DirtyFile::new(
+                porcelain_status_letter(index_status, worktree_status),
+                file_path,
+            ));
         }
     }
 
-    let (ahead, behind) = Command::new("git")
+    // Line counts: tracked files from one numstat against HEAD (staged plus
+    // unstaged), untracked files by counting their lines.
+    let numstat = git()
+        .args(["diff", "--numstat", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_numstat(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    let mut added_total = 0usize;
+    let mut removed_total = 0usize;
+    for file in &mut all_files {
+        let key = file
+            .path
+            .rsplit(" -> ")
+            .next()
+            .unwrap_or(&file.path)
+            .trim_matches('"');
+        let abs = repo_root.as_ref().map(|root| root.join(key));
+        if file.status == '?' {
+            file.added = abs.as_deref().and_then(count_text_lines);
+            file.removed = file.added.map(|_| 0);
+        } else if let Some(&(a, r)) = numstat.get(key) {
+            file.added = a;
+            file.removed = r;
+        }
+        added_total += file.added.unwrap_or(0);
+        removed_total += file.removed.unwrap_or(0);
+        file.modified_at = abs
+            .as_deref()
+            .and_then(|p| std::fs::symlink_metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+    }
+    // Newest first, so the file being worked on stays visible under the cap.
+    // Deleted files have no mtime and sort last.
+    all_files.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    let dirty_total = all_files.len();
+    all_files.truncate(10);
+    let dirty_files = all_files;
+
+    let (ahead, behind) = git()
         .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
         .output()
         .ok()
@@ -1343,6 +1546,20 @@ fn gather_git_info_inner() -> Option<GitInfo> {
         })
         .unwrap_or((0, 0));
 
+    let recent_commits = git()
+        .args([
+            "log",
+            "-n",
+            "8",
+            "--shortstat",
+            "--format=%x1e%h%x1f%ct%x1f%s",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| parse_recent_commits(&String::from_utf8_lossy(&o.stdout), ahead))
+        .unwrap_or_default();
+
     Some(GitInfo {
         branch,
         modified,
@@ -1351,5 +1568,115 @@ fn gather_git_info_inner() -> Option<GitInfo> {
         ahead,
         behind,
         dirty_files,
+        dirty_total,
+        added_total,
+        removed_total,
+        repo_root,
+        recent_commits,
     })
+}
+
+/// Parse `git log --shortstat --format=%x1e%h%x1f%ct%x1f%s`. The first
+/// `ahead` commits are the ones not yet on the upstream.
+pub(crate) fn parse_recent_commits(
+    text: &str,
+    ahead: usize,
+) -> Vec<crate::tui::info_widget::RecentCommit> {
+    text.split('\x1e')
+        .filter(|record| !record.trim().is_empty())
+        .enumerate()
+        .filter_map(|(index, record)| {
+            let mut lines = record.lines();
+            let mut fields = lines.next()?.splitn(3, '\x1f');
+            let hash = fields.next()?.trim().to_string();
+            let timestamp = fields.next()?.trim().parse().ok()?;
+            let subject = fields.next().unwrap_or("").trim().to_string();
+            let (mut added, mut removed) = (None, None);
+            // " 3 files changed, 12 insertions(+), 4 deletions(-)"
+            for part in lines.flat_map(|l| l.split(',')) {
+                let part = part.trim();
+                let n = part.split_whitespace().next().and_then(|n| n.parse().ok());
+                if part.contains("insertion") {
+                    added = n;
+                } else if part.contains("deletion") {
+                    removed = n;
+                } else if part.contains("changed") {
+                    added = added.or(Some(0));
+                    removed = removed.or(Some(0));
+                }
+            }
+            Some(crate::tui::info_widget::RecentCommit {
+                hash,
+                subject,
+                timestamp,
+                unpushed: index < ahead,
+                added,
+                removed,
+            })
+        })
+        .collect()
+}
+
+/// Parse `git diff --numstat` into path -> (added, removed). Binary files
+/// report `-` and map to `None` counts.
+pub(crate) fn parse_numstat(
+    text: &str,
+) -> std::collections::HashMap<String, (Option<usize>, Option<usize>)> {
+    let mut out = std::collections::HashMap::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(a), Some(r), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        // Renames: `old => new` or `dir/{old => new}/file`.
+        let path = if let (Some(open), Some(close)) = (path.find('{'), path.find('}')) {
+            let inner = &path[open + 1..close];
+            let new = inner.rsplit(" => ").next().unwrap_or(inner);
+            format!("{}{}{}", &path[..open], new, &path[close + 1..]).replace("//", "/")
+        } else {
+            path.rsplit(" => ").next().unwrap_or(path).to_string()
+        };
+        out.insert(path, (a.parse().ok(), r.parse().ok()));
+    }
+    out
+}
+
+/// Line count of a small text file, for untracked files. Large or binary
+/// files return `None` so the widget shows no count rather than a bogus one.
+fn count_text_lines(path: &std::path::Path) -> Option<usize> {
+    const MAX_BYTES: u64 = 2 * 1024 * 1024;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let lines = bytes.iter().filter(|&&b| b == b'\n').count();
+    Some(if bytes.last().is_some_and(|&b| b != b'\n') {
+        lines + 1
+    } else {
+        lines
+    })
+}
+
+/// Collapse a porcelain `XY` pair into the single letter the Changes widget
+/// shows. Conflicts win, then the worktree side (what the user is editing),
+/// then the index side.
+pub(crate) fn porcelain_status_letter(index: u8, worktree: u8) -> char {
+    if index == b'?' {
+        return '?';
+    }
+    if index == b'U' || worktree == b'U' || (index == b'A' && worktree == b'A') {
+        return 'U';
+    }
+    let pick = if worktree != b' ' { worktree } else { index };
+    match pick {
+        b'M' | b'T' => 'M',
+        b'A' => 'A',
+        b'D' => 'D',
+        b'R' | b'C' => 'R',
+        _ => 'M',
+    }
 }

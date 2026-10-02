@@ -239,6 +239,9 @@ pub struct RemoteConnection {
     session_id: Option<String>,
     client_instance_id: Option<String>,
     next_request_id: u64,
+    // Bootstrap Done acknowledgments are not completions of a detached turn.
+    // Retain recent ids because target Subscribe can acknowledge twice.
+    control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
     tool_diff: RemoteDiffTracker,
     /// Bytes pulled from the socket that have not yet been split into complete
     /// newline-delimited protocol lines. This buffer is persistent across
@@ -282,8 +285,8 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
 
 pub(crate) trait RemoteEventState {
     fn handle_tool_start(&mut self, id: &str, name: &str);
-    fn handle_tool_input(&mut self, delta: &str);
-    fn get_current_tool_input(&self) -> serde_json::Value;
+    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str);
+    fn get_tool_input(&self, id: &str) -> serde_json::Value;
     fn handle_tool_exec(&mut self, id: &str, name: &str);
     fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String;
     fn clear_pending(&mut self);
@@ -329,7 +332,11 @@ impl RemoteConnection {
             _dummy_peer: None,
             session_id: None,
             client_instance_id: client_instance_id.map(str::to_string),
-            next_request_id: 1,
+            // A reattached turn carries the old connection's request id on
+            // local sockets as well as SSH. Keep its Done distinct from this
+            // connection's Subscribe/GetHistory acknowledgments.
+            next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
+            control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
@@ -343,17 +350,27 @@ impl RemoteConnection {
         let subscribe_start = Instant::now();
         let (working_dir, selfdev) = super::subscribe_metadata(remote_working_dir);
         let resume_target = resume_session
-            .filter(|session_id| crate::session::session_exists(session_id))
+            .filter(|session_id| {
+                super::is_ssh_remote() || crate::session::session_exists(session_id)
+            })
             .map(|session_id| session_id.to_string());
         conn.send_request(Request::Subscribe {
+            system_prompt: None,
+            supports_pdf_panels: false,
             id: conn.next_request_id,
             working_dir,
             selfdev,
             target_session_id: resume_target.clone(),
             client_instance_id: conn.client_instance_id.clone(),
-            client_has_local_history,
+            client_has_local_history: client_has_local_history && !super::is_ssh_remote(),
             allow_session_takeover,
-            terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+            crash_on_disconnect: false,
+            continue_on_disconnect: super::is_ssh_remote(),
+            terminal_env: if super::is_ssh_remote() {
+                Vec::new()
+            } else {
+                crate::terminal_launch::snapshot_client_terminal_env()
+            },
         })
         .await?;
         let subscribe_ms = subscribe_start.elapsed().as_millis();
@@ -381,6 +398,7 @@ impl RemoteConnection {
         // request fresh catalog data when needed.
         if std::env::var_os("JCODE_REMOTE_BOOTSTRAP_MODEL_CATALOG").is_some() {
             conn.send_request(Request::GetModelCatalog {
+                subscribe_usage_updates: true,
                 id: conn.next_request_id,
             })
             .await?;
@@ -440,6 +458,24 @@ impl RemoteConnection {
         request: Request,
         interrupt_trigger: Option<&str>,
     ) -> Result<()> {
+        let control_id = match &request {
+            Request::Subscribe { id, .. }
+            | Request::GetHistory { id }
+            | Request::ResumeSession { id, .. }
+            | Request::GetModelCatalog { id, .. }
+            | Request::GetState { id } => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = control_id {
+            let mut ids = self
+                .control_done_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if ids.len() >= 256 {
+                ids.pop_front();
+            }
+            ids.push_back(id);
+        }
         let json = serde_json::to_string(&request)? + "\n";
         let interrupt_log = self.interrupt_request_log_fields(&request, interrupt_trigger);
         if let Some(fields) = &interrupt_log {
@@ -601,6 +637,15 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Refresh daemon usage after a client-side banked reset attempt.
+    pub async fn invalidate_openai_usage(&mut self, account_label: Option<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::InvalidateOpenAiUsage { id, account_label })
+            .await?;
+        Ok(id)
+    }
+
     /// Re-request the session history payload from the server.
     ///
     /// Used by the client-side history-recovery watchdog: if the bootstrap
@@ -626,7 +671,11 @@ impl RemoteConnection {
     pub async fn request_model_catalog(&mut self) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::GetModelCatalog { id }).await?;
+        self.send_request(Request::GetModelCatalog {
+            id,
+            subscribe_usage_updates: true,
+        })
+        .await?;
         Ok(id)
     }
 
@@ -825,6 +874,16 @@ impl RemoteConnection {
     }
 
     /// Set or clear the custom session display title on the server.
+    pub async fn set_session_saved(&mut self, saved: bool, label: Option<String>) -> Result<()> {
+        let request = Request::SetSessionSaved {
+            id: self.next_request_id,
+            saved,
+            label,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     pub async fn rename_session(&mut self, title: Option<String>) -> Result<()> {
         let request = Request::RenameSession {
             id: self.next_request_id,
@@ -1224,6 +1283,15 @@ impl RemoteConnection {
             return LineOutcome::Skip;
         }
         match serde_json::from_str(&text) {
+            Ok(ServerEvent::Done { id })
+                if self
+                    .control_done_ids
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&id) =>
+            {
+                LineOutcome::Skip
+            }
             Ok(event) => LineOutcome::Event(Box::new(event)),
             Err(error) => {
                 // A single unparseable JSON line (e.g. the tail half of a frame
@@ -1278,6 +1346,7 @@ impl RemoteConnection {
             session_id: None,
             client_instance_id: None,
             next_request_id: 1,
+            control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
             read_buffer_scan_start: 0,
@@ -1291,6 +1360,11 @@ impl RemoteConnection {
     #[cfg(test)]
     pub(crate) fn take_dummy_peer(&mut self) -> Option<Stream> {
         self._dummy_peer.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_request_id_for_test(&self) -> u64 {
+        self.next_request_id
     }
 
     /// Set session ID
@@ -1322,13 +1396,13 @@ impl RemoteConnection {
     }
 
     /// Handle tool input delta
-    pub fn handle_tool_input(&mut self, delta: &str) {
-        self.tool_diff.handle_tool_input(delta);
+    pub fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
+        self.tool_diff.handle_tool_input(id, delta);
     }
 
-    /// Get parsed current tool input (before it's cleared in handle_tool_exec)
-    pub fn get_current_tool_input(&self) -> serde_json::Value {
-        self.tool_diff.current_tool_input_json()
+    /// Get parsed input for this call (before handle_tool_exec clears it)
+    pub fn get_tool_input(&self, id: &str) -> serde_json::Value {
+        self.tool_diff.tool_input_json(id)
     }
 
     /// Handle tool exec - cache file content if edit/write
@@ -1362,12 +1436,12 @@ impl RemoteEventState for RemoteConnection {
         Self::handle_tool_start(self, id, name);
     }
 
-    fn handle_tool_input(&mut self, delta: &str) {
-        Self::handle_tool_input(self, delta);
+    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
+        Self::handle_tool_input(self, id, delta);
     }
 
-    fn get_current_tool_input(&self) -> serde_json::Value {
-        Self::get_current_tool_input(self)
+    fn get_tool_input(&self, id: &str) -> serde_json::Value {
+        Self::get_tool_input(self, id)
     }
 
     fn handle_tool_exec(&mut self, id: &str, name: &str) {
@@ -1408,12 +1482,12 @@ impl RemoteEventState for ReplayRemoteState {
         self.tool_diff.handle_tool_start(id, name);
     }
 
-    fn handle_tool_input(&mut self, delta: &str) {
-        self.tool_diff.handle_tool_input(delta);
+    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
+        self.tool_diff.handle_tool_input(id, delta);
     }
 
-    fn get_current_tool_input(&self) -> serde_json::Value {
-        self.tool_diff.current_tool_input_json()
+    fn get_tool_input(&self, id: &str) -> serde_json::Value {
+        self.tool_diff.tool_input_json(id)
     }
 
     fn handle_tool_exec(&mut self, id: &str, name: &str) {
@@ -1466,6 +1540,39 @@ mod tests {
             elapsed
         );
         assert_eq!(remote.next_request_id, 2);
+    }
+
+    #[tokio::test]
+    async fn native_resume_filters_duplicate_control_done_but_preserves_turn_done() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, mut writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        remote.resume_session("running-session").await.unwrap();
+        let mut request = String::new();
+        reader.read_line(&mut request).await.unwrap();
+        let id = match serde_json::from_str::<Request>(&request).unwrap() {
+            Request::ResumeSession { id, .. } => id,
+            other => panic!("expected resume, got {other:?}"),
+        };
+        writer.write_all(format!(
+            "{{\"type\":\"done\",\"id\":{id}}}\n{{\"type\":\"done\",\"id\":{id}}}\n{{\"type\":\"text_delta\",\"text\":\"Still working\"}}\n{{\"type\":\"done\",\"id\":44}}\n"
+        ).as_bytes()).await.unwrap();
+        assert!(matches!(remote.next_event().await,
+            RemoteRead::Event(ServerEvent::TextDelta { text }) if text == "Still working"));
+        assert!(matches!(
+            remote.next_event().await,
+            RemoteRead::Event(ServerEvent::Done { id: 44 })
+        ));
+
+        // An ordinary Message's Done still completes normally on this client.
+        let message_id = remote.send_message("next turn".to_string()).await.unwrap();
+        writer
+            .write_all(format!("{{\"type\":\"done\",\"id\":{message_id}}}\n").as_bytes())
+            .await
+            .unwrap();
+        assert!(matches!(remote.next_event().await,
+            RemoteRead::Event(ServerEvent::Done { id }) if id == message_id));
     }
 
     #[tokio::test]

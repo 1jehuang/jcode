@@ -83,8 +83,9 @@ fn test_expand_badge_shortcut_toggles_inline_diff_and_pulses_key() {
 
 #[test]
 fn test_alt_shift_i_toggles_inline_images_and_persists() {
-    let _render_lock = scroll_render_test_lock();
+    // App setup also takes the render lock, so always acquire env first.
     let _env_guard = crate::storage::lock_test_env();
+    let _render_lock = scroll_render_test_lock();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -93,6 +94,7 @@ fn test_alt_shift_i_toggles_inline_images_and_persists() {
     app.is_remote = true;
     app.remote_side_pane_images
         .push(crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: "image-data".to_string(),
             label: Some("preview.png".to_string()),
@@ -108,9 +110,14 @@ fn test_alt_shift_i_toggles_inline_images_and_persists() {
         KeyModifiers::ALT | KeyModifiers::SHIFT,
     ));
     assert!(!app.inline_images_visible, "Alt+Shift+I should hide images");
+    // The notice renders the platform chord via alt_chord (Option symbol on
+    // macOS, Alt elsewhere), so assert that instead of a hardcoded "Alt+...".
     assert_eq!(
         app.status_notice(),
-        Some("Inline images: hidden (Alt+Shift+I to show)".to_string())
+        Some(format!(
+            "Inline images: hidden ({} to show)",
+            jcode_tui_core::keybind::alt_chord("Shift+I")
+        ))
     );
 
     // The flag persists for the next app (e.g. resume after restart).
@@ -140,6 +147,7 @@ fn text_only_transcript_updates_keep_inline_image_signature_cached() {
     app.is_remote = true;
     app.remote_side_pane_images = (0..24)
         .map(|index| crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             // Large enough to make accidental payload cloning/re-rendering costly,
             // without bloating the test process excessively.
@@ -176,6 +184,7 @@ fn inline_image_signature_distinguishes_labels_and_same_prefix_payloads() {
         hasher.finish()
     };
     let base = crate::session::RenderedImage {
+        history_message_index: None,
         media_type: "image/png".to_string(),
         data: format!("{}tail-a", "A".repeat(128)),
         label: Some("first.png".to_string()),
@@ -706,12 +715,14 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.diff_pane_focus = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: String::new(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -751,12 +762,14 @@ fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.diff_pane_focus = true;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: String::new(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -910,7 +923,8 @@ fn test_click_on_inline_image_label_line_cycles_level() {
     );
     assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
 
-    // Further label clicks continue the cycle: Large -> Full -> Fit.
+    // Large and Full have identical geometry for this landscape image, so the
+    // redundant Full state is skipped and the next click returns to Fit.
     let click_label = |app: &mut App| {
         app.handle_mouse_event(MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
@@ -922,14 +936,8 @@ fn test_click_on_inline_image_label_line_cycles_level() {
     click_label(&mut app);
     assert_eq!(
         app.image_expand_level(IMAGE_ID),
-        ImageExpandLevel::Full,
-        "second click should expand Large -> Full"
-    );
-    click_label(&mut app);
-    assert_eq!(
-        app.image_expand_level(IMAGE_ID),
         ImageExpandLevel::Fit,
-        "cycle should wrap Full -> Fit"
+        "second click should skip duplicate Full geometry and return to Fit"
     );
 }
 
@@ -1349,18 +1357,13 @@ fn test_click_on_inline_image_body_cycles_level() {
         "clicking the image body should expand Fit -> Large"
     );
 
-    // Clicking the body again advances the cycle.
-    click(&mut app, body_col, body_row);
-    assert_eq!(
-        app.image_expand_level(IMAGE_ID),
-        ImageExpandLevel::Full,
-        "second body click should expand Large -> Full"
-    );
+    // Large and Full resolve to the same geometry for this landscape image, so
+    // the click cycle must omit Full rather than showing a duplicate size.
     click(&mut app, body_col, body_row);
     assert_eq!(
         app.image_expand_level(IMAGE_ID),
         ImageExpandLevel::Fit,
-        "third body click should wrap Full -> Fit"
+        "second body click should skip duplicate Full geometry and return to Fit"
     );
 
     // A click in the blank space to the right of the image must stay inert.

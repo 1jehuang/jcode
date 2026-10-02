@@ -58,6 +58,52 @@ fn test_open_model_picker_without_routes_shows_actionable_guidance() {
     assert!(last.content.contains("/model"));
 }
 
+#[test]
+fn test_remote_model_picker_during_startup_waits_for_session_catalog() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
+    app.remote_provider_model = Some("gpt-5.6-sol".to_string());
+    app.remote_available_entries.clear();
+    app.remote_model_options.clear();
+
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("loading model picker should be open");
+    assert_eq!(picker.entries.len(), 1);
+    assert_eq!(picker.entries[0].name, "gpt-5.6-sol");
+    assert_eq!(picker.entries[0].options[0].detail, "updating model list…");
+}
+
+#[test]
+fn test_remote_model_command_opens_picker_without_catalog_request() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+    app.input = "/model".to_string();
+    app.cursor_pos = app.input.len();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let request_id_before = remote.next_request_id_for_test();
+
+    rt.block_on(app.handle_remote_key(
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+        &mut remote,
+    ))
+    .unwrap();
+
+    assert!(app.inline_interactive_state.is_some());
+    assert_eq!(
+        remote.next_request_id_for_test(),
+        request_id_before,
+        "opening /model must not refresh or request a remote catalog"
+    );
+}
+
 #[derive(Clone)]
 struct CountingModelRoutesProvider {
     calls: StdArc<AtomicUsize>,
@@ -110,6 +156,7 @@ impl AuthUxStateSpaceProvider {
                 } else {
                     "no API key".to_string()
                 },
+                usage: None,
                 cheapness: None,
             });
         }
@@ -124,6 +171,7 @@ impl AuthUxStateSpaceProvider {
                 } else {
                     "no API key".to_string()
                 },
+                usage: None,
                 cheapness: None,
             });
             if self.include_generic_profile_duplicate {
@@ -137,6 +185,7 @@ impl AuthUxStateSpaceProvider {
                     } else {
                         "no API key".to_string()
                     },
+                    usage: None,
                     cheapness: None,
                 });
             }
@@ -154,6 +203,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openai-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -162,6 +212,7 @@ impl MixedModelRoutesProvider {
                 api_method: "claude-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -170,6 +221,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openai-compatible:chutes".to_string(),
                 available: true,
                 detail: "https://llm.chutes.ai/v1".to_string(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -178,6 +230,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ]
@@ -432,6 +485,7 @@ impl Provider for CountingModelRoutesProvider {
                 api_method: "test".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             })
             .collect()
@@ -796,10 +850,15 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     assert!(login.success, "unexpected failed login event: {login:?}");
                     assert_eq!(login.provider, "Cerebras");
                     assert!(login.message.contains("Cerebras API key saved."));
+                    let expected_path = crate::storage::app_config_dir()
+                        .unwrap()
+                        .join("cerebras.env");
                     assert!(
                         login
                             .message
-                            .contains("Stored at ~/.config/jcode/cerebras.env.")
+                            .contains(&format!("Stored at {}.", expected_path.display())),
+                        "{}",
+                        login.message
                     );
                     assert!(login.message.contains("Fetching models now."));
                     assert!(!login.message.contains("did not switch models"));
@@ -1560,6 +1619,7 @@ impl Provider for AzureLoginMockProvider {
             api_method: "openai-compatible".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }]
     }
@@ -1821,10 +1881,8 @@ fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_
     let gpt_text = render_filtered(&mut app, "gpt-oss-120b-medium");
 
     assert!(
-        claude_text.contains("MODEL")
-            && claude_text.contains("PROVIDER")
-            && claude_text.contains("METHOD"),
-        "rendered /model view should include picker columns, got:
+        claude_text.contains("▸ Claude Sonnet 4.6") && claude_text.contains("↑↓ choose"),
+        "rendered /model suggestions should show the selected row and navigation, got:
 {}",
         claude_text
     );
@@ -1894,10 +1952,8 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     let openrouter_openai_text = render_filtered(&mut app, "openai/gpt-5.5");
 
     assert!(
-        openai_text.contains("MODEL")
-            && openai_text.contains("PROVIDER")
-            && openai_text.contains("METHOD"),
-        "rendered /model view should include user-visible picker columns, got:\n{}",
+        openai_text.contains("▸ GPT-5.4") && openai_text.contains("↑↓ choose"),
+        "rendered /model suggestions should show the selected row and navigation, got:\n{}",
         openai_text
     );
     assert!(
@@ -2573,7 +2629,7 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
         // The continuation self-identifies as an automated follow-up so the model
         // does not mistake it for a user message, but never discloses private
         // calibration details.
-        assert!(summary.contains("automated follow-up"));
+        assert!(summary.starts_with("[auto]"));
         assert!(!summary.to_ascii_lowercase().contains("threshold"));
         // The model is told exactly which completed todos to recheck.
         assert!(summary.contains("Finish risky provider path"));
@@ -2699,7 +2755,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 confidence_history: vec![
-                    crate::todo::ConfidenceState::from_legacy_score(70),
+                    crate::todo::ConfidenceState::Speculative,
                     crate::todo::ConfidenceState::from_legacy_score(100),
                 ],
                 ..Default::default()
@@ -2960,5 +3016,85 @@ fn test_overnight_start_queues_remote_turn_without_stuck_sending() {
         );
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].contains("visible Overnight Coordinator"));
+    });
+}
+
+#[test]
+fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps() {
+    use crate::todo::ConfidenceState;
+    with_temp_jcode_home(|| {
+        for (planning, completion, history) in [
+            (
+                ConfidenceState::Plausible,
+                ConfidenceState::Verified,
+                vec![ConfidenceState::Plausible, ConfidenceState::Verified],
+            ),
+            (
+                ConfidenceState::Speculative,
+                ConfidenceState::Validated,
+                vec![ConfidenceState::Speculative, ConfidenceState::Validated],
+            ),
+            // Legacy planning/completion disagreement is not a recorded jump.
+            (
+                ConfidenceState::Speculative,
+                ConfidenceState::Verified,
+                vec![],
+            ),
+            (
+                ConfidenceState::Speculative,
+                ConfidenceState::Verified,
+                vec![ConfidenceState::Verified],
+            ),
+            // Stale history must end at the current completion confidence.
+            (
+                ConfidenceState::Speculative,
+                ConfidenceState::Validated,
+                vec![ConfidenceState::Speculative, ConfidenceState::Verified],
+            ),
+        ] {
+            let mut app = create_test_app();
+            app.is_remote = false;
+            app.auto_poke_incomplete_todos = true;
+            app.auto_poke_default_on = false;
+            crate::todo::save_todos(
+                &app.session.id,
+                &[crate::todo::TodoItem {
+                    id: "validated-result".into(),
+                    content: "Validate the requested result".into(),
+                    status: "completed".into(),
+                    confidence: Some(planning),
+                    completion_confidence: Some(completion),
+                    confidence_history: history,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+            // Missing goal metadata is not unfinished ownership work either.
+            crate::todo::save_goals(&app.session.id, &[]).unwrap();
+            for id in 42..44 {
+                app.is_processing = true;
+                super::local::finish_turn(&mut app);
+                assert!(!app.todo_confidence_spike_challenged);
+                if id == 42 {
+                    assert_eq!(
+                        app.queued_messages,
+                        vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+                    );
+                    assert!(app.pending_queued_dispatch);
+                } else {
+                    assert!(app.queued_messages.is_empty());
+                    assert!(!app.pending_queued_dispatch);
+                }
+                app.queued_messages.clear();
+                app.pending_queued_dispatch = false;
+            }
+            assert!(!app.auto_poke_incomplete_todos);
+            assert!(app.hidden_queued_system_messages.is_empty());
+            assert!(
+                !app.display_messages()
+                    .iter()
+                    .any(|message| message.content.contains("Double-checking confidence jumps"))
+            );
+        }
     });
 }

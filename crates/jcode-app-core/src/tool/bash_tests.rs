@@ -8,6 +8,76 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 #[test]
+fn bash_optional_nulls_use_omitted_defaults() {
+    let omitted: BashInput = serde_json::from_value(json!({"command": "printf ok"})).unwrap();
+    let nulls: BashInput = serde_json::from_value(json!({
+        "command": "printf ok",
+        "intent": null,
+        "accept_large_output": null,
+        "timeout": null,
+        "run_in_background": null,
+        "notify": null,
+        "wake": null,
+        "stall_wake_seconds": null,
+        "justification": null
+    }))
+    .unwrap();
+    assert!(nulls.notify);
+    assert!(!nulls.wake);
+    assert_eq!(nulls.notify, omitted.notify);
+    assert_eq!(nulls.wake, omitted.wake);
+    assert_eq!(nulls.run_in_background, omitted.run_in_background);
+    assert_eq!(nulls.timeout, omitted.timeout);
+    assert_eq!(nulls.stall_wake_seconds, omitted.stall_wake_seconds);
+    assert_eq!(nulls.justification, omitted.justification);
+    assert_eq!(nulls.intent, omitted.intent);
+}
+
+#[test]
+fn bash_optional_booleans_preserve_explicit_values() {
+    for value in [false, true] {
+        let input: BashInput = serde_json::from_value(json!({
+            "command": "printf ok", "notify": value, "wake": value,
+            "run_in_background": value
+        }))
+        .unwrap();
+        assert_eq!(input.notify, value);
+        assert_eq!(input.wake, value);
+        assert_eq!(input.run_in_background, Some(value));
+    }
+}
+
+#[test]
+fn bash_optional_booleans_still_reject_invalid_types() {
+    for key in ["notify", "wake", "run_in_background"] {
+        for value in [json!("false"), json!(0), json!([]), json!({})] {
+            let mut input = json!({"command": "printf ok"});
+            input[key] = value;
+            assert!(serde_json::from_value::<BashInput>(input).is_err());
+        }
+    }
+    assert!(serde_json::from_value::<BashInput>(json!({"command": null})).is_err());
+    assert!(serde_json::from_value::<BashInput>(json!({})).is_err());
+}
+
+#[tokio::test]
+async fn bash_executes_with_null_optional_arguments() {
+    let output = BashTool::new()
+        .execute(
+            json!({
+                "command": "printf null-options-ok",
+                "notify": null, "wake": null, "run_in_background": null,
+                "timeout": null, "stall_wake_seconds": null, "justification": null,
+                "intent": null, "accept_large_output": null
+            }),
+            make_ctx(None),
+        )
+        .await
+        .unwrap();
+    assert!(output.output.contains("null-options-ok"));
+}
+
+#[test]
 fn repository_commands_export_a_logged_cargo_function() {
     let repo =
         crate::build::find_repo_in_ancestors(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
@@ -266,6 +336,13 @@ async fn test_foreground_timeout_promotes_and_command_keeps_running() {
         .as_str()
         .expect("task_id should be present")
         .to_string();
+
+    // Promotion must retain an output artifact before returning, even though
+    // this in-process path only fills it once the command finishes.
+    assert!(
+        crate::background::global().output(&task_id).await.is_some(),
+        "output artifact should exist immediately after promotion"
+    );
 
     // Wait for the promoted command to finish on its own.
     let mut final_status = None;

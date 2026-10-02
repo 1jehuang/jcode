@@ -107,7 +107,14 @@ pub(super) fn reconnect_status_message(app: &App, state: &RemoteRunState, detail
                 .as_ref()
                 .and_then(|id| crate::id::extract_session_name(id))
         });
-    let resume_hint = if let Some(name) = &session_name {
+    let resume_hint = if let Some(host) = crate::tui::ssh_remote_host() {
+        let id = app
+            .remote_session_id
+            .as_deref()
+            .or(app.resume_session_id.as_deref())
+            .unwrap_or("pending");
+        format!(" · SSH {host} · remote session {id}")
+    } else if let Some(name) = &session_name {
         format!(" · resume: jcode --resume {}", name)
     } else {
         String::new()
@@ -146,7 +153,14 @@ pub(super) fn reload_wait_status_message(
                 .as_ref()
                 .and_then(|id| crate::id::extract_session_name(id))
         });
-    let resume_hint = if let Some(name) = &session_name {
+    let resume_hint = if let Some(host) = crate::tui::ssh_remote_host() {
+        let id = app
+            .remote_session_id
+            .as_deref()
+            .or(app.resume_session_id.as_deref())
+            .unwrap_or("pending");
+        format!(" · SSH {host} · remote session {id}")
+    } else if let Some(name) = &session_name {
         format!(" · resume: jcode --resume {}", name)
     } else {
         String::new()
@@ -186,7 +200,8 @@ fn disconnected_redraw_interval(initial_connect: bool) -> tokio::time::Interval 
 }
 
 pub(in crate::tui::app) fn reload_handoff_active(state: &RemoteRunState) -> bool {
-    state.server_reload_in_progress || super::session_persistence::reload_marker_active()
+    !crate::tui::is_ssh_remote()
+        && (state.server_reload_in_progress || super::session_persistence::reload_marker_active())
 }
 
 pub(in crate::tui::app) fn should_use_same_session_fast_path(
@@ -308,7 +323,10 @@ async fn recover_reloading_server(
     state: &mut RemoteRunState,
     detail: &str,
 ) -> Result<bool> {
-    if state.reload_recovery_attempted || crate::server_spawn::is_running().await {
+    if crate::tui::is_ssh_remote()
+        || state.reload_recovery_attempted
+        || crate::server_spawn::is_running().await
+    {
         return Ok(false);
     }
 
@@ -365,8 +383,9 @@ pub(in crate::tui::app) async fn connect_with_retry(
         return Ok(outcome);
     }
 
-    let client_has_local_history =
-        session_to_resume.is_some() && !app.display_messages().is_empty();
+    let client_has_local_history = !crate::tui::is_ssh_remote()
+        && session_to_resume.is_some()
+        && !app.display_messages().is_empty();
     let client_instance_id = app.remote_client_instance_id.clone();
     let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
     let connect = RemoteConnection::connect_with_session(
@@ -401,6 +420,9 @@ pub(in crate::tui::app) async fn connect_with_retry(
         }
     } {
         Ok(remote) => {
+            // Request IDs are scoped to a connection. Old acknowledgements cannot
+            // arrive on this new socket and must not swallow a new turn's Done.
+            app.usage_reset.invalidate_requests.clear();
             crate::logging::info(&format!(
                 "[TIMING] remote bootstrap: connected after {}ms (resume={:?}, reconnect_attempts={})",
                 app.app_started.elapsed().as_millis(),
@@ -418,6 +440,11 @@ pub(in crate::tui::app) async fn connect_with_retry(
         }
         Err(e) => {
             if state.reconnect_attempts == 0 && !app.server_spawning {
+                if let Some(host) = crate::tui::ssh_remote_host() {
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect to the SSH adapter for {host}: {e}"
+                    ));
+                }
                 return Err(anyhow::anyhow!(
                     "Failed to connect to server. Is `jcode serve` running? Error: {}",
                     e
@@ -594,7 +621,8 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
             app.reload_info.push(ctx.reconnect_notice_line());
         }
 
-        let must_reload_client = state.server_reload_in_progress || app.has_newer_binary();
+        let must_reload_client = !crate::tui::is_ssh_remote()
+            && (state.server_reload_in_progress || app.has_newer_binary());
 
         if must_reload_client {
             app.push_display_message(DisplayMessage::system(
@@ -649,13 +677,14 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         && !reload_ctx_available
         && !hints.has_client_reload_marker
         && !history_already_loaded;
-    let same_session_reload_fast_path = should_use_same_session_fast_path(
-        state.reconnect_attempts > 0,
-        session_to_resume,
-        app.remote_session_id.as_deref(),
-        !app.display_messages.is_empty(),
-        reload_reconnect_needs_server_history,
-    );
+    let same_session_reload_fast_path = !crate::tui::is_ssh_remote()
+        && should_use_same_session_fast_path(
+            state.reconnect_attempts > 0,
+            session_to_resume,
+            app.remote_session_id.as_deref(),
+            !app.display_messages.is_empty(),
+            reload_reconnect_needs_server_history,
+        );
 
     if reload_reconnect_needs_server_history {
         app.pending_reload_reconnect_status = Some(PendingReloadReconnectStatus::AwaitingHistory {
@@ -711,6 +740,17 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         app.clear_remote_history_wait();
     }
 
+    // Hydrate route metadata as part of connection bootstrap, not when the
+    // user opens `/model`. History intentionally carries names only, so without
+    // this follow-up the public picker exposes generic `remote-catalog` rows.
+    // Request ordering keeps the authoritative History snapshot ahead of this
+    // expanded catalog response on a newly connected transport.
+    if let Err(error) = remote.request_model_catalog().await {
+        crate::logging::warn(&format!(
+            "Failed to hydrate model routes during remote bootstrap: {error}"
+        ));
+    }
+
     // Dispatch restored work once the server history is in place. This must
     // also cover a pending startup submission (e.g. a headed swarm spawn whose
     // initial prompt was staged into `app.input` with `submit_input_on_startup`),
@@ -738,6 +778,9 @@ pub(super) fn load_reload_reconnect_hints(
     app: &mut App,
     session_to_resume: Option<&str>,
 ) -> ReloadReconnectHints {
+    if crate::tui::is_ssh_remote() {
+        return ReloadReconnectHints::default();
+    }
     let reload_ctx_for_session = session_to_resume.and_then(|sid| {
         let result = ReloadContext::peek_for_session(sid);
         crate::logging::info(&format!(

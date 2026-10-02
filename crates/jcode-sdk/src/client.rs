@@ -12,10 +12,11 @@
 
 use crate::errors::{Error, ErrorKind, Result};
 use crate::launch::{LaunchOptions, LaunchedInstance, ensure_runtime, launch_instance};
+use crate::ssh::{SshConnectOptions, SshProcess, SshTransport};
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, ModelRouteInfo,
-    PermissionDecision, ServerFrame, SessionInfo, TextMatch, api_socket_path, read_frame,
-    write_frame,
+    PermissionDecision, ServerFrame, SessionInfo, SessionToolDefinition, TextMatch,
+    ToolConfiguration, api_socket_path, read_frame, write_frame,
 };
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -52,6 +53,20 @@ impl Default for ConnectOptions {
     }
 }
 
+/// Options fixed when a session is created.
+#[derive(Clone, Debug, Default)]
+pub struct CreateSessionOptions {
+    /// Working directory for the new session. Omit to use the runtime default.
+    pub working_dir: Option<String>,
+    /// Replace the entire assembled system prompt, not just its base text.
+    ///
+    /// This bypasses the default prompt and assembled instruction/context additions.
+    /// `None` keeps normal prompt assembly. `Some(String::new())` explicitly
+    /// overrides it with an empty prompt. Immutable after creation and persisted
+    /// by the runtime for resume.
+    pub system_prompt: Option<String>,
+}
+
 /// A duplex byte transport. Lets tests and future WebSockets plug in.
 pub trait Transport: Send {
     /// A handle which interrupts both halves after `split`. Custom transports
@@ -63,15 +78,17 @@ pub trait Transport: Send {
     fn split(self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)>;
 }
 
-/// A Unix socket transport, the default.
-pub struct UnixTransport(std::os::unix::net::UnixStream);
+/// A Unix-domain socket transport, the default.
+type PlatformUnixStream = jcode_transport::SyncStream;
+
+pub struct UnixTransport(PlatformUnixStream);
 
 impl UnixTransport {
     pub fn connect(path: &std::path::Path) -> Result<Self> {
         // A bare `No such file or directory` names the syscall and hides the
         // cause: the bridge is not running. Connecting is the first thing
         // anyone does with this SDK, so say what to do about it.
-        let stream = std::os::unix::net::UnixStream::connect(path).map_err(|cause| {
+        let stream = PlatformUnixStream::connect(path).map_err(|cause| {
             Error::new(
                 ErrorKind::ConnectFailed,
                 match cause.kind() {
@@ -100,10 +117,19 @@ impl UnixTransport {
 
 impl Transport for UnixTransport {
     fn shutdown_handle(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
-        let socket = self.0.try_clone().ok()?;
-        Some(Arc::new(move || {
-            let _ = socket.shutdown(std::net::Shutdown::Both);
-        }))
+        #[cfg(unix)]
+        {
+            let socket = self.0.try_clone().ok()?;
+            Some(Arc::new(move || {
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            }))
+        }
+        #[cfg(windows)]
+        {
+            // Closing the reader and writer handles interrupts named-pipe I/O.
+            // They are owned by the client and dropped during shutdown.
+            None
+        }
     }
 
     fn split(self: Box<Self>) -> Result<(Box<dyn BufRead + Send>, Box<dyn Write + Send>)> {
@@ -295,12 +321,15 @@ fn stop_global_stream(control: &GlobalEventControl, error: Option<Error>) {
     drop(children);
 }
 
+/// A live subscription: (id, session filter, sink).
+type Subscriber = (u64, Option<String>, Sender<ApiEvent>);
+
 struct Inner {
     writer: Mutex<Box<dyn Write + Send>>,
     /// Requests waiting for their `reply_to` frame.
     pending: Mutex<HashMap<u64, Sender<ServerFrame>>>,
     /// Live subscriptions: (id, session filter, sink).
-    subscribers: Mutex<Vec<(u64, Option<String>, Sender<ApiEvent>)>>,
+    subscribers: Mutex<Vec<Subscriber>>,
     next_id: AtomicU64,
     next_sub: AtomicU64,
     closed: AtomicBool,
@@ -308,6 +337,7 @@ struct Inner {
     socket_path: std::path::PathBuf,
     client_name: String,
     native_socket: bool,
+    ssh_process: Option<Arc<SshProcess>>,
     shutdown: Option<Arc<dyn Fn() + Send + Sync>>,
     client_handles: AtomicUsize,
 }
@@ -318,6 +348,7 @@ struct Inner {
 /// without one is a stream event and goes to every subscriber.
 pub struct JcodeClient {
     inner: Arc<Inner>,
+    ssh_options: Option<SshConnectOptions>,
     instance: Option<Arc<LaunchedInstance>>,
     /// State directory of the private instance this client owns, if any.
     pub instance_home: Option<std::path::PathBuf>,
@@ -332,6 +363,7 @@ impl Clone for JcodeClient {
         self.inner.client_handles.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: Arc::clone(&self.inner),
+            ssh_options: self.ssh_options.clone(),
             instance: self.instance.clone(),
             instance_home: self.instance_home.clone(),
             server: self.server.clone(),
@@ -342,15 +374,82 @@ impl Clone for JcodeClient {
 
 impl Drop for JcodeClient {
     fn drop(&mut self) {
-        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(shutdown) = &self.inner.shutdown {
-                shutdown();
-            }
+        if self.inner.client_handles.fetch_sub(1, Ordering::AcqRel) == 1
+            && let Some(shutdown) = &self.inner.shutdown
+        {
+            shutdown();
         }
     }
 }
 
 impl JcodeClient {
+    /// Retain this client's shared SSH master for reconnecting independent API
+    /// channels. Returns None for isolated or already closed SSH channels.
+    #[cfg(unix)]
+    pub fn shared_ssh_transport(&self) -> Option<crate::SharedSshTransport> {
+        self.inner
+            .ssh_process
+            .as_ref()
+            .and_then(|process| process.shared_transport())
+    }
+
+    /// Connect to a remote shared harness using system SSH credentials/config.
+    ///
+    /// The remote must have `jcode api --stdio`. Dropping the last client clone
+    /// kills and reaps SSH, but leaves the remote shared daemon running. This
+    /// never launches a local runtime or falls back to local session data.
+    pub fn connect_ssh(options: SshConnectOptions) -> Result<Self> {
+        let transport = SshTransport::spawn(&options)?;
+        Self::over_ssh(transport, options)
+    }
+
+    pub(crate) fn over_ssh(transport: SshTransport, options: SshConnectOptions) -> Result<Self> {
+        let process = Arc::clone(&transport.process);
+        // Also interrupts a blocked hello write, not just the reply wait.
+        let (deadline, watchdog) = process.startup_deadline(options.connect_timeout);
+        let connect = ConnectOptions {
+            socket_path: None,
+            client_name: options.client_name.clone(),
+            request_timeout: options.request_timeout,
+            ensure_runtime: false,
+        };
+        // A remote connection has no local socket path. Do not resolve the
+        // user's local configuration just to manufacture one.
+        let result = Self::over(
+            Box::new(transport),
+            &connect,
+            std::path::PathBuf::new(),
+            false,
+            Some((options, Arc::clone(&process))),
+        );
+        let _ = deadline.send(());
+        let _ = watchdog.join();
+        let result = if process.timed_out.load(Ordering::Acquire) {
+            Err(Error::new(
+                ErrorKind::StartupTimeout,
+                "SSH startup and handshake timed out",
+            ))
+        } else {
+            result
+        };
+        result.map_err(|error| {
+            process.shutdown();
+            let message = if error.kind == ErrorKind::Disconnected {
+                process.diagnostic()
+            } else {
+                format!("{}; {}", error.message, process.diagnostic())
+            };
+            Error::new(
+                if error.kind == ErrorKind::Timeout || process.timed_out.load(Ordering::Acquire) {
+                    ErrorKind::StartupTimeout
+                } else {
+                    error.kind
+                },
+                message,
+            )
+        })
+    }
+
     /// Start and own a private jcode instance, then connect to it.
     ///
     /// Its state and sockets are isolated from the user's interactive jcode.
@@ -383,13 +482,14 @@ impl JcodeClient {
             &options,
             path,
             true,
+            None,
         )
     }
 
     /// Connect over a caller-supplied transport. The seam tests use.
     pub fn connect_with(transport: Box<dyn Transport>, options: ConnectOptions) -> Result<Self> {
         let path = options.socket_path.clone().unwrap_or_else(api_socket_path);
-        Self::over(transport, &options, path, false)
+        Self::over(transport, &options, path, false, None)
     }
 
     fn over(
@@ -397,7 +497,16 @@ impl JcodeClient {
         options: &ConnectOptions,
         socket_path: std::path::PathBuf,
         native_socket: bool,
+        ssh: Option<(SshConnectOptions, Arc<SshProcess>)>,
     ) -> Result<Self> {
+        let hello_timeout = ssh
+            .as_ref()
+            .map(|(options, _)| options.connect_timeout)
+            .or(options.request_timeout);
+        let (ssh_options, ssh_process) = match ssh {
+            Some((options, process)) => (Some(options), Some(process)),
+            None => (None, None),
+        };
         let shutdown = transport.shutdown_handle();
         let (reader, writer) = transport.split()?;
         let inner = Arc::new(Inner {
@@ -411,6 +520,7 @@ impl JcodeClient {
             socket_path,
             client_name: options.client_name.clone(),
             native_socket,
+            ssh_process,
             shutdown,
             client_handles: AtomicUsize::new(1),
         });
@@ -418,16 +528,20 @@ impl JcodeClient {
 
         let mut client = Self {
             inner,
+            ssh_options,
             instance: None,
             instance_home: None,
             server: String::new(),
             capabilities: Vec::new(),
         };
-        let frame = client.request(ApiRequest::Hello {
-            min_version: API_VERSION_MAJOR,
-            max_version: API_VERSION_MAJOR,
-            client: options.client_name.clone(),
-        })?;
+        let frame = client.request_with_timeout(
+            ApiRequest::Hello {
+                min_version: API_VERSION_MAJOR,
+                max_version: API_VERSION_MAJOR,
+                client: options.client_name.clone(),
+            },
+            hello_timeout,
+        )?;
         match frame.event {
             ApiEvent::HelloOk {
                 server,
@@ -446,7 +560,7 @@ impl JcodeClient {
         }
     }
 
-    /// The socket this client is talking to.
+    /// The socket this client is talking to. Empty for SSH connections.
     pub fn socket_path(&self) -> &std::path::Path {
         &self.inner.socket_path
     }
@@ -463,6 +577,14 @@ impl JcodeClient {
 
     /// Send a raw request and wait for its reply frame.
     pub fn request(&self, request: ApiRequest) -> Result<ServerFrame> {
+        self.request_with_timeout(request, self.inner.request_timeout)
+    }
+
+    fn request_with_timeout(
+        &self,
+        request: ApiRequest,
+        timeout: Option<Duration>,
+    ) -> Result<ServerFrame> {
         let (tx, rx) = channel();
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         self.inner.pending.lock().map_err(poisoned)?.insert(id, tx);
@@ -470,15 +592,15 @@ impl JcodeClient {
             self.inner.pending.lock().map_err(poisoned)?.remove(&id);
             return Err(error);
         }
-        let received = match self.inner.request_timeout {
+        let received = match timeout {
             Some(timeout) => rx.recv_timeout(timeout).map_err(|error| match error {
                 RecvTimeoutError::Timeout => Error::new(
                     ErrorKind::Timeout,
                     format!("no reply to {} within {timeout:?}", request_name(&request)),
                 ),
-                RecvTimeoutError::Disconnected => closed_error(),
+                RecvTimeoutError::Disconnected => self.disconnect_error(),
             }),
-            None => rx.recv().map_err(|_| closed_error()),
+            None => rx.recv().map_err(|_| self.disconnect_error()),
         };
         if received.is_err() {
             self.inner.pending.lock().map_err(poisoned)?.remove(&id);
@@ -494,10 +616,27 @@ impl JcodeClient {
 
     fn write(&self, frame: ClientFrame) -> Result<()> {
         if self.inner.closed.load(Ordering::Relaxed) {
-            return Err(closed_error());
+            return Err(self.disconnect_error());
         }
         let mut writer = self.inner.writer.lock().map_err(poisoned)?;
-        write_frame(&mut *writer, &frame).map_err(Error::from)
+        write_frame(&mut *writer, &frame).map_err(|error| {
+            if let Some(process) = &self.inner.ssh_process {
+                process.shutdown();
+                Error::new(
+                    ErrorKind::Disconnected,
+                    format!("{error}; {}", process.diagnostic()),
+                )
+            } else {
+                Error::from(error)
+            }
+        })
+    }
+
+    fn disconnect_error(&self) -> Error {
+        match &self.inner.ssh_process {
+            Some(process) => Error::new(ErrorKind::Disconnected, process.diagnostic()),
+            None => closed_error(),
+        }
     }
 
     /// Send a request, failing when the server replies with an error frame.
@@ -533,14 +672,14 @@ impl JcodeClient {
     /// fans their events into a bounded queue. A disconnected child is removed
     /// and attached again by a later discovery pass.
     pub fn global_events(&self, options: GlobalEventsOptions) -> Result<GlobalEventStream> {
-        if !self.inner.native_socket {
+        if !self.inner.native_socket && self.ssh_options.is_none() {
             return Err(Error::new(
                 ErrorKind::UnsupportedTransport,
-                "global_events requires a native socket connection; custom transports cannot be cloned into per-session child connections",
+                "global_events requires a native socket or SSH connection; custom transports cannot be cloned into per-session child connections",
             ));
         }
         if self.is_closed() {
-            return Err(closed_error());
+            return Err(self.disconnect_error());
         }
         if options.max_buffered_events == 0 {
             return Err(Error::new(
@@ -624,9 +763,25 @@ impl JcodeClient {
             .map(drop)
     }
 
+    /// Create a session with the normal assembled system prompt.
     pub fn create_session(&self, working_dir: Option<String>) -> Result<SessionInfo> {
+        self.create_session_with_options(CreateSessionOptions {
+            working_dir,
+            ..Default::default()
+        })
+    }
+
+    /// Create a session with optional full system prompt replacement.
+    /// See [`CreateSessionOptions::system_prompt`] for override semantics.
+    pub fn create_session_with_options(
+        &self,
+        options: CreateSessionOptions,
+    ) -> Result<SessionInfo> {
         match self
-            .request_ok(ApiRequest::CreateSession { working_dir })?
+            .request_ok(ApiRequest::CreateSession {
+                working_dir: options.working_dir,
+                system_prompt: options.system_prompt,
+            })?
             .event
         {
             ApiEvent::Attached { session } => Ok(session),
@@ -646,11 +801,36 @@ impl JcodeClient {
         }
     }
 
+    /// Clone a session's complete persisted context into a new idle session.
+    pub fn fork_session(&self, session_id: &str) -> Result<SessionInfo> {
+        match self
+            .request_ok(ApiRequest::ForkSession {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::SessionForked { session } => Ok(session),
+            other => Err(unexpected("session_forked", &other)),
+        }
+    }
+
     pub fn detach_session(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::DetachSession {
             session_id: session_id.to_string(),
         })
         .map(drop)
+    }
+
+    /// Submit a hidden continuation without a user transcript row or accept wait.
+    /// The caller, not the bridge, decides when recovery is appropriate.
+    pub fn send_system_reminder(&self, session_id: &str, reminder: &str) -> Result<()> {
+        self.notify(ApiRequest::SendMessage {
+            session_id: session_id.to_string(),
+            content: String::new(),
+            system_reminder: Some(reminder.to_string()),
+            images: Vec::new(),
+            no_reply: false,
+        })
     }
 
     /// Send a user message.
@@ -673,6 +853,7 @@ impl JcodeClient {
         self.notify(ApiRequest::SendMessage {
             session_id: session_id.to_string(),
             content: content.to_string(),
+            system_reminder: None,
             images,
             no_reply: false,
         })?;
@@ -700,9 +881,21 @@ impl JcodeClient {
     }
 
     pub fn soft_interrupt(&self, session_id: &str, content: &str, urgent: bool) -> Result<()> {
+        self.soft_interrupt_with_images(session_id, content, Vec::new(), urgent)
+    }
+
+    /// Inject text and image attachments at the next safe point without cancelling.
+    pub fn soft_interrupt_with_images(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        urgent: bool,
+    ) -> Result<()> {
         self.request_ok(ApiRequest::SoftInterrupt {
             session_id: session_id.to_string(),
             content: content.to_string(),
+            images,
             urgent,
         })
         .map(drop)
@@ -806,6 +999,7 @@ impl JcodeClient {
                 provider,
                 model,
                 reasoning_effort,
+                auth_method,
                 routes,
             } => {
                 let mut providers = Vec::new();
@@ -826,6 +1020,7 @@ impl JcodeClient {
                     provider,
                     model,
                     reasoning_effort,
+                    auth_method,
                     providers,
                     routes,
                 })
@@ -846,6 +1041,36 @@ impl JcodeClient {
         {
             ApiEvent::CredentialUpdated { .. } => Ok(()),
             other => Err(unexpected("credential_updated", &other)),
+        }
+    }
+
+    /// Reload credentials saved by an out-of-band OAuth login. This does not
+    /// send a chat message or transport any credential material.
+    pub fn notify_auth_changed(&self, provider: &str) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::NotifyAuthChanged {
+                provider: provider.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::Ok => Ok(()),
+            other => Err(unexpected("ok", &other)),
+        }
+    }
+
+    /// Tell the daemon a banked usage reset was redeemed for one subscription
+    /// login (`claude` or `openai`), so it refetches quota instead of keeping a
+    /// pre-reset cooldown. Carries no credentials and never redeems anything.
+    pub fn invalidate_usage(&self, provider: &str, account_label: Option<&str>) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::InvalidateUsage {
+                provider: provider.to_string(),
+                account_label: account_label.map(str::to_string),
+            })?
+            .event
+        {
+            ApiEvent::Ok => Ok(()),
+            other => Err(unexpected("ok", &other)),
         }
     }
 
@@ -962,6 +1187,62 @@ impl JcodeClient {
         }
     }
 
+    /// Configure the tools available to a session before starting a turn.
+    ///
+    /// Custom tool invocations arrive as [`ApiEvent::ToolCall`] on [`Self::events`].
+    /// Subscribe before sending a message and answer each invocation with
+    /// [`Self::submit_tool_result`]. The SDK does not execute custom tools itself.
+    pub fn configure_tools(&self, session_id: &str, tools: ToolConfiguration) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::ConfigureTools {
+                session_id: session_id.to_string(),
+                tools,
+            })?
+            .event
+        {
+            ApiEvent::Ok => Ok(()),
+            other => Err(unexpected("ok", &other)),
+        }
+    }
+
+    /// List the effective tool definitions available to a session.
+    pub fn list_tools(&self, session_id: &str) -> Result<Vec<SessionToolDefinition>> {
+        match self
+            .request_ok(ApiRequest::ListTools {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::Tools { tools, .. } => Ok(tools),
+            other => Err(unexpected("tools", &other)),
+        }
+    }
+
+    /// Complete a custom [`ApiEvent::ToolCall`] using its session and call ids.
+    ///
+    /// Pass textual output (serialize structured results as JSON) and `None`
+    /// for success, or `Some(message)` to report a tool execution failure.
+    pub fn submit_tool_result(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        output: &str,
+        error: Option<String>,
+    ) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::ToolResult {
+                session_id: session_id.to_string(),
+                call_id: call_id.to_string(),
+                output: output.to_string(),
+                error,
+            })?
+            .event
+        {
+            ApiEvent::Ok => Ok(()),
+            other => Err(unexpected("ok", &other)),
+        }
+    }
+
     /// Switch the session to a different model. `model` is an id from
     /// `list_models`.
     pub fn set_model(&self, session_id: &str, model: &str) -> Result<()> {
@@ -1006,6 +1287,49 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Bookmark or unbookmark a session. A label also becomes its title.
+    pub fn set_session_saved(
+        &self,
+        session_id: &str,
+        saved: bool,
+        label: Option<String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::SetSessionSaved {
+            session_id: session_id.to_string(),
+            saved,
+            label,
+        })
+        .map(drop)
+    }
+
+    /// Report a user action in an agent applet instance.
+    pub fn applet_action(
+        &self,
+        session_id: &str,
+        instance: &str,
+        action: jcode_applet_types::Action,
+        state: serde_json::Value,
+        source_key: Option<String>,
+    ) -> Result<()> {
+        self.request_ok(ApiRequest::AppletAction {
+            session_id: session_id.to_string(),
+            instance: instance.to_string(),
+            action,
+            state,
+            source_key,
+        })
+        .map(drop)
+    }
+
+    /// Close an agent applet instance. The agent is not woken.
+    pub fn close_applet(&self, session_id: &str, instance: &str) -> Result<()> {
+        self.request_ok(ApiRequest::CloseApplet {
+            session_id: session_id.to_string(),
+            instance: instance.to_string(),
+        })
+        .map(drop)
+    }
+
     /// Restore the history the last `rewind` removed.
     pub fn rewind_undo(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::RewindUndo {
@@ -1017,6 +1341,14 @@ impl JcodeClient {
     /// Drop soft interrupts that are queued but not yet delivered.
     pub fn cancel_soft_interrupts(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::CancelSoftInterrupts {
+            session_id: session_id.to_string(),
+        })
+        .map(drop)
+    }
+
+    /// Move the running tool call to the background (the TUI's Alt+B).
+    pub fn background_tool(&self, session_id: &str) -> Result<()> {
+        self.request_ok(ApiRequest::BackgroundTool {
             session_id: session_id.to_string(),
         })
         .map(drop)
@@ -1039,12 +1371,27 @@ impl JcodeClient {
             Some(Duration::from_secs(10)),
         )?;
         let mut result = TurnResult::default();
+        let mut text_stream = TextCollector::default();
         while let Some(event) = stream.next() {
             if let Some(on_event) = &options.on_event {
                 on_event(&event);
             }
             match event {
-                ApiEvent::TextDelta { text, .. } => result.text.push_str(&text),
+                ApiEvent::TextDelta {
+                    text, message_id, ..
+                } => {
+                    text_stream.message(message_id).0.text.push_str(&text);
+                }
+                ApiEvent::TextReplace {
+                    text, message_id, ..
+                } => {
+                    text_stream.message(message_id).0.text = text;
+                }
+                ApiEvent::TextDone { message_id, .. } => {
+                    if let Some(index) = text_stream.index(&message_id) {
+                        text_stream.parts[index].1 = true;
+                    }
+                }
                 ApiEvent::ReasoningDelta { text, .. } => result.reasoning.push_str(&text),
                 ApiEvent::ToolDone {
                     call_id,
@@ -1062,25 +1409,36 @@ impl JcodeClient {
                     input,
                     output,
                     cache_read_input,
+                    cache_creation_input,
                     ..
                 } => {
                     result.usage = Some(Usage {
                         input,
                         output,
                         cache_read_input,
+                        cache_creation_input,
                     })
                 }
                 ApiEvent::PermissionRequest { request_id, .. } if options.auto_approve => {
                     self.respond_to_permission(session_id, &request_id, PermissionDecision::Allow)?;
                 }
-                ApiEvent::TurnDone { .. } => return Ok(result),
+                ApiEvent::TurnStopped {
+                    reason, message, ..
+                } => {
+                    result.stop_reason = Some(reason);
+                    result.stop_message = Some(message);
+                }
+                ApiEvent::TurnDone { .. } => {
+                    text_stream.finish(&mut result);
+                    return Ok(result);
+                }
                 ApiEvent::Error { code, message } => {
                     return Err(Error::new(ErrorKind::Harness(code), message));
                 }
                 _ => {}
             }
         }
-        Err(closed_error())
+        Err(self.disconnect_error())
     }
 
     /// Whether the connection has been closed or lost.
@@ -1113,6 +1471,8 @@ pub struct RuntimeInfo {
     pub model: Option<String>,
     /// Reasoning effort, e.g. `high`, when the provider exposes it.
     pub reasoning_effort: Option<String>,
+    /// Credential the session bills against (`oauth` or `api_key`).
+    pub auth_method: Option<String>,
     pub providers: Vec<String>,
     pub routes: Vec<ModelRouteInfo>,
 }
@@ -1148,10 +1508,73 @@ pub struct FileStatus {
 /// What one turn produced.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct TurnResult {
+    /// None for natural completion. Failures still return Err and are also
+    /// delivered to on_event as TurnStopped before the legacy Error event.
+    pub stop_reason: Option<jcode_harness_api::TurnStopReason>,
+    pub stop_message: Option<String>,
+    /// All assistant text in the turn, including tool narration.
     pub text: String,
+    /// Last completed assistant message, or aggregate text on older bridges.
+    pub final_text: String,
+    /// Framed messages. Empty when connected to an older, unframed bridge.
+    pub messages: Vec<AssistantTextMessage>,
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
+    /// Usage from the latest provider call in this turn, not a sum of calls.
     pub usage: Option<Usage>,
+}
+
+/// One assistant text message, excluding interleaved reasoning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssistantTextMessage {
+    /// Stream-local correlator, not a persisted history message id.
+    pub message_id: Option<String>,
+    pub text: String,
+}
+
+#[derive(Default)]
+struct TextCollector {
+    parts: Vec<(AssistantTextMessage, bool)>,
+}
+
+impl TextCollector {
+    fn index(&self, id: &Option<String>) -> Option<usize> {
+        self.parts
+            .iter()
+            .rposition(|(part, done)| &part.message_id == id && (id.is_some() || !done))
+    }
+
+    fn message(&mut self, id: Option<String>) -> &mut (AssistantTextMessage, bool) {
+        let index = self.index(&id).unwrap_or_else(|| {
+            self.parts.push((
+                AssistantTextMessage {
+                    message_id: id,
+                    text: String::new(),
+                },
+                false,
+            ));
+            self.parts.len() - 1
+        });
+        &mut self.parts[index]
+    }
+
+    fn finish(self, result: &mut TurnResult) {
+        result.text = self
+            .parts
+            .iter()
+            .map(|(part, _)| part.text.as_str())
+            .collect();
+        result.messages = self
+            .parts
+            .into_iter()
+            .filter_map(|(part, done)| (done && !part.text.is_empty()).then_some(part))
+            .collect();
+        result.final_text = result
+            .messages
+            .last()
+            .map(|part| part.text.clone())
+            .unwrap_or_else(|| result.text.clone());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1162,11 +1585,14 @@ pub struct ToolCall {
     pub error: Option<String>,
 }
 
+/// Provider-reported counters. Cache counters may be separate from input
+/// (Anthropic) or a subset of it (OpenAI), so do not blindly add them together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
     pub input: u64,
     pub output: u64,
     pub cache_read_input: Option<u64>,
+    pub cache_creation_input: Option<u64>,
 }
 
 fn discover_global_sessions(
@@ -1228,12 +1654,38 @@ fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, s
         return;
     }
 
-    let child = match JcodeClient::connect(ConnectOptions {
-        socket_path: Some(parent.inner.socket_path.clone()),
-        client_name: format!("{}/global-events", parent.inner.client_name),
-        request_timeout: parent.inner.request_timeout,
-        ensure_runtime: false,
-    }) {
+    let connection = if let Some(options) = &parent.ssh_options {
+        let mut options = options.clone();
+        options.client_name = format!("{}/global-events", parent.inner.client_name);
+        #[cfg(unix)]
+        let shared = parent.shared_ssh_transport();
+        #[cfg(unix)]
+        if let Some(shared) = shared {
+            shared.connect()
+        } else if parent
+            .inner
+            .ssh_process
+            .as_ref()
+            .is_some_and(|process| process.was_shared)
+        {
+            Err(Error::new(
+                ErrorKind::Disconnected,
+                "shared SSH parent channel is closed",
+            ))
+        } else {
+            JcodeClient::connect_ssh(options)
+        }
+        #[cfg(not(unix))]
+        JcodeClient::connect_ssh(options)
+    } else {
+        JcodeClient::connect(ConnectOptions {
+            socket_path: Some(parent.inner.socket_path.clone()),
+            client_name: format!("{}/global-events", parent.inner.client_name),
+            request_timeout: parent.inner.request_timeout,
+            ensure_runtime: false,
+        })
+    };
+    let child = match connection {
         Ok(child) => child,
         Err(error) => {
             stop_global_stream(control, Some(error));
@@ -1302,11 +1754,7 @@ fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, s
 /// The reader thread: correlates replies, fans stream events out.
 fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
     std::thread::spawn(move || {
-        loop {
-            let frame: ServerFrame = match read_frame(&mut reader) {
-                Ok(frame) => frame,
-                Err(_) => break,
-            };
+        while let Ok(frame) = read_frame::<_, ServerFrame>(&mut reader) {
             // Unknown kinds are skipped silently, per the protocol's
             // forward-compatibility rule.
             if matches!(frame.event, ApiEvent::Unknown) {
@@ -1342,6 +1790,9 @@ fn spawn_reader(inner: Arc<Inner>, mut reader: Box<dyn BufRead + Send>) {
                 });
             }
         }
+        if let Some(shutdown) = &inner.shutdown {
+            shutdown();
+        }
         inner.closed.store(true, Ordering::Relaxed);
         // Fail everything in flight rather than leaving callers blocked on a
         // reply that can never arrive.
@@ -1359,19 +1810,29 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
     use ApiEvent::*;
     match event {
         TextDelta { session_id, .. }
+        | TextDone { session_id, .. }
+        | TextReplace { session_id, .. }
         | ReasoningDelta { session_id, .. }
         | ReasoningDone { session_id, .. }
         | ToolStart { session_id, .. }
         | ToolInputDelta { session_id, .. }
         | ToolExec { session_id, .. }
         | ToolDone { session_id, .. }
+        | ToolCall { session_id, .. }
+        | Tools { session_id, .. }
+        | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
+        | KvCacheMiss { session_id, .. }
         | TurnDone { session_id, .. }
+        | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }
         | MessageAccepted { session_id, .. }
         | PermissionRequest { session_id, .. }
         | SessionStatus { session_id, .. }
+        | SessionRecovery { session_id, .. }
         | ModelInfo { session_id, .. }
+        | RuntimeInfo { session_id, .. }
+        | ConnectionPhase { session_id, .. }
         | Models { session_id, .. }
         | Compacted { session_id, .. }
         | SessionRenamed { session_id, .. }

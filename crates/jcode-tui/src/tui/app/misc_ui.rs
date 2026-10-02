@@ -15,6 +15,8 @@ pub(crate) struct ResolvedTokenPricing {
     /// Whether the active model is Anthropic/Claude (drives split-accounting and
     /// the cache-write premium).
     pub is_anthropic: bool,
+    /// OpenAI reports both reads and writes as subsets of input_tokens.
+    pub is_openai: bool,
 }
 
 impl ResolvedTokenPricing {
@@ -26,11 +28,8 @@ impl ResolvedTokenPricing {
     ///     Subtracting cache-read from input again would double count it and bill
     ///     fresh input at ~$0 on cache-hit turns.
     ///   - Subset accounting (OpenAI-style): cached tokens are counted INSIDE
-    ///     `input_tokens`, so we subtract the cache-read portion to bill it at the
-    ///     cheaper cache rate.
-    ///
-    /// Mirrors the heuristic the cache/context paths use (see
-    /// `effective_prompt_tokens` / `effective_context_tokens_from_usage`).
+    ///     `input_tokens`, so subtract both reads and writes before pricing each
+    ///     category once. Modern OpenAI cache writes use a 1.25x input rate.
     pub fn cost_for_usage(
         &self,
         input_tokens: u64,
@@ -38,13 +37,15 @@ impl ResolvedTokenPricing {
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
     ) -> f32 {
-        let split_accounting =
-            self.is_anthropic || cache_creation_tokens > 0 || cache_read_tokens > input_tokens;
+        let split_accounting = self.is_anthropic
+            || (!self.is_openai && (cache_creation_tokens > 0 || cache_read_tokens > input_tokens));
 
         let fresh_input_tokens = if split_accounting {
             input_tokens
         } else {
-            input_tokens.saturating_sub(cache_read_tokens.min(input_tokens))
+            input_tokens
+                .saturating_sub(cache_read_tokens)
+                .saturating_sub(cache_creation_tokens)
         };
 
         let prompt_cost = (fresh_input_tokens as f32 * self.prompt_price) / 1_000_000.0;
@@ -55,19 +56,17 @@ impl ResolvedTokenPricing {
             Some(price) => (cache_read_tokens as f32 * price) / 1_000_000.0,
             None => (cache_read_tokens as f32 * self.prompt_price) / 1_000_000.0,
         };
-        // Cache *writes* (cache-creation) are billed at a premium over the base
-        // input rate. Anthropic charges 1.25x for the 5-minute TTL and 2x for the
-        // 1-hour TTL; other split-accounting providers we approximate at the base
-        // input rate. Subset-accounting providers fold writes into `input_tokens`
-        // (and rarely report a creation count), so we only add this for split
-        // accounting to avoid double counting.
-        let cache_write_cost = if split_accounting && cache_creation_tokens > 0 {
+        // Write pricing replaces ordinary input pricing, it is not an extra
+        // charge on top of already-billed OpenAI input tokens.
+        let cache_write_cost = if cache_creation_tokens > 0 {
             let multiplier = if self.is_anthropic {
                 if crate::provider::anthropic::is_cache_ttl_1h() {
                     2.0
                 } else {
                     1.25
                 }
+            } else if self.is_openai {
+                1.25
             } else {
                 1.0
             };
@@ -238,6 +237,7 @@ impl App {
             completion_price,
             cache_read_price,
             is_anthropic,
+            is_openai,
         };
 
         let call_cost = pricing.cost_for_usage(
@@ -381,6 +381,7 @@ impl App {
             completion_price: *self.cost.cached_completion_price.get_or_insert(60.0),
             cache_read_price: self.cost.cached_cache_read_price,
             is_anthropic,
+            is_openai,
         })
     }
 
@@ -580,5 +581,26 @@ mod tests {
                 "{provider_name} should not be billed per token"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_cost_tests {
+    use super::ResolvedTokenPricing;
+
+    #[test]
+    fn openai_cache_writes_replace_uncached_input_cost() {
+        let pricing = ResolvedTokenPricing {
+            prompt_price: 10.0,
+            completion_price: 40.0,
+            cache_read_price: Some(1.0),
+            is_anthropic: false,
+            is_openai: true,
+        };
+        // 10K total = 2K ordinary + 6K cache reads + 2K cache writes.
+        let cost = pricing.cost_for_usage(10_000, 100, 6_000, 2_000);
+        let expected = (2_000.0 * 10.0 + 6_000.0 + 2_000.0 * 12.5 + 100.0 * 40.0) / 1_000_000.0;
+        assert!((cost - expected).abs() < 0.000001, "{cost} != {expected}");
+        assert!((pricing.cost_for_usage(10_000, 0, 6_000, 0) - 0.046).abs() < 0.000001);
     }
 }

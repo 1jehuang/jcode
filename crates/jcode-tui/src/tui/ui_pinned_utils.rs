@@ -35,17 +35,3 @@ pub(super) fn estimate_side_panel_pane_area(
         .min(max_diff);
     Some(Rect::new(0, 0, diff_width, terminal_height))
 }
-
-pub(super) fn compact_image_label(label: &str) -> String {
-    if label.contains('/') {
-        return label
-            .rsplit('/')
-            .take(2)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("/");
-    }
-    label.to_string()
-}

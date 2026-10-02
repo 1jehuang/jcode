@@ -75,6 +75,10 @@ pub fn inferred_reasoning_efforts(
         return DEEPSEEK_SELECTABLE_EFFORTS.to_vec();
     }
 
+    if provider.contains("z.ai") || provider == "zai" || model.starts_with("glm-") {
+        return OPENAI_SELECTABLE_EFFORTS.to_vec();
+    }
+
     let is_openai_model = model.starts_with("gpt-")
         || model.starts_with("o1")
         || model.starts_with("o3")
@@ -134,6 +138,18 @@ mod tests {
             inferred_reasoning_efforts(Some("openai-compatible:custom"), Some("gpt-5.6")),
             OPENAI_SELECTABLE_EFFORTS,
             "direct OpenAI-compatible runtimes use the OpenAI reasoning_effort vocabulary"
+        );
+    }
+
+    #[test]
+    fn zai_and_glm_identities_expose_openai_efforts() {
+        assert_eq!(
+            inferred_reasoning_efforts(Some("Z.AI"), Some("glm-5.3")),
+            OPENAI_SELECTABLE_EFFORTS
+        );
+        assert_eq!(
+            inferred_reasoning_efforts(Some("openai-compatible:zai"), Some("glm-5.3-flash")),
+            OPENAI_SELECTABLE_EFFORTS
         );
     }
 

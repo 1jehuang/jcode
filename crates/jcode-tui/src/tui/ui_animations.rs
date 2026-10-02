@@ -151,7 +151,7 @@ pub(crate) fn render_idle_animation_into(buf: &mut Buffer, area: Rect, elapsed: 
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let cell = &mut buf[(x, y)];
-            cell.fg = jcode_tui_style::adapt_color_for_theme(cell.fg);
+            cell.fg = jcode_tui_style::adapt_foreground_for_display(cell.fg, cell.bg);
         }
     }
 }

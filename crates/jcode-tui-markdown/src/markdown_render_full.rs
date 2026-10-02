@@ -48,6 +48,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     let mut code_block_content = String::new();
     let mut heading_level: Option<u8> = None;
     let mut blockquote_depth = 0usize;
+    let mut blockquote_starts = Vec::new();
     let mut list_stack: Vec<ListRenderState> = Vec::new();
     let mut link_targets: Vec<String> = Vec::new();
     let mut in_image = false;
@@ -156,6 +157,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     ),
                 );
                 enter_centered_structured_block(&mut centered_blocks, lines.len());
+                blockquote_starts.push(lines.len());
                 blockquote_depth += 1;
             }
             Event::End(TagEnd::BlockQuote(_)) => {
@@ -169,6 +171,9 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                         in_footnote_definition,
                     ),
                 );
+                if let Some(start) = blockquote_starts.pop() {
+                    fill_blockquote_separators(&mut lines[start..], blockquote_depth);
+                }
                 blockquote_depth = blockquote_depth.saturating_sub(1);
                 exit_centered_structured_block(&mut centered_blocks, lines.len());
                 if blockquote_depth == 0
@@ -587,11 +592,15 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                         LatexRenderingMode::Unicode => math_display_lines(&math),
                         LatexRenderingMode::Image
                             if blockquote_depth == 0
-                                && list_stack.is_empty()
                                 && !in_definition_list
                                 && !in_footnote_definition =>
                         {
-                            latex_image_lines(&math, true, max_width)
+                            // pulldown-cmark preserves the indentation used to
+                            // nest display math inside a list item. That
+                            // whitespace is Markdown structure, not TeX source,
+                            // and can make native/image renderers reject an
+                            // otherwise valid expression.
+                            latex_image_lines(math.trim(), true, max_width)
                                 .unwrap_or_else(|| math_display_lines(&math))
                         }
                         LatexRenderingMode::Image => math_display_lines(&math),

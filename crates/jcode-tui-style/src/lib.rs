@@ -8,9 +8,16 @@ pub use color::{ColorCapability, clear_buf, color_capability, has_truecolor, ind
 pub use harmony::{Criterion, HarmonyReport, Oklab, analyze as analyze_harmony, analyze_active};
 pub use palette::{ALL_ROLES, Palette, Role, palette, role_color, set_palette};
 pub use theme_mode::{
-    ThemeMode, adapt_buffer, adapt_buffer_for_theme, adapt_color_for_theme, is_light_theme,
-    set_theme_mode, theme_mode,
+    ThemeMode, adapt_buffer, adapt_buffer_for_display, adapt_buffer_for_theme,
+    adapt_color_for_theme, adapt_foreground_for_display, adapt_foreground_for_theme,
+    is_light_theme, set_theme_mode, theme_mode,
 };
+
+/// The active palette and theme mode are process-global. One lock serializes
+/// every test that reads or mutates them, wherever the test lives (palette and
+/// theme-mode tests used to carry separate locks and could interleave).
+#[cfg(test)]
+pub(crate) static STYLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Restore the terminal, logging any failure instead of printing it.
 ///

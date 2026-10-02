@@ -4,6 +4,8 @@
 //! crate plus a binary relink instead of rebuilding the base -> app-core ->
 //! tui spine. The binary's composition root registers a parameterized factory
 //! with `jcode_base::provider::external::register_openrouter_factory`.
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 //! OpenRouter API provider
 //!
@@ -430,6 +432,61 @@ fn apply_kimi_coding_agent_headers(
     }
 }
 
+/// Hosts that require the `x-opencode-session` header (issue #1167).
+fn is_opencode_api_base(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    matches!(
+        url.host_str(),
+        Some(host) if host == "opencode.ai" || host.ends_with(".opencode.ai")
+    )
+}
+
+pub(crate) fn new_conversation_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// OpenCode Go/Zen require a stable per-conversation `x-opencode-session`
+/// header on inference requests (rejected from 2026-09-05 without it).
+fn apply_opencode_session_header(
+    req: reqwest::RequestBuilder,
+    api_base: &str,
+    conversation_id: &str,
+) -> reqwest::RequestBuilder {
+    if is_opencode_api_base(api_base) {
+        req.header(OPENCODE_SESSION_HEADER, conversation_id)
+    } else {
+        req
+    }
+}
+
+pub(crate) const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
+
+/// Models the Grok CLI chat proxy serves to Grok Build subscribers.
+pub const GROK_BUILD_MODELS: &[&str] = &["grok-4.6", "grok-4.5", "grok-code-fast-1"];
+const GROK_BUILD_AUTH_LABEL: &str = "Grok Build subscription (Grok CLI OIDC)";
+
+/// Per-turn Grok CLI sampler headers (model override, conversation/request ids).
+fn apply_grok_cli_turn_headers(
+    mut req: reqwest::RequestBuilder,
+    auth: &ProviderAuth,
+    model: &str,
+    conversation_id: &str,
+) -> reqwest::RequestBuilder {
+    if matches!(auth, ProviderAuth::GrokCli { .. }) {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        for (name, value) in jcode_base::auth::grok_build::chat_proxy_turn_headers(
+            model,
+            conversation_id,
+            &request_id,
+        ) {
+            req = req.header(name, value);
+        }
+    }
+    req
+}
+
 #[derive(Debug, Clone)]
 enum ProviderAuth {
     AuthorizationBearer {
@@ -442,6 +499,12 @@ enum ProviderAuth {
         label: String,
     },
     AzureEntra {
+        label: String,
+    },
+    /// Grok Build subscription: the Grok CLI OIDC session from
+    /// `~/.grok/auth.json`, resolved (and refreshed when expired) per request,
+    /// plus the Grok CLI identity headers the chat proxy requires.
+    GrokCli {
         label: String,
     },
     None {
@@ -460,6 +523,14 @@ impl ProviderAuth {
                 let token = jcode_base::auth::azure::get_bearer_token().await?;
                 Ok(req.bearer_auth(token))
             }
+            Self::GrokCli { .. } => {
+                let token = jcode_base::auth::grok_build::bearer_token(false).await?;
+                let mut req = req.bearer_auth(token);
+                for (name, value) in jcode_base::auth::grok_build::chat_proxy_identity_headers() {
+                    req = req.header(name, value);
+                }
+                Ok(req)
+            }
             Self::None { .. } => Ok(req),
         }
     }
@@ -469,6 +540,7 @@ impl ProviderAuth {
             Self::AuthorizationBearer { label, .. } => label,
             Self::HeaderValue { label, .. } => label,
             Self::AzureEntra { label } => label,
+            Self::GrokCli { label } => label,
             Self::None { label } => label,
         }
     }
@@ -880,6 +952,9 @@ pub struct OpenRouterProvider {
     /// Explicit `supports_reasoning_effort` override from named-profile config.
     /// `None` means auto-detect (deepseek profile id or DeepSeek-family model).
     reasoning_effort_support: Option<bool>,
+    disable_reasoning_heuristics: bool,
+    /// Per-model `(supports effort, default effort)` overrides from a named profile.
+    static_reasoning_config: HashMap<String, (Option<bool>, Option<String>)>,
     max_tokens: Option<u32>,
     /// Extra top-level JSON object fields merged into every chat/completions
     /// request body (e.g. NVIDIA NIM DeepSeek-V4 `chat_template_kwargs`).
@@ -892,6 +967,10 @@ pub struct OpenRouterProvider {
     /// Missing entries mean unspecified and preserve the provider-level fallback.
     static_image_input_support: HashMap<String, bool>,
     send_openrouter_headers: bool,
+    /// Stable per-conversation identifier sent as `x-opencode-session` to
+    /// OpenCode (Zen / Go) endpoints, which require it for routing (issue #1167).
+    /// Each provider instance (and each `fork()`) gets a fresh UUID.
+    conversation_id: String,
     models_cache: Arc<RwLock<ModelsCache>>,
     model_catalog_refresh: Arc<Mutex<ModelCatalogRefreshState>>,
     /// Provider routing preferences
@@ -905,6 +984,46 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// Apply a real (already resolved) effort without changing the stored swarm mode.
+    fn apply_resolved_reasoning_effort(
+        &self,
+        request: &mut Value,
+        effort: &str,
+        strict_openai_schema: bool,
+    ) -> bool {
+        if self.supports_deepseek_reasoning_effort() {
+            let effort = match effort {
+                "minimal" => "low",
+                "xhigh" => "high",
+                other => other,
+            };
+            if effort == "none" {
+                return false;
+            }
+            request["reasoning_effort"] = serde_json::json!(effort);
+        } else if self.supports_openai_reasoning_effort() {
+            // Strict endpoints such as Mistral reject the UX alias `max`.
+            let effort = if strict_openai_schema && effort == "max" {
+                "xhigh"
+            } else {
+                effort
+            };
+            if effort == "none" {
+                return false;
+            }
+            request["reasoning_effort"] = serde_json::json!(effort);
+        } else if Self::profile_supports_unified_reasoning(
+            self.profile_id.as_deref(),
+            self.send_openrouter_headers,
+        ) {
+            let effort = if effort == "max" { "xhigh" } else { effort };
+            request["reasoning"] = serde_json::json!({"effort": effort});
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn profile_supports_reasoning_effort(profile_id: Option<&str>) -> bool {
         matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek"))
     }
@@ -926,16 +1045,21 @@ impl OpenRouterProvider {
     /// deepseek profile, then the active model family for direct compat
     /// endpoints (never for real OpenRouter, which uses unified reasoning).
     pub(crate) fn supports_deepseek_reasoning_effort(&self) -> bool {
+        if self.model_reasoning_support() == Some(false) {
+            return false;
+        }
         if let Some(explicit) = self.reasoning_effort_support {
             return explicit;
         }
         if Self::profile_supports_reasoning_effort(self.profile_id.as_deref()) {
             return true;
         }
-        !Self::profile_supports_unified_reasoning(
-            self.profile_id.as_deref(),
-            self.send_openrouter_headers,
-        ) && Self::model_is_deepseek_family(&self.model_snapshot())
+        !self.disable_reasoning_heuristics
+            && !Self::profile_supports_unified_reasoning(
+                self.profile_id.as_deref(),
+                self.send_openrouter_headers,
+            )
+            && Self::model_is_deepseek_family(&self.model_snapshot())
     }
 
     /// GPT-family reasoning models (gpt-5.x, codex variants, o-series) accept
@@ -957,16 +1081,21 @@ impl OpenRouterProvider {
     /// reasoning models, and only when no explicit config override or
     /// DeepSeek-style support already applies.
     pub(crate) fn supports_openai_reasoning_effort(&self) -> bool {
+        if let Some(explicit) = self.model_reasoning_support() {
+            return explicit;
+        }
         if self.reasoning_effort_support == Some(false) {
             return false;
         }
         if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref()) {
             return true;
         }
-        !Self::profile_supports_unified_reasoning(
-            self.profile_id.as_deref(),
-            self.send_openrouter_headers,
-        ) && Self::model_is_openai_reasoning_family(&self.model_snapshot())
+        !self.disable_reasoning_heuristics
+            && !Self::profile_supports_unified_reasoning(
+                self.profile_id.as_deref(),
+                self.send_openrouter_headers,
+            )
+            && Self::model_is_openai_reasoning_family(&self.model_snapshot())
     }
 
     fn model_snapshot(&self) -> String {
@@ -974,6 +1103,27 @@ impl OpenRouterProvider {
             .try_read()
             .map(|model| model.clone())
             .unwrap_or_default()
+    }
+
+    fn model_reasoning_config(&self) -> Option<&(Option<bool>, Option<String>)> {
+        let model = self.model_snapshot().trim().to_ascii_lowercase();
+        self.static_reasoning_config.get(&model)
+    }
+
+    fn model_reasoning_support(&self) -> Option<bool> {
+        self.model_reasoning_config().and_then(|config| config.0)
+    }
+
+    fn configured_effort_for_model(&self) -> Option<String> {
+        self.model_reasoning_config()
+            .and_then(|config| config.1.clone())
+            .or_else(|| {
+                jcode_base::config::config()
+                    .provider
+                    .openai_reasoning_effort
+                    .clone()
+            })
+            .and_then(|effort| self.normalize_reasoning_effort_for_self(&effort))
     }
 
     pub(crate) fn supports_any_reasoning_effort(&self) -> bool {
@@ -1002,8 +1152,10 @@ impl OpenRouterProvider {
         reasoning_effort_support: Option<bool>,
         profile_id: Option<&str>,
     ) -> Option<String> {
-        let supported =
-            reasoning_effort_support.unwrap_or(Self::profile_supports_reasoning_effort(profile_id));
+        let supported = reasoning_effort_support.unwrap_or(
+            Self::profile_supports_reasoning_effort(profile_id)
+                || Self::profile_supports_openai_reasoning_effort(profile_id),
+        );
         if !supported {
             return None;
         }
@@ -1011,7 +1163,13 @@ impl OpenRouterProvider {
             .provider
             .openai_reasoning_effort
             .as_deref()
-            .and_then(Self::normalize_reasoning_effort)
+            .and_then(|effort| {
+                if Self::profile_supports_openai_reasoning_effort(profile_id) {
+                    Self::normalize_openai_reasoning_effort(effort)
+                } else {
+                    Self::normalize_reasoning_effort(effort)
+                }
+            })
     }
 
     fn profile_rejects_image_input(profile_id: Option<&str>) -> bool {
@@ -1026,7 +1184,9 @@ impl OpenRouterProvider {
         // no profile id or the "openrouter" doctor-profile id (assigned when
         // the default api base matches the OpenRouter OpenAI-compat profile),
         // so both must qualify (issue: effort rejected on plain OpenRouter).
-        send_openrouter_headers && profile_id.is_none_or(|id| id.eq_ignore_ascii_case("openrouter"))
+        (send_openrouter_headers
+            && profile_id.is_none_or(|id| id.eq_ignore_ascii_case("openrouter")))
+            || profile_id.is_some_and(|id| id.eq_ignore_ascii_case("conifer"))
     }
 
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {
@@ -1330,7 +1490,7 @@ impl OpenRouterProvider {
             .iter()
             .filter_map(|model| {
                 let id = model.id.trim();
-                if id.is_empty() {
+                if id.is_empty() || model.input.is_empty() {
                     return None;
                 }
                 let supports_images = model
@@ -1340,13 +1500,25 @@ impl OpenRouterProvider {
                 Some((id.to_ascii_lowercase(), supports_images))
             })
             .collect::<HashMap<_, _>>();
-        Ok(Self {
+        let static_reasoning_config = profile
+            .models
+            .iter()
+            .filter_map(|model| {
+                let id = model.id.trim();
+                if id.is_empty() || (model.reasoning.is_none() && model.reasoning_effort.is_none())
+                {
+                    return None;
+                }
+                Some((
+                    id.to_ascii_lowercase(),
+                    (model.reasoning, model.reasoning_effort.clone()),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
-            reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
-                profile.supports_reasoning_effort,
-                Some(profile_name),
-            ))),
+            reasoning_effort: Arc::new(RwLock::new(None)),
             api_base,
             auth,
             supports_provider_features: matches!(
@@ -1361,6 +1533,8 @@ impl OpenRouterProvider {
                 ),
             profile_id: Some(profile_name.to_string()),
             reasoning_effort_support: profile.supports_reasoning_effort,
+            disable_reasoning_heuristics: profile.disable_reasoning_heuristics,
+            static_reasoning_config,
             max_tokens: Self::configured_max_tokens(Some(profile_name)),
             extra_body: Self::resolve_extra_body(
                 profile.extra_body.as_ref(),
@@ -1374,13 +1548,23 @@ impl OpenRouterProvider {
             static_context_limits,
             static_image_input_support,
             send_openrouter_headers: false,
+            conversation_id: new_conversation_id(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
             provider_pin: Arc::new(Mutex::new(None)),
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
-        })
+        };
+        let initial_effort = if provider.supports_any_reasoning_effort() {
+            provider.configured_effort_for_model()
+        } else {
+            None
+        };
+        if let Ok(mut effort) = provider.reasoning_effort.try_write() {
+            *effort = initial_effort;
+        }
+        Ok(provider)
     }
 
     /// Return true if this model is a Kimi K2/K2.5 variant (Moonshot).
@@ -1562,12 +1746,15 @@ impl OpenRouterProvider {
             supports_model_catalog,
             profile_id,
             reasoning_effort_support: None,
+            disable_reasoning_heuristics: false,
+            static_reasoning_config: HashMap::new(),
             max_tokens,
             extra_body,
             static_models,
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers,
+            conversation_id: new_conversation_id(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
@@ -1575,6 +1762,60 @@ impl OpenRouterProvider {
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         })
+    }
+
+    /// Grok Build subscription over the Grok CLI chat proxy
+    /// (`https://cli-chat-proxy.grok.com/v1`, OpenAI-compatible).
+    ///
+    /// Auth is the Grok CLI OIDC session, not `XAI_API_KEY`. The token is read
+    /// from `auth.json` for every request so refreshes (by Jcode or the Grok
+    /// CLI) are picked up without rebuilding the provider. Jcode owns tools.
+    pub fn new_grok_build_subscription(model: &str) -> Self {
+        let static_models = GROK_BUILD_MODELS
+            .iter()
+            .map(|model| model.to_string())
+            .collect::<Vec<_>>();
+        let static_context_limits = GROK_BUILD_MODELS
+            .iter()
+            .map(|model| {
+                let limit = if model.contains("grok-code-fast") {
+                    256_000
+                } else {
+                    500_000
+                };
+                (model.to_string(), limit)
+            })
+            .collect();
+        Self {
+            client: jcode_provider_core::shared_http_client(),
+            model: Arc::new(RwLock::new(model.to_string())),
+            reasoning_effort: Arc::new(RwLock::new(None)),
+            api_base: jcode_base::auth::grok_build::chat_proxy_base_url(),
+            auth: ProviderAuth::GrokCli {
+                label: GROK_BUILD_AUTH_LABEL.to_string(),
+            },
+            supports_provider_features: false,
+            // The proxy's `/models` shape is not a documented catalog; keep the
+            // curated list so `/model` works offline and before first request.
+            supports_model_catalog: false,
+            profile_id: Some("grok-build".to_string()),
+            reasoning_effort_support: Some(false),
+            disable_reasoning_heuristics: true,
+            static_reasoning_config: HashMap::new(),
+            max_tokens: Self::configured_max_tokens(None),
+            extra_body: None,
+            static_models,
+            static_context_limits,
+            static_image_input_support: HashMap::new(),
+            send_openrouter_headers: false,
+            conversation_id: new_conversation_id(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        }
     }
 
     pub fn new_openrouter_api_key_runtime() -> Result<Self> {
@@ -1603,12 +1844,15 @@ impl OpenRouterProvider {
             supports_model_catalog: true,
             profile_id: None,
             reasoning_effort_support: None,
+            disable_reasoning_heuristics: false,
+            static_reasoning_config: HashMap::new(),
             max_tokens: Self::configured_max_tokens(None),
             extra_body: Self::resolve_extra_body(None, DEFAULT_ENV_FILE),
             static_models: Vec::new(),
             static_context_limits: HashMap::new(),
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: true,
+            conversation_id: new_conversation_id(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(Self::parse_provider_routing())),
@@ -1672,12 +1916,15 @@ impl OpenRouterProvider {
             supports_model_catalog: true,
             profile_id: Some(resolved.id.clone()),
             reasoning_effort_support: None,
+            disable_reasoning_heuristics: false,
+            static_reasoning_config: HashMap::new(),
             max_tokens: Self::configured_max_tokens(Some(&resolved.id)),
             extra_body: Self::resolve_extra_body(None, &resolved.env_file),
             static_models,
             static_context_limits,
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,
+            conversation_id: new_conversation_id(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -1875,12 +2122,15 @@ impl OpenRouterProvider {
                 supports_model_catalog: true,
                 profile_id: None,
                 reasoning_effort_support: None,
+                disable_reasoning_heuristics: false,
+                static_reasoning_config: HashMap::new(),
                 max_tokens: None,
                 extra_body: None,
                 static_models: Vec::new(),
                 static_context_limits: HashMap::new(),
                 static_image_input_support: HashMap::new(),
                 send_openrouter_headers: true,
+                conversation_id: new_conversation_id(),
                 models_cache: Arc::new(RwLock::new(ModelsCache::default())),
                 model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
                 provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -2682,6 +2932,14 @@ mod openrouter_catalog_merge_tests;
 #[cfg(test)]
 #[path = "openrouter_pricing_deadlock_tests.rs"]
 mod openrouter_pricing_deadlock_tests;
+
+#[cfg(test)]
+#[path = "openrouter_input_modalities_tests.rs"]
+mod openrouter_input_modalities_tests;
+
+#[cfg(test)]
+#[path = "issue_1056_tests.rs"]
+mod issue_1056_tests;
 
 #[cfg(test)]
 mod profile_catalog_backoff_tests {

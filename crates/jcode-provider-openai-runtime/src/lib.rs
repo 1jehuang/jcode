@@ -7,13 +7,17 @@
 //! Model-catalog/account-availability state stays in `jcode_base::provider`
 //! (it is shared vocabulary for routing), as does the pure request shaping in
 //! `jcode_base::provider::openai_request`.
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{FutureExt, SinkExt, StreamExt as FuturesStreamExt};
 use jcode_base::auth::codex::CodexCredentials;
 use jcode_base::auth::oauth;
-use jcode_base::provider::openai_request::{build_responses_input, build_tools};
+use jcode_base::provider::openai_request::{
+    build_responses_input, build_tools, insert_additional_tools,
+};
 #[cfg(test)]
 use jcode_message_types::TOOL_OUTPUT_MISSING_TEXT;
 use jcode_message_types::{Message as ChatMessage, StreamEvent, ToolDefinition};
@@ -54,6 +58,26 @@ pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
 /// The Responses backend only exposes `image_generation` to general
 /// ChatGPT/GPT models. Codex models (ids containing `codex`) reject unknown
 /// hosted tools, so they must not receive it. See issue #369.
+/// Responses `additional_tools` / deferred tool loading requires gpt-5.4 or
+/// newer. Unknown model families stay eager, which is always correct.
+fn model_supports_additional_tools(model_id: &str) -> bool {
+    let lower = model_id.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("gpt-") else {
+        return false;
+    };
+    let version: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = version.split('.').filter(|p| !p.is_empty());
+    let major: u32 = match parts.next().and_then(|p| p.parse().ok()) {
+        Some(major) => major,
+        None => return false,
+    };
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    major > 5 || (major == 5 && minor >= 4)
+}
+
 fn model_supports_image_generation(model_id: &str) -> bool {
     !model_id.to_ascii_lowercase().contains("codex")
 }
@@ -273,6 +297,9 @@ fn openai_request_model(request: &Value) -> String {
 /// to send only new items instead of the full conversation each turn.
 struct PersistentWsState {
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    /// Actual handshake identity. Never logged. Forks can update shared
+    /// credentials without directly clearing this provider's private socket.
+    identity: (String, Option<String>, String),
     last_response_id: String,
     connected_at: Instant,
     last_activity_at: Instant,
@@ -284,6 +311,10 @@ struct PersistentWsState {
     message_count: usize,
     /// Number of items we sent in the last full request (for detecting conversation changes)
     last_input_item_count: usize,
+    /// Fingerprints of the last canonical full input. A larger input can still
+    /// rewrite earlier items (for example, when tool outputs are reordered).
+    /// A count alone is not a safe continuation cursor in that case.
+    last_input_item_hashes: Vec<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -401,6 +432,13 @@ fn summarize_ws_input(items: &[Value]) -> WsInputStats {
         }
     }
     stats
+}
+
+fn persistent_ws_input_item_hashes(input: &[Value]) -> Vec<u64> {
+    input
+        .iter()
+        .map(jcode_provider_core::fingerprint::stable_hash_json)
+        .collect()
 }
 
 fn persistent_ws_incremental_items(input: &[Value], start_index: usize) -> (Vec<Value>, usize) {
@@ -722,6 +760,7 @@ pub struct OpenAIProvider {
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
     /// Persistent WebSocket connection for incremental continuation
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
+    prewarm: Arc<openai_websocket_prewarm::PrewarmSlot>,
     /// Browser-backed ChatGPT state for web-only models such as GPT-5.6 Pro.
     chatgpt_web: Arc<chatgpt_web::ChatGptWebState>,
     /// True when this runtime was created without API credentials. It can still
@@ -730,16 +769,11 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
-    pub(crate) fn supports_extended_prompt_cache_retention(model_id: &str) -> bool {
-        jcode_base::provider::openai::supports_extended_prompt_cache_retention(model_id)
-    }
-
     fn effective_prompt_cache_retention<'a>(
         model_id: &str,
         configured: Option<&'a str>,
     ) -> Option<&'a str> {
-        configured
-            .or_else(|| Self::supports_extended_prompt_cache_retention(model_id).then_some("24h"))
+        jcode_base::provider::openai::effective_prompt_cache_retention(model_id, configured)
     }
 
     pub fn new(credentials: CodexCredentials) -> Self {
@@ -804,21 +838,17 @@ impl OpenAIProvider {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        let prompt_cache_retention = std::env::var("JCODE_OPENAI_PROMPT_CACHE_RETENTION")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        let prompt_cache_retention = match prompt_cache_retention.as_deref() {
-            Some("in_memory") | Some("24h") => prompt_cache_retention,
-            Some(other) => {
-                jcode_base::logging::info(&format!(
-                    "Warning: Unsupported JCODE_OPENAI_PROMPT_CACHE_RETENTION '{}'; expected 'in_memory' or '24h'",
-                    other
-                ));
-                None
-            }
-            None => None,
-        };
+        let prompt_cache_retention =
+            jcode_base::provider::openai::prompt_cache_retention_from_env();
+        if prompt_cache_retention.is_none()
+            && let Ok(raw) = std::env::var("JCODE_OPENAI_PROMPT_CACHE_RETENTION")
+            && !raw.trim().is_empty()
+        {
+            jcode_base::logging::warn(&format!(
+                "Unsupported JCODE_OPENAI_PROMPT_CACHE_RETENTION '{}'; expected 'in_memory' or '24h'",
+                raw.trim()
+            ));
+        }
         let max_output_tokens = Self::load_max_output_tokens();
         let reasoning_effort = jcode_base::config::config()
             .provider
@@ -866,6 +896,7 @@ impl OpenAIProvider {
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
             persistent_ws: Arc::new(Mutex::new(None)),
+            prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(browser_only)),
         };
@@ -957,6 +988,7 @@ impl OpenAIProvider {
     }
 
     fn clear_persistent_ws_try(&self, reason: &str) {
+        self.prewarm.clear();
         if let Ok(mut persistent_ws) = self.persistent_ws.try_lock() {
             if persistent_ws.is_some() {
                 jcode_base::logging::info(&format!(
@@ -969,6 +1001,7 @@ impl OpenAIProvider {
     }
 
     async fn clear_persistent_ws(&self, reason: &str) {
+        self.prewarm.clear();
         let mut persistent_ws = self.persistent_ws.lock().await;
         if persistent_ws.is_some() {
             jcode_base::logging::info(&format!("Clearing persistent OpenAI WS state: {}", reason));
@@ -1002,7 +1035,7 @@ impl OpenAIProvider {
             return None;
         }
         match value.as_str() {
-            // `swarm` is a UI sentinel meaning "max effort + use the swarm tool".
+            // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
             // We keep it stored so the UI/session reflect it and the agent injects
             // the swarm directive; it is translated to a real effort at request time
             // by `api_reasoning_effort`.
@@ -1057,24 +1090,40 @@ impl OpenAIProvider {
         }
     }
 
-    /// Translate a stored reasoning effort into the value sent to the API.
-    /// The `swarm` sentinel maps to the active model's strongest advertised
-    /// effort, falling back to `max` before catalog metadata is available.
+    /// Resolve swarm effort only at the wire boundary, preserving the stored mode.
     fn api_reasoning_effort(&self, effort: Option<&str>) -> Option<String> {
-        match effort {
-            Some(e) if jcode_base::prompt::is_swarm_effort(e) => {
-                let available = self.available_efforts();
-                jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
-                    .iter()
-                    .rev()
-                    .find(|candidate| {
-                        !jcode_base::prompt::is_swarm_effort(candidate)
-                            && available.contains(candidate)
-                    })
-                    .map(|effort| (*effort).to_string())
-            }
-            other => other.map(|e| e.to_string()),
+        self.api_reasoning_effort_with_swarm_root(
+            effort,
+            effort.and_then(jcode_base::prompt::swarm_root_reasoning_effort),
+        )
+    }
+
+    fn api_reasoning_effort_with_swarm_root(
+        &self,
+        effort: Option<&str>,
+        swarm_root: Option<&str>,
+    ) -> Option<String> {
+        let effort = effort?;
+        if !jcode_base::prompt::is_swarm_effort(effort) {
+            return Some(effort.to_string());
         }
+        let resolved = swarm_root.unwrap_or("max");
+        let available = self.available_efforts();
+        let ladder = jcode_provider_core::OPENAI_SELECTABLE_EFFORTS;
+        let requested = ladder.iter().position(|e| *e == resolved)?;
+        // Preserve the old strongest-advertised mapping for max. For lower
+        // configured levels prefer the closest supported level at or below it,
+        // falling back to the minimum on models with a restricted ladder.
+        ladder[..=requested]
+            .iter()
+            .rev()
+            .find(|candidate| available.contains(candidate))
+            .or_else(|| {
+                ladder.iter().find(|candidate| {
+                    !jcode_base::prompt::is_swarm_effort(candidate) && available.contains(candidate)
+                })
+            })
+            .map(|effort| (*effort).to_string())
     }
 
     fn native_compaction_threshold_for_context_window(
@@ -1194,6 +1243,65 @@ impl OpenAIProvider {
 
     fn responses_compact_url(credentials: &CodexCredentials) -> String {
         format!("{}/compact", Self::responses_url(credentials))
+    }
+
+    /// Shared request settings keep speculative warmup and foreground generation
+    /// identical even when reasoning, tools, cache policy, or service tier change.
+    async fn response_request(
+        &self,
+        input: &[Value],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Value {
+        let model_id = self.model_id().await;
+        let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
+        self.response_request_for_model(&model_id, input, tools, system, is_chatgpt_mode)
+    }
+
+    fn response_request_for_model(
+        &self,
+        model_id: &str,
+        input: &[Value],
+        tools: &[ToolDefinition],
+        system: &str,
+        is_chatgpt_mode: bool,
+    ) -> Value {
+        let hosted_tools =
+            native_web_search::hosted_tools_for_request(model_id, is_chatgpt_mode, tools);
+        let tools = native_web_search::without_local_websearch(tools, &hosted_tools);
+        let mut api_tools = build_tools(&tools);
+        api_tools.extend(hosted_tools);
+        let reasoning_effort = self
+            .reasoning_effort
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+            // No explicit user effort: fall back to the model's jcode-side
+            // default (e.g. `low` for GPT-5.6 Sol).
+            .or_else(|| Self::default_reasoning_effort_for_model(model_id));
+        // Map the `swarm` sentinel (and any future aliases) to the real effort
+        // value the API understands.
+        let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
+        let service_tier = self
+            .service_tier
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        let native_compaction_threshold =
+            self.native_compaction_threshold_for_context_window(self.context_window());
+        Self::build_response_request(
+            model_id,
+            system.to_string(),
+            input,
+            &api_tools,
+            is_chatgpt_mode,
+            self.max_output_tokens,
+            api_reasoning_effort.as_deref(),
+            service_tier.as_deref(),
+            self.prompt_cache_key.as_deref(),
+            self.prompt_cache_retention.as_deref(),
+            native_compaction_threshold,
+        )
     }
 
     #[expect(
@@ -1345,7 +1453,7 @@ impl OpenAIProvider {
             .map(|mode| mode.as_str().to_string())
             .unwrap_or_else(|_| "busy".to_string());
         format!(
-            "transport_mode={} {}",
+            "transport_mode={} websocket_protocol=v2 {}",
             transport_mode,
             self.diagnostic_persistent_ws_summary()
         )
@@ -1364,10 +1472,12 @@ use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 use self::stream::{handle_openai_output_item, parse_text_wrapped_tool_call};
 
 mod chatgpt_web;
+mod native_web_search;
 #[path = "openai_provider_impl.rs"]
 mod openai_provider_impl;
 #[path = "openai_stream_runtime.rs"]
 mod openai_stream_runtime;
+mod openai_websocket_prewarm;
 
 #[path = "openai/websocket_health.rs"]
 mod websocket_health;

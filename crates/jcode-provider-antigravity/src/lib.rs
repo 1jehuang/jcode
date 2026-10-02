@@ -18,14 +18,68 @@ pub const AVAILABLE_MODELS: &[&str] = &[
     "gemini-3.5-flash-low",
     "gpt-oss-120b-medium",
 ];
-pub const FETCH_MODELS_API_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
-pub const GENERATE_CONTENT_API_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:generateContent";
+/// Default Cloud Code base endpoint used for Antigravity requests.
+///
+/// The official Antigravity IDE talks to `daily-cloudcode-pa.googleapis.com`,
+/// not `cloudcode-pa.googleapis.com`. Google Front End routes by `Host`
+/// header, and for consumer (`@gmail.com`) accounts allocated to the
+/// `aicode-consumers` project, the non-`daily` host rejects otherwise-valid
+/// requests with `HTTP 429 RESOURCE_EXHAUSTED`, even though the identical
+/// token succeeds against `daily-cloudcode-pa.googleapis.com`. See
+/// <https://github.com/1jehuang/jcode/issues/1329>.
+pub const DEFAULT_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
+/// Environment variable that overrides [`DEFAULT_ENDPOINT`], for accounts or
+/// environments that need a different Cloud Code host.
+pub const ENDPOINT_ENV: &str = "JCODE_ANTIGRAVITY_ENDPOINT";
 const VERSION_ENV: &str = "JCODE_ANTIGRAVITY_VERSION";
 pub const ANTIGRAVITY_VERSION: &str = "1.18.3";
 pub const X_GOOG_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
 const CATALOG_REFRESH_TTL_HOURS: i64 = 6;
+
+/// Resolve the Cloud Code base endpoint, honoring [`ENDPOINT_ENV`] and
+/// otherwise defaulting to [`DEFAULT_ENDPOINT`].
+///
+/// A configured override that is not a well-formed `http(s)://host` base URL
+/// (no query string, no fragment, no trailing RPC path) falls back to
+/// [`DEFAULT_ENDPOINT`] rather than silently producing broken RPC URLs: a
+/// query-bearing base would send the `:fetchAvailableModels` /
+/// `:generateContent` suffix as query text instead of path, and a scheme-less
+/// host would fail request construction with an opaque `reqwest` builder
+/// error. See [`is_valid_endpoint_base`].
+pub fn antigravity_endpoint() -> String {
+    std::env::var(ENDPOINT_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| is_valid_endpoint_base(value))
+        .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string())
+}
+
+/// Whether `value` is a plausible `http(s)://host` Cloud Code base URL: an
+/// absolute HTTP(S) URL with no query string or fragment. This is a
+/// deliberately narrow, dependency-free check (not full RFC 3986 parsing)
+/// meant only to catch the override mistakes that would otherwise silently
+/// break RPC URL construction in [`fetch_models_api_url`] and
+/// [`generate_content_api_url`].
+fn is_valid_endpoint_base(value: &str) -> bool {
+    let Some(rest) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    !rest.is_empty() && !value.contains(['?', '#'])
+}
+
+/// Full URL for the `fetchAvailableModels` RPC against the resolved endpoint.
+pub fn fetch_models_api_url() -> String {
+    format!("{}/v1internal:fetchAvailableModels", antigravity_endpoint())
+}
+
+/// Full URL for the `generateContent` RPC against the resolved endpoint.
+pub fn generate_content_api_url() -> String {
+    format!("{}/v1internal:generateContent", antigravity_endpoint())
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct PersistedCatalog {
@@ -33,6 +87,32 @@ pub struct PersistedCatalog {
     pub fetched_at_rfc3339: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model_id: Option<String>,
+    /// Cloud Code base endpoint (see [`antigravity_endpoint`]) the catalog was
+    /// fetched from. `None` means the cache predates this field (written by an
+    /// older jcode version) and its endpoint is unknown.
+    ///
+    /// A model catalog is endpoint-specific: model availability, ids, and
+    /// quotas can differ between Cloud Code hosts (e.g. `cloudcode-pa` vs
+    /// `daily-cloudcode-pa`). A cache written against one endpoint must not be
+    /// trusted after the resolved endpoint changes (default flip, or a new
+    /// `JCODE_ANTIGRAVITY_ENDPOINT` value), or a user could be offered a model
+    /// id that the new endpoint doesn't actually serve. See
+    /// [`catalog_matches_current_endpoint`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+/// Whether a persisted catalog was fetched from the endpoint currently
+/// resolved by [`antigravity_endpoint`]. A cache with no recorded endpoint
+/// (written before this field existed) is treated as matching, so existing
+/// caches are not invalidated by an in-place upgrade; but once repersisted, a
+/// stamped cache will be checked against future endpoint changes. Callers
+/// should discard the cache and force a fresh fetch when this returns `false`.
+pub fn catalog_matches_current_endpoint(catalog: &PersistedCatalog) -> bool {
+    match catalog.endpoint.as_deref() {
+        Some(endpoint) => endpoint == antigravity_endpoint(),
+        None => true,
+    }
 }
 
 /// Result of parsing the backend `fetchAvailableModels` response: the ordered
@@ -576,5 +656,166 @@ pub fn flatten_schema_combiners(schema: &Value) -> Value {
         }
         Value::Array(items) => Value::Array(items.iter().map(flatten_schema_combiners).collect()),
         _ => schema.clone(),
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serialize env-var mutation across tests in this module: `std::env` is
+    // process-global, and cargo runs tests in this crate on multiple threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn antigravity_endpoint_defaults_to_daily_host() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+        assert_eq!(
+            fetch_models_api_url(),
+            format!("{DEFAULT_ENDPOINT}/v1internal:fetchAvailableModels")
+        );
+        assert_eq!(
+            generate_content_api_url(),
+            format!("{DEFAULT_ENDPOINT}/v1internal:generateContent")
+        );
+    }
+
+    #[test]
+    fn antigravity_endpoint_honors_env_override_and_trims_trailing_slash() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(ENDPOINT_ENV, " https://example.googleapis.com/ ");
+        }
+        assert_eq!(antigravity_endpoint(), "https://example.googleapis.com");
+        assert_eq!(
+            fetch_models_api_url(),
+            "https://example.googleapis.com/v1internal:fetchAvailableModels"
+        );
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+    }
+
+    #[test]
+    fn antigravity_endpoint_ignores_blank_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(ENDPOINT_ENV, "   ");
+        }
+        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+    }
+
+    #[test]
+    fn antigravity_endpoint_falls_back_on_scheme_less_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(ENDPOINT_ENV, "example.googleapis.com");
+        }
+        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+    }
+
+    #[test]
+    fn antigravity_endpoint_falls_back_on_override_with_query_string() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(
+                ENDPOINT_ENV,
+                "https://example.googleapis.com?not=a-base-url",
+            );
+        }
+        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+    }
+
+    #[test]
+    fn antigravity_endpoint_falls_back_on_override_with_fragment() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(ENDPOINT_ENV, "https://example.googleapis.com#frag");
+        }
+        assert_eq!(antigravity_endpoint(), DEFAULT_ENDPOINT);
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+    }
+
+    #[test]
+    fn antigravity_endpoint_accepts_valid_http_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(ENDPOINT_ENV, "http://localhost:8080");
+        }
+        assert_eq!(antigravity_endpoint(), "http://localhost:8080");
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+    }
+
+    fn sample_catalog(endpoint: Option<&str>) -> PersistedCatalog {
+        PersistedCatalog {
+            models: vec![CatalogModel {
+                id: "gemini-3-flash".to_string(),
+                display_name: None,
+                reset_time: None,
+                tag_title: None,
+                model_provider: None,
+                max_tokens: None,
+                max_output_tokens: None,
+                recommended: false,
+                available: true,
+                remaining_fraction_milli: None,
+            }],
+            fetched_at_rfc3339: "2026-01-01T00:00:00Z".to_string(),
+            default_model_id: None,
+            endpoint: endpoint.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn catalog_with_no_recorded_endpoint_matches_any_current_endpoint() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+        assert!(catalog_matches_current_endpoint(&sample_catalog(None)));
+    }
+
+    #[test]
+    fn catalog_stamped_with_current_endpoint_matches() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
+        assert!(catalog_matches_current_endpoint(&sample_catalog(Some(
+            DEFAULT_ENDPOINT
+        ))));
+    }
+
+    #[test]
+    fn catalog_stamped_with_stale_endpoint_does_not_match_after_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var(ENDPOINT_ENV, "https://example.googleapis.com");
+        }
+        // Cached from the old default before the override was set.
+        assert!(!catalog_matches_current_endpoint(&sample_catalog(Some(
+            DEFAULT_ENDPOINT
+        ))));
+        unsafe {
+            std::env::remove_var(ENDPOINT_ENV);
+        }
     }
 }

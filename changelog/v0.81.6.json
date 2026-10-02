@@ -1,0 +1,8 @@
+{
+  "version": "0.81.6",
+  "date": "2026-09-03",
+  "features": [],
+  "fixes": [
+    "Send the x-opencode-session header on OpenCode Go/Zen requests (required from 2026-09-05)"
+  ]
+}

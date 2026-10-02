@@ -1,0 +1,36 @@
+{
+  "version": "0.89.0",
+  "date": "2026-09-27",
+  "title": "Built-in voice input, agent applets, and a pinned session status line",
+  "highlights": [
+    "Built-in voice input for the CLI, with native microphone capture on macOS and Windows and coding-aware dictation vocabulary",
+    "The session status line (directory, branch, git status, context, provider, and model) stays pinned below the input, with info widgets showing the detail behind it",
+    "Agents can show interactive applets, and swarms can message each other across swarms with unique labels"
+  ],
+  "improvements": [
+    "The Changes widget lists dirty files newest first with line counts and marks the files the agent edited",
+    "MCP tools load through provider-native deferred loading, so adding or using MCP servers no longer busts the prompt cache",
+    "Accounts have a persistent auto-switch pool, and failover rotates through it in your chosen order",
+    "Show an upgrade card and daily feature allowances when a Jcode plan limit is reached",
+    "The daemon detects KV cache misses and reports them to every client",
+    "Untitled sessions are named after their first prompt, and save labels name the session",
+    "Keep your reading position across terminal resizes",
+    "Support embedded and multiple slash commands in one message",
+    "The first Ctrl+C clears the input and the second quits",
+    "Add pre-tool input transformers",
+    "Add the Yolo-Auto provider, grok-4.7 and grok-4.6 on Cursor, and OpenRouter image support from the model catalog",
+    "Block lid-close sleep on macOS and Windows while sessions are working",
+    "Rust and TypeScript SDKs support per-connection SSH identities and pinned host keys"
+  ],
+  "fixes": [
+    "Antigravity consumer accounts no longer hit 429s from the wrong endpoint",
+    "Claude usage limits are shared across processes and keep the last good values when throttled",
+    "MCP servers no longer stall startup or spawn duplicates, and pending requests fail when a stdio server exits",
+    "Reload exits with an error when the new server never becomes ready",
+    "Switching models validates against the target provider, and configured default models with a provider prefix match correctly",
+    "The effort chip follows model changes, and the alternate-enter hint respects queue mode and keymap conflicts",
+    "Ctrl+Up into prompt history keeps your draft",
+    "Hooks never flash a console window on Windows",
+    "DeepSeek Flash and MiMo v2.6 models keep their full context window"
+  ]
+}
