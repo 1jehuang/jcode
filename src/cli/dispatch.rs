@@ -21,6 +21,7 @@ use super::{
 };
 use provider_init::ProviderChoice;
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn is_file_controlled_debug_client() -> bool {
     std::env::var_os("JCODE_DEBUG_CMD_PATH").is_some()
 }

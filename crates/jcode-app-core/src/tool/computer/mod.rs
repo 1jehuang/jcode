@@ -507,7 +507,7 @@ fn require_xy(input: &ComputerInput) -> Result<(f64, f64)> {
 }
 
 #[cfg(target_os = "macos")]
-fn req_app<'a>(input: &'a ComputerInput) -> Result<&'a str> {
+fn req_app(input: &ComputerInput) -> Result<&str> {
     input
         .app
         .as_deref()

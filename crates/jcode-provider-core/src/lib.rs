@@ -72,6 +72,7 @@ use std::time::Duration;
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
 /// Provider trait for LLM backends.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Send messages and get a streaming response.

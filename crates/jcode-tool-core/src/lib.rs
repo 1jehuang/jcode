@@ -141,6 +141,7 @@ impl ToolContext {
 }
 
 /// A tool that can be executed by the agent.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// Tool name (must match what's sent to the API).
