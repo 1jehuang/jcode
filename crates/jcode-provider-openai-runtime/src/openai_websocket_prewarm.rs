@@ -388,6 +388,27 @@ mod tests {
     }
 
     #[test]
+    fn parallel_calls_prewarm_preserves_policy_and_invalidates_on_change() {
+        for enabled in [false, true] {
+            let request = serde_json::json!({
+                "model":"gpt-5.4", "parallel_tool_calls":enabled,
+                "input":[{"role":"user", "content":"hello"}], "stream":true
+            });
+            let warm = prewarm_request(&request);
+            assert_eq!(warm["parallel_tool_calls"], enabled);
+            let continuation =
+                openai_stream_runtime::build_continuation_request(&request, "resp_warm", &[]);
+            assert_eq!(
+                continuation["parallel_tool_calls"],
+                warm["parallel_tool_calls"]
+            );
+            let mut changed = request.clone();
+            changed["parallel_tool_calls"] = serde_json::json!(!enabled);
+            assert_ne!(warm, prewarm_request(&changed));
+        }
+    }
+
+    #[test]
     fn warmup_compatibility_compares_all_settings_but_not_conversation_input() {
         let request = serde_json::json!({
             "model":"gpt-5.6-sol", "instructions":"static", "input":[], "tools":[],
