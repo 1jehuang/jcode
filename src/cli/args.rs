@@ -191,6 +191,12 @@ pub(crate) enum Command {
 
         /// The message to send
         message: String,
+
+        /// Parent session id to link this run to. Headless automation
+        /// (hooks, swarm workers, scripts) passes the spawner here so the
+        /// run shows under the 🤖 workers filter instead of as an orphan.
+        #[arg(long)]
+        parent: Option<String>,
     },
 
     /// Login to a provider via OAuth, API key, or local credentials

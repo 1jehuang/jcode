@@ -32,6 +32,7 @@ fn session_picker_resume_action_keeps_overlay_open() {
                 server_name: None,
                 server_icon: None,
                 source: crate::tui::session_picker::SessionSource::Jcode,
+                hook_trigger: None,
                 resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
                     session_id: "session_keep_open".to_string(),
                 },
@@ -83,6 +84,7 @@ fn session_picker_enter_queues_current_terminal_resume_and_closes_overlay() {
                 server_name: None,
                 server_icon: None,
                 source: crate::tui::session_picker::SessionSource::Jcode,
+                hook_trigger: None,
                 resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
                     session_id: "session_here_123".to_string(),
                 },
@@ -409,6 +411,7 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
         server_name: None,
         server_icon: None,
         source: SessionSource::Jcode,
+        hook_trigger: None,
         resume_target: crate::tui::session_picker::ResumeTarget::JcodeSession {
             session_id: "session_scroll".to_string(),
         },

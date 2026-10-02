@@ -284,6 +284,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             message,
             json,
             ndjson,
+            parent,
         }) => {
             commands::run_single_message_command(
                 &args.provider,
@@ -292,6 +293,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 &message,
                 json,
                 ndjson,
+                parent.as_deref(),
             )
             .await?;
         }
