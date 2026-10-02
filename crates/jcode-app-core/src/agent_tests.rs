@@ -4002,3 +4002,329 @@ fn pruner_stage1_pilot_gate_on_frozen_corpus() {
     assert_eq!(err_ok, n, "error_lines_kept 100%");
     assert!(mean <= 0.85, "mean ratio {mean:.3} <= 0.85");
 }
+
+/// SWE-Pruner Stage 1 wiring: mode ON prunes the display copy while the
+/// offload file keeps the full original bytes (PLAN §3).
+#[test]
+fn pruner_wire_mode_on_prunes_display_copy_keeps_full_offload_bytes() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_window = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "1");
+    let prev_pruner = std::env::var_os("JCODE_PRUNER_MODE");
+    crate::env::set_var("JCODE_PRUNER_MODE", "on");
+    crate::config::Config::invalidate_cache();
+
+    let original = [
+        "// src/auth.ts - session login flow",
+        "import { login } from './session';",
+        "import { refresh } from './token';",
+        "import { logout } from './session';",
+        "import { validate } from './token';",
+        "",
+        "",
+        "export function auth_login(user) {",
+        "ERROR: auth failed for user guest",
+        "  return login(user, auth);",
+        "}",
+    ]
+    .join("\n");
+    assert!(
+        original.chars().count() > 200,
+        "fixture must clear the stub floor"
+    );
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_prune".to_string(),
+        name: "read".to_string(),
+        input: serde_json::json!({"file_path": "/src/auth.ts"}),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_prune".to_string(),
+                content: original.clone(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "next".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, "session_pruner_on");
+    match &out[1].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            // Pruned display copy precedes the unchanged cue+ref substitution.
+            assert!(
+                content.contains("(filtered "),
+                "pruned marker, got:\n{content}"
+            );
+            assert!(
+                content.contains("[jcode-retention:offloaded"),
+                "cue+ref intact, got:\n{content}"
+            );
+            assert!(
+                content.contains("read file_path="),
+                "recipe intact, got:\n{content}"
+            );
+            assert!(
+                content.contains("ERROR: auth failed for user guest"),
+                "error line kept verbatim, got:\n{content}"
+            );
+            let (pruned, _) = content
+                .split_once("[jcode-retention:")
+                .expect("substitution follows pruned copy");
+            assert_ne!(
+                pruned.trim_end(),
+                original,
+                "display copy differs from stored bytes"
+            );
+        }
+        other => panic!("result block must survive, got: {other:?}"),
+    }
+    // Stored bytes: the offload file holds the FULL original, byte-identical.
+    let offload_dir = temp
+        .path()
+        .join("sessions")
+        .join("offloaded")
+        .join(Agent::sanitize_offload_component("session_pruner_on"));
+    let entries: Vec<_> = std::fs::read_dir(&offload_dir)
+        .expect("offload dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("entries");
+    assert_eq!(entries.len(), 1, "single-chunk fixture writes one file");
+    let body = std::fs::read_to_string(entries[0].path()).expect("read offload");
+    let stored = body
+        .split_once("--- result ---\n")
+        .expect("offload header")
+        .1
+        .trim_end_matches('\n');
+    assert_eq!(stored, original, "stored bytes byte-identical to pre-wire");
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev_window {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    match prev_pruner {
+        Some(value) => crate::env::set_var("JCODE_PRUNER_MODE", value),
+        None => crate::env::remove_var("JCODE_PRUNER_MODE"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+/// SWE-Pruner Stage 1 wiring: mode OFF (default) leaves the send view
+/// byte-identical to pre-wire behavior — substitution only, no pruned copy.
+#[test]
+fn pruner_wire_mode_off_leaves_bytes_byte_identical() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_window = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "1");
+    let prev_pruner = std::env::var_os("JCODE_PRUNER_MODE");
+    crate::env::remove_var("JCODE_PRUNER_MODE");
+    crate::config::Config::invalidate_cache();
+
+    let original = [
+        "// src/auth.ts - session login flow",
+        "import { login } from './session';",
+        "import { refresh } from './token';",
+        "import { logout } from './session';",
+        "import { validate } from './token';",
+        "",
+        "",
+        "export function auth_login(user) {",
+        "ERROR: auth failed for user guest",
+        "  return login(user, auth);",
+        "}",
+    ]
+    .join("\n");
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_prune_off".to_string(),
+        name: "read".to_string(),
+        input: serde_json::json!({"file_path": "/src/auth.ts"}),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_prune_off".to_string(),
+                content: original.clone(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "next".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, "session_pruner_off");
+    match &out[1].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            assert!(
+                content.starts_with("[jcode-retention:offloaded"),
+                "substitution only, got:\n{content}"
+            );
+            assert!(
+                !content.contains("(filtered "),
+                "no pruner markers, got:\n{content}"
+            );
+        }
+        other => panic!("result block must survive, got: {other:?}"),
+    }
+    let offload_dir = temp
+        .path()
+        .join("sessions")
+        .join("offloaded")
+        .join(Agent::sanitize_offload_component("session_pruner_off"));
+    let entries: Vec<_> = std::fs::read_dir(&offload_dir)
+        .expect("offload dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("entries");
+    assert_eq!(entries.len(), 1);
+    let body = std::fs::read_to_string(entries[0].path()).expect("read offload");
+    let stored = body
+        .split_once("--- result ---\n")
+        .expect("offload header")
+        .1
+        .trim_end_matches('\n');
+    assert_eq!(stored, original, "stored bytes byte-identical to pre-wire");
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev_window {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    match prev_pruner {
+        Some(value) => crate::env::set_var("JCODE_PRUNER_MODE", value),
+        None => crate::env::remove_var("JCODE_PRUNER_MODE"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+/// SWE-Pruner Stage 1 wiring: unknown tools bypass even with mode ON
+/// (same backward-compat rule as the paper's missing-hint bypass).
+#[test]
+fn pruner_wire_unknown_tool_bypasses_when_mode_on() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_window = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "1");
+    let prev_pruner = std::env::var_os("JCODE_PRUNER_MODE");
+    crate::env::set_var("JCODE_PRUNER_MODE", "on");
+    crate::config::Config::invalidate_cache();
+
+    let original = [
+        "line one of write output",
+        "",
+        "",
+        "line two of write output",
+    ]
+    .join("\n")
+        + &"x".repeat(300);
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_write".to_string(),
+        name: "write".to_string(),
+        input: serde_json::json!({"file_path": "/tmp/out.txt"}),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_write".to_string(),
+                content: original.clone(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "next".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, "session_pruner_bypass");
+    match &out[1].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            assert!(
+                content.starts_with("[jcode-retention:offloaded"),
+                "unknown tool bypasses pruner, got:\n{content}"
+            );
+            assert!(
+                !content.contains("(filtered "),
+                "no pruner markers, got:\n{content}"
+            );
+        }
+        other => panic!("result block must survive, got: {other:?}"),
+    }
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev_window {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    match prev_pruner {
+        Some(value) => crate::env::set_var("JCODE_PRUNER_MODE", value),
+        None => crate::env::remove_var("JCODE_PRUNER_MODE"),
+    }
+    crate::config::Config::invalidate_cache();
+}

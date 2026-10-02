@@ -978,6 +978,64 @@ impl Agent {
         }
     }
 
+    /// SWE-Pruner Stage 1 mode knob: `JCODE_PRUNER_MODE=on` filters the
+    /// display copy, anything else (including unset) bypasses. Default OFF,
+    /// so masking behavior is byte-identical unless explicitly enabled. Read
+    /// live (no cache) so tests can flip it under the test-env lock.
+    fn pruner_enabled() -> bool {
+        std::env::var("JCODE_PRUNER_MODE")
+            .map(|v| v.trim().eq_ignore_ascii_case("on"))
+            .unwrap_or(false)
+    }
+
+    /// Pre-offload line filter on a DISPLAY copy (phase3/13-swe-pruner PLAN
+    /// §3). Returns the pruned text, or `None` when the caller should keep
+    /// the substitution-only send view: pruner off, unknown tool
+    /// (`classify_tool` bypass, same rule as the paper's missing-hint
+    /// bypass), scorer changed nothing, or scorer returned empty. Fail open
+    /// always — the full original bytes still reach `offload_chunk_result`.
+    ///
+    /// Goal hint derives deterministically from the ToolUse block (tool name
+    /// + `file_path`/`path`, `pattern`/`query`/`text`, `command`, plus
+    /// `intent`/`glob` extras), never agent-generated.
+    fn pruner_prune_display(
+        tool_name: Option<&str>,
+        tool_input: Option<&serde_json::Value>,
+        content: &str,
+    ) -> Option<String> {
+        if !Self::pruner_enabled() {
+            return None;
+        }
+        let name = tool_name.unwrap_or("");
+        let family = pruner::classify_tool(name)?;
+        let input = tool_input.cloned().unwrap_or(serde_json::Value::Null);
+        let field = |keys: &[&str]| -> &str {
+            keys.iter()
+                .find_map(|k| input.get(k).and_then(|v| v.as_str()))
+                .unwrap_or("")
+        };
+        let file_path = field(&["file_path", "path"]);
+        let query = field(&["pattern", "query", "text"]);
+        let command = field(&["command"]);
+        let mut extra = String::new();
+        for key in ["intent", "glob"] {
+            if let Some(s) = input.get(key).and_then(|v| v.as_str())
+                && !s.is_empty()
+            {
+                if !extra.is_empty() {
+                    extra.push(' ');
+                }
+                extra.push_str(s);
+            }
+        }
+        let outcome =
+            pruner::prune_tool_result(family, name, file_path, query, command, &extra, content);
+        if outcome.text.is_empty() || outcome.text == content {
+            return None;
+        }
+        Some(outcome.text)
+    }
+
     /// Write a cleared tool result to its session-scoped offload file
     /// (`<jcode_dir>/sessions/offloaded/<session>/<tool>_<hash>.txt`), full
     /// original bytes under a small deterministic header (no timestamps, so
@@ -1073,11 +1131,20 @@ impl Agent {
         // Tool names live on the ToolUse blocks, not the results: correlate
         // once (owned — the borrow cannot survive the mutation loop below) so
         // offloaded files carry the originating tool name in their header.
+        // Inputs are correlated too: the pruner derives its deterministic
+        // goal hint from the ToolUse input (PLAN §4, never agent-generated).
         let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut tool_inputs: HashMap<String, serde_json::Value> = HashMap::new();
         for message in messages.iter() {
             for block in message.content.iter() {
-                if let ContentBlock::ToolUse { id, name, .. } = block {
+                if let ContentBlock::ToolUse {
+                    id, name, input, ..
+                } = block
+                {
                     tool_names.entry(id.clone()).or_insert_with(|| name.clone());
+                    tool_inputs
+                        .entry(id.clone())
+                        .or_insert_with(|| input.clone());
                 }
             }
         }
@@ -1122,6 +1189,16 @@ impl Agent {
                 {
                     let was = content.chars().count();
                     let tool_name = tool_names.get(tool_use_id).map(String::as_str);
+                    // SWE-Pruner Stage 1 (PLAN §3): filter a DISPLAY copy
+                    // before the offload substitution. The bytes reaching
+                    // offload_chunk_result below stay byte-identical to the
+                    // pre-wire path; the pruned copy is shown only when the
+                    // scorer changed something (fail open otherwise).
+                    let pruned_display = Self::pruner_prune_display(
+                        tool_name,
+                        tool_inputs.get(tool_use_id),
+                        content,
+                    );
                     match Self::offload_chunk_result(
                         session_id,
                         tool_use_id,
@@ -1130,7 +1207,10 @@ impl Agent {
                         None,
                     ) {
                         Some((_path, substitution, nchunks)) => {
-                            *content = substitution;
+                            *content = match pruned_display {
+                                Some(pruned) => format!("{pruned}\n{substitution}"),
+                                None => substitution,
+                            };
                             jcode_base::cache_invalidation::record(
                                 "tool-result clearing",
                                 format!(
