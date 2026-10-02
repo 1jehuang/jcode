@@ -1571,5 +1571,9 @@ mod duplicate_tool_result_tests;
 mod wedge_fixture_check;
 
 #[cfg(test)]
+#[path = "native_web_search_repair_tests.rs"]
+mod native_web_search_repair_tests;
+
+#[cfg(test)]
 #[path = "deferred_tools_tests.rs"]
 mod deferred_tools_tests;
