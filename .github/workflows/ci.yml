@@ -297,6 +297,14 @@ jobs:
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-app-core --lib tool::bash::tests::test_stdin_forwarding -- --nocapture
 
+      - name: Run OAuth callback socket timeout regression (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          python3 .github/scripts/run_with_timeout.py 180 \
+            "$(rustup which cargo)" test --locked --target ${{ matrix.target }} \
+            -p jcode-sdk --lib accepted_stream_waits_for_the_read_timeout
+
       - name: Run TUI library tests (Linux only)
         if: runner.os == 'Linux'
         shell: bash
