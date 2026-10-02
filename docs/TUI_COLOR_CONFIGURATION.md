@@ -31,6 +31,8 @@ error = "#ff6464"
 Run `/colors` in the TUI to list every role with its current value. Changes
 apply immediately; no restart.
 
+Reasoning text has an independent `reasoning` color role, defaulting to its current `#646464` appearance.
+
 | Command | Effect |
 | --- | --- |
 | `/colors` | List every configurable role |
@@ -42,7 +44,7 @@ apply immediately; no restart.
 
 ## How every color became configurable
 
-The TUI does not have one palette. It has ~22 named semantic roles plus roughly
+The TUI does not have one palette. It has ~23 named semantic roles plus roughly
 250 distinct ad hoc `rgb(...)` literals spread across widgets, plus ratatui's
 named colors (`Color::Red`, `Color::White`, ...). Editing every call site would
 have been a large, permanently fragile change.
@@ -85,14 +87,16 @@ Three consequences worth knowing:
 
 - **Role accessors return defaults.** `theme::user_color()` deliberately returns
   the role's *default* color, not the configured one. If it returned the
-  configured color, a cell would be remapped twice (once by the accessor, once
-  by the buffer pass) and the hue/lightness offsets would compound.
+  configured color, a cell would be substituted twice (once by the accessor,
+  once by the buffer pass).
 - **Only role-tagged colors are configurable.** A buffer color that *is* a
   role's default is replaced by that role's configured color, and ratatui's
   named colors map to the role they conventionally stand for. An ad hoc
   `rgb(...)` literal carries no role, so recoloring a role leaves it alone: give
   a shade a role if it should follow `/colors`. There is no guessing by color
   proximity, so an override can never bleed into another role's output.
+- **Reasoning has its own role.** Reasoning spans keep their historical dim-gray
+  default, but use the `reasoning` role independently of ordinary `dim` text.
 
 - **Configured colors are used exactly as given**, on light and dark terminals
   alike, so what you put in the config is what the terminal receives.
@@ -158,7 +162,7 @@ self-consistent test suite would have happily accepted forever.
 
 ## Generating a palette
 
-Hand-tuning 22 roles is what stops most people from theming at all, so
+Hand-tuning 23 roles is what stops most people from theming at all, so
 `/colors generate <#rrggbb>` derives a complete palette from one seed color and
 reports the resulting score.
 

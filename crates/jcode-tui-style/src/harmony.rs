@@ -322,7 +322,15 @@ fn readability(palette: &Palette, background: (u8, u8, u8)) -> Criterion {
     let mut findings = Vec::new();
     let mut worst_scores = Vec::new();
 
-    for role in ALL_ROLES.iter().copied() {
+    // Preserve the calibration of existing palettes until users explicitly
+    // configure the new reasoning role. Its default is a historical render
+    // color, but scoring that extra fixed value would shift legacy palette
+    // scores even when their configuration did not change.
+    for role in ALL_ROLES
+        .iter()
+        .copied()
+        .filter(|role| *role != Role::Reasoning || palette.is_overridden(*role))
+    {
         if role.is_background() {
             // Backgrounds are judged by how little they fight the terminal
             // background, not by contrast against it.

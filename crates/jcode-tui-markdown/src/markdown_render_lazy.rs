@@ -9,6 +9,7 @@ pub fn render_markdown_lazy(
     let text = escape_currency_dollars(&text);
     let text = preserve_line_oriented_softbreaks(&text);
     let text = text.as_str();
+    let markdown_source = text;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current_spans: Vec<Span<'static>> = Vec::new();
     let deferred_mermaid_mode = deferred_mermaid_render_context_enabled();
@@ -61,9 +62,9 @@ pub fn render_markdown_lazy(
     options.insert(Options::ENABLE_GFM);
     options.insert(Options::ENABLE_DEFINITION_LIST);
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
-    let parser = Parser::new_ext(text, options);
+    let parser = Parser::new_ext(text, options).into_offset_iter();
 
-    for event in parser {
+    for (event, source_range) in parser {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 flush_current_line_with_alignment(
@@ -607,23 +608,18 @@ pub fn render_markdown_lazy(
                 } else {
                     let is_thinking_duration =
                         text.starts_with("Thought for ") && text.ends_with('s');
-                    // The sentinel can appear at the start and/or end of the line
-                    // (and smart-punctuation may split it across events), so latch
-                    // on its presence anywhere and strip every occurrence.
-                    let has_sentinel = text.contains(crate::REASONING_SENTINEL);
-                    if has_sentinel {
-                        // Latch for the rest of this emphasis span so smart-
-                        // punctuation splits keep the dim/italic styling.
+                    let reasoning_text = jcode_render_core::reasoning::reasoning_text_event(
+                        markdown_source,
+                        source_range.clone(),
+                        &text,
+                    );
+                    if reasoning_text.is_some() {
+                        // Latch for the rest of this generated emphasis span so
+                        // smart-punctuation splits keep the dim/italic styling.
                         reasoning_emphasis = true;
                     }
                     let is_reasoning = reasoning_emphasis;
-                    let stripped;
-                    let text: &str = if has_sentinel {
-                        stripped = text.replace(crate::REASONING_SENTINEL, "");
-                        &stripped
-                    } else {
-                        &text
-                    };
+                    let visible_text = reasoning_text.as_deref().unwrap_or(text.as_ref());
                     let mut style = if is_thinking_duration || is_reasoning {
                         Style::default().fg(md_dim_color()).italic()
                     } else {
@@ -636,7 +632,7 @@ pub fn render_markdown_lazy(
                     };
                     style = apply_inline_decorations(style, strike, !link_targets.is_empty());
                     ensure_blockquote_prefix(&mut current_spans, blockquote_depth);
-                    current_spans.push(Span::styled(text.to_string(), style));
+                    current_spans.push(Span::styled(visible_text.to_string(), style));
                 }
             }
 

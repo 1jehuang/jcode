@@ -17,6 +17,9 @@ pub fn file_link_color() -> Color {
 pub fn dim_color() -> Color {
     crate::palette::role_color(crate::palette::Role::Dim)
 }
+pub fn reasoning_color() -> Color {
+    crate::palette::role_color(crate::palette::Role::Reasoning)
+}
 pub fn accent_color() -> Color {
     crate::palette::role_color(crate::palette::Role::Accent)
 }

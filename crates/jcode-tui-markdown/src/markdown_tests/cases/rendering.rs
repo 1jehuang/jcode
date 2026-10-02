@@ -1151,6 +1151,58 @@ fn test_reasoning_emphasis_does_not_leak_into_following_text() {
 }
 
 #[test]
+fn ordinary_invisible_separator_is_preserved_and_does_not_enable_reasoning_style() {
+    let sentinel = crate::REASONING_SENTINEL;
+    let md = format!(
+        "ordinary{sentinel}marker\n\n*italic {sentinel} marker*\n\nfollowing text"
+    );
+    let full = render_markdown(&md);
+    let lazy = render_markdown_lazy(&md, None, 0..100);
+
+    for lines in [&full, &lazy] {
+        let visible: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(visible.contains(&format!("ordinary{sentinel}marker")));
+        assert!(visible.contains(&format!("italic {sentinel} marker")));
+
+        let following = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("following text"))
+            .expect("following paragraph is present");
+        assert!(
+            !following
+                .style
+                .add_modifier
+                .contains(Modifier::ITALIC),
+            "ordinary text must not inherit reasoning emphasis"
+        );
+    }
+}
+
+#[test]
+fn lazy_generated_reasoning_wrapper_remains_dim_italic() {
+    let sentinel = crate::REASONING_SENTINEL;
+    let body = format!("generated{sentinel}reasoning");
+    let markup = crate::reasoning_line_markup(&body);
+    let lines = render_markdown_lazy(&markup, None, 0..100);
+    let mut visible = String::new();
+
+    for span in lines.iter().flat_map(|line| line.spans.iter()) {
+        visible.push_str(&span.content);
+        if span.content.contains("generated") || span.content.contains("reasoning") {
+            assert_eq!(span.style.fg, Some(md_dim_color()));
+            assert!(span.style.add_modifier.contains(Modifier::ITALIC));
+        }
+    }
+    assert!(visible.contains(&body));
+    assert_eq!(visible.matches(sentinel).count(), 1);
+}
+
+#[test]
 fn test_reasoning_summary_line_markup_folds_to_single_dim_italic_trace() {
     let sentinel = crate::REASONING_SENTINEL;
 

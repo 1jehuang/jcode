@@ -300,7 +300,37 @@ fn adapt_buffer_impl(buf: &mut Buffer, mode: ThemeMode, palette: Option<&crate::
             .or_insert_with(|| readable_light_foreground(color, background))
     };
     for cell in buf.content.iter_mut() {
-        let (fg, fg_override) = adapt(cell.fg);
+        let italic = cell.modifier.contains(Modifier::ITALIC);
+        let (reasoning_r, reasoning_g, reasoning_b) = crate::palette::Role::Reasoning.default_rgb();
+        let contextual_reasoning =
+            italic && cell.fg == crate::color::rgb(reasoning_r, reasoning_g, reasoning_b);
+        let (fg, fg_override) = if contextual_reasoning {
+            palette
+                .and_then(|palette| {
+                    crate::palette::configured_native_color_for_context(palette, cell.fg, true)
+                })
+                .map(|color| (color, true))
+                .unwrap_or_else(|| {
+                    // A reasoning span shares Dim's historical default color,
+                    // but must not inherit Dim's override. Preserve the original
+                    // ink here and still apply light-theme contrast repair below.
+                    (
+                        if mode == ThemeMode::Light {
+                            adapt_color_for_light(cell.fg)
+                        } else {
+                            cell.fg
+                        },
+                        false,
+                    )
+                })
+        } else {
+            palette
+                .and_then(|palette| {
+                    crate::palette::configured_native_color_for_context(palette, cell.fg, italic)
+                })
+                .map(|color| (color, true))
+                .unwrap_or_else(|| adapt(cell.fg))
+        };
         let (bg, bg_override) = adapt(cell.bg);
         let (underline, underline_override) = adapt(cell.underline_color);
         cell.fg = fg;
@@ -377,6 +407,63 @@ mod tests {
         let c = Color::Rgb(138, 180, 248);
         assert_eq!(adapt_color_for_theme(c), c);
         assert_eq!(adapt_color_for_theme(Color::White), Color::White);
+    }
+
+    #[test]
+    fn italic_reasoning_uses_its_override_without_recoloring_dim_cells() {
+        let mut palette = crate::palette::Palette::default();
+        let chosen = (18, 52, 86);
+        let dim = (220, 180, 40);
+        palette.set(crate::palette::Role::Reasoning, chosen);
+        palette.set(crate::palette::Role::Dim, dim);
+
+        let default = crate::color::rgb(100, 100, 100);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        buf.content[0].fg = default;
+        buf.content[0].modifier.insert(Modifier::ITALIC);
+        buf.content[1].fg = crate::palette::role_color(crate::palette::Role::Dim);
+
+        adapt_buffer_impl(&mut buf, ThemeMode::Dark, Some(&palette));
+
+        assert_eq!(
+            buf.content[0].fg,
+            crate::color::rgb(chosen.0, chosen.1, chosen.2)
+        );
+        assert_eq!(buf.content[1].fg, crate::color::rgb(dim.0, dim.1, dim.2));
+    }
+
+    #[test]
+    fn italic_reasoning_does_not_inherit_dim_override() {
+        let mut palette = crate::palette::Palette::default();
+        let dim = (220, 180, 40);
+        palette.set(crate::palette::Role::Dim, dim);
+
+        let default = crate::color::rgb(100, 100, 100);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        buf.content[0].fg = default;
+        buf.content[0].modifier.insert(Modifier::ITALIC);
+        buf.content[1].fg = crate::palette::role_color(crate::palette::Role::Dim);
+
+        adapt_buffer_impl(&mut buf, ThemeMode::Dark, Some(&palette));
+
+        assert_eq!(buf.content[0].fg, default);
+        assert_eq!(buf.content[1].fg, crate::color::rgb(dim.0, dim.1, dim.2));
+    }
+
+    #[test]
+    fn light_reasoning_without_override_keeps_contrast_and_skips_dim_override() {
+        let mut palette = crate::palette::Palette::default();
+        palette.set(crate::palette::Role::Dim, (220, 180, 40));
+
+        let default = crate::color::rgb(100, 100, 100);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buf.content[0].fg = default;
+        buf.content[0].modifier.insert(Modifier::ITALIC);
+
+        adapt_buffer_impl(&mut buf, ThemeMode::Light, Some(&palette));
+
+        assert_ne!(buf.content[0].fg, crate::color::rgb(220, 180, 40));
+        assert!(contrast(as_rgb(buf.content[0].fg), LIGHT_SURFACE) >= TARGET_TEXT_CONTRAST);
     }
 
     #[test]

@@ -7,8 +7,8 @@
 //! 2. Hundreds of ad hoc `rgb(r, g, b)` literals scattered across widgets.
 //!
 //! Both funnel through this module. Once per frame,
-//! [`crate::theme_mode::adapt_buffer_for_display`] rewrites any buffer color
-//! that is exactly a role's default onto that role's configured color, and maps
+//! [`crate::theme_mode::adapt_buffer_for_display`] substitutes role defaults
+//! with configured colors, using render context for reasoning, and maps
 //! ratatui's named colors to the role they conventionally stand for. Ad hoc
 //! `rgb(...)` literals carry no role, so they are not configurable: give a shade
 //! a role if it needs to follow `/colors`. An unconfigured palette is
@@ -43,6 +43,8 @@ pub enum Role {
     FileLink,
     /// Low-emphasis text (hints, separators).
     Dim,
+    /// Model reasoning text.
+    Reasoning,
     /// Primary brand accent (headers, highlights).
     Accent,
     /// System / harness notices.
@@ -87,6 +89,7 @@ pub const ALL_ROLES: &[Role] = &[
     Role::Tool,
     Role::FileLink,
     Role::Dim,
+    Role::Reasoning,
     Role::Accent,
     Role::System,
     Role::Queued,
@@ -115,6 +118,7 @@ impl Role {
             Role::Tool => "tool",
             Role::FileLink => "file_link",
             Role::Dim => "dim",
+            Role::Reasoning => "reasoning",
             Role::Accent => "accent",
             Role::System => "system",
             Role::Queued => "queued",
@@ -152,6 +156,7 @@ impl Role {
             Role::Tool => (120, 120, 120),
             Role::FileLink => (180, 200, 255),
             Role::Dim => (80, 80, 80),
+            Role::Reasoning => (100, 100, 100),
             Role::Accent => (186, 139, 255),
             Role::System => (255, 170, 220),
             Role::Queued => (255, 193, 7),
@@ -183,8 +188,8 @@ impl Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     entries: [(u8, u8, u8); ALL_ROLES.len()],
-    /// Which roles the user explicitly configured. Only overridden roles
-    /// participate in literal remapping, so a default palette is a no-op.
+    /// Which roles the user explicitly configured. Only overridden roles are
+    /// substituted, so a default palette is a no-op.
     overridden: [bool; ALL_ROLES.len()],
 }
 
@@ -341,6 +346,26 @@ pub(crate) fn configured_palette() -> Option<Palette> {
 /// carries. Ad hoc `rgb(...)` literals are unattributed and returned as-is:
 /// give a shade a role if it should follow `/colors`.
 pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option<Color> {
+    configured_native_color_for_context(palette, color, false)
+}
+
+/// Resolve a foreground with its render context. Reasoning uses the same
+/// historical gray as markdown's dim role, so its italic modifier preserves
+/// the semantic distinction after spans enter ratatui's color-only buffer.
+pub(crate) fn configured_native_color_for_context(
+    palette: &Palette,
+    color: Color,
+    italic: bool,
+) -> Option<Color> {
+    let (r, g, b) = Role::Reasoning.default_rgb();
+    if italic && color == crate::color::rgb(r, g, b) {
+        if !palette.is_overridden(Role::Reasoning) {
+            return None;
+        }
+        let (r, g, b) = palette.rgb(Role::Reasoning);
+        return Some(crate::color::rgb(r, g, b));
+    }
+
     let rgb = match color {
         Color::Reset => return None,
         Color::Rgb(r, g, b) => (r, g, b),
@@ -354,7 +379,10 @@ pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option
     let role = ALL_ROLES
         .iter()
         .copied()
-        .find(|role| role.default_rgb() == rgb && palette.is_overridden(*role))?;
+        // Reasoning is contextual: only italic reasoning spans may select it.
+        .find(|role| {
+            *role != Role::Reasoning && role.default_rgb() == rgb && palette.is_overridden(*role)
+        })?;
     let (r, g, b) = palette.rgb(role);
     Some(crate::color::rgb(r, g, b))
 }
@@ -365,8 +393,8 @@ pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option
 /// one: substitution happens once per frame in
 /// [`crate::theme_mode::adapt_buffer_for_display`]. Returning the configured
 /// color here would let
-/// the same cell be remapped twice (once by the accessor, once by the buffer
-/// pass), which compounds the hue/lightness offsets.
+/// the same cell be substituted twice (once by the accessor, once by the buffer
+/// pass).
 pub fn role_color(role: Role) -> Color {
     let (r, g, b) = role.default_rgb();
     crate::color::rgb(r, g, b)
@@ -473,6 +501,8 @@ mod tests {
     fn default_palette_matches_historical_values() {
         let palette = Palette::default();
         assert_eq!(palette.rgb(Role::User), (138, 180, 248));
+        assert_eq!(palette.rgb(Role::Reasoning), (100, 100, 100));
+        assert_eq!(Role::Reasoning.key(), "reasoning");
         assert!(!palette.has_overrides());
     }
 
@@ -498,6 +528,24 @@ mod tests {
         assert_eq!(
             configured_native_color(&Palette::default(), Color::Rgb(r, g, b)),
             None
+        );
+    }
+
+    #[test]
+    fn reasoning_default_requires_italic_context() {
+        let mut palette = Palette::default();
+        palette.set(Role::Reasoning, (18, 52, 86));
+        let reasoning_default = Role::Reasoning.default_rgb();
+        let color = crate::color::rgb(
+            reasoning_default.0,
+            reasoning_default.1,
+            reasoning_default.2,
+        );
+
+        assert_eq!(configured_native_color(&palette, color), None);
+        assert_eq!(
+            configured_native_color_for_context(&palette, color, true),
+            Some(crate::color::rgb(18, 52, 86))
         );
     }
 
@@ -779,6 +827,7 @@ mod default_palette_is_frozen {
         (Role::Tool, (120, 120, 120)),
         (Role::FileLink, (180, 200, 255)),
         (Role::Dim, (80, 80, 80)),
+        (Role::Reasoning, (100, 100, 100)),
         (Role::Accent, (186, 139, 255)),
         (Role::System, (255, 170, 220)),
         (Role::Queued, (255, 193, 7)),
@@ -831,7 +880,7 @@ mod default_palette_is_frozen {
         }
         assert!(
             !palette.has_overrides(),
-            "the default palette must claim no overrides, or literal remapping would engage"
+            "the default palette must claim no overrides, or role substitution would engage"
         );
     }
 
