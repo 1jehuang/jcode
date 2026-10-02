@@ -81,6 +81,10 @@ impl Tool for JcodeDocsTool {
         })
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        true
+    }
+
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: JcodeDocsInput = serde_json::from_value(input)?;
         let output = match params.action.as_str() {

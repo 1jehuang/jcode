@@ -174,6 +174,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_MAX_RETRIES",
     "JCODE_MCP_TOOLS",
     "JCODE_MCP_TOOLS_TOKEN_THRESHOLD",
+    "JCODE_PARALLEL_TOOLS",
     "JCODE_RETRY_BACKOFF_CAP_SECS",
     "JCODE_SWARM_ENABLED",
     "JCODE_SWARM_EFFORT",
@@ -679,6 +680,12 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
+    /// Opt in to running adjacent eligible tool calls from one model response
+    /// in parallel. Only `read`, `ls`, `jcode_docs`, and `webfetch` are eligible.
+    /// All `bash`, `agentgrep`, `websearch`, and custom tools remain sequential.
+    /// Results keep the model's order. Disabled by default. Env override:
+    /// `JCODE_PARALLEL_TOOLS=1` enables this; `JCODE_PARALLEL_TOOLS=0` disables it.
+    pub parallel: bool,
 }
 
 impl Default for ToolConfig {
@@ -690,6 +697,7 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
+            parallel: false,
         }
     }
 }
@@ -855,6 +863,10 @@ mod env_overrides;
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config/parallel_tools_tests.rs"]
+mod parallel_tools_tests;
 
 #[cfg(test)]
 #[path = "config_color_tests.rs"]

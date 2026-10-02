@@ -1545,22 +1545,38 @@ impl Agent {
             // Execute tools and add results
             let tool_count = tool_calls.len();
             let mut tool_results_dirty = false;
+            // Adjacent concurrency-safe calls are started together the first
+            // time the loop reaches them; the loop below still records every
+            // result in order. Unstarted tasks are aborted when this drops.
+            let mut prefetch = self.tool_prefetch().await;
             for tool_index in 0..tool_count {
+                // A current bash task may have completed its reload handoff.
+                // Do not launch the next unsafe call merely because that
+                // completion won the select over the shutdown signal.
+                if self.is_graceful_shutdown() {
+                    self.finish_interrupted_prefetch(
+                        &mut prefetch,
+                        &tool_calls,
+                        tool_index,
+                        "[Skipped - server reloading]",
+                        &event_tx,
+                    )
+                    .await;
+                    self.session.save()?;
+                    return Ok(());
+                }
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
                 if tool_index > 0 && self.has_urgent_interrupt() {
                     crate::telemetry::record_user_cancelled();
-                    // Add tool_results for all remaining skipped tools to maintain valid history
-                    for skipped_tc in &tool_calls[tool_index..] {
-                        self.add_message(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: skipped_tc.id.clone(),
-                                content: "[Skipped: user interrupted]".to_string(),
-                                is_error: Some(true),
-                            }],
-                        );
-                    }
-                    let tools_remaining = tool_count - tool_index;
+                    let tools_remaining = self
+                        .finish_interrupted_prefetch(
+                            &mut prefetch,
+                            &tool_calls,
+                            tool_index,
+                            "[Skipped: user interrupted]",
+                            &event_tx,
+                        )
+                        .await;
                     let injected = self.inject_soft_interrupts();
                     if !injected.is_empty() {
                         for event in
@@ -1634,19 +1650,19 @@ impl Agent {
                     // Fall through to local execution for native tools with SDK errors
                 }
 
-                let ctx = ToolContext {
-                    session_id: self.session.id.clone(),
-                    message_id: message_id.clone(),
-                    tool_call_id: tc.id.clone(),
-                    working_dir: self.working_dir().map(PathBuf::from),
-                    stdin_request_tx: self.stdin_request_tx.clone(),
-                    graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
-                    execution_mode: ToolExecutionMode::AgentTurn,
-                };
-
                 if trace {
                     eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
                 }
+
+                self.maybe_prefetch_safe_run(
+                    &mut prefetch,
+                    &tool_calls,
+                    tool_index,
+                    &message_id,
+                    &sdk_tool_results,
+                    super::parallel_tools::PrefetchRegistry::Clone,
+                )
+                .await;
 
                 logging::info(&format!("Tool starting: {}", tc.name));
                 crate::session_metrics::record_activity(&self.session.id);
@@ -1657,17 +1673,31 @@ impl Agent {
                     self.inline_tail.start_tool(&tc.name, &tc.input);
                     self.publish_inline_tail();
                 }
-                let tool_start = Instant::now();
-
-                // Spawn tool in its own task so we can detach it to background on Alt+B
-                let registry_clone = self.registry.clone();
-                let tool_name_for_spawn = tc.name.clone();
-                let tool_input_for_spawn = tc.input.clone();
-                let tool_handle = tokio::spawn(async move {
-                    registry_clone
-                        .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
-                        .await
-                });
+                // Spawn tool in its own task so we can detach it to background on
+                // Alt+B. A prefetched call is already running: adopt its task and
+                // its real start time.
+                let deferred_context_guard = prefetch.contains(tool_index);
+                let tool_handle = if let Some(prefetched) = prefetch.take(tool_index) {
+                    prefetched
+                } else {
+                    let ctx = ToolContext {
+                        session_id: self.session.id.clone(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                        working_dir: self.working_dir().map(PathBuf::from),
+                        stdin_request_tx: self.stdin_request_tx.clone(),
+                        graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                        execution_mode: ToolExecutionMode::AgentTurn,
+                    };
+                    let registry_clone = self.registry.clone();
+                    let tool_name_for_spawn = tc.name.clone();
+                    let tool_input_for_spawn = tc.input.clone();
+                    super::parallel_tools::PrefetchedTool::spawn_sequential(async move {
+                        registry_clone
+                            .execute(&tool_name_for_spawn, tool_input_for_spawn, ctx)
+                            .await
+                    })
+                };
 
                 // Reset background signal before waiting
                 self.background_tool_signal.reset();
@@ -1713,7 +1743,7 @@ impl Agent {
                 };
 
                 self.unlock_tools_if_needed(&tc.name);
-                let tool_elapsed = tool_start.elapsed();
+                let tool_elapsed = tool_handle.elapsed();
                 crate::session_metrics::record_activity(&self.session.id);
 
                 if let Some(result) = tool_result {
@@ -1732,6 +1762,11 @@ impl Agent {
 
                     match result {
                         Ok(output) => {
+                            let output = if deferred_context_guard {
+                                self.admit_prefetched_output(&prefetch, tc, output).await
+                            } else {
+                                output
+                            };
                             let output = cap_tool_output_for_history(&tc.name, output);
                             let _ = event_tx.send(ServerEvent::ToolDone {
                                 id: tc.id.clone(),
@@ -1756,11 +1791,11 @@ impl Agent {
                             }
 
                             let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
-                            self.add_message_with_duration(
-                                Role::User,
+                            self.add_tool_result_with_duration(
                                 blocks,
                                 Some(tool_elapsed.as_millis() as u64),
-                            );
+                            )
+                            .await;
                             tool_results_dirty = true;
                         }
                         Err(e) => {
@@ -1772,15 +1807,15 @@ impl Agent {
                                 error: Some(error_msg.clone()),
                             });
 
-                            self.add_message_with_duration(
-                                Role::User,
+                            self.add_tool_result_with_duration(
                                 vec![ContentBlock::ToolResult {
                                     tool_use_id: tc.id.clone(),
                                     content: error_msg,
                                     is_error: Some(true),
                                 }],
                                 Some(tool_elapsed.as_millis() as u64),
-                            );
+                            )
+                            .await;
                             tool_results_dirty = true;
                         }
                     }
@@ -1810,28 +1845,25 @@ impl Agent {
                         },
                     });
 
-                    self.add_message_with_duration(
-                        Role::User,
+                    self.add_tool_result_with_duration(
                         vec![ContentBlock::ToolResult {
                             tool_use_id: tc.id.clone(),
                             content: interrupted_msg,
                             is_error: Some(is_error),
                         }],
                         Some(tool_elapsed.as_millis() as u64),
-                    );
+                    )
+                    .await;
                     self.session.save()?;
 
-                    // Add results for any remaining tools too
-                    for remaining_tc in &tool_calls[(tool_index + 1)..] {
-                        self.add_message(
-                            Role::User,
-                            vec![ContentBlock::ToolResult {
-                                tool_use_id: remaining_tc.id.clone(),
-                                content: "[Skipped - server reloading]".to_string(),
-                                is_error: Some(true),
-                            }],
-                        );
-                    }
+                    self.finish_interrupted_prefetch(
+                        &mut prefetch,
+                        &tool_calls,
+                        tool_index + 1,
+                        "[Skipped - server reloading]",
+                        &event_tx,
+                    )
+                    .await;
                     self.session.save()?;
                     return Ok(());
                 } else {
@@ -1842,9 +1874,16 @@ impl Agent {
                         tool_elapsed.as_secs_f64()
                     ));
 
-                    let bg_info = crate::background::global()
-                        .adopt(&tc.name, &self.session.id, tool_handle)
-                        .await;
+                    // Once explicitly transferred, registration must finish
+                    // even if the caller's turn is cancelled during adopt().
+                    let tool_name = tc.name.clone();
+                    let session_id = self.session.id.clone();
+                    let bg_info = tokio::spawn(async move {
+                        crate::background::global()
+                            .adopt(&tool_name, &session_id, tool_handle.into_background())
+                            .await
+                    })
+                    .await?;
 
                     let bg_msg = format!(
                         "Tool '{}' was moved to background by the user (task_id: {}). \
@@ -1860,15 +1899,15 @@ impl Agent {
                         error: None,
                     });
 
-                    self.add_message_with_duration(
-                        Role::User,
+                    self.add_tool_result_with_duration(
                         vec![ContentBlock::ToolResult {
                             tool_use_id: tc.id.clone(),
                             content: bg_msg,
                             is_error: None,
                         }],
                         Some(tool_elapsed.as_millis() as u64),
-                    );
+                    )
+                    .await;
                     self.session.save()?;
 
                     self.background_tool_signal.reset();

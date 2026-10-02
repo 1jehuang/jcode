@@ -169,6 +169,22 @@ pub trait Tool: Send + Sync {
     /// Execute the tool with the given input.
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput>;
 
+    /// Whether this call may run concurrently with adjacent concurrency-safe
+    /// calls from the same model response.
+    ///
+    /// Return `true` only when the call has no side effects that another call
+    /// in the same response could observe or race with: no file writes, no
+    /// shared mutable state, no user prompts. Evaluated per call, so a tool
+    /// may answer differently depending on its input. Dropping the execution
+    /// future must not abandon mutating child work or require user cleanup.
+    /// This is a scheduling contract, not a sandbox. Bash and linked search
+    /// engines deliberately do not opt in to the initial rollout.
+    ///
+    /// The default is `false`, so tools run sequentially unless they opt in.
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        false
+    }
+
     /// Convert to API tool definition.
     fn to_definition(&self) -> ToolDefinition {
         ToolDefinition {

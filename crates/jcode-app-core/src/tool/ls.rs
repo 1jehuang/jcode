@@ -71,6 +71,10 @@ impl Tool for LsTool {
         })
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        true
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: LsInput = serde_json::from_value(input)?;
 
