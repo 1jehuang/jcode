@@ -349,6 +349,23 @@ fn picker_is_runtime_model_picker(picker: &InlineInteractiveState) -> bool {
 /// over-advertise. Swarm modes are orchestration rungs, not reasoning levels.
 /// Empty means the route switches at once without a level step.
 pub(super) fn model_route_effort_levels(model: &str, route: &PickerOption) -> Vec<&'static str> {
+    model_route_effort_levels_with_config(model, route, crate::config::config())
+}
+
+fn model_route_effort_levels_with_config(
+    model: &str,
+    route: &PickerOption,
+    config: &crate::config::Config,
+) -> Vec<&'static str> {
+    if !crate::tui::is_ssh_remote()
+        && let Some(efforts) =
+            super::named_profile_reasoning_efforts(config, Some(&route.api_method), Some(model))
+    {
+        return efforts
+            .into_iter()
+            .filter(|effort| !crate::prompt::is_swarm_mode_effort(effort))
+            .collect();
+    }
     if !route_supports_reasoning_effort(&route.api_method) {
         return Vec::new();
     }
@@ -4420,10 +4437,10 @@ mod tests {
         filter_routes_by_provider_allowlist, fold_model_picker_usage_efforts,
         key_char_eq_ignore_ascii_case, model_effort_step_preselection,
         model_picker_route_is_current, model_picker_route_is_default,
-        model_picker_route_is_recommended, next_model_favorite_after_current,
-        picker_is_runtime_model_picker, remote_model_catalog_cache_is_fresh,
-        remote_model_catalog_cache_origin, remote_model_catalog_snapshot_is_safe,
-        route_supports_reasoning_effort,
+        model_picker_route_is_recommended, model_route_effort_levels_with_config,
+        next_model_favorite_after_current, picker_is_runtime_model_picker,
+        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
+        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -4461,6 +4478,39 @@ mod tests {
 
     fn picker_option(provider: &str) -> PickerOption {
         picker_option_with_method(provider, "test")
+    }
+
+    #[test]
+    fn named_compatible_route_opens_reasoning_level_step_when_enabled() {
+        let mut config = crate::config::Config::default();
+        config.providers.insert(
+            "custom".into(),
+            crate::config::NamedProviderConfig {
+                supports_reasoning_effort: Some(true),
+                ..Default::default()
+            },
+        );
+        let route = picker_option_with_method("custom", "openai-compatible:custom");
+
+        assert_eq!(
+            model_route_effort_levels_with_config("kimi-k3", &route, &config),
+            vec!["none", "low", "medium", "high", "max"],
+        );
+    }
+
+    #[test]
+    fn named_compatible_route_skips_level_step_when_disabled() {
+        let mut config = crate::config::Config::default();
+        config.providers.insert(
+            "custom".into(),
+            crate::config::NamedProviderConfig {
+                supports_reasoning_effort: Some(false),
+                ..Default::default()
+            },
+        );
+        let route = picker_option_with_method("custom", "openai-compatible:custom");
+
+        assert!(model_route_effort_levels_with_config("kimi-k3", &route, &config).is_empty());
     }
 
     #[test]
