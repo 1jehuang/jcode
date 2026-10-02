@@ -1,0 +1,117 @@
+{
+ "01.txt": {
+  "file_path": "/home/sk/session-root/work/jcode/phase3/17-judge-calib/REPORT.md",
+  "intent": "Read calibration report"
+ },
+ "03.txt": {
+  "file_path": "/home/sk/.jcode/scratch/rabbit_transcript.txt",
+  "intent": "Read mid transcript for extra discoveries",
+  "limit": 330,
+  "start_line": 400
+ },
+ "05.txt": {
+  "file_path": "/home/sk/session-root/work/jcode/shadow/SHADOW-IMPL.md",
+  "intent": "Read the shadow instrumentation landing notes"
+ },
+ "08.txt": {
+  "command": "ls exp/judge-runner/heads/ 2>/dev/null; echo ---; ls exp/judge-runner/ 2>/dev/null; echo ---; ls crates/ 2>/dev/null | head -30",
+  "intent": "Survey judge-runner heads and crates"
+ },
+ "10.txt": {
+  "command": "ls -la ~/.jcode/sessions/ | grep -i rabbit; echo \"---\"; ls -la ~/.jcode/sessions/offloaded/ 2>/dev/null | grep -i rabbit; echo \"--- find ---\"; find ~/.jcode/sessions -maxdepth 2 -iname '*rabbit*1790868127947*' -printf '%p %s\\n' 2>/dev/null",
+  "intent": "Locate rabbit session transcript files"
+ },
+ "12.txt": {
+  "command": "ls -la ~/.jcode/sessions/ 2>/dev/null | head -20; echo \"---\"; find ~/.jcode -name \"*1790868313645*\" 2>/dev/null | head -20",
+  "intent": "Locate the session transcript file for session_parrot_1790868313645_0036978cd5126c35"
+ },
+ "14.txt": {
+  "command": "grep -n \"PREFILTER_QUERIES\\|PREFILTER_SHADOW_SAMPLED\\|PREFILTER_ENGAGED\\|PREFILTER_FAILOPEN\\|prefilter_shadow_stats\\|prefilter_shadow_snapshot\\|PrefilterShadowSnapshot\\|dropped_tail_summary\\|prefilter_for_jev_take\\|prefilter_take_inner\\|prefilter_rank_guarded\\|prefilter_shadow_sampled\\|prefilter_shadow_rate\\|PrefilterStaged\\|PrefilterOutcome\\|prefilter_dropped\\|hybrid_prefilter_rank\\|7-day drop-tail\\|re-judgment\\|rejudgment\" crates/jcode-base/src/memory.rs | head -80",
+  "intent": "Locate prefilter instrumentation sites"
+ },
+ "16.txt": {
+  "command": "command cargo test --profile selfdev -p jcode-base --lib -- judge --no-run 2>&1 | tail -5",
+  "intent": "Check judge test target compiles",
+  "timeout": 600000
+ },
+ "18.txt": {
+  "command": "command cargo test --profile selfdev -p jcode-base --lib -- memory:: 2>&1 | tail -25",
+  "intent": "Run memory tests for compile check",
+  "timeout": 600000
+ },
+ "20.txt": {
+  "command": "command cargo test --profile selfdev -p jcode-base --lib -- memory:: 2>&1 | tail -30",
+  "intent": "Compile and run memory tests",
+  "timeout": 600000
+ },
+ "22.txt": {
+  "command": "command cargo test --profile selfdev -p jcode-base --lib -- memory:: 2>&1 | tail -15",
+  "intent": "Run memory test suite",
+  "timeout": 600000
+ },
+ "24.txt": {
+  "command": "echo \"=== cwd of TUI ===\"; readlink /proc/14788/cwd; echo \"=== cwd of serve ===\"; readlink /proc/2111/cwd; echo \"=== serve cmdline ===\"; tr '\\0' ' ' < /proc/2111/cmdline; echo; echo \"=== TUI cmdline ===\"; tr '\\0' ' ' < /proc/14788/cmdline; echo; echo \"=== opencode config in cwd ===\"; ls -la \"$(readlink /proc/14788/cwd)/opencode.json\"* 2>/dev/null; ls -la \"$(readlink /proc/14788/cwd)/.opencode/\" 2>/dev/null",
+  "intent": "Find opencode working dir and config"
+ },
+ "26.txt": {
+  "command": "find ~/.jcode/sessions -name \"*parrot_1790868313645*\" 2>/dev/null; echo \"---ALL PARROT---\"; find ~/.jcode/sessions -name \"session_parrot_1790868313645*\" -exec ls -la {} \\; 2>/dev/null",
+  "intent": "Find parrot session files specifically"
+ },
+ "28.txt": {
+  "intent": "Plan Tier-2 gate work",
+  "plan": {
+   "understands_user_intent": "clear",
+   "user_intention": "Build Tier-2 prod gate: own bars+CI, fail-closed interaction, swap coverage, model ids; notes + commit, no push"
+  },
+  "todos": [
+   {
+    "confidence": "plausible",
+    "content": "Verify git clean + read REPORT, PARKED D, h2_agree.py, P0A verify",
+    "id": "1",
+    "priority": "high",
+    "status": "in_progress"
+   },
+   {
+    "confidence": "speculative",
+    "content": "Define Tier-2 gate bars + implement checks reusing h2 machinery",
+    "id": "2",
+    "priority": "high",
+    "status": "pending"
+   },
+   {
+    "confidence": "speculative",
+    "content": "Measure fail-closed interaction + swap-agreement coverage",
+    "id": "3",
+    "priority": "high",
+    "status": "pending"
+   },
+   {
+    "confidence": "speculative",
+    "content": "Run judge tests + h2 smoke, write TIER2-GATE.md, commit",
+    "id": "4",
+    "priority": "high",
+    "status": "pending"
+   }
+  ]
+ },
+ "30.txt": {
+  "file_path": "/home/sk/session-root/work/jcode/PARKED-REGISTER.md",
+  "intent": "Read parked register section D"
+ },
+ "32.txt": {
+  "action": "search",
+  "intent": "Find selfdev docs",
+  "limit": 5,
+  "query": "selfdev self-dev canary session build reload"
+ },
+ "33.txt": {
+  "file_path": "/home/sk/.local/bin/opencode",
+  "intent": "Read opencode shim script"
+ },
+ "35.txt": {
+  "file_path": "/home/sk/session-root/repos/jcode/crates/jcode-base/src/memory.rs",
+  "intent": "Read prefilter staged structs and counters",
+  "limit": 130,
+  "start_line": 920
+ }
+}
