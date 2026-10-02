@@ -44,7 +44,7 @@ impl App {
         self.status_detail = None;
         self.invalidate_model_picker_cache();
         let active_model = self.provider.model();
-        self.update_context_limit_for_model(&active_model);
+        self.update_context_limit_for_model(&active_model, None);
         self.session.provider_key =
             crate::provider::MultiProvider::session_provider_key_after_model_switch(
                 model_request,
@@ -491,7 +491,7 @@ impl App {
                 self.status_detail = None;
                 self.invalidate_model_picker_cache();
                 let active_model = self.provider.model();
-                self.update_context_limit_for_model(&active_model);
+                self.update_context_limit_for_model(&active_model, None);
                 self.session.provider_key =
                     crate::provider::MultiProvider::session_provider_key_after_model_switch(
                         &spec,
@@ -627,16 +627,28 @@ impl App {
         }
     }
 
-    pub(super) fn update_context_limit_for_model(&mut self, model: &str) {
-        let limit = if self.is_remote {
-            crate::provider::context_limit_for_model_with_provider(
-                model,
-                self.remote_provider_name.as_deref(),
-            )
-            .unwrap_or(self.provider.context_window())
-        } else {
-            self.provider.context_window()
-        };
+    pub(super) fn update_context_limit_for_model(
+        &mut self,
+        model: &str,
+        server_context_window: Option<u64>,
+    ) {
+        // Prefer the window the server resolved. A remote client's own provider is
+        // an inert placeholder with no model catalog, and the static resolver has
+        // no entry for a model it does not recognise, so both answer the generic
+        // default. Measured: `stealth/space-bunny-alpha@Stealth` has a catalog
+        // entry with context_length 1000000, and the panel showed 200000 because
+        // the number never crossed the wire.
+        let limit = server_context_window.map(|w| w as usize).unwrap_or_else(|| {
+            if self.is_remote {
+                crate::provider::context_limit_for_model_with_provider(
+                    model,
+                    self.remote_provider_name.as_deref(),
+                )
+                .unwrap_or(self.provider.context_window())
+            } else {
+                self.provider.context_window()
+            }
+        });
         self.context_limit = limit as u64;
         self.context_warning_shown = false;
 
