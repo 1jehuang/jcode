@@ -241,6 +241,17 @@ impl Agent {
         }
     }
 
+    /// Stable opening of the continuation injected by
+    /// [`Self::maybe_continue_empty_post_tool_response`].
+    ///
+    /// `messages_end_with_tool_result` treats any User-role text opening with
+    /// `<system-reminder>` as evidence that tool results are in play. Without
+    /// excluding this one specifically, the injected continuation keeps that
+    /// signal true on the following turn by itself, so each whitespace-only
+    /// response appends another one and spends another API call.
+    pub(crate) const EMPTY_POST_TOOL_CONTINUATION_PREFIX: &str =
+        "<system-reminder>The previous provider response was empty after tool results.";
+
     /// Retry a whitespace-only final response that arrived right after tool
     /// results, by asking the model to produce the final answer. Shared by the
     /// non-streaming and streaming (mpsc) turn loops so their recovery
@@ -281,7 +292,12 @@ impl Agent {
                 // Keep this as a user-role message for provider compatibility,
                 // but mark it as internal so transcript renderers never present
                 // the synthetic recovery instruction as a prompt from the user.
-                text: "<system-reminder>The previous provider response was empty after tool results. Provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.</system-reminder>".to_string(),
+                // Built from the shared prefix so the predicate that must exclude
+                // this channel cannot drift from the text that produces it.
+                text: format!(
+                    "{} Provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.</system-reminder>",
+                    Self::EMPTY_POST_TOOL_CONTINUATION_PREFIX
+                ),
                 cache_control: None,
             }],
         );
