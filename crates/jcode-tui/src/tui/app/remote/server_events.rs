@@ -1696,6 +1696,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.last_cache_optimal_input_tokens = None;
                 app.token_accounting.cache_next_optimal_input_tokens = None;
                 app.kv_cache.kv_cache_baseline = None;
+                app.kv_cache.beep_milestones_fired = 0;
                 app.kv_cache.pending_kv_cache_request = None;
                 app.kv_cache.kv_cache_turn_number = None;
                 app.kv_cache.kv_cache_turn_call_index = 0;
