@@ -419,6 +419,10 @@ fn persistent_ws_incremental_items(input: &[Value], start_index: usize) -> (Vec<
     (incremental_items, skipped_reasoning_items)
 }
 
+fn persistent_ws_response_requires_chain_reset(completed_tool_items: &HashSet<String>) -> bool {
+    !completed_tool_items.is_empty()
+}
+
 fn persistent_ws_idle_needs_healthcheck(idle_for: Duration) -> bool {
     idle_for >= Duration::from_secs(WEBSOCKET_PERSISTENT_HEALTHCHECK_IDLE_SECS)
 }

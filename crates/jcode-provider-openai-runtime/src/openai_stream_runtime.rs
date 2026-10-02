@@ -962,6 +962,34 @@ pub(super) async fn try_persistent_ws_continuation(
         return PersistentWsResult::Success;
     }
 
+    // A completed response that emitted tool calls is not safe to reuse as a
+    // `previous_response_id`. The next user turn may not include the matching
+    // tool outputs in the incremental delta, and OpenAI rejects that chain with
+    // "No tool output found for function call ...". Reset to the full transcript
+    // path, whose request builder pairs function calls with outputs explicitly.
+    if persistent_ws_response_requires_chain_reset(&completed_tool_items) {
+        let tool_call_count = completed_tool_items.len();
+        jcode_base::logging::info(&format!(
+            "Persistent WS response emitted {} tool call(s); clearing response chain",
+            tool_call_count
+        ));
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "response_had_tool_calls".to_string()),
+                ("tool_call_count", tool_call_count.to_string()),
+                (
+                    "elapsed_ms",
+                    stream_started.elapsed().as_millis().to_string(),
+                ),
+            ],
+        );
+        *guard = None;
+        return PersistentWsResult::Success;
+    }
+
     // Update persistent state for next turn
     if let Some(resp_id) = new_response_id {
         state.last_response_id = resp_id;
@@ -1410,6 +1438,35 @@ pub(super) async fn stream_response_websocket_persistent(
                 )));
             }
         }
+    }
+
+    // Do not save response chains that end with tool calls. A future turn can
+    // replay the full transcript safely, but a `previous_response_id` chain can
+    // require function_call_output items that are outside the incremental delta.
+    if persistent_ws_response_requires_chain_reset(&completed_tool_items) {
+        let tool_call_count = completed_tool_items.len();
+        jcode_base::logging::info(&format!(
+            "Fresh WS response emitted {} tool call(s); not saving response chain",
+            tool_call_count
+        ));
+        let mut guard = persistent_ws.lock().await;
+        *guard = None;
+        drop(guard);
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "fresh_ws_stream_complete_not_saved",
+            vec![
+                ("model", request_model_label.clone()),
+                ("transport", "websocket".to_string()),
+                (
+                    "elapsed_ms",
+                    stream_started_at.elapsed().as_millis().to_string(),
+                ),
+                ("reason", "response_had_tool_calls".to_string()),
+                ("tool_call_count", tool_call_count.to_string()),
+            ],
+        );
+        return Ok(());
     }
 
     // Save the WebSocket connection and response_id for reuse on next turn
