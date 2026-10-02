@@ -114,8 +114,11 @@ pub(crate) async fn handle_account_command_remote(
 
 fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>> {
     let rest = trimmed
-        .strip_prefix("/account")
-        .or_else(|| trimmed.strip_prefix("/accounts"))?;
+        .strip_prefix("/accounts")
+        .or_else(|| trimmed.strip_prefix("/account"))?;
+    if !rest.is_empty() && !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
     let rest = rest.trim();
     if rest.is_empty() {
         return Some(Ok(AccountCommand::OpenOverlay {
@@ -1193,6 +1196,20 @@ mod tests {
         assert!(matches!(
             parse_account_command("/account jcode logout"),
             Some(Ok(AccountCommand::JcodeLogout))
+        ));
+    }
+
+    #[test]
+    fn parse_account_command_requires_a_token_boundary() {
+        assert!(
+            parse_account_command("/accounting").is_none(),
+            "/accounting must not be parsed as /account with label `ing`"
+        );
+        assert!(matches!(
+            parse_account_command("/accounts"),
+            Some(Ok(AccountCommand::OpenOverlay {
+                provider_filter: None
+            }))
         ));
     }
 
