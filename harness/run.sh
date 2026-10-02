@@ -329,7 +329,10 @@ PYEOF
 # Pre-embed via the shipped remember path into the scratch project graph
 # (memory import -> remember_project -> ensure_embedding with the real
 # local ONNX backend; JCODE_HOME + cwd are already the scratch dirs).
-"$BIN_ABS" memory import "$IMPORT_ENTRIES" --scope project >/dev/null
+# NOTE (rebase v0.90.0): the CLI resolves the project graph from the
+# process cwd (run_memory_command_for_dir(current_dir)), so the import
+# must run with cwd = the scratch proj dir (like the C4 import below).
+(cd "$JCODE_PROJECT_DIR" && "$BIN_ABS" memory import "$IMPORT_ENTRIES" --scope project >/dev/null)
 # The live project graph file holds the embedded vectors (memory export
 # strips embeddings by design). Locate it via the manager's own path rule:
 # DefaultHasher(project_dir) % 2^64 formatted %016x, under
