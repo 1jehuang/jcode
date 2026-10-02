@@ -60,7 +60,12 @@ pub fn format_messages_with_native(
     // synthetic placeholder result, then the real result lands moments later,
     // and the conversation is permanently unsendable. Prefer the real output
     // over the synthetic placeholder, and otherwise keep the first occurrence.
-    let messages = &dedupe_tool_results(messages);
+    // Repair persisted provider-native Anthropic server-tool history before replay.
+    // Ordinary ToolUse blocks already have a synthetic-result repair below, but
+    // server_tool_use / web_search_tool_result pairs are stored as ProviderNative
+    // blocks and therefore need their own recovery path.
+    let repaired_messages = repair_dangling_anthropic_server_tools(messages);
+    let messages = &dedupe_tool_results(&repaired_messages);
 
     // First pass: collect all tool_use IDs and tool_result IDs
     let mut tool_use_ids: HashSet<String> = HashSet::new();
@@ -364,8 +369,116 @@ fn is_placeholder_tool_result(content: &str, is_error: Option<bool>) -> bool {
             || content.contains("[Session interrupted before tool execution completed]"))
 }
 
-/// Remove duplicate `tool_result` blocks so each `tool_use_id` is answered
-/// exactly once, preferring real output over a synthetic placeholder.
+/// Repair persisted Anthropic native web-search blocks that no longer form a valid pair.
+///
+/// An interrupted turn can persist a server_tool_use without its matching
+/// web_search_tool_result. Replaying that block verbatim causes Anthropic to
+/// reject the entire request with a 400. Completed history gets an explicit
+/// synthetic error result so the sequence remains valid; a final assistant
+/// turn ending on an unmatched server-tool block is preserved because that is
+/// the valid pause_turn resume shape.
+fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Vec<Message> {
+    use std::collections::HashSet;
+
+    let mut starts = HashSet::new();
+    let mut results = HashSet::new();
+    for msg in messages {
+        for block in &msg.content {
+            let ContentBlock::ProviderNative { provider, item } = block else {
+                continue;
+            };
+            if provider != jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC {
+                continue;
+            }
+            match item.get("type").and_then(Value::as_str) {
+                Some("server_tool_use") => {
+                    if let Some(id) = item.get("id").and_then(Value::as_str) {
+                        starts.insert(id.to_string());
+                    }
+                }
+                Some("web_search_tool_result") => {
+                    if let Some(id) = item.get("tool_use_id").and_then(Value::as_str) {
+                        results.insert(id.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let final_paused_id = messages.last().and_then(|message| {
+        if !matches!(message.role, Role::Assistant) {
+            return None;
+        }
+        let Some(ContentBlock::ProviderNative { provider, item }) = message.content.last() else {
+            return None;
+        };
+        if provider != jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC {
+            return None;
+        }
+        (item.get("type").and_then(Value::as_str) == Some("server_tool_use"))
+            .then(|| item.get("id").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string)
+    });
+
+    let mut repaired = Vec::with_capacity(messages.len());
+    for message in messages {
+        let mut content = Vec::with_capacity(message.content.len());
+        for block in &message.content {
+            let ContentBlock::ProviderNative { provider, item } = block else {
+                content.push(block.clone());
+                continue;
+            };
+
+            if provider != jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC {
+                content.push(block.clone());
+                continue;
+            }
+
+            match item.get("type").and_then(Value::as_str) {
+                Some("server_tool_use") => {
+                    let Some(id) = item.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    content.push(block.clone());
+                    if !results.contains(id) && final_paused_id.as_deref() != Some(id) {
+                        content.push(ContentBlock::ProviderNative {
+                            provider: jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC
+                                .to_string(),
+                            item: json!({
+                                "type": "web_search_tool_result",
+                                "tool_use_id": id,
+                                "content": {
+                                    "type": "web_search_tool_result_error",
+                                    "error_code": "search_interrupted"
+                                }
+                            }),
+                        });
+                    }
+                }
+                Some("web_search_tool_result") => {
+                    let Some(id) = item.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if starts.contains(id) {
+                        content.push(block.clone());
+                    }
+                }
+                _ => content.push(block.clone()),
+            }
+        }
+
+        if !content.is_empty() {
+            let mut repaired_message = message.clone();
+            repaired_message.content = content;
+            repaired.push(repaired_message);
+        }
+    }
+    repaired
+}
+
+/// Remove duplicate tool_result blocks so each tool_use_id is answered/// exactly once, preferring real output over a synthetic placeholder.
 /// Messages left with no content at all are dropped by the caller's
 /// `!content.is_empty()` guard.
 fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
