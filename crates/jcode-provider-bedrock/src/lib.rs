@@ -25,6 +25,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(feature = "aws-sdk")]
 use jcode_message_types::{ContentBlock as JContentBlock, Role as JRole, StreamEvent};
+#[cfg(feature = "aws-sdk")]
+use jcode_logging::warn;
 use jcode_message_types::{Message as JMessage, ToolDefinition};
 #[cfg(feature = "aws-sdk")]
 use jcode_provider_core::summarize_model_catalog_refresh;
@@ -304,7 +306,41 @@ impl BedrockProvider {
     }
 
     // Pure string logic; only reachable from aws-sdk request paths and tests.
+    /// Whether a failed Bedrock call is worth another attempt. Matches the
+    /// AWS SDK error codes that clear on their own (a burst throttle, a
+    /// momentary outage, a dropped stream) and nothing else. A daily quota,
+    /// an auth error, or a validation error fails the same way every time,
+    /// so retrying those only burns the window the user is waiting in.
+    /// The codes are matched whole, so prose that merely says "throttling"
+    /// does not loop.
     #[cfg_attr(not(feature = "aws-sdk"), allow(dead_code))]
+    fn is_retryable_bedrock_error(raw: &str) -> bool {
+        let lower = raw.to_ascii_lowercase();
+        if [
+            "servicequotaexceeded",
+            "daily",
+            "per day",
+            "billing",
+            "insufficient_quota",
+            "quota_exhausted",
+        ]
+        .iter()
+        .any(|reason| lower.contains(reason))
+        {
+            return false;
+        }
+        [
+            "throttlingexception",
+            "too many requests",
+            "rate exceeded",
+            "serviceunavailableexception",
+            "modelstreamerrorexception",
+            "modeltimeoutexception",
+        ]
+        .iter()
+        .any(|code| lower.contains(code))
+    }
+
     fn classify_error_message(raw: &str) -> String {
         let lower = raw.to_ascii_lowercase();
         let is_legacy_model_error = lower.contains("marked by provider as legacy")
@@ -551,11 +587,22 @@ impl BedrockProvider {
                         JContentBlock::ToolUse {
                             id, name, input, ..
                         } => {
+                            // Bedrock Converse rejects a toolUse whose `input`
+                            // is absent ("The value at messages.N.content.M.toolUse.input
+                            // is empty"). `json_to_document` maps JSON null to
+                            // `Document::Null`, which the SDK serializes as a
+                            // missing field, so an interrupted or malformed tool
+                            // call (input null, a bare string, or an array)
+                            // poisons every later Bedrock turn that replays it.
+                            // Anthropic tolerates a null input, which is why the
+                            // same history only fails on the Bedrock route.
+                            // Coerce anything that is not an object to `{}`.
+                            let input = jcode_message_types::ToolCall::input_as_object(input);
                             let tool_use =
                                 match aws_sdk_bedrockruntime::types::ToolUseBlock::builder()
                                     .tool_use_id(id)
                                     .name(name)
-                                    .input(Self::json_to_document(input))
+                                    .input(Self::json_to_document(&input))
                                     .build()
                                 {
                                     Ok(tool_use) => tool_use,
@@ -577,7 +624,43 @@ impl BedrockProvider {
                         .map_err(|err| anyhow::anyhow!(err)),
                 )
             })
-            .collect()
+            .collect::<Result<Vec<Message>>>()
+            .map(Self::merge_consecutive_same_role_messages)
+    }
+
+    /// Merge consecutive Bedrock messages of the same role into one.
+    ///
+    /// jcode records one `ToolResult` per user message when a turn ran
+    /// multiple tools (see `Agent::add_message` calls in the tool-execution
+    /// loop), which produces back-to-back `User` messages: one per tool
+    /// result. The Bedrock Converse API requires every `toolResult` for a
+    /// preceding assistant turn to land in a single following `user`
+    /// message; unlike the Anthropic Messages API, Bedrock does not merge
+    /// consecutive same-role messages itself and instead rejects the
+    /// request with `ValidationException: Expected toolResult blocks for
+    /// the following Ids`. Fold same-role runs into one message, mirroring
+    /// the merge pass `jcode-provider-anthropic` already performs.
+    #[cfg(feature = "aws-sdk")]
+    fn merge_consecutive_same_role_messages(messages: Vec<Message>) -> Vec<Message> {
+        let mut merged: Vec<Message> = Vec::with_capacity(messages.len());
+        for msg in messages {
+            if let Some(last) = merged.last_mut() {
+                if last.role() == msg.role() {
+                    let mut combined = last.content().to_vec();
+                    combined.extend(msg.content().to_vec());
+                    if let Ok(rebuilt) = Message::builder()
+                        .role(msg.role().clone())
+                        .set_content(Some(combined))
+                        .build()
+                    {
+                        *last = rebuilt;
+                        continue;
+                    }
+                }
+            }
+            merged.push(msg);
+        }
+        merged
     }
 
     #[cfg(feature = "aws-sdk")]
@@ -812,14 +895,36 @@ impl BedrockProvider {
 
     fn model_info(model: &str) -> BedrockModelInfo {
         let id = Self::normalize_model_id(model).to_ascii_lowercase();
-        if id.contains("claude-opus-4") || id.contains("claude-sonnet-4") {
+        let claude_45 = id.contains("claude-opus-4-5")
+            || id.contains("claude-opus-4.5")
+            || id.contains("claude-sonnet-4-5")
+            || id.contains("claude-sonnet-4.5");
+        if id.contains("claude-opus-4")
+            || id.contains("claude-sonnet-4")
+            || id.contains("claude-opus-5")
+            || id.contains("claude-sonnet-5")
+            || id.contains("claude-fable-5")
+        {
             BedrockModelInfo {
-                context_tokens: 200_000,
+                // Claude 4.6+ and the whole Claude 5 family ship a 1M context
+                // window (Anthropic model comparison table, 2026-09). Only 4.5
+                // and older stay at 200K. Hardcoding 200K made the context meter
+                // and compaction fire at 1/5 of the real window.
+                context_tokens: if claude_45 { 200_000 } else { 1_000_000 },
                 max_output_tokens: 64_000,
                 supports_tools: true,
                 supports_vision: true,
                 supports_reasoning: true,
                 pricing: Some((3_000_000, 15_000_000)),
+            }
+        } else if id.contains("claude-haiku-4-5") {
+            BedrockModelInfo {
+                context_tokens: 200_000,
+                max_output_tokens: 8_192,
+                supports_tools: true,
+                supports_vision: true,
+                supports_reasoning: false,
+                pricing: Some((800_000, 4_000_000)),
             }
         } else if id.contains("claude-3-7-sonnet") || id.contains("claude-3-5-sonnet") {
             BedrockModelInfo {
@@ -1184,15 +1289,40 @@ impl Provider for BedrockProvider {
             if let Some(inference_config) = inference_config {
                 req = req.inference_config(inference_config);
             }
-            let resp = match req.send().await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(Self::classify_error_message(
-                            &Self::sdk_error_message(&err)
-                        ))))
-                        .await;
-                    return;
+            // Bedrock answers a burst of parallel calls (a swarm spawning
+            // several agents at once) with ThrottlingException. The AWS SDK
+            // retries some of these internally, but the ones that still
+            // surface used to kill the turn on the first failure. Retry only
+            // the transient classes, with the same backoff the other
+            // providers use, and give up cleanly on anything else.
+            const MAX_BEDROCK_RETRIES: u32 = 5;
+            let mut attempt: u32 = 0;
+            let resp = loop {
+                match req.clone().send().await {
+                    Ok(resp) => break resp,
+                    Err(err) => {
+                        let raw = Self::sdk_error_message(&err);
+                        if attempt < MAX_BEDROCK_RETRIES && Self::is_retryable_bedrock_error(&raw) {
+                            let delay = jcode_provider_core::retry_after::retry_delay(
+                                attempt,
+                                1500,
+                                None,
+                            );
+                            warn(&format!(
+                                "Bedrock converse_stream throttled (attempt {}/{}); retrying in {:?}",
+                                attempt + 1,
+                                MAX_BEDROCK_RETRIES,
+                                delay
+                            ));
+                            attempt += 1;
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(Self::classify_error_message(&raw))))
+                            .await;
+                        return;
+                    }
                 }
             };
             let mut stream = resp.stream;
@@ -1848,6 +1978,204 @@ mod tests {
         assert!(!BedrockProvider::model_info("openai.gpt-oss-120b-1:0").supports_tools);
         assert!(BedrockProvider::model_info("us.amazon.nova-2-lite-v1:0").supports_tools);
         assert!(BedrockProvider::model_info("us.anthropic.claude-sonnet-4-6").supports_tools);
+    }
+
+    #[test]
+    fn claude_5_family_advertises_tools() {
+        // Regression: the Claude 5 family (sonnet-5, opus-5, opus-5-5) previously
+        // fell through to the untooled default because model_info only matched
+        // "claude-opus-4"/"claude-sonnet-4", silently dropping tool defs for
+        // Bedrock requests and causing the model to hallucinate fake tool-call
+        // text instead of invoking real tools.
+        assert!(BedrockProvider::model_info("us.anthropic.claude-sonnet-5").supports_tools);
+        assert!(BedrockProvider::model_info("us.anthropic.claude-opus-5").supports_tools);
+        assert!(BedrockProvider::model_info("us.anthropic.claude-opus-5-5").supports_tools);
+        assert!(
+            BedrockProvider::model_info(
+                "arn:aws:bedrock:us-east-2:1234:inference-profile/us.anthropic.claude-sonnet-5"
+            )
+            .supports_tools
+        );
+        assert!(
+            BedrockProvider::model_info("us.anthropic.claude-haiku-4-5-20251001-v1:0")
+                .supports_tools
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "aws-sdk")]
+    fn to_bedrock_messages_merges_consecutive_tool_results() {
+        // Regression: when a turn runs multiple tools, jcode records one
+        // `ToolResult` per user message (see `Agent::add_message` calls in
+        // the tool-execution loop), producing back-to-back `User` messages.
+        // Bedrock's Converse API requires every `toolResult` for the
+        // preceding assistant turn to land in a single following `user`
+        // message and rejects the request otherwise with
+        // `ValidationException: Expected toolResult blocks for the
+        // following Ids`. Unlike the Anthropic Messages API, Bedrock does
+        // not merge same-role messages itself, so jcode must do it.
+        let messages = vec![
+            JMessage {
+                role: JRole::User,
+                content: vec![JContentBlock::Text {
+                    text: "do two things".to_string(),
+                    cache_control: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            JMessage {
+                role: JRole::Assistant,
+                content: vec![
+                    JContentBlock::ToolUse {
+                        id: "tool_a".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "echo a"}),
+                        thought_signature: None,
+                    },
+                    JContentBlock::ToolUse {
+                        id: "tool_b".to_string(),
+                        name: "mcp__chron__log_message".to_string(),
+                        input: serde_json::json!({"content": "b"}),
+                        thought_signature: None,
+                    },
+                ],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            // Two separate user messages, one per tool result: this is what
+            // the agent loop actually produces today.
+            JMessage {
+                role: JRole::User,
+                content: vec![JContentBlock::ToolResult {
+                    tool_use_id: "tool_a".to_string(),
+                    content: "a".to_string(),
+                    is_error: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            JMessage {
+                role: JRole::User,
+                content: vec![JContentBlock::ToolResult {
+                    tool_use_id: "tool_b".to_string(),
+                    content: "b".to_string(),
+                    is_error: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+
+        let converted =
+            BedrockProvider::to_bedrock_messages(&messages, false).expect("conversion succeeds");
+
+        // The two trailing user tool-result messages must be folded into one,
+        // or Bedrock rejects the request.
+        assert_eq!(
+            converted.len(),
+            3,
+            "expected [user, assistant, user] after merging consecutive tool-result messages, got {} messages",
+            converted.len()
+        );
+        let last = converted.last().expect("has a final message");
+        assert_eq!(*last.role(), ConversationRole::User);
+        assert_eq!(
+            last.content().len(),
+            2,
+            "final user message should carry both tool results"
+        );
+    }
+
+    /// Regression: Bedrock Converse returns
+    /// `ValidationException: The value at messages.N.content.M.toolUse.input
+    /// is empty` when a replayed tool call has a null (or otherwise
+    /// non-object) input, which is what an interrupted tool call leaves in
+    /// history. The input must be coerced to an empty object so the history
+    /// stays replayable.
+    #[test]
+    #[cfg(feature = "aws-sdk")]
+    fn to_bedrock_messages_coerces_empty_tool_use_input_to_object() {
+        use aws_sdk_bedrockruntime::types::ContentBlock;
+
+        let messages = vec![JMessage {
+            role: JRole::Assistant,
+            content: vec![
+                JContentBlock::ToolUse {
+                    id: "tool_null".to_string(),
+                    name: "swarm".to_string(),
+                    input: serde_json::Value::Null,
+                    thought_signature: None,
+                },
+                JContentBlock::ToolUse {
+                    id: "tool_str".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!("not an object"),
+                    thought_signature: None,
+                },
+                JContentBlock::ToolUse {
+                    id: "tool_ok".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "echo ok"}),
+                    thought_signature: None,
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let converted =
+            BedrockProvider::to_bedrock_messages(&messages, false).expect("conversion succeeds");
+        let content = converted[0].content();
+
+        let input_of = |idx: usize| match &content[idx] {
+            ContentBlock::ToolUse(tool_use) => tool_use.input().as_object().cloned(),
+            other => panic!("expected ToolUse at {idx}, got {other:?}"),
+        };
+
+        assert_eq!(
+            input_of(0).as_ref().map(|m| m.len()),
+            Some(0),
+            "null input must become an empty object, not an absent field"
+        );
+        assert_eq!(
+            input_of(1).as_ref().map(|m| m.len()),
+            Some(0),
+            "non-object input must become an empty object"
+        );
+        assert!(
+            input_of(2).is_some_and(|m| m.contains_key("command")),
+            "object input must be preserved"
+        );
+    }
+
+    #[test]
+    fn throttling_is_retried_but_quota_and_auth_are_not() {
+        // The exact text the AWS SDK prints for a ThrottlingException.
+        assert!(BedrockProvider::is_retryable_bedrock_error(
+            "ServiceError(ServiceError { source: ThrottlingException(ThrottlingException { message: Some(\"Too many requests, please wait before trying again.\") }) })"
+        ));
+        assert!(BedrockProvider::is_retryable_bedrock_error(
+            "ServiceUnavailableException: Bedrock is currently unable to handle the request"
+        ));
+        assert!(BedrockProvider::is_retryable_bedrock_error(
+            "ModelStreamErrorException: An error occurred while streaming the response"
+        ));
+        // A real quota wall. Retrying would loop for nothing.
+        assert!(!BedrockProvider::is_retryable_bedrock_error(
+            "ServiceQuotaExceededException: You have reached your daily request quota"
+        ));
+        // Auth and validation fail the same way every time.
+        assert!(!BedrockProvider::is_retryable_bedrock_error(
+            "AccessDeniedException: Bearer Token has expired"
+        ));
+        assert!(!BedrockProvider::is_retryable_bedrock_error(
+            "ValidationException: The provided model identifier is invalid"
+        ));
+        // Mentioning the word is not the same as being throttled.
+        assert!(!BedrockProvider::is_retryable_bedrock_error(
+            "the user asked how throttling works"
+        ));
     }
 
     #[test]

@@ -138,7 +138,9 @@ pub fn anthropic_context_mode_is_verified(model: &str) -> bool {
         // Opus/Sonnet 3.x-4.8 and Sonnet 5 were probed with raw long-context
         // requests on a live subscription. Opus 5.5 is documented as native 1M.
         Some("opus") => version <= (4, 8) || version == (5, 5),
-        Some("sonnet") => version <= (5, 0),
+        // Sonnet 5.5 is documented as native 1M in the official model
+        // comparison table (2026-09), same as Opus 5.5.
+        Some("sonnet") => version <= (5, 0) || version == (5, 5),
         Some("haiku") => version <= (4, 5),
         _ => false,
     }
