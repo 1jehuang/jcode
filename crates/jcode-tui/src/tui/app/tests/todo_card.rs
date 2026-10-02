@@ -296,7 +296,7 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
     )
     .unwrap();
     app.refresh_pinned_todos_now();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::tool(
             "duplicate todo transcript card",
             crate::message::ToolCall {
@@ -317,7 +317,7 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
                 thought_signature: None,
             },
         ),
-    ];
+    ]);
     app.bump_display_messages_version();
     app.session.short_name = Some("test".to_string());
     let backend = ratatui::backend::TestBackend::new(80, 40);
@@ -343,7 +343,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     app.refresh_pinned_todos_now();
     assert!(app.pinned_todos_payload_ref().is_some());
 
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage {
             role: "user".to_string(),
             content: "kick off the work".to_string(),
@@ -360,7 +360,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
             title: None,
             tool_data: None,
         },
-    ];
+    ]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;

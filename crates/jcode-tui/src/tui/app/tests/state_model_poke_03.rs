@@ -1860,7 +1860,7 @@ fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_pre
 #[test]
 fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_them() {
     let mut app = create_antigravity_picker_test_app();
-    app.display_messages = vec![DisplayMessage::system("seed render state")];
+    app.display_messages.replace(vec![DisplayMessage::system("seed render state")]);
     app.bump_display_messages_version();
     app.open_model_picker();
     wait_for_model_picker_load(&mut app);
@@ -1923,7 +1923,7 @@ GPT:
 #[test]
 fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     let mut app = create_login_smoke_model_app();
-    app.display_messages = vec![DisplayMessage::system("seed render state")];
+    app.display_messages.replace(vec![DisplayMessage::system("seed render state")]);
     app.bump_display_messages_version();
     app.open_model_picker();
     wait_for_model_picker_load(&mut app);

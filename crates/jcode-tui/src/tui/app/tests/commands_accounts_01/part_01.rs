@@ -1438,11 +1438,11 @@ fn test_splitview_command_off_restores_previous_side_panel_page() {
 #[test]
 fn test_splitview_mirrors_chat_and_streaming_text() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::system("System note".to_string()),
         DisplayMessage::user("What did we decide?".to_string()),
         DisplayMessage::assistant("We decided to ship it.".to_string()),
-    ];
+    ]);
     app.bump_display_messages_version();
     app.streaming.streaming_text = "Working on the follow-up now...".to_string();
     app.set_split_view_enabled(true, true);
@@ -1463,10 +1463,10 @@ fn test_splitview_mirrors_chat_and_streaming_text() {
 #[test]
 fn test_splitview_does_not_build_cache_while_disabled() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("What did we decide?".to_string()),
         DisplayMessage::assistant("We decided to ship it.".to_string()),
-    ];
+    ]);
 
     app.bump_display_messages_version();
 
@@ -1477,10 +1477,10 @@ fn test_splitview_does_not_build_cache_while_disabled() {
 #[test]
 fn test_splitview_disable_clears_cached_markdown() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("What did we decide?".to_string()),
         DisplayMessage::assistant("We decided to ship it.".to_string()),
-    ];
+    ]);
     app.bump_display_messages_version();
     app.set_split_view_enabled(true, true);
 

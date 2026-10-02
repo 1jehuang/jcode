@@ -277,7 +277,7 @@ fn test_copy_selection_full_user_prompt_line_skips_prompt_chrome() {
 fn test_copy_selection_swarm_message_skips_rail_chrome() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_copy_test_app();
-    app.display_messages = vec![DisplayMessage::swarm("Broadcast", "hello team")];
+    app.display_messages.replace(vec![DisplayMessage::swarm("Broadcast", "hello team")]);
     app.bump_display_messages_version();
 
     render_and_snap(&app, &mut terminal);
@@ -322,7 +322,7 @@ fn test_copy_selection_swarm_message_skips_rail_chrome() {
 fn test_copy_selection_reconstructs_wrapped_chat_lines_without_hard_wraps() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: "same physical device: i2c-ELAN900C:00 same vendor/product family: 04F3:4216"
             .to_string(),
@@ -330,7 +330,7 @@ fn test_copy_selection_reconstructs_wrapped_chat_lines_without_hard_wraps() {
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
 
     let backend = ratatui::backend::TestBackend::new(36, 20);
@@ -388,7 +388,7 @@ fn test_copy_selection_centered_list_keeps_logical_list_text() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(true);
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: concat!(
             "A goal should support\n\n",
@@ -403,7 +403,7 @@ fn test_copy_selection_centered_list_keeps_logical_list_text() {
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
 
     let backend = ratatui::backend::TestBackend::new(28, 20);
@@ -829,14 +829,14 @@ fn test_ctrl_a_copies_chat_viewport_with_context_when_input_empty() {
         .map(|idx| format!("line {idx:02}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: lines,
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
     app.scroll_offset = 12;
     app.auto_scroll_paused = true;
@@ -897,14 +897,14 @@ fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
         .map(|idx| format!("line {idx:03}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: lines,
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -1020,14 +1020,14 @@ fn test_edge_autoscroll_is_one_line_per_tick_and_stops_on_release() {
         .map(|idx| format!("line {idx:03}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: lines,
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -1114,14 +1114,14 @@ fn test_copy_selection_drag_near_top_edge_keeps_auto_scrolling() {
         .map(|idx| format!("line {idx:03}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: lines,
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -1218,14 +1218,14 @@ fn test_copy_selection_drag_to_bottom_edge_when_pinned_does_not_snap_or_autoscro
         .map(|idx| format!("line {idx:03}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: lines,
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -1327,14 +1327,14 @@ fn test_copy_selection_drag_below_last_line_fully_selects_last_line() {
         .map(|idx| format!("line {idx:03}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: lines,
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -1445,14 +1445,14 @@ fn test_alt_a_copies_chat_viewport_with_context_when_input_empty() {
         .map(|idx| format!("line {idx:02}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.display_messages = vec![DisplayMessage {
+    app.display_messages.replace(vec![DisplayMessage {
         role: "assistant".to_string(),
         content: lines,
         tool_calls: vec![],
         duration_secs: None,
         title: None,
         tool_data: None,
-    }];
+    }]);
     app.bump_display_messages_version();
     app.scroll_offset = 4;
     app.auto_scroll_paused = true;
