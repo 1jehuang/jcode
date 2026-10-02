@@ -15,7 +15,7 @@ fn assistant_with_native(item: serde_json::Value) -> Message {
 }
 
 #[test]
-fn orphaned_server_tool_use_gets_synthetic_error_result() {
+fn orphaned_server_tool_use_is_dropped_from_completed_history() {
     let messages = vec![
         assistant_with_native(json!({
             "type": "server_tool_use",
@@ -35,21 +35,11 @@ fn orphaned_server_tool_use_gets_synthetic_error_result() {
     ];
 
     let formatted = format_messages_with_native(&messages, false, &[], true);
-    assert_eq!(formatted.len(), 2);
-
-    let first = serde_json::to_value(&formatted[0]).unwrap();
-    assert_eq!(first["role"], "assistant");
-    assert_eq!(first["content"][0]["type"], "server_tool_use");
-    assert_eq!(first["content"][1]["type"], "web_search_tool_result");
-    assert_eq!(first["content"][1]["tool_use_id"], "srvtoolu_orphan");
-    assert_eq!(
-        first["content"][1]["content"]["type"],
-        "web_search_tool_result_error"
-    );
-    assert_eq!(
-        first["content"][1]["content"]["error_code"],
-        "search_interrupted"
-    );
+    assert_eq!(formatted.len(), 1);
+    assert_eq!(formatted[0].role, "user");
+    let only = serde_json::to_value(&formatted[0]).unwrap();
+    assert_eq!(only["content"][0]["type"], "text");
+    assert_eq!(only["content"][0]["text"], "continue");
 }
 
 #[test]
