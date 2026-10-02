@@ -624,6 +624,7 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
     app.remote_model_switch_in_flight = true;
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: Some("Anthropic".to_string()),
@@ -670,6 +671,7 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: None,
@@ -1293,7 +1295,7 @@ fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
     app.remote_provider_name = Some("OpenAI".to_string());
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
-    app.update_context_limit_for_model("gpt-5.4");
+    app.update_context_limit_for_model("gpt-5.4", None);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
 
@@ -1315,7 +1317,7 @@ fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_provider_model = Some("gpt-5.4".to_string());
-    app.update_context_limit_for_model("gpt-5.4");
+    app.update_context_limit_for_model("gpt-5.4", None);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
 
@@ -2523,6 +2525,7 @@ fn test_remote_model_changed_updates_resolved_credential() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 0,
             model: "claude-opus-5-5".to_string(),
             provider_name: Some("Claude".to_string()),
@@ -2549,6 +2552,7 @@ fn model_changed_event(
     reasoning_effort: Option<&str>,
 ) -> crate::protocol::ServerEvent {
     crate::protocol::ServerEvent::ModelChanged {
+        context_window: None,
         id: 0,
         model: "gpt-5.6-terra".to_string(),
         provider_name: Some("OpenAI".to_string()),
