@@ -1171,7 +1171,9 @@ impl App {
         self.side_panel.focused_page_id = None;
         self.side_panel_user_hidden = true;
         self.side_panel_explicit_hidden = true;
-        self.set_diff_pane_focus(false);
+        if !self.diff_mode.has_side_pane() {
+            self.set_diff_pane_focus(false);
+        }
         self.sync_diagram_fit_context();
         self.set_status_notice("Side panel: OFF");
     }
