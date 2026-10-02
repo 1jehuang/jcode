@@ -54,7 +54,7 @@ fn test_up_arrow_recalls_prompts_from_previous_sessions() {
         "newer old prompt".to_string(),
     ]);
     // Current session has one prompt.
-    app.display_messages = vec![DisplayMessage::user("current prompt")];
+    app.display_messages.replace(vec![DisplayMessage::user("current prompt")]);
     app.bump_display_messages_version();
 
     app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
@@ -76,7 +76,7 @@ fn test_merged_prompt_history_dedupes_across_sessions() {
     let mut app = create_test_app();
     app.persisted_prompt_history =
         Some(vec!["shared prompt".to_string(), "unique old".to_string()]);
-    app.display_messages = vec![DisplayMessage::user("shared prompt")];
+    app.display_messages.replace(vec![DisplayMessage::user("shared prompt")]);
     app.bump_display_messages_version();
 
     let merged = app.merged_prompt_history();

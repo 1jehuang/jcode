@@ -2296,6 +2296,30 @@ pub(crate) fn copy_viewport_point_from_screen(
     (point.pane == crate::tui::CopySelectionPane::Chat).then_some(point)
 }
 
+/// The chat frame's raw (unwrapped) coordinates for `point`: the raw line and
+/// the raw column inside it.
+///
+/// Raw text does not move when the transcript is rewrapped, and the copy path
+/// already extracts through it, so capturing a selection endpoint here keeps a
+/// resize from silently sliding it onto different characters.
+pub(crate) fn copy_viewport_raw_point(
+    point: crate::tui::CopySelectionPoint,
+) -> Option<(usize, usize)> {
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Chat)?;
+    let raw = copy_selection::raw_selection_point(&snapshot, point)?;
+    Some((raw.raw_line, raw.column))
+}
+
+/// The wrapped chat selection point that lands on `raw_line`/`raw_col` in the
+/// current frame, the inverse of [`copy_viewport_raw_point`].
+pub(crate) fn copy_viewport_point_from_raw(
+    raw_line: usize,
+    raw_col: usize,
+) -> Option<crate::tui::CopySelectionPoint> {
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Chat)?;
+    copy_selection::selection_point_from_raw(&snapshot, raw_line, raw_col)
+}
+
 #[cfg(test)]
 pub(crate) fn side_pane_point_from_screen(
     column: u16,

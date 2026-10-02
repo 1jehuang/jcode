@@ -125,7 +125,7 @@ impl App {
         let was_visual_debug = crate::tui::visual_debug::is_enabled();
         crate::tui::visual_debug::enable();
 
-        self.display_messages = vec![
+        self.display_messages.replace(vec![
             DisplayMessage {
                 role: "user".to_string(),
                 content: "Headless side-panel latency benchmark".to_string(),
@@ -142,7 +142,7 @@ impl App {
                 title: None,
                 tool_data: None,
             },
-        ];
+        ]);
         self.bump_display_messages_version();
         self.side_panel = Self::build_side_panel_latency_snapshot(diagrams, padding);
         self.diff_mode = crate::config::DiffDisplayMode::Off;
@@ -365,7 +365,7 @@ impl App {
         crate::tui::visual_debug::enable();
         crate::tui::mermaid::init_picker();
 
-        self.display_messages = vec![
+        self.display_messages.replace(vec![
             DisplayMessage {
                 role: "user".to_string(),
                 content: "Live Mermaid UI benchmark".to_string(),
@@ -383,7 +383,7 @@ impl App {
                 title: None,
                 tool_data: None,
             },
-        ];
+        ]);
         self.bump_display_messages_version();
         self.side_panel = Self::build_side_panel_latency_snapshot(diagrams, padding);
         self.diff_mode = crate::config::DiffDisplayMode::Off;
@@ -790,7 +790,7 @@ impl App {
         crate::tui::markdown::set_diagram_mode_override(Some(diagram_mode));
 
         let test_content = Self::build_scroll_test_content(diagrams, padding, diagram_override);
-        self.display_messages = vec![
+        self.display_messages.replace(vec![
             DisplayMessage {
                 role: "user".to_string(),
                 content: "Scroll test: render mermaid + text".to_string(),
@@ -807,7 +807,7 @@ impl App {
                 title: None,
                 tool_data: None,
             },
-        ];
+        ]);
         self.bump_display_messages_version();
         self.follow_chat_bottom();
         self.is_processing = false;

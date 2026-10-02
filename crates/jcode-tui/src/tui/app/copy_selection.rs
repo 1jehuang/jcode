@@ -158,6 +158,83 @@ impl App {
         self.copy_selection_goal_column = Some(point.column);
     }
 
+    /// Capture a transcript selection in the frame's raw coordinates before a
+    /// resize rewraps the transcript.
+    ///
+    /// The endpoints are wrapped line indices, so a rewrap reinterprets them and
+    /// the selection silently starts covering different text. Raw text does not
+    /// move with the width, and it is the space the copy path extracts through,
+    /// so capture and extraction agree at any width. Only the transcript pane is
+    /// affected: the other panes are not transcript-relative.
+    pub(super) fn capture_selection_rebase(&mut self) {
+        use crate::tui::{CopySelectionPane, ui};
+
+        let (Some(anchor_point), Some(cursor_point)) =
+            (self.copy_selection_anchor, self.copy_selection_cursor)
+        else {
+            return;
+        };
+        if anchor_point.pane != CopySelectionPane::Chat || cursor_point.pane != anchor_point.pane {
+            return;
+        }
+        let (Some(anchor_raw), Some(cursor_raw)) = (
+            ui::copy_viewport_raw_point(anchor_point),
+            ui::copy_viewport_raw_point(cursor_point),
+        ) else {
+            return;
+        };
+        self.pending_selection_rebase = Some(super::PendingSelectionRebase {
+            anchor_raw,
+            cursor_raw,
+            captured_width: ui::last_layout_snapshot()
+                .map(|layout| layout.messages_area.width)
+                .unwrap_or(0),
+        });
+    }
+
+    /// Re-base a captured transcript selection onto the frame the renderer drew
+    /// at the new width. Returns true when an endpoint moved.
+    pub(super) fn rebase_selection_after_resize(&mut self) -> bool {
+        use crate::tui::{CopySelectionPane, ui};
+
+        let Some(pending) = self.pending_selection_rebase else {
+            return false;
+        };
+        let width = ui::last_layout_snapshot()
+            .map(|layout| layout.messages_area.width)
+            .unwrap_or(0);
+        if width == pending.captured_width {
+            // No frame at the new width has been laid out yet.
+            return false;
+        }
+        self.pending_selection_rebase = None;
+
+        let mut changed = false;
+        for (raw, slot) in [
+            (pending.anchor_raw, &mut self.copy_selection_anchor),
+            (pending.cursor_raw, &mut self.copy_selection_cursor),
+        ] {
+            let Some(mut point) = *slot else {
+                continue;
+            };
+            if point.pane != CopySelectionPane::Chat {
+                continue;
+            }
+            // An endpoint whose raw line is gone from the new frame keeps its
+            // line index: something is better than dropping the selection.
+            let Some(resolved) = ui::copy_viewport_point_from_raw(raw.0, raw.1) else {
+                continue;
+            };
+            if (point.abs_line, point.column) != (resolved.abs_line, resolved.column) {
+                point.abs_line = resolved.abs_line;
+                point.column = resolved.column;
+                *slot = Some(point);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     fn update_selection_with_point(&mut self, point: crate::tui::CopySelectionPoint, extend: bool) {
         let Some(point) = Self::clamp_point(point) else {
             return;
