@@ -1,11 +1,48 @@
 use super::*;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
+// macOS has no wait channel in proc_pidinfo, so a waiting test-harness thread
+// can make pipe or vnode stdin appear to be read. Use dedicated fixtures there.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn test_own_process_not_reading_stdin() {
     let pid = std::process::id();
     let state = is_waiting_for_stdin(pid);
     assert_ne!(state, StdinState::Reading);
+}
+
+#[cfg(target_os = "macos")]
+fn state_of_child_with_piped_stdin(program: &str, args: &[&str]) -> StdinState {
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn fixture");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let state = is_waiting_for_stdin(child.id());
+    child.kill().ok();
+    child.wait().ok();
+    state
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_busy_process_with_piped_stdin_is_not_reading() {
+    let state = state_of_child_with_piped_stdin("sh", &["-c", "while :; do :; done"]);
+    assert_eq!(state, StdinState::NotReading);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn test_blocked_process_detected_macos() {
+    let state = state_of_child_with_piped_stdin("cat", &[]);
+    assert_eq!(
+        state,
+        StdinState::Reading,
+        "cat should be waiting for stdin"
+    );
 }
 
 #[test]

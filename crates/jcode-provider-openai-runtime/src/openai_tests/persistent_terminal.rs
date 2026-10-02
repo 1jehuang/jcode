@@ -22,8 +22,7 @@ async fn persistent_terminal_public_case(
     let full_input = build_responses_input(&messages);
     let expected_input = full_input.clone();
     let server = tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut ws = accept_fixture_websocket(&listener).await;
         let delta: Value =
             serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(delta["previous_response_id"], "resp_stale");
@@ -47,8 +46,7 @@ async fn persistent_terminal_public_case(
                 _ => break,
             }
         }
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut ws = accept_fixture_websocket(&listener).await;
         let fresh: Value =
             serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert!(fresh.get("previous_response_id").is_none(), "{fresh}");
@@ -164,8 +162,7 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
     let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
     let (fail_tx, fail_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut ws = accept_fixture_websocket(&listener).await;
         assert!(matches!(
             ws.next().await.unwrap().unwrap(),
             WsMessage::Text(_)

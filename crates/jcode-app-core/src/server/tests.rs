@@ -327,6 +327,10 @@ fn persisted_headless_member(
 
 #[tokio::test]
 async fn background_task_wake_runs_live_session_immediately_when_idle() {
+    // Wake routing reads the process-global config (`server.wake_mode`), which
+    // `external_background_task_wake_emits_request_without_starting_turn` flips to
+    // `external` under this same lock; without it the two race in the full suite.
+    let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Build result processed.".to_string()),

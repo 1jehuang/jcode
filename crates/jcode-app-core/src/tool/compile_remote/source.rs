@@ -496,6 +496,10 @@ mod tests {
         assert!(error.to_string().contains("exceeds 2 bytes"));
     }
 
+    // APFS/HFS+ refuse to create non-UTF-8 file names (EILSEQ), so this on-disk case
+    // cannot arise on macOS. The byte-level rejection is still covered on every
+    // platform by `rejects_invalid_paths_and_deduplicates_listing` (`b"\xff"`).
+    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn rejects_non_utf8_git_paths() {
         use std::os::unix::ffi::OsStrExt;
@@ -579,8 +583,11 @@ mod tests {
             assert!(relative_path(path).is_err(), "{path:?}");
         }
         let dir = tempfile::tempdir().unwrap();
-        put(dir.path(), "file", "contents");
-        assert_eq!(collect(dir.path(), b"file\0file\0").unwrap().files.len(), 1);
-        assert!(collect(dir.path(), b"file").is_err());
+        // `collect` requires a canonical root, as `snapshot` provides (macOS temp
+        // dirs sit under the `/var` -> `/private/var` symlink).
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        put(&root, "file", "contents");
+        assert_eq!(collect(&root, b"file\0file\0").unwrap().files.len(), 1);
+        assert!(collect(&root, b"file").is_err());
     }
 }

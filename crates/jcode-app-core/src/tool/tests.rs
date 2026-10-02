@@ -686,6 +686,9 @@ async fn tool_descriptions_stay_under_token_cap() {
     // user, so planning happens proactively rather than only when prompted.
     // applet carries the whole view-node vocabulary inline, since the model has
     // no other way to learn which node types and props the host renders.
+    // macos_computer_use drives the user's live Mac; its description carries the
+    // live-machine safety rule (only the requested task, background AX before
+    // click/type), which cannot fit the cap. Trimmed from ~159 to ~46 tokens.
     const EXEMPT: &[&str] = &[
         "integration_tools",
         "swarm",
@@ -693,6 +696,7 @@ async fn tool_descriptions_stay_under_token_cap() {
         "browser",
         "todo",
         "applet",
+        "macos_computer_use",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);

@@ -121,8 +121,7 @@ async fn persistent_prefix_changed_output_case(had_real_output: bool) {
     );
 
     let mut server = tokio::spawn(async move {
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut socket = accept_fixture_websocket(&listener).await;
         let first = prefix_test_request(&mut socket).await;
         assert!(first.get("previous_response_id").is_none());
         assert_eq!(first["input"], serde_json::json!(original_input));
@@ -138,8 +137,7 @@ async fn persistent_prefix_changed_output_case(had_real_output: bool) {
                 other => panic!("changed prefix reused old socket: {other:?}"),
             }
         }
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut fresh = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut fresh = accept_fixture_websocket(&listener).await;
         let request = prefix_test_request(&mut fresh).await;
         assert_eq!(request["type"], "response.create");
         assert!(request.get("previous_response_id").is_none(), "{request}");
@@ -211,8 +209,7 @@ async fn persistent_prefix_append_only_reuses_socket_and_refreshes_hashes_each_t
         .collect();
     let mut server = tokio::spawn(async move {
         // Exactly one accept: reconnecting cannot satisfy this fixture.
-        let (tcp, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+        let mut socket = accept_fixture_websocket(&listener).await;
         let mut cursor = 0;
         for (i, input) in inputs.iter().enumerate() {
             let request = prefix_test_request(&mut socket).await;
