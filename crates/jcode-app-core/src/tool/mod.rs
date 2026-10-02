@@ -616,6 +616,13 @@ impl Registry {
         jcode_tool_types::resolve_tool_name(name)
     }
 
+    /// Tolerant tool-name resolution for registry misses. Delegates to the
+    /// shared implementation in `jcode-tool-types` (separator/case-insensitive
+    /// match plus unique MCP suffix match); see that crate's docs and tests.
+    fn fuzzy_resolve_tool(name: &str, tools: &HashMap<String, Arc<dyn Tool>>) -> Option<String> {
+        jcode_tool_types::fuzzy_resolve_tool(name, tools.keys().map(|k| k.as_str()))
+    }
+
     /// Suggest up to 3 available tool names that look similar to `name`.
     /// Uses cheap, dependency-free heuristics: case-insensitive equality,
     /// prefix/substring containment, then bounded edit distance. Helps the
@@ -900,19 +907,34 @@ impl Registry {
         } else {
             match tools.get(resolved_name) {
                 Some(tool) => tool.clone(),
-                None => {
-                    // List available tools so the model can recover instead of
-                    // spiraling through hallucinated names like "ToolSearch" (#104).
-                    let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
-                    available.sort_unstable();
-                    let suggestions = Self::closest_tool_names(name, &available);
-                    let mut msg = format!("Unknown tool: {name}.");
-                    if !suggestions.is_empty() {
-                        msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+                None => match Self::fuzzy_resolve_tool(resolved_name, &tools) {
+                    // Tolerant fallback for the recurring failure class where
+                    // backing models emit mangled tool names (Agentgrep,
+                    // McpCall, SkillManage, bare get_architecture without the
+                    // mcp__server__ prefix). Resolving silently is cheaper
+                    // than a failed round-trip; the corrective error path
+                    // below stays for genuinely unknown names (#104).
+                    Some(resolved) => {
+                        crate::logging::info(&format!(
+                            "Tool name '{}' not found; fuzzy-resolved to '{}'",
+                            resolved_name, resolved
+                        ));
+                        tools.get(&resolved).expect("fuzzy match must exist").clone()
                     }
-                    msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
-                    return Err(anyhow::anyhow!(msg));
-                }
+                    None => {
+                        // List available tools so the model can recover instead of
+                        // spiraling through hallucinated names like "ToolSearch" (#104).
+                        let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
+                        available.sort_unstable();
+                        let suggestions = Self::closest_tool_names(name, &available);
+                        let mut msg = format!("Unknown tool: {name}.");
+                        if !suggestions.is_empty() {
+                            msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+                        }
+                        msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                },
             }
         };
 
