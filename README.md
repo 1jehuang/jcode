@@ -433,11 +433,16 @@ There are two ways to set one up:
   jcode login --provider moonshotai
   jcode login --provider meta-muse     # Meta Model API / Muse Spark
   jcode login --provider yolo-auto     # Yolo-Auto
+  jcode login --provider tsubasa       # Tsubasa
   ```
 
   Built-in OpenAI-compatible profile ids include: `openrouter`, `orcarouter`, `deepseek`, `zai`, `kimi`, `moonshotai`, `meta-muse` (Meta Model API / Muse Spark), `yolo-auto` (Yolo-Auto), `opencode` (OpenCode Zen), `opencode-go`, `302ai`, `baseten`, `cortecs`, `huggingface`, `nebius`, `scaleway`, `stackit`, and `firmware`. Each profile only sets the endpoint and key variable; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list.
 
 - **Any other endpoint** — point jcode at an arbitrary OpenAI-compatible API (hosted or local) with `jcode login --provider openai-compatible` or the scriptable `jcode provider add` command described below.
+
+The Tsubasa profile reads `TSUBASA_API_KEY` and offers `tsubasa-pro` and
+`tsubasa-fast`, each with a 32,768-token context window. It uses Chat Completions
+at `https://api.tsubasa.sh/v1`.
 
 Useful environment overrides for these endpoints:
 

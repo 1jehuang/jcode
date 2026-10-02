@@ -1173,7 +1173,7 @@ impl OpenRouterProvider {
     }
 
     fn profile_rejects_image_input(profile_id: Option<&str>) -> bool {
-        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek") || id.eq_ignore_ascii_case("zai"))
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek") || id.eq_ignore_ascii_case("zai") || id.eq_ignore_ascii_case("tsubasa"))
     }
 
     fn profile_supports_unified_reasoning(
@@ -1657,7 +1657,7 @@ impl OpenRouterProvider {
     /// not permitted" when either is present (issue #261).
     fn strict_openai_schema_endpoint(profile_id: Option<&str>, api_base: &str) -> bool {
         if profile_id
-            .map(|id| id.eq_ignore_ascii_case("mistral"))
+            .map(|id| id.eq_ignore_ascii_case("mistral") || id.eq_ignore_ascii_case("tsubasa"))
             .unwrap_or(false)
         {
             return true;
