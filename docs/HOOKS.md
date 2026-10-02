@@ -229,6 +229,7 @@ session that triggered it.
 # Timeout-bounded; empty extraction writes nothing.
 # Provider auto-detect is the default; no --model flag needed.
 timeout 300 jcode run \
+  --parent "$JCODE_HOOK_SESSION_ID" \
   "Consolidate session $JCODE_HOOK_SESSION_ID into memory. Read its transcript, \
 extract durable facts in the resume-critical shape (decisions+why, discoveries, \
 failed attempts, open gaps). Search memory first and skip anything already stored \
@@ -248,6 +249,13 @@ failed attempts, gaps — the resume-critical subset. The model owns what to
 keep; core only reads. Note: the hook fires on ANY ended session, including
 trivial one-turn fixtures — the worker should skip sessions with nothing
 durable rather than writing noise.
+
+`--parent` links the consolidation run to the session that triggered it, so
+it shows under the picker 🤖 workers filter instead of as an orphan entry in
+the default list. The `... &` backgrounding above is HUP-fragile: if the
+closing shell exits before the worker finishes, the child can be reaped
+mid-run and linger as a crashed picker entry. Prefer `nohup ... &` or
+`setsid ... &` if your shell/config propagates HUP on exit.
 
 ## Design notes
 

@@ -536,6 +536,56 @@ fn test_batch_restore_detection_excludes_already_recovered_parent_sessions() {
 }
 
 #[test]
+fn test_hook_triggered_session_lands_in_worker_tab_hidden_from_default_all() {
+    let human = make_session("session_human", "human", false, SessionStatus::Closed);
+    let mut hook_run = make_session(
+        "session_hook_consolidation",
+        "consolidation",
+        false,
+        SessionStatus::Closed,
+    );
+    hook_run.hook_trigger = Some("session_end".to_string());
+
+    // Default All view: humans only, hook run hidden.
+    let mut picker = SessionPicker::new(vec![human, hook_run]);
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert_eq!(
+        picker.visible_session_iter().next().map(|s| &s.id),
+        Some(&"session_human".to_string())
+    );
+
+    // Worker tab: hook run surfaces.
+    picker.filter_mode = SessionFilterMode::Worker;
+    picker.rebuild_items();
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert_eq!(
+        picker.visible_session_iter().next().map(|s| &s.id),
+        Some(&"session_hook_consolidation".to_string())
+    );
+
+    // Search still finds the hook run under the Worker tab (tab filter
+    // applies on top of the query match, so search never leaks automation
+    // into the default All view).
+    picker.filter_mode = SessionFilterMode::Worker;
+    picker.search_query = "consolidation".to_string();
+    picker.rebuild_items();
+    assert!(
+        picker
+            .visible_session_iter()
+            .any(|s| s.id == "session_hook_consolidation")
+    );
+    // Same query from All stays human-only.
+    picker.filter_mode = SessionFilterMode::All;
+    picker.rebuild_items();
+    assert!(
+        picker
+            .visible_session_iter()
+            .all(|s| s.hook_trigger.is_none() && s.parent_id.is_none())
+    );
+}
+
+#[test]
 fn test_grouped_batch_restore_uses_last_active_at_and_includes_debug_sessions() {
     let now = Utc::now();
 
@@ -640,7 +690,7 @@ fn test_loading_preview_refreshes_search_index_for_picker_filtering() {
 
     let mut session = Session::create_with_id(
         "session_preview_search".to_string(),
-        Some("/tmp/preview-search".to_string()),
+        None,
         Some("Preview Search".to_string()),
     );
     session.append_stored_message(crate::session::StoredMessage {
@@ -798,17 +848,20 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     // empty in tests.
     assert_eq!(picker.visible_sessions.len(), 0);
 
-    // Worker view matches sessions with a parent_id (swarm/hook children).
+    // Worker view matches automation: parented children and hook runs.
     picker.all_sessions[1].parent_id = Some("session_saved".to_string());
+    picker.all_sessions[2].hook_trigger = Some("session_end".to_string());
     picker.filter_mode = SessionFilterMode::Worker;
     picker.rebuild_items();
-    assert_eq!(picker.visible_sessions.len(), 1);
+    assert_eq!(picker.visible_sessions.len(), 2);
     assert!(
         picker
             .visible_session_iter()
-            .all(|session| session.parent_id.is_some())
+            .all(|session| session.parent_id.is_some() || session.hook_trigger.is_some())
     );
+    // Default All view hides automation; humans only.
     picker.all_sessions[1].parent_id = None;
+    picker.all_sessions[2].hook_trigger = None;
     picker.filter_mode = SessionFilterMode::Active;
     picker.rebuild_items();
 

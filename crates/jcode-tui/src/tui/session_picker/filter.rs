@@ -160,12 +160,16 @@ impl SessionPicker {
         filter_mode: SessionFilterMode,
     ) -> bool {
         match filter_mode {
-            SessionFilterMode::All => true,
+            // Default view is humans only: parented/hook-spawned automation
+            // (swarm workers, historian runs) lives under the Worker tab.
+            SessionFilterMode::All => session.parent_id.is_none() && session.hook_trigger.is_none(),
             SessionFilterMode::CurrentDir => self.session_in_current_dir(session),
             SessionFilterMode::CatchUp => session.needs_catchup,
             SessionFilterMode::Saved => session.saved,
             SessionFilterMode::Active => self.session_is_live(session),
-            SessionFilterMode::Worker => session.parent_id.is_some(),
+            SessionFilterMode::Worker => {
+                session.parent_id.is_some() || session.hook_trigger.is_some()
+            }
             SessionFilterMode::ClaudeCode => Self::session_is_claude_code(session),
             SessionFilterMode::Codex => Self::session_is_codex(session),
             SessionFilterMode::Pi => Self::session_is_pi(session),

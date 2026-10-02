@@ -1674,6 +1674,11 @@ pub(super) fn crashed_sessions_from_all_sessions(
         .iter()
         .filter(|s| matches!(s.status, SessionStatus::Crashed { .. }))
         .filter(|s| !recovered_parents.contains(s.id.as_str()))
+        // Automation (parented/hook-spawned runs) is hidden from the default
+        // picker view, so its crashes stay out of the banner too. Genuinely
+        // crashed human sessions still surface; automation crashes remain
+        // visible as rows under the Worker tab.
+        .filter(|s| s.parent_id.is_none() && s.hook_trigger.is_none())
         .collect();
     if crashed.is_empty() {
         return None;
