@@ -5,14 +5,20 @@
 //! persistence and can be queried across daemon, CLI, and API bridge processes.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+const MAX_LEGACY_SNAPSHOT_BYTES: u64 = 256 * 1024;
+const MAX_PENDING_METADATA_BYTES: u64 = 64 * 1024;
+const LEGACY_BOOTSTRAP_KEY: &str = "legacy-bootstrap-v1";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct RecentSessionMetadata {
     pub session_id: String,
     pub working_dir: Option<String>,
@@ -73,7 +79,11 @@ fn open() -> Result<Connection> {
          CREATE INDEX IF NOT EXISTS recent_sessions_activity
          ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);
          CREATE INDEX IF NOT EXISTS recent_sessions_updated
-         ON recent_sessions(updated_at_ms DESC);",
+         ON recent_sessions(updated_at_ms DESC);
+         CREATE TABLE IF NOT EXISTS recent_session_state (
+             key TEXT PRIMARY KEY NOT NULL,
+             value INTEGER NOT NULL
+         );",
     )?;
     // Additive migration for databases created before saved-session ordering
     // became part of the shared session-list contract.
@@ -91,15 +101,30 @@ fn open() -> Result<Connection> {
 }
 
 pub fn recent(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
+    query_recent(limit, false)
+}
+
+fn recent_eligible(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
+    query_recent(limit, true)
+}
+
+fn query_recent(limit: usize, eligible_only: bool) -> Result<Vec<RecentSessionMetadata>> {
     let connection = open()?;
-    let mut statement = connection.prepare(
+    let query = format!(
         "SELECT session_id, working_dir, generated_title, custom_title,
                 todo_title, saved, updated_at_ms, last_active_at_ms, save_label,
                 status, is_debug
          FROM recent_sessions
+         {}
          ORDER BY updated_at_ms DESC, session_id DESC
          LIMIT ?1",
-    )?;
+        if eligible_only {
+            "WHERE is_debug = 0"
+        } else {
+            ""
+        }
+    );
+    let mut statement = connection.prepare(&query)?;
     let entries = statement
         .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
             Ok(RecentSessionMetadata {
@@ -129,25 +154,28 @@ pub fn recent_persisted(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
     }
 
     let fetch_limit = limit.saturating_mul(4).min(500);
-    bootstrap_from_snapshots(fetch_limit)?;
+    recover_pending()?;
+    bootstrap_from_snapshots_once(fetch_limit)?;
     let entries = recent(500)?;
 
-    let mut hydrated = Vec::with_capacity(entries.len());
     for mut entry in entries {
-        if entry.session_id.starts_with("imported_")
-            || !crate::session::session_exists(&entry.session_id)
-        {
-            continue;
-        }
         if entry.status.is_none() || entry.is_debug.is_none() {
             let Ok(snapshot) = metadata_from_snapshot(&entry.session_id) else {
                 // Unknown debug state is not safe to expose as a normal session.
                 continue;
             };
-            entry = snapshot;
+            entry.status = snapshot.status;
+            entry.is_debug = snapshot.is_debug;
             let _ = upsert(&entry);
         }
-        if entry.is_debug != Some(false) {
+    }
+
+    let entries = recent_eligible(limit.saturating_mul(4).min(500))?;
+    let mut hydrated = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry.session_id.starts_with("imported_")
+            || !crate::session::session_exists(&entry.session_id)
+        {
             continue;
         }
         hydrated.push(entry);
@@ -162,9 +190,21 @@ pub fn recent_persisted(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
     Ok(hydrated)
 }
 
-fn bootstrap_from_snapshots(limit: usize) -> Result<()> {
-    let sessions_dir = crate::storage::jcode_dir()?.join("sessions");
+fn bootstrap_from_snapshots_once(limit: usize) -> Result<()> {
     let connection = open()?;
+    let complete = connection
+        .query_row(
+            "SELECT value FROM recent_session_state WHERE key = ?1",
+            [LEGACY_BOOTSTRAP_KEY],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some_and(|value| value != 0);
+    if complete {
+        return Ok(());
+    }
+
+    let sessions_dir = crate::storage::jcode_dir()?.join("sessions");
     let mut statement = connection.prepare("SELECT session_id FROM recent_sessions")?;
     let existing = statement
         .query_map([], |row| row.get::<_, String>(0))?
@@ -172,6 +212,7 @@ fn bootstrap_from_snapshots(limit: usize) -> Result<()> {
     drop(statement);
     drop(connection);
     let Ok(directory) = std::fs::read_dir(sessions_dir) else {
+        mark_legacy_bootstrap_complete()?;
         return Ok(());
     };
     let mut candidates = directory
@@ -209,12 +250,87 @@ fn bootstrap_from_snapshots(limit: usize) -> Result<()> {
             }
         }
     }
+    mark_legacy_bootstrap_complete()?;
     Ok(())
 }
 
 fn metadata_from_snapshot(session_id: &str) -> Result<RecentSessionMetadata> {
+    let path = crate::session::session_path(session_id)?;
+    if path.metadata()?.len() > MAX_LEGACY_SNAPSHOT_BYTES {
+        bail!("legacy session snapshot exceeds metadata bootstrap limit");
+    }
     let session = Session::load_startup_stub(session_id)?;
     Ok(metadata_from_session(&session))
+}
+
+fn mark_legacy_bootstrap_complete() -> Result<()> {
+    open()?.execute(
+        "INSERT INTO recent_session_state (key, value) VALUES (?1, 1)
+         ON CONFLICT(key) DO UPDATE SET value = 1",
+        [LEGACY_BOOTSTRAP_KEY],
+    )?;
+    Ok(())
+}
+
+fn pending_dir() -> Result<PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("session-index-pending"))
+}
+
+fn pending_path(session_id: &str) -> Result<PathBuf> {
+    if !valid_session_id(session_id) {
+        bail!("invalid session ID for pending metadata");
+    }
+    Ok(pending_dir()?.join(format!("{session_id}.json")))
+}
+
+fn write_pending(entry: &RecentSessionMetadata) -> Result<()> {
+    if !valid_session_id(&entry.session_id) {
+        bail!("invalid session ID for pending metadata");
+    }
+    let directory = pending_dir()?;
+    std::fs::create_dir_all(&directory)?;
+    crate::storage::write_json_fast(&directory.join(format!("{}.json", entry.session_id)), entry)
+}
+
+fn clear_pending(session_id: &str) {
+    let Ok(path) = pending_path(session_id) else {
+        return;
+    };
+    let _ = std::fs::remove_file(path);
+}
+
+fn recover_pending() -> Result<()> {
+    let directory = pending_dir()?;
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        let Some(session_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if !valid_session_id(session_id) {
+            continue;
+        }
+        if path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > MAX_PENDING_METADATA_BYTES)
+        {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(metadata) = serde_json::from_slice::<RecentSessionMetadata>(&bytes) else {
+            continue;
+        };
+        if metadata.session_id != session_id {
+            continue;
+        }
+        if upsert(&metadata).is_ok() {
+            clear_pending(session_id);
+        }
+    }
+    Ok(())
 }
 
 fn valid_session_id(session_id: &str) -> bool {
@@ -243,7 +359,17 @@ fn metadata_from_session(session: &Session) -> RecentSessionMetadata {
 
 /// Update the index after a successful session persistence operation.
 pub fn upsert_session(session: &Session) -> Result<()> {
-    upsert(&metadata_from_session(session))
+    let metadata = metadata_from_session(session);
+    match upsert(&metadata) {
+        Ok(()) => {
+            clear_pending(&metadata.session_id);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = write_pending(&metadata);
+            Err(error)
+        }
+    }
 }
 
 pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
@@ -472,6 +598,134 @@ mod tests {
 
         let sessions = recent(1).expect("list recent sessions");
         assert_eq!(sessions[0].session_id, "session_updated");
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn debug_rows_do_not_consume_the_picker_limit() {
+        let _env_lock = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().expect("create temporary jcode home");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let mut normal = Session::create_with_id(
+            "session_normal_older".to_string(),
+            None,
+            Some("Normal".to_string()),
+        );
+        normal.save_prepared().expect("persist normal session");
+        let normal_updated_at = normal.updated_at.timestamp_millis();
+
+        for index in 0..501 {
+            upsert(&RecentSessionMetadata {
+                session_id: format!("session_debug_newer_{index}"),
+                working_dir: None,
+                generated_title: None,
+                custom_title: None,
+                todo_title: None,
+                saved: false,
+                save_label: None,
+                updated_at_ms: normal_updated_at + i64::from(index) + 1,
+                last_active_at_ms: None,
+                status: Some("active".to_string()),
+                is_debug: Some(true),
+            })
+            .expect("index debug session");
+        }
+        mark_legacy_bootstrap_complete().expect("mark bootstrap complete");
+
+        let sessions = recent_persisted(1).expect("list eligible session");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, normal.id);
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn legacy_hydration_preserves_newer_index_timestamp() {
+        let _env_lock = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().expect("create temporary jcode home");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let mut session = Session::create_with_id(
+            "session_newer_index".to_string(),
+            None,
+            Some("Newer index".to_string()),
+        );
+        session.save_prepared().expect("persist snapshot");
+        let newer_timestamp = session.updated_at.timestamp_millis() + 10_000;
+        open()
+            .expect("open index")
+            .execute(
+                "UPDATE recent_sessions
+                 SET updated_at_ms = ?2, status = NULL, is_debug = NULL
+                 WHERE session_id = ?1",
+                params![session.id, newer_timestamp],
+            )
+            .expect("simulate newer journal-backed legacy row");
+        mark_legacy_bootstrap_complete().expect("mark bootstrap complete");
+
+        let sessions = recent_persisted(1).expect("hydrate legacy row");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].updated_at_ms, newer_timestamp);
+        let indexed = recent(1).expect("read hydrated row");
+        assert_eq!(indexed[0].updated_at_ms, newer_timestamp);
+        assert_eq!(indexed[0].is_debug, Some(false));
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn completed_bootstrap_uses_pending_metadata_without_rescanning_snapshots() {
+        let _env_lock = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().expect("create temporary jcode home");
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::create_dir_all(home.path().join("sessions")).expect("create session directory");
+        mark_legacy_bootstrap_complete().expect("mark bootstrap complete");
+
+        let mut session = Session::create_with_id(
+            "session_pending".to_string(),
+            None,
+            Some("Pending".to_string()),
+        );
+        session.working_dir = Some("/pending".to_string());
+        crate::storage::write_json_fast(
+            &crate::session::session_path(&session.id).expect("session path"),
+            &session,
+        )
+        .expect("write snapshot without index");
+        assert!(
+            recent_persisted(1)
+                .expect("skip completed legacy scan")
+                .is_empty()
+        );
+
+        let metadata = metadata_from_session(&session);
+        write_pending(&metadata).expect("write failed-index recovery metadata");
+        let sessions = recent_persisted(1).expect("recover pending metadata");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, session.id);
+        assert!(!pending_path(&session.id).expect("pending path").exists());
+
+        let oversized_id = "session_oversized_legacy";
+        std::fs::write(
+            crate::session::session_path(oversized_id).expect("oversized snapshot path"),
+            vec![b' '; usize::try_from(MAX_LEGACY_SNAPSHOT_BYTES).unwrap() + 1],
+        )
+        .expect("write oversized snapshot");
+        assert!(metadata_from_snapshot(oversized_id).is_err());
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
