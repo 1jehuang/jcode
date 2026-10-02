@@ -740,17 +740,47 @@ fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+fn configured_claude_file_is_unambiguous(
+    path: &Path,
+    existed_before_login: bool,
+    modified_before_login: Option<std::time::SystemTime>,
+    native_present: bool,
+) -> Result<()> {
+    if existed_before_login && native_present {
+        let modified_after_login = std::fs::metadata(path)
+            .and_then(|file| file.modified())
+            .ok();
+        anyhow::ensure!(
+            modified_before_login
+                .zip(modified_after_login)
+                .is_some_and(|(before, after)| before != after),
+            "Claude Code did not update the configured credentials file, while native credentials also exist. Jcode cannot tell which account just signed in. Refresh or remove the stale file, or use Jcode's OAuth login."
+        );
+    }
+    Ok(())
+}
+
 fn login_claude_code_flow() -> Result<()> {
+    let source = auth::claude::ExternalClaudeAuthSource::ClaudeCode;
+    let file_path = source.path()?;
+    let configured_file = std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|dir| !dir.is_empty());
+    let file_existed_before_login = file_path.exists();
+    let file_modified_before_login = std::fs::metadata(&file_path)
+        .and_then(|file| file.modified())
+        .ok();
     eprintln!("Signing in with Claude Code on this machine (`claude auth login`)…");
     auth::login_flows::run_external_login_command("claude", &["auth", "login"])?;
 
     // Jcode makes direct Anthropic requests, so a CLI login by itself is not a
     // Jcode login. Keep the existing external-source consent boundary intact.
-    let source = auth::claude::ExternalClaudeAuthSource::ClaudeCode;
-    let file_path = source.path()?;
-    let configured_file = std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|dir| !dir.is_empty());
     let mut reused = false;
     if configured_file && file_path.exists() {
+        configured_claude_file_is_unambiguous(
+            &file_path,
+            file_existed_before_login,
+            file_modified_before_login,
+            auth::claude::native_credentials_present(),
+        )?;
         reused = reuse_claude_code_file(source, &file_path)?;
     }
     if !reused {

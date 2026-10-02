@@ -1,6 +1,53 @@
 use super::*;
 
 #[test]
+fn claude_code_choice_ignores_ambient_browser_suppression() {
+    let _guard = crate::storage::lock_test_env();
+    let old_no_browser = std::env::var_os("NO_BROWSER");
+    crate::env::set_var("NO_BROWSER", "1");
+    let claude = login_provider_for_choice(&ProviderChoice::Claude).unwrap();
+    assert_eq!(
+        auto_scriptable_flow_reason(claude, &LoginOptions::default(), true),
+        Some("no_browser_requested")
+    );
+    assert_eq!(
+        auto_scriptable_flow_reason(
+            claude,
+            &LoginOptions {
+                claude_code: true,
+                ..LoginOptions::default()
+            },
+            true,
+        ),
+        None
+    );
+    set_or_clear_env("NO_BROWSER", old_no_browser);
+}
+
+#[test]
+fn unchanged_configured_file_with_native_credentials_cannot_claim_new_login() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let file = temp.path().join(".credentials.json");
+    std::fs::write(&file, "old synthetic credentials").unwrap();
+    let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+
+    let error =
+        configured_claude_file_is_unambiguous(&file, true, Some(modified), true).unwrap_err();
+    assert!(error.to_string().contains("cannot tell which account"));
+    assert!(configured_claude_file_is_unambiguous(&file, true, Some(modified), false).is_ok());
+    assert!(configured_claude_file_is_unambiguous(&file, false, None, true).is_ok());
+    assert!(
+        configured_claude_file_is_unambiguous(
+            &file,
+            true,
+            Some(std::time::SystemTime::UNIX_EPOCH),
+            true,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn claude_code_method_rejects_other_provider_account_and_noninteractive_options() {
     let claude = login_provider_for_choice(&ProviderChoice::Claude).unwrap();
     let openai = login_provider_for_choice(&ProviderChoice::Openai).unwrap();
