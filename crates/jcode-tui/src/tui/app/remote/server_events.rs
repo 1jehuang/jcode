@@ -2302,6 +2302,7 @@ pub(in crate::tui::app) fn handle_server_event(
             error,
             resolved_credential,
             reasoning_effort,
+            context_window,
             ..
         } => {
             app.remote_model_switch_in_flight = false;
@@ -2324,7 +2325,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
-                app.update_context_limit_for_model(&model);
+                app.update_context_limit_for_model(&model, context_window);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
