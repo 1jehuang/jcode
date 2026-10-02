@@ -30,9 +30,9 @@ impl CopilotApiProvider {
             body["messages"] =
                 Value::Array(Self::build_messages(&request.system, &request.messages));
             Self::add_max_token_parameter(&mut body, &request.model, 32_768u32);
-            self.add_reasoning_effort_parameter(&mut body, &request.model);
             Self::build_tools(&request.tools)
         };
+        self.add_reasoning_effort_parameter(&mut body, &request.model, uses_responses_api);
         let tool_count = tools.len();
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools);

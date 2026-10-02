@@ -375,6 +375,9 @@ Cursor uses jcode's native HTTPS transport. Copilot uses GitHub device-flow auth
 - Catalog routes and picker models are published together for the authenticated API host. A token host change triggers discovery again; retries rebuild the request payload if the new host advertises a different endpoint.
 - Catalog discovery has a 2-second deadline, including response-body reads and waiting for an in-progress refresh. Models with known fallback routes do not queue behind another refresh. Unknown models wait for endpoint metadata within that deadline and fail clearly if no route can be determined, rather than guessing Chat Completions. Failed automatic discovery has a 60-second cooldown; an explicit model refresh bypasses it.
 - For unambiguous CLI selection, use a provider-qualified model, for example `jcode --provider copilot --model copilot:gpt-6-luna`.
+- `/effort` uses the selected model's advertised `capabilities.supports.reasoning_effort` levels, not a Sonnet-only allowlist. Cold sessions fetch missing capabilities before setting effort, and refreshed capabilities are cached for later starts.
+- Selected effort is sent as `reasoning.effort` on Responses requests and top-level `reasoning_effort` on Chat Completions requests. Switching models does not send a level unsupported by the destination model.
+- GitHub's catalog and inference backend can disagree: GPT-6.1 Sol currently advertises `none`, but its backend rejects that value. jcode forwards the advertised selection and reports the API error rather than substituting another effort.
 - Credential discovery order:
   1. `COPILOT_GITHUB_TOKEN`
   2. `GH_TOKEN`

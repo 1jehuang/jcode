@@ -766,7 +766,7 @@ pub(super) async fn handle_set_reasoning_effort(
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     let result = if let Ok(mut agent_guard) = agent.try_lock() {
-        agent_guard.set_reasoning_effort(&effort)
+        apply_reasoning_effort(&mut agent_guard, &effort).await
     } else {
         spawn_deferred_reasoning_effort_change(
             id,
@@ -778,6 +778,14 @@ pub(super) async fn handle_set_reasoning_effort(
     };
 
     send_reasoning_effort_result(id, result, client_event_tx);
+}
+
+async fn apply_reasoning_effort(agent: &mut Agent, effort: &str) -> anyhow::Result<Option<String>> {
+    let provider = agent.provider_handle();
+    if provider.name().eq_ignore_ascii_case("copilot") && provider.available_efforts().is_empty() {
+        provider.prefetch_models().await?;
+    }
+    agent.set_reasoning_effort(effort)
 }
 
 fn send_reasoning_effort_result(
@@ -813,7 +821,7 @@ fn spawn_deferred_reasoning_effort_change(
     tokio::spawn(async move {
         let mut agent_guard = agent.lock().await;
         log_provider_control_lock_acquired("set_reasoning_effort", id, queued_at);
-        let result = agent_guard.set_reasoning_effort(&effort);
+        let result = apply_reasoning_effort(&mut agent_guard, &effort).await;
         crate::logging::info(&format!(
             "Deferred reasoning effort change completed request_id={} requested={} success={}",
             id,

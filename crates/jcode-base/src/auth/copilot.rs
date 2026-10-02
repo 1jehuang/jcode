@@ -909,6 +909,14 @@ pub struct CopilotModelInfo {
 pub struct CopilotModelCapabilities {
     #[serde(default)]
     pub limits: Option<CopilotModelLimits>,
+    #[serde(default)]
+    pub supports: Option<CopilotModelSupports>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CopilotModelSupports {
+    #[serde(default)]
+    pub reasoning_effort: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

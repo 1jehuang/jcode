@@ -109,7 +109,7 @@ async fn catalog_server(endpoint: &str) -> Result<(String, tokio::task::JoinHand
 async fn stalled_catalog_bounds_completions_without_queuing_or_repeated_fetches() -> Result<()> {
     let mut provider = make_test_provider(Vec::new());
     provider.client = reqwest::Client::builder().no_proxy().build()?;
-    provider.catalog.write().unwrap().source = CatalogSource::None;
+    provider.catalog.write().source = CatalogSource::None;
     provider.set_model("gpt-5-mini")?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     set_host(&provider, format!("http://{}", listener.local_addr()?)).await;
@@ -170,7 +170,7 @@ async fn host_change_refreshes_live_routes() -> Result<()> {
     let _home = CatalogHome::new()?;
     let mut provider = make_test_provider(Vec::new());
     provider.client = reqwest::Client::builder().no_proxy().build()?;
-    provider.catalog.write().unwrap().source = CatalogSource::None;
+    provider.catalog.write().source = CatalogSource::None;
     let (first_host, first_server) = catalog_server("/responses").await?;
     let first_bearer = set_host(&provider, first_host).await;
     provider
@@ -204,7 +204,7 @@ async fn reader_cannot_drop_catalog_publication() -> Result<()> {
     let (held_tx, held_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let _guard = models.read().unwrap();
+        let _guard = models.read();
         held_tx.send(()).unwrap();
         release_rx.recv().unwrap();
     });
@@ -263,7 +263,7 @@ async fn retry_on_new_host_rebuilds_route_and_payload() -> Result<()> {
     let _home = CatalogHome::new()?;
     let mut provider = make_test_provider(Vec::new());
     provider.client = reqwest::Client::builder().no_proxy().build()?;
-    provider.catalog.write().unwrap().source = CatalogSource::None;
+    provider.catalog.write().source = CatalogSource::None;
     provider.set_model("future-model")?;
     let first = TcpListener::bind("127.0.0.1:0").await?;
     let second = TcpListener::bind("127.0.0.1:0").await?;
@@ -273,11 +273,13 @@ async fn retry_on_new_host_rebuilds_route_and_payload() -> Result<()> {
     let old_server = tokio::spawn(async move {
         let (mut catalog, _) = first.accept().await?;
         read_headers(&mut catalog).await?;
-        reply(&mut catalog, "200 OK", "application/json", r#"{"data":[{"id":"future-model","model_picker_enabled":true,"supported_endpoints":["/chat/completions"]}]}"#).await?;
+        reply(&mut catalog, "200 OK", "application/json", r#"{"data":[{"id":"future-model","model_picker_enabled":true,"supported_endpoints":["/chat/completions"],"capabilities":{"supports":{"reasoning_effort":["high"]}}}]}"#).await?;
         let (mut completion, _) = first.accept().await?;
         let body = read_completion(&mut completion, "/chat/completions").await?;
         assert_eq!(body["messages"][1]["content"], "hello");
         assert!(body.get("input").is_none());
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("reasoning").is_none());
         // A refreshed token changes hosts while this attempt is in flight.
         *bearer.write().await = Some(copilot_auth::CopilotApiToken {
             token: "new-host-token".to_string(),
@@ -297,16 +299,23 @@ async fn retry_on_new_host_rebuilds_route_and_payload() -> Result<()> {
         let (mut catalog, _) = second.accept().await?;
         let headers = read_headers(&mut catalog).await?;
         assert!(headers.starts_with(b"GET /models HTTP/1.1\r\n"));
-        reply(&mut catalog, "200 OK", "application/json", r#"{"data":[{"id":"future-model","model_picker_enabled":true,"supported_endpoints":["/responses"]}]}"#).await?;
+        reply(&mut catalog, "200 OK", "application/json", r#"{"data":[{"id":"future-model","model_picker_enabled":true,"supported_endpoints":["/responses"],"capabilities":{"supports":{"reasoning_effort":["high"]}}}]}"#).await?;
         let (mut completion, _) = second.accept().await?;
         let body = read_completion(&mut completion, "/responses").await?;
         assert_eq!(body["model"], "future-model");
         assert_eq!(body["instructions"], "system");
         assert_eq!(body["input"][0]["content"][0]["text"], "hello");
         assert!(body.get("messages").is_none());
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert!(body.get("reasoning_effort").is_none());
         reply(&mut completion, "200 OK", "text/event-stream", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"NEW_HOST_OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n").await?;
         Ok::<_, anyhow::Error>(())
     });
+    let initial_bearer = provider.get_bearer_token().await?;
+    provider
+        .ensure_model_catalog(&initial_bearer, "future-model")
+        .await;
+    provider.set_reasoning_effort("high")?;
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(10), completion_text(&provider)).await??,
         "NEW_HOST_OK"
@@ -321,7 +330,7 @@ async fn failed_catalog_can_be_explicitly_refreshed_during_cooldown() -> Result<
     let _home = CatalogHome::new()?;
     let mut provider = make_test_provider(Vec::new());
     provider.client = reqwest::Client::builder().no_proxy().build()?;
-    provider.catalog.write().unwrap().source = CatalogSource::None;
+    provider.catalog.write().source = CatalogSource::None;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let bearer = set_host(&provider, format!("http://{}", listener.local_addr()?)).await;
     let server = tokio::spawn(async move {
@@ -358,7 +367,7 @@ async fn concurrent_responses_only_turns_share_discovery_before_sending() -> Res
     let _home = CatalogHome::new()?;
     let mut provider = make_test_provider(Vec::new());
     provider.client = reqwest::Client::builder().no_proxy().build()?;
-    provider.catalog.write().unwrap().source = CatalogSource::None;
+    provider.catalog.write().source = CatalogSource::None;
     provider.set_model("gpt-6-luna")?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     set_host(&provider, format!("http://{}", listener.local_addr()?)).await;
@@ -416,7 +425,7 @@ async fn unknown_model_with_stalled_catalog_fails_without_inference_or_repeated_
 -> Result<()> {
     let mut provider = make_test_provider(Vec::new());
     provider.client = reqwest::Client::builder().no_proxy().build()?;
-    provider.catalog.write().unwrap().source = CatalogSource::None;
+    provider.catalog.write().source = CatalogSource::None;
     provider.set_model("gpt-6-luna")?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     set_host(&provider, format!("http://{}", listener.local_addr()?)).await;

@@ -22,14 +22,16 @@ use jcode_provider_copilot::{
 use jcode_provider_copilot::{DEFAULT_MODEL, FALLBACK_MODELS};
 pub use jcode_provider_core::PremiumMode;
 use jcode_provider_core::{EventStream, Provider};
+use parking_lot::RwLock;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 mod catalog;
+mod effort;
 mod request;
 
 use catalog::ModelCatalog;
@@ -62,14 +64,6 @@ pub struct CopilotApiProvider {
     user_turn_count: Arc<std::sync::atomic::AtomicU64>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
     created_at: std::time::Instant,
-}
-
-/// Reasoning efforts supported by Copilot's claude-sonnet-5 route,
-/// per live `/models` capabilities (issue #558).
-const SONNET5_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
-
-fn copilot_model_supports_reasoning_effort(model: &str) -> bool {
-    model == "claude-sonnet-5"
 }
 
 fn copilot_model_uses_responses_api(model: &str, supported_endpoints: &[String]) -> bool {
@@ -107,10 +101,7 @@ impl CopilotApiProvider {
     }
 
     fn known_model_route(&self, model: &str, api_base: &str) -> Option<bool> {
-        let catalog = self
-            .catalog
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let catalog = self.catalog.read();
         if catalog.api_base.as_deref() == Some(api_base)
             && let Some(route) = catalog.routes.get(model)
         {
@@ -130,7 +121,7 @@ impl CopilotApiProvider {
 
     fn set_detected_default(&self, default: Option<String>) {
         if let Some(default) = default
-            && let Ok(mut model) = self.model.try_write()
+            && let Some(mut model) = self.model.try_write()
             && !self
                 .model_explicit
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -139,72 +130,12 @@ impl CopilotApiProvider {
         }
     }
 
-    fn current_reasoning_effort(&self) -> Option<String> {
-        self.reasoning_effort
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    /// Add top-level `reasoning_effort` when set and the model supports it.
-    fn add_reasoning_effort_parameter(&self, body: &mut Value, model: &str) {
-        if !copilot_model_supports_reasoning_effort(model) {
-            return;
-        }
-        if let Some(effort) = self.current_reasoning_effort() {
-            body["reasoning_effort"] = json!(effort);
-        }
-    }
-
     fn persisted_catalog_path() -> Result<std::path::PathBuf> {
         Ok(jcode_base::storage::app_config_dir()?.join("copilot_models_cache.json"))
     }
 
-    fn load_persisted_catalog() -> Option<PersistedCatalog> {
-        let path = Self::persisted_catalog_path().ok()?;
-        jcode_base::storage::read_json(&path)
-            .ok()
-            .filter(|catalog: &PersistedCatalog| !catalog.models.is_empty())
-    }
-
-    fn persist_catalog(models: &[String]) {
-        if models.is_empty() {
-            return;
-        }
-        let Ok(path) = Self::persisted_catalog_path() else {
-            return;
-        };
-        let payload = PersistedCatalog {
-            models: models.to_vec(),
-            fetched_at_rfc3339: Utc::now().to_rfc3339(),
-        };
-        if let Err(error) = jcode_base::storage::write_json(&path, &payload) {
-            jcode_base::logging::warn(&format!(
-                "Failed to persist Copilot model catalog {}: {}",
-                path.display(),
-                error
-            ));
-        }
-    }
-
-    fn seed_cached_catalog(&self) {
-        if let Some(cached) = Self::load_persisted_catalog() {
-            let mut catalog = self
-                .catalog
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            catalog.models = cached.models;
-            catalog.source = CatalogSource::Cached;
-        }
-    }
-
     fn model_catalog_detail_impl(&self) -> String {
-        match self
-            .catalog
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .source
-        {
+        match self.catalog.read().source {
             CatalogSource::Live => String::new(),
             CatalogSource::Cached => "cached live catalog".to_string(),
             CatalogSource::None => "catalog still loading".to_string(),
@@ -987,7 +918,7 @@ impl Provider for CopilotApiProvider {
         self.model
             .try_read()
             .map(|m| m.clone())
-            .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string())
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
@@ -1002,7 +933,7 @@ impl Provider for CopilotApiProvider {
                 "1M context window models are not supported via Copilot. Use the Anthropic API directly."
             );
         }
-        if let Ok(mut current) = self.model.try_write() {
+        if let Some(mut current) = self.model.try_write() {
             *current = trimmed.to_string();
             self.model_explicit
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -1019,10 +950,7 @@ impl Provider for CopilotApiProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        let catalog = self
-            .catalog
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let catalog = self.catalog.read();
         if !catalog.models.is_empty() {
             return catalog.models.clone();
         }
@@ -1038,7 +966,16 @@ impl Provider for CopilotApiProvider {
 
     async fn prefetch_models(&self) -> Result<()> {
         let grace_ms = Self::startup_prefetch_grace_ms();
-        if self.created_at.elapsed().as_millis() < u128::from(grace_ms) {
+        if !self
+            .model_explicit
+            .load(std::sync::atomic::Ordering::Acquire)
+            && self.created_at.elapsed().as_millis() < u128::from(grace_ms)
+            && self
+                .catalog
+                .read()
+                .model_efforts
+                .contains_key(&self.model())
+        {
             jcode_base::logging::info(&format!(
                 "Skipping Copilot model prefetch during startup grace window ({}ms)",
                 grace_ms
@@ -1094,42 +1031,34 @@ impl Provider for CopilotApiProvider {
     }
 
     fn reasoning_effort(&self) -> Option<String> {
-        if !copilot_model_supports_reasoning_effort(&self.model()) {
-            return None;
-        }
-        self.current_reasoning_effort()
+        self.reasoning_effort_for_model(&self.model())
     }
 
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         let model = self.model();
-        if !copilot_model_supports_reasoning_effort(&model) {
+        let efforts = self.efforts_for_model(&model);
+        if efforts.is_empty() {
             anyhow::bail!(
-                "Reasoning effort is not supported for Copilot model '{}' (only claude-sonnet-5)",
+                "Reasoning effort is not supported for Copilot model '{}'",
                 model
             );
         }
         let normalized = effort.trim().to_lowercase();
-        if !SONNET5_EFFORTS.contains(&normalized.as_str()) {
+        if !efforts.contains(&normalized.as_str()) {
             anyhow::bail!(
-                "Unsupported reasoning effort '{}' for Copilot claude-sonnet-5. Supported: {}",
+                "Unsupported reasoning effort '{}' for Copilot model '{}'. Supported: {}",
                 effort,
-                SONNET5_EFFORTS.join(", ")
+                model,
+                efforts.join(", ")
             );
         }
-        let mut guard = self
-            .reasoning_effort
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self.reasoning_effort.write();
         *guard = Some(normalized);
         Ok(())
     }
 
     fn available_efforts(&self) -> Vec<&'static str> {
-        if copilot_model_supports_reasoning_effort(&self.model()) {
-            SONNET5_EFFORTS.to_vec()
-        } else {
-            vec![]
-        }
+        self.efforts_for_model(&self.model())
     }
 }
 
