@@ -770,6 +770,10 @@ fn test_side_panel_header_close_hides_without_deleting_page() {
         .unwrap();
     let close_column = pane.right() - 2;
     assert_eq!(terminal.backend().buffer()[(close_column, pane.y)].symbol(), "x");
+    let header = (pane.x..pane.right())
+        .map(|x| terminal.backend().buffer()[(x, pane.y)].symbol().to_string())
+        .collect::<String>();
+    assert!(!header.contains("fullscre"), "clipped header: {header}");
 
     let redraw = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

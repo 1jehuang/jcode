@@ -586,18 +586,20 @@ pub(super) fn draw_side_panel_markdown(
         format!(" {}/{} ", page_index, page_count),
         Style::default().fg(dim_color()),
     ));
-    title_parts.push(Span::styled(
-        format!(
-            " {} {} ",
-            crate::tui::keybind::side_panel_toggle_key_label(),
-            if app.side_panel_fullscreen() {
-                "hide"
-            } else {
-                "fullscreen"
-            }
-        ),
-        Style::default().fg(dim_color()),
-    ));
+    let toggle_hint = format!(
+        " {} {} ",
+        crate::tui::keybind::side_panel_toggle_key_label(),
+        if app.side_panel_fullscreen() {
+            "hide"
+        } else {
+            "fullscreen"
+        }
+    );
+    if Line::from(title_parts.clone()).width() + Line::from(toggle_hint.as_str()).width()
+        <= side_panel_inner(area).width.saturating_sub(3) as usize
+    {
+        title_parts.push(Span::styled(toggle_hint, Style::default().fg(dim_color())));
+    }
     if focused {
         title_parts.push(Span::styled(
             " j/k scroll ",
