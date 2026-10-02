@@ -2562,6 +2562,24 @@ fn model_changed_event(
     }
 }
 
+/// The panel's window and the compaction budget must not disagree. Every site that
+/// assigns `context_limit` directly used to update the panel while skipping the
+/// budget sync, so a correct panel could sit on a stale compaction trigger — about
+/// five times too early on a 1M route.
+#[test]
+fn test_setting_context_limit_also_syncs_the_compaction_budget() {
+    let mut app = create_test_app();
+
+    app.set_context_limit_and_sync_budget(1_000_000);
+
+    assert_eq!(app.context_limit, 1_000_000, "panel must show the new window");
+    let budget = app.registry.compaction().try_read().expect("compaction lock").token_budget();
+    assert_eq!(
+        budget, 1_000_000,
+        "compaction budget must follow the panel limit, or the session compacts early"
+    );
+}
+
 /// Issue #1504: the effort chip must follow the effort the server reports for
 /// the switched-to model: adopt a new level, clear on `None`, and leave the
 /// running model's effort untouched when the switch fails.

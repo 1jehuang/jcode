@@ -661,6 +661,22 @@ impl App {
         }
     }
 
+/// Assign the panel's context window and keep the compaction budget in step
+    /// with it.
+    ///
+    /// Assigning `context_limit` directly updates the panel but skips the
+    /// budget sync, so the two can disagree: a correct panel with a stale
+    /// compaction trigger that fires about five times too early on a 1M route.
+    /// Every direct assignment should come through here.
+    pub(super) fn set_context_limit_and_sync_budget(&mut self, limit: usize) {
+        self.context_limit = limit as u64;
+        self.context_warning_shown = false;
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.set_budget(limit);
+        };
+    }
+
     pub(super) fn effective_context_tokens_from_usage(
         &self,
         input_tokens: u64,
