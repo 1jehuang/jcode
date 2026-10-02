@@ -752,6 +752,105 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
 }
 
 #[test]
+fn test_side_panel_header_close_hides_without_deleting_page() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    let close_column = pane.right() - 2;
+    assert_eq!(terminal.backend().buffer()[(close_column, pane.y)].symbol(), "x");
+
+    let redraw = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: close_column,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(!redraw);
+    assert!(app.side_panel.focused_page().is_none());
+    assert_eq!(app.side_panel.pages[0].id, "plan");
+    assert_eq!(app.status_notice(), Some("Side panel: OFF".to_string()));
+
+    app.set_side_panel_snapshot(test_side_panel_snapshot("plan", "Updated plan"));
+    assert!(app.side_panel.focused_page().is_none());
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT).unwrap();
+    assert_eq!(app.side_panel.focused_page().unwrap().title, "Updated plan");
+}
+
+#[test]
+fn test_fullscreen_side_panel_header_close_restores_chat() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.side_panel_fullscreen = true;
+    app.diff_pane_focus = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    let close_column = pane.right() - 2;
+    assert_eq!(terminal.backend().buffer()[(close_column, pane.y)].symbol(), "x");
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: close_column,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(!app.side_panel_fullscreen);
+    assert!(!app.diff_pane_focus);
+}
+
+#[test]
+fn test_drag_release_over_side_panel_close_does_not_hide_page() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    for (kind, column, row) in [
+        (MouseEventKind::Down(MouseButton::Left), pane.x + 5, pane.y + 2),
+        (MouseEventKind::Drag(MouseButton::Left), pane.right() - 2, pane.y),
+        (MouseEventKind::Up(MouseButton::Left), pane.right() - 2, pane.y),
+    ] {
+        app.handle_mouse_event(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    assert!(app.side_panel.focused_page().is_some());
+}
+
+#[test]
 fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();

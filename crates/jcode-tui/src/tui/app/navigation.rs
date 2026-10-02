@@ -1134,17 +1134,7 @@ impl App {
                 self.set_status_notice(format!("Side panel: {title} (fullscreen)"));
                 return;
             }
-            self.side_panel_fullscreen = false;
-            crate::tui::clear_side_panel_render_caches();
-            self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
-            self.side_panel.focused_page_id = None;
-            self.side_panel_user_hidden = true;
-            self.side_panel_explicit_hidden = true;
-            if !self.diff_pane_visible() {
-                self.set_diff_pane_focus(false);
-            }
-            self.sync_diagram_fit_context();
-            self.set_status_notice("Side panel: OFF");
+            self.hide_side_panel();
             return;
         }
 
@@ -1172,6 +1162,18 @@ impl App {
             .map(|page| format!("Side panel: {}", page.title))
             .unwrap_or_else(|| "Side panel: ON".to_string());
         self.set_status_notice(status);
+    }
+
+    fn hide_side_panel(&mut self) {
+        self.side_panel_fullscreen = false;
+        crate::tui::clear_side_panel_render_caches();
+        self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
+        self.side_panel.focused_page_id = None;
+        self.side_panel_user_hidden = true;
+        self.side_panel_explicit_hidden = true;
+        self.set_diff_pane_focus(false);
+        self.sync_diagram_fit_context();
+        self.set_status_notice("Side panel: OFF");
     }
 
     fn notify_no_side_panel_pages(&mut self) {
@@ -1519,6 +1521,15 @@ impl App {
             if let Some(diff_area) = layout.diff_pane_area {
                 over_diff_pane =
                     super::super::layout_utils::point_in_rect(mouse.column, mouse.row, diff_area);
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    && self.side_panel.focused_page().is_some()
+                    && super::super::ui::side_panel_close_area(diff_area).is_some_and(|area| {
+                        super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                    })
+                {
+                    self.hide_side_panel();
+                    finish_mouse_event!(false, "side_panel_close");
+                }
             }
             if diagram_available && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if on_diagram_border {
