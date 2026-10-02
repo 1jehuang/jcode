@@ -808,6 +808,23 @@ impl MemoryManager {
         v
     }
 
+    /// Convex-combination weight for hybrid fusion (C3 port, default OFF:
+    /// `memory_convex_alpha`, default 0.0); env `JCODE_MEMORY_CONVEX_ALPHA`
+    /// wins. 0.0 selects the shipped RRF path; (0, 1] selects convex
+    /// fusion `alpha * dense_norm + (1 - alpha) * sparse_norm` with each
+    /// leg min-max normalized over its own retrieved pool. Non-finite or
+    /// negative values fall back to 0.0 (RRF path) so a bad config can
+    /// never silently switch the fusion rule; values above 1.0 clamp to
+    /// 1.0 (dense-only). Public so the recall bench fuses exactly as the
+    /// runtime when driving alpha grids via env.
+    pub fn convex_alpha() -> f32 {
+        let v = crate::config::config().agents.memory_convex_alpha;
+        if !v.is_finite() || v <= 0.0 {
+            return 0.0;
+        }
+        v.clamp(0.0, 1.0)
+    }
+
     /// Recency-prior weight for hybrid RRF fusion (G-R, shipped 2026-09-30:
     /// `memory_recency_weight`, default 0.05); env
     /// `JCODE_MEMORY_RECENCY_W` wins. Non-finite or negative falls back
@@ -1770,14 +1787,36 @@ impl MemoryManager {
         // compresses rank gaps, lower k rewards top ranks more steeply.
         // The dense list is weighted by `memory_rrf_dense_weight`
         // (default 1.0 = equal weights); the sparse list keeps weight 1.0.
+        //
+        // C3 convex-combination port (default OFF): when
+        // `memory_convex_alpha` is in (0, 1], fuse instead as
+        // `alpha * dense_norm + (1 - alpha) * sparse_norm` where each leg
+        // is min-max normalized over its own retrieved pool (missing =
+        // 0.0, degenerate pool = 1.0 for retrieved docs — the c3 scaffold
+        // semantics from exec/c3-fusion). The trio BM25 leg, the prefilter
+        // pool, and the G-R recency position below are unchanged; only
+        // the combination rule switches. Alpha 0.0 (the default) keeps
+        // the exact RRF path below, bit-identical to pre-port.
         let rrf_k = Self::rrf_k();
         let w_dense = Self::rrf_dense_weight();
+        let convex_alpha = Self::convex_alpha();
         let mut fused: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
-        for (rank, (idx, _)) in dense.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += w_dense / (rrf_k + rank as f32 + 1.0);
-        }
-        for (rank, (idx, _)) in sparse.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
+        if convex_alpha > 0.0 {
+            let dense_norm = minmax_normalize(&dense);
+            let sparse_norm = minmax_normalize(&sparse);
+            for (idx, v) in dense_norm {
+                *fused.entry(idx).or_insert(0.0) += convex_alpha * v;
+            }
+            for (idx, v) in sparse_norm {
+                *fused.entry(idx).or_insert(0.0) += (1.0 - convex_alpha) * v;
+            }
+        } else {
+            for (rank, (idx, _)) in dense.iter().enumerate() {
+                *fused.entry(*idx).or_insert(0.0) += w_dense / (rrf_k + rank as f32 + 1.0);
+            }
+            for (rank, (idx, _)) in sparse.iter().enumerate() {
+                *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
+            }
         }
 
         // G-R recency prior: bounded additive bonus per fused candidate.
@@ -2855,6 +2894,47 @@ fn prefilter_for_jev(entries: Vec<MemoryEntry>, query: &str) -> Vec<MemoryEntry>
     ranked
         .into_iter()
         .filter_map(|(idx, _)| entries[idx].take())
+        .collect()
+}
+
+/// Per-query min-max normalization of one retriever leg over its retrieved
+/// pool (C3 convex-combination port; c3 scaffold semantics from
+/// exec/c3-fusion PLAN.md §4): `(s - min) / (max - min)` into [0, 1].
+/// A doc absent from the leg contributes nothing (caller fuses 0.0 by
+/// union-ing only retrieved idxs). Degenerate pools (empty, single-item,
+/// or max == min) map every retrieved doc to 1.0 so a constant leg stays
+/// neutral rather than zeroing its side of the convex sum. Non-finite
+/// scores are treated as the pool minimum (defensive: BM25/cosine legs
+/// are finite in practice, but a NaN must not poison normalization).
+fn minmax_normalize(ranked: &[(usize, f32)]) -> Vec<(usize, f32)> {
+    if ranked.is_empty() {
+        return Vec::new();
+    }
+    // Range over finite scores only: a non-finite leg score maps to 0.0
+    // (pool minimum) instead of stretching or poisoning the span.
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    for (_, s) in ranked {
+        if !s.is_finite() {
+            continue;
+        }
+        if *s < lo {
+            lo = *s;
+        }
+        if *s > hi {
+            hi = *s;
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() || (hi - lo) <= 0.0 {
+        return ranked.iter().map(|(idx, _)| (*idx, 1.0)).collect();
+    }
+    let span = hi - lo;
+    ranked
+        .iter()
+        .map(|(idx, s)| {
+            let s = if s.is_finite() { *s } else { lo };
+            (*idx, (s - lo) / span)
+        })
         .collect()
 }
 

@@ -350,6 +350,36 @@ fn test_env_override_memory_rrf_dense_w() {
 }
 
 #[test]
+fn test_env_override_memory_convex_alpha() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_CONVEX_ALPHA");
+    crate::env::remove_var("JCODE_MEMORY_CONVEX_ALPHA");
+
+    crate::env::set_var("JCODE_MEMORY_CONVEX_ALPHA", "0.8");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_convex_alpha, 0.8);
+
+    // Non-finite, negative, and garbage values leave the file value in place.
+    // 0.0 applies (explicit off). Above-1.0 values apply here and clamp at use.
+    for bad in ["NaN", "inf", "-inf", "abc", "", "-0.5"] {
+        crate::env::set_var("JCODE_MEMORY_CONVEX_ALPHA", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_convex_alpha = 0.3;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_convex_alpha, 0.3, "env {bad} must not apply");
+    }
+    crate::env::set_var("JCODE_MEMORY_CONVEX_ALPHA", "0.0");
+    let mut cfg = Config::default();
+    cfg.agents.memory_convex_alpha = 0.3;
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_convex_alpha, 0.0);
+
+    restore_env_var("JCODE_MEMORY_CONVEX_ALPHA", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
 fn test_env_override_memory_recency_w() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_MEMORY_RECENCY_W");
