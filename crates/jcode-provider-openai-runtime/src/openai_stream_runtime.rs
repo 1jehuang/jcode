@@ -765,6 +765,7 @@ pub(super) async fn try_persistent_ws_continuation(
     let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
+    let mut response_tool_call_count = 0usize;
     let mut saw_response_completed = false;
     let mut consumer_dropped = false;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
@@ -890,6 +891,9 @@ pub(super) async fn try_persistent_ws_continuation(
                     {
                         return PersistentWsResult::Failed(format!("stream error: {}", message));
                     }
+                    if stream_event_starts_tool_call(&event) {
+                        response_tool_call_count += 1;
+                    }
                     if tx.send(Ok(event)).await.is_err() {
                         consumer_dropped = true;
                         break;
@@ -901,6 +905,9 @@ pub(super) async fn try_persistent_ws_continuation(
                     }
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
                         saw_response_completed = true;
+                    }
+                    if stream_event_starts_tool_call(&event) {
+                        response_tool_call_count += 1;
                     }
                     if tx.send(Ok(event)).await.is_err() {
                         consumer_dropped = true;
@@ -967,8 +974,8 @@ pub(super) async fn try_persistent_ws_continuation(
     // tool outputs in the incremental delta, and OpenAI rejects that chain with
     // "No tool output found for function call ...". Reset to the full transcript
     // path, whose request builder pairs function calls with outputs explicitly.
-    if persistent_ws_response_requires_chain_reset(&completed_tool_items) {
-        let tool_call_count = completed_tool_items.len();
+    if persistent_ws_response_requires_chain_reset(response_tool_call_count) {
+        let tool_call_count = response_tool_call_count;
         jcode_base::logging::info(&format!(
             "Persistent WS response emitted {} tool call(s); clearing response chain",
             tool_call_count
@@ -1211,6 +1218,7 @@ pub(super) async fn stream_response_websocket_persistent(
     let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
+    let mut response_tool_call_count = 0usize;
     let mut saw_response_completed = false;
     let mut saw_api_activity = false;
     let ws_started_at = Instant::now();
@@ -1352,6 +1360,9 @@ pub(super) async fn stream_response_websocket_persistent(
                                 )));
                             }
                         }
+                        if stream_event_starts_tool_call(&event) {
+                            response_tool_call_count += 1;
+                        }
                         if tx.send(Ok(event)).await.is_err() {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Warn,
@@ -1387,6 +1398,9 @@ pub(super) async fn stream_response_websocket_persistent(
                         }
                         if matches!(event, StreamEvent::MessageEnd { .. }) {
                             saw_response_completed = true;
+                        }
+                        if stream_event_starts_tool_call(&event) {
+                            response_tool_call_count += 1;
                         }
                         if tx.send(Ok(event)).await.is_err() {
                             log_openai_stream_lifecycle(
@@ -1443,8 +1457,8 @@ pub(super) async fn stream_response_websocket_persistent(
     // Do not save response chains that end with tool calls. A future turn can
     // replay the full transcript safely, but a `previous_response_id` chain can
     // require function_call_output items that are outside the incremental delta.
-    if persistent_ws_response_requires_chain_reset(&completed_tool_items) {
-        let tool_call_count = completed_tool_items.len();
+    if persistent_ws_response_requires_chain_reset(response_tool_call_count) {
+        let tool_call_count = response_tool_call_count;
         jcode_base::logging::info(&format!(
             "Fresh WS response emitted {} tool call(s); not saving response chain",
             tool_call_count

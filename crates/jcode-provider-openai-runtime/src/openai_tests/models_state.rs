@@ -162,15 +162,8 @@ fn test_summarize_ws_input_counts_tool_outputs() {
 
 #[test]
 fn test_persistent_ws_response_with_tool_calls_resets_chain() {
-    let mut completed_tool_items = HashSet::new();
-    assert!(!persistent_ws_response_requires_chain_reset(
-        &completed_tool_items
-    ));
-
-    completed_tool_items.insert("fc_123".to_string());
-    assert!(persistent_ws_response_requires_chain_reset(
-        &completed_tool_items
-    ));
+    assert!(!persistent_ws_response_requires_chain_reset(0));
+    assert!(persistent_ws_response_requires_chain_reset(1));
 }
 
 #[test]
