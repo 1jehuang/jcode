@@ -329,3 +329,98 @@ async fn spawn_target_creates_one_child_session_and_runs_task() {
                 .contains("Spawned session handled task.")
     }));
 }
+
+/// The visible-cycle window must go through the shared terminal launcher
+/// rather than naming one emulator.
+///
+/// This regression previously shipped: `run_cycle` ran `kitty` unconditionally,
+/// so `ambient.visible = true` logged "failed to spawn kitty" and silently fell
+/// back to headless on every machine without kitty, even when the user had
+/// explicitly configured a different terminal. The fallback is intentional, but
+/// it masked the real problem, so the only durable check is that the launcher
+/// consults the shared candidate list.
+#[test]
+fn ambient_visible_launch_does_not_hardcode_a_terminal() {
+    let source = include_str!("runner.rs");
+    let launcher_start = source
+        .find("async fn run_cycle(")
+        .expect("run_cycle must exist");
+    let launcher_end = source[launcher_start..]
+        .find("async fn run_cycle_with_visible_launcher")
+        .map(|offset| launcher_start + offset)
+        .expect("run_cycle_with_visible_launcher must follow run_cycle");
+    let launcher = &source[launcher_start..launcher_end];
+
+    assert!(
+        launcher.contains("spawn_command_in_new_terminal_with"),
+        "the ambient visible launcher must use the shared terminal launcher"
+    );
+
+    // Terminal names may still appear in explanatory comments, so only
+    // executable lines are checked.
+    for line in launcher.lines() {
+        let code = line.split("//").next().unwrap_or("");
+        for terminal in [
+            "kitty",
+            "ghostty",
+            "wezterm",
+            "alacritty",
+            "iterm2",
+            "gnome-terminal",
+        ] {
+            assert!(
+                !code.contains(terminal),
+                "ambient visible launch hardcodes `{terminal}`; route it through \
+                 jcode_terminal_launch candidates instead: {}",
+                line.trim()
+            );
+        }
+    }
+}
+
+/// The shared launcher must offer at least one candidate terminal, otherwise
+/// `visible = true` can never succeed anywhere.
+#[test]
+fn terminal_launcher_offers_candidates() {
+    let candidates = jcode_terminal_launch::resume_terminal_candidates();
+    assert!(
+        !candidates.is_empty(),
+        "terminal candidate list should never be empty"
+    );
+}
+
+/// `trigger()` must persist the idle status, not just set it in memory.
+///
+/// The run loop re-reads state from disk through `AmbientManager::new()` on
+/// every iteration, so an in-memory-only status flip is invisible to
+/// `should_run()`. That shipped: `jcode ambient trigger` printed "Ambient cycle
+/// triggered" and returned 0 while the loop woke, reloaded the still-`Scheduled`
+/// status from disk, logged "not time to run", and slept again. The cycle never
+/// ran and nothing surfaced the discrepancy.
+#[tokio::test]
+async fn trigger_persists_idle_status_to_disk() {
+    use crate::ambient::{AmbientState, AmbientStatus};
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    // Put a scheduled wake far enough out that should_run() is false.
+    let mut state = AmbientState::default();
+    state.status = AmbientStatus::Scheduled {
+        next_wake: chrono::Utc::now() + chrono::Duration::hours(4),
+    };
+    state.save().expect("seed scheduled state");
+
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    runner.trigger().await;
+
+    // Re-read from disk exactly as the run loop does.
+    let reloaded = AmbientState::load().expect("reload state");
+    assert!(
+        matches!(reloaded.status, AmbientStatus::Idle),
+        "trigger() must persist Idle so the run loop's disk reload sees it; \
+         found {:?}",
+        reloaded.status
+    );
+}
