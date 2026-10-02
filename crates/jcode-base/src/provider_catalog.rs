@@ -791,6 +791,11 @@ fn apply_openai_compatible_profile_env_impl(
         crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", &resolved.api_key_env);
         crate::env::set_var("JCODE_OPENROUTER_ENV_FILE", &resolved.env_file);
         crate::env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", &resolved.id);
+        // API_BASE makes the runtime treat this as explicit config, so carry
+        // the profile default through the environment it reads for the model.
+        if let Some(default_model) = resolved.default_model.as_deref() {
+            crate::env::set_var("JCODE_OPENROUTER_MODEL", default_model);
+        }
         crate::env::set_var("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
         let static_models = openai_compatible_profile_static_models(profile);
         if static_models.is_empty() {
