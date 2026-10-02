@@ -360,6 +360,20 @@ mod tests {
     }
 
     #[test]
+    fn requesty_login_identifies_openai_compatible_endpoint() {
+        let provider = resolve_login_selection("requesty", &cli_login_providers())
+            .expect("Requesty CLI login provider");
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Requesty should use the OpenAI-compatible runtime");
+        };
+
+        assert_eq!(profile.id, "requesty");
+        assert_eq!(profile.api_base, "https://router.requesty.ai/v1");
+        assert_eq!(profile.api_key_env, "REQUESTY_API_KEY");
+        assert!(profile.requires_api_key);
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),
