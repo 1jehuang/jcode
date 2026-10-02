@@ -623,7 +623,7 @@ fn cmd_pool(args: &[String]) -> Result<()> {
         // Multiple diverse retrievers widen the pool (reduces pooling bias).
         let dense = dense_retrieve(&q_emb, &corpus, 0.0, pool_n, false);
         let lexical = bm25.search(&q.query, pool_n);
-        let fused = rrf(&[dense.clone(), lexical.clone()], 60.0, pool_n);
+        let fused = rrf(&[dense.clone(), lexical.clone()], jcode::memory::MemoryManager::rrf_k(), pool_n);
 
         let mut retrievers_by_id: HashMap<String, Vec<String>> = HashMap::new();
         for (id, _) in &dense {
@@ -1228,7 +1228,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             let q_emb = embedding::embed(&q.query)?;
             let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
             let lex = bm25.search(&q.query, rerank_pool);
-            let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+            let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
             let cands: Vec<(String, String)> = pool
                 .into_iter()
                 .map(|(id, _)| {
@@ -1466,7 +1466,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             let q_emb = embedding::embed(&q.query)?;
             let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
             let lex = bm25.search(&q.query, rerank_pool);
-            let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+            let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
             let cands: Vec<(String, String)> = pool
                 .into_iter()
                 .map(|(id, _)| {
@@ -1598,7 +1598,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             let q_emb = embedding::embed(&q.query)?;
             let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
             let lex = bm25.search(&q.query, rerank_pool);
-            let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+            let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
             let cands: Vec<(String, String)> = pool
                 .into_iter()
                 .map(|(id, _)| {
@@ -1735,7 +1735,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 "hybrid_dyn" => {
                     let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                     let lex = bm25.search(&q.query, 50);
-                    let pool = rrf(&[dense, lex], 60.0, 50);
+                    let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                     dynamic_gate_abs(&pool, gate_floor, gate_drop, gate_max, gate_abs)
                 }
                 "oracle_dyn" => Vec::new(), // gold is empty -> oracle injects nothing
@@ -1827,7 +1827,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             "hybrid" => {
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), EMBEDDING_MAX_HITS)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
@@ -1841,7 +1841,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .expect("--reranker required for ce_rerank");
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
                 let lex = bm25.search(&q.query, rerank_pool);
-                let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
                 let cands: Vec<(String, String)> = pool
                     .into_iter()
                     .map(|(id, _)| {
@@ -1864,7 +1864,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .expect("--reranker required for ce_rerank_focused");
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
                 let lex = bm25.search(&q.query, rerank_pool);
-                let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
                 let cands: Vec<(String, String)> = pool
                     .into_iter()
                     .map(|(id, _)| {
@@ -1890,7 +1890,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // irrelevant filler up to N even when only 1-2 are relevant.
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let pool = rrf(&[dense, lex], 60.0, 50);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 let rel_set: HashSet<&String> = rel.iter().collect();
                 let mut ids: Vec<String> = pool.into_iter().map(|(id, _)| id).collect();
                 // Stable sort: relevant candidates first, original order otherwise.
@@ -1907,7 +1907,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // top-k structurally throws away.
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let pool = rrf(&[dense, lex], 60.0, 50);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 let rel_set: HashSet<&String> = rel.iter().collect();
                 pool.into_iter()
                     .map(|(id, _)| id)
@@ -1921,7 +1921,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // precision improvement. Tune via --gate_floor/--gate_drop/--gate_max.
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let pool = rrf(&[dense, lex], 60.0, 50);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 dynamic_gate_abs(&pool, gate_floor, gate_drop, gate_max, gate_abs)
             }
             "llm_rerank" | "llm_rerank_padded" | "llm_strict" | "llm_judge" | "llm_synth"
@@ -1954,7 +1954,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             "hybrid_priors" => {
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let fused = rrf(&[dense, lex], 60.0, 50);
+                let fused = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 // Multiply fused RRF score by a gentle prior derived from
                 // confidence / strength / recency. Priors only re-order within
                 // the already-retrieved set; they never add/remove candidates.
@@ -1976,7 +1976,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             "hybrid_focused" => {
                 let dense = dense_retrieve(&q_emb_focused, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&focused, 50);
-                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), EMBEDDING_MAX_HITS)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
@@ -1986,7 +1986,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // contributes its graph neighbors with a decayed score, fused in.
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let base = rrf(&[dense, lex], 60.0, 50);
+                let base = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 let mut scored: HashMap<String, f32> = base.iter().cloned().collect();
                 // Expansion: add neighbors of the top base hits with 0.5 decay.
                 for (id, score) in base.iter().take(10) {
@@ -2022,7 +2022,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .expect("--embedder required for bge_hybrid");
                 let dense = alt_dense_rank(qe, &alt_corpus_emb, 50);
                 let lex = bm25.search(&q.query, 50);
-                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), EMBEDDING_MAX_HITS)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
@@ -2045,7 +2045,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .expect("openai_hybrid requires the OpenAI backend");
                 let dense = alt_dense_rank(qe, &openai_corpus_emb, 50);
                 let lex = bm25.search(&q.query, 50);
-                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), EMBEDDING_MAX_HITS)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
@@ -2420,7 +2420,7 @@ fn cmd_gate(args: &[String]) -> Result<()> {
                 let query = format_context_for_relevance(window);
                 let dense = dense_retrieve(emb, corpus, 0.0, pool_k, false);
                 let lex = bm25.search(&query, pool_k);
-                let pool = rrf(&[dense, lex], 60.0, pool_k);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), pool_k);
                 let ids: std::collections::HashSet<String> =
                     pool.into_iter().map(|(id, _)| id).collect();
                 pool_total += 1;
