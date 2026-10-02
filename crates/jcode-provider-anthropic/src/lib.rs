@@ -373,10 +373,10 @@ fn is_placeholder_tool_result(content: &str, is_error: Option<bool>) -> bool {
 ///
 /// An interrupted turn can persist a server_tool_use without its matching
 /// web_search_tool_result. Replaying that block verbatim causes Anthropic to
-/// reject the entire request with a 400. Completed history gets an explicit
-/// synthetic error result so the sequence remains valid; a final assistant
-/// turn ending on an unmatched server-tool block is preserved because that is
-/// the valid pause_turn resume shape.
+/// reject the entire request with a 400. In completed history, an orphaned
+/// server-tool block is dropped rather than inventing a server response; a
+/// final assistant turn ending on an unmatched server-tool block is preserved
+/// because that is the valid pause_turn resume shape.
 fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Vec<Message> {
     use std::collections::HashSet;
 
@@ -441,20 +441,8 @@ fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Vec<Message> 
                     let Some(id) = item.get("id").and_then(Value::as_str) else {
                         continue;
                     };
-                    content.push(block.clone());
-                    if !results.contains(id) && final_paused_id.as_deref() != Some(id) {
-                        content.push(ContentBlock::ProviderNative {
-                            provider: jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC
-                                .to_string(),
-                            item: json!({
-                                "type": "web_search_tool_result",
-                                "tool_use_id": id,
-                                "content": {
-                                    "type": "web_search_tool_result_error",
-                                    "error_code": "search_interrupted"
-                                }
-                            }),
-                        });
+                    if results.contains(id) || final_paused_id.as_deref() == Some(id) {
+                        content.push(block.clone());
                     }
                 }
                 Some("web_search_tool_result") => {
