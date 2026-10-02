@@ -5,18 +5,46 @@
 //! persistence and can be queried across daemon, CLI, and API bridge processes.
 
 use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::session::Session;
 
-const MAX_LEGACY_SNAPSHOT_BYTES: u64 = 256 * 1024;
+const MAX_METADATA_HEAD_BYTES: usize = 64 * 1024;
+const MAX_METADATA_TAIL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PENDING_METADATA_BYTES: u64 = 64 * 1024;
 const LEGACY_BOOTSTRAP_KEY: &str = "legacy-bootstrap-v1";
+
+#[derive(Deserialize)]
+struct SnapshotMetadataHeader {
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    custom_title: Option<String>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotMetadataSuffix {
+    #[allow(dead_code)]
+    is_canary: bool,
+    #[serde(default)]
+    working_dir: Option<String>,
+    status: crate::session::SessionStatus,
+    #[serde(default)]
+    last_active_at: Option<DateTime<Utc>>,
+    is_debug: bool,
+    saved: bool,
+    #[serde(default)]
+    save_label: Option<String>,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct RecentSessionMetadata {
@@ -153,9 +181,8 @@ pub fn recent_persisted(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
         return Ok(Vec::new());
     }
 
-    let fetch_limit = limit.saturating_mul(4).min(500);
     recover_pending()?;
-    bootstrap_from_snapshots_once(fetch_limit)?;
+    bootstrap_from_snapshots_once()?;
     let entries = recent(500)?;
 
     for mut entry in entries {
@@ -190,7 +217,7 @@ pub fn recent_persisted(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
     Ok(hydrated)
 }
 
-fn bootstrap_from_snapshots_once(limit: usize) -> Result<()> {
+fn bootstrap_from_snapshots_once() -> Result<()> {
     let connection = open()?;
     let complete = connection
         .query_row(
@@ -238,16 +265,9 @@ fn bootstrap_from_snapshots_once(limit: usize) -> Result<()> {
         .collect::<Vec<_>>();
     candidates.sort_unstable_by_key(|(modified, _)| std::cmp::Reverse(*modified));
 
-    let mut indexed = 0usize;
     for (_, session_id) in candidates {
         if let Ok(metadata) = metadata_from_snapshot(&session_id) {
             let _ = upsert(&metadata);
-            if metadata.is_debug == Some(false) {
-                indexed += 1;
-                if indexed >= limit {
-                    break;
-                }
-            }
         }
     }
     mark_legacy_bootstrap_complete()?;
@@ -256,11 +276,193 @@ fn bootstrap_from_snapshots_once(limit: usize) -> Result<()> {
 
 fn metadata_from_snapshot(session_id: &str) -> Result<RecentSessionMetadata> {
     let path = crate::session::session_path(session_id)?;
-    if path.metadata()?.len() > MAX_LEGACY_SNAPSHOT_BYTES {
-        bail!("legacy session snapshot exceeds metadata bootstrap limit");
+    let mut file = std::fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+
+    let head_len = usize::try_from(file_len.min(MAX_METADATA_HEAD_BYTES as u64))?;
+    let mut head = vec![0; head_len];
+    file.read_exact(&mut head)?;
+    let header = snapshot_metadata_header(&head)?;
+    if header.id != session_id {
+        bail!("session snapshot ID does not match its filename");
     }
-    let session = Session::load_startup_stub(session_id)?;
-    Ok(metadata_from_session(&session))
+
+    let tail_len = usize::try_from(file_len.min(MAX_METADATA_TAIL_BYTES as u64))?;
+    file.seek(SeekFrom::End(-i64::try_from(tail_len)?))?;
+    let mut tail = vec![0; tail_len];
+    file.read_exact(&mut tail)?;
+    let suffix = snapshot_metadata_suffix(&tail)
+        .context("session snapshot has no bounded metadata suffix")?;
+
+    Ok(RecentSessionMetadata {
+        session_id: header.id,
+        working_dir: suffix.working_dir,
+        generated_title: header.title,
+        custom_title: header.custom_title,
+        todo_title: crate::todo::load_session_title(session_id),
+        saved: suffix.saved,
+        save_label: suffix.save_label,
+        updated_at_ms: header.updated_at.timestamp_millis(),
+        last_active_at_ms: suffix.last_active_at.map(|time| time.timestamp_millis()),
+        status: Some(suffix.status.display().to_string()),
+        is_debug: Some(suffix.is_debug),
+    })
+}
+
+fn snapshot_metadata_header(bytes: &[u8]) -> Result<SnapshotMetadataHeader> {
+    const MESSAGES_FIELD: &[u8] = b"\"messages\":";
+    let field_start = bytes
+        .windows(MESSAGES_FIELD.len())
+        .position(|window| window == MESSAGES_FIELD)
+        .context("session snapshot header has no messages field")?;
+    let mut json = bytes[..field_start + MESSAGES_FIELD.len()].to_vec();
+    json.extend_from_slice(b"[]}");
+    Ok(serde_json::from_slice(&json)?)
+}
+
+fn snapshot_metadata_suffix(bytes: &[u8]) -> Option<SnapshotMetadataSuffix> {
+    const ANCHOR: &[u8] = b"\"is_canary\":";
+    bytes
+        .windows(ANCHOR.len())
+        .enumerate()
+        .filter_map(|(start, window)| (window == ANCHOR).then_some(start))
+        .find_map(|start| parse_snapshot_metadata_suffix(&bytes[start..]))
+}
+
+fn parse_snapshot_metadata_suffix(bytes: &[u8]) -> Option<SnapshotMetadataSuffix> {
+    const FIELD_ORDER: &[&str] = &[
+        "is_canary",
+        "testing_build",
+        "working_dir",
+        "short_name",
+        "status",
+        "last_pid",
+        "last_active_at",
+        "is_debug",
+        "saved",
+        "save_label",
+    ];
+    const FOLLOWING_FIELDS: &[&str] = &[
+        "env_snapshots",
+        "memory_injections",
+        "replay_events",
+        "migration_epoch",
+    ];
+
+    let mut cursor = 0usize;
+    let mut last_order = None;
+    let mut saw_status = false;
+    let mut saw_debug = false;
+    let mut saw_saved = false;
+    let mut object = vec![b'{'];
+    loop {
+        let (field, after_field) = json_field_name(bytes, cursor)?;
+        let Some(order) = FIELD_ORDER.iter().position(|candidate| *candidate == field) else {
+            break;
+        };
+        if last_order.is_some_and(|previous| order <= previous) {
+            return None;
+        }
+        let colon = skip_json_whitespace(bytes, after_field);
+        if bytes.get(colon) != Some(&b':') {
+            return None;
+        }
+        let value_start = skip_json_whitespace(bytes, colon + 1);
+        let value_end = json_value_end(bytes, value_start)?;
+        if object.len() > 1 {
+            object.push(b',');
+        }
+        object.extend_from_slice(&bytes[cursor..value_end]);
+        saw_status |= field == "status";
+        saw_debug |= field == "is_debug";
+        saw_saved |= field == "saved";
+        last_order = Some(order);
+
+        cursor = skip_json_whitespace(bytes, value_end);
+        if bytes.get(cursor) != Some(&b',') {
+            break;
+        }
+        cursor = skip_json_whitespace(bytes, cursor + 1);
+    }
+    if !saw_status || !saw_debug || !saw_saved {
+        return None;
+    }
+    if bytes.get(cursor) != Some(&b'}') {
+        let (next_field, _) = json_field_name(bytes, cursor)?;
+        if !FOLLOWING_FIELDS.contains(&next_field) {
+            return None;
+        }
+    }
+    object.push(b'}');
+    serde_json::from_slice(&object).ok()
+}
+
+fn json_field_name(bytes: &[u8], start: usize) -> Option<(&str, usize)> {
+    let start = skip_json_whitespace(bytes, start);
+    if bytes.get(start) != Some(&b'"') {
+        return None;
+    }
+    let end = bytes[start + 1..].iter().position(|byte| *byte == b'"')? + start + 1;
+    let field = std::str::from_utf8(&bytes[start + 1..end]).ok()?;
+    Some((field, end + 1))
+}
+
+fn skip_json_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn json_value_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let first = *bytes.get(start)?;
+    if first == b'"' {
+        let mut escaped = false;
+        for (offset, byte) in bytes[start + 1..].iter().enumerate() {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                return Some(start + offset + 2);
+            }
+        }
+        return None;
+    }
+    if matches!(first, b'{' | b'[') {
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (offset, byte) in bytes[start..].iter().enumerate() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if *byte == b'\\' {
+                    escaped = true;
+                } else if *byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match *byte {
+                b'"' => in_string = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(start + offset + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
+    bytes[start..]
+        .iter()
+        .position(|byte| matches!(*byte, b',' | b'}' | b']') || byte.is_ascii_whitespace())
+        .map(|offset| start + offset)
+        .or(Some(bytes.len()))
 }
 
 fn mark_legacy_bootstrap_complete() -> Result<()> {
@@ -326,6 +528,23 @@ fn recover_pending() -> Result<()> {
         if metadata.session_id != session_id {
             continue;
         }
+        let indexed_timestamp = open()
+            .and_then(|connection| {
+                connection
+                    .query_row(
+                        "SELECT updated_at_ms FROM recent_sessions WHERE session_id = ?1",
+                        [session_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .map_err(Into::into)
+            })
+            .ok()
+            .flatten();
+        if indexed_timestamp.is_some_and(|timestamp| timestamp >= metadata.updated_at_ms) {
+            clear_pending(session_id);
+            continue;
+        }
         if upsert(&metadata).is_ok() {
             clear_pending(session_id);
         }
@@ -388,7 +607,8 @@ pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
              last_active_at_ms = excluded.last_active_at_ms,
              save_label = excluded.save_label,
              status = excluded.status,
-             is_debug = excluded.is_debug",
+             is_debug = excluded.is_debug
+         WHERE excluded.updated_at_ms >= recent_sessions.updated_at_ms",
         params![
             entry.session_id,
             entry.working_dir,
@@ -722,10 +942,91 @@ mod tests {
         let oversized_id = "session_oversized_legacy";
         std::fs::write(
             crate::session::session_path(oversized_id).expect("oversized snapshot path"),
-            vec![b' '; usize::try_from(MAX_LEGACY_SNAPSHOT_BYTES).unwrap() + 1],
+            vec![b' '; MAX_METADATA_TAIL_BYTES + 1],
         )
         .expect("write oversized snapshot");
         assert!(metadata_from_snapshot(oversized_id).is_err());
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn bootstrap_indexes_all_candidates_and_reads_large_transcripts_boundedly() {
+        let _env_lock = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().expect("create temporary jcode home");
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::create_dir_all(home.path().join("sessions")).expect("create session directory");
+
+        for index in 0..6 {
+            let session = Session::create_with_id(
+                format!("session_legacy_{index}"),
+                None,
+                Some(format!("Legacy {index}")),
+            );
+            let encoded = serde_json::to_vec(&session).expect("serialize legacy session");
+            std::fs::write(
+                crate::session::session_path(&session.id).expect("legacy session path"),
+                encoded,
+            )
+            .expect("write legacy snapshot");
+        }
+
+        let large = Session::create_with_id(
+            "session_large_legacy".to_string(),
+            None,
+            Some("Large legacy".to_string()),
+        );
+        let encoded = serde_json::to_string(&large).expect("serialize large session");
+        let large_messages = format!("\"messages\":[{{\"blob\":\"{}\"}}]", "x".repeat(512 * 1024));
+        let encoded = encoded.replacen("\"messages\":[]", &large_messages, 1);
+        assert!(encoded.len() > 256 * 1024);
+        std::fs::write(
+            crate::session::session_path(&large.id).expect("large session path"),
+            encoded,
+        )
+        .expect("write large legacy snapshot");
+
+        recent_persisted(1).expect("bootstrap all legacy sessions");
+        let indexed = recent(20).expect("read complete legacy index");
+        assert_eq!(indexed.len(), 7);
+        assert!(indexed.iter().any(|entry| entry.session_id == large.id));
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn pending_recovery_does_not_overwrite_newer_index_metadata() {
+        let _env_lock = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().expect("create temporary jcode home");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let mut session = Session::create_with_id(
+            "session_recovery_race".to_string(),
+            None,
+            Some("Older title".to_string()),
+        );
+        session.save_prepared().expect("persist session");
+        let mut stale = metadata_from_session(&session);
+        stale.updated_at_ms -= 1;
+
+        session.title = Some("Newer title".to_string());
+        session.save_prepared().expect("persist newer session");
+        let newer_timestamp = session.updated_at.timestamp_millis();
+        write_pending(&stale).expect("write stale pending metadata after newer save");
+
+        recover_pending().expect("recover pending metadata");
+        let indexed = recent(1).expect("read recovered index");
+        assert_eq!(indexed[0].generated_title.as_deref(), Some("Newer title"));
+        assert_eq!(indexed[0].updated_at_ms, newer_timestamp);
+        assert!(!pending_path(&session.id).expect("pending path").exists());
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),
@@ -746,16 +1047,17 @@ mod tests {
             Some("Top level".to_string()),
         );
         session.working_dir = Some("/top-level".to_string());
-        let mut snapshot = serde_json::to_value(&session).expect("serialize session");
-        snapshot["messages"] = serde_json::json!([{
-            "working_dir": "/nested",
-            "is_debug": true,
-            "status": "crashed"
-        }]);
+        let snapshot = serde_json::to_string(&session)
+            .expect("serialize session")
+            .replacen(
+                "\"messages\":[]",
+                r#""messages":[{"working_dir":"/nested","is_debug":true,"status":"crashed"}]"#,
+                1,
+            );
         std::fs::create_dir_all(home.path().join("sessions")).expect("create session directory");
         std::fs::write(
             crate::session::session_path(&session.id).expect("session path"),
-            serde_json::to_vec(&snapshot).expect("encode snapshot"),
+            snapshot,
         )
         .expect("write snapshot");
 
