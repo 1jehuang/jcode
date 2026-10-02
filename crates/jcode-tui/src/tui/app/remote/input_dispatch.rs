@@ -152,6 +152,7 @@ pub(in crate::tui::app) async fn submit_prepared_remote_input(
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
     });
     let _ = app
         .begin_remote_send(remote, prepared.expanded, prepared.images, false)
@@ -437,6 +438,7 @@ async fn submit_remote_transcript_input(
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                tool_duration_ms: None,
             });
             app.begin_remote_send(remote, prepared.expanded, prepared.images, false)
                 .await?;

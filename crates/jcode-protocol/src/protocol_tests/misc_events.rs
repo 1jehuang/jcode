@@ -637,3 +637,34 @@ fn tool_input_optional_id_preserves_legacy_wire_format() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn tool_done_duration_ms_roundtrip_and_legacy_omission() -> Result<()> {
+    // New servers send the measured duration; the wire keeps it optional so
+    // older servers can omit it and older clients ignore it (#1453).
+    let event = ServerEvent::ToolDone {
+        id: "t1".to_string(),
+        name: "bash".to_string(),
+        output: "ok".to_string(),
+        error: None,
+        duration_ms: Some(2_325),
+    };
+    let json = serde_json::to_value(&event)?;
+    assert_eq!(json["duration_ms"], 2_325);
+    let decoded = parse_event_json(&serde_json::to_string(&json)?)?;
+    assert!(
+        matches!(&decoded, ServerEvent::ToolDone { duration_ms: Some(ms), .. } if *ms == 2_325)
+    );
+
+    // Legacy payload without the field still decodes, and re-serializing
+    // drops the absent field so old clients see an unchanged shape.
+    let legacy = parse_event_json(
+        r#"{"type":"tool_done","id":"t1","name":"bash","output":"ok"}"#,
+    )?;
+    assert!(matches!(&legacy, ServerEvent::ToolDone { duration_ms: None, .. }));
+    assert_eq!(
+        serde_json::to_value(legacy)?,
+        serde_json::json!({"type":"tool_done","id":"t1","name":"bash","output":"ok"})
+    );
+    Ok(())
+}
