@@ -243,10 +243,15 @@ impl App {
             return;
         }
         let provider_messages = self.materialized_provider_messages();
+        // Read the window live rather than from the cached `context_limit` field, which
+        // is only refreshed on account switch. A model that changes any other way
+        // (picker, session restore, catalog arrival) otherwise leaves the budget at
+        // whatever the last account switch saw.
+        let context_budget = self.provider.context_window();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
             manager.reset();
-            manager.set_budget(self.context_limit as usize);
+            manager.set_budget(context_budget);
             if let Some(state) = self.session.compaction.as_ref() {
                 manager.restore_persisted_state_with(state, &provider_messages);
             } else {
@@ -307,9 +312,11 @@ impl App {
 
         self.session.compaction = Some(state.clone());
         let provider_messages = self.materialized_provider_messages();
+        // Live window, for the same reason as the sibling site above.
+        let context_budget = self.provider.context_window();
         let compaction = self.registry.compaction();
         if let Ok(mut manager) = compaction.try_write() {
-            manager.set_budget(self.context_limit as usize);
+            manager.set_budget(context_budget);
             manager.restore_persisted_state_with(&state, &provider_messages);
         }
 

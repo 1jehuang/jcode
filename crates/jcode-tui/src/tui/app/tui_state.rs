@@ -1644,7 +1644,7 @@ impl crate::tui::TuiState for App {
             context_info,
             context_info_stale: !context_snapshot.fresh,
             queue_mode: Some(self.queue_mode),
-            context_limit: Some(self.context_limit as usize),
+            context_limit: Some(self.provider.context_window()),
             model,
             reasoning_effort,
             service_tier,
