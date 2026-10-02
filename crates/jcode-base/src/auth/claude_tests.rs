@@ -82,6 +82,66 @@ fn jcode_path_respects_jcode_home() {
 }
 
 #[test]
+fn claude_config_dir_selects_external_file_without_inheriting_other_path_consent() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let first = temp.path().join("first-claude-config");
+    let second = temp.path().join("second-claude-config");
+    let _config = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &first);
+    let first_path = first.join(".credentials.json");
+    assert_eq!(claude_code_path().unwrap(), first_path);
+    assert_eq!(jcode_path().unwrap(), temp.path().join("auth.json"));
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::write(&first_path, "synthetic fixture").unwrap();
+
+    crate::config::Config::allow_external_auth_source_for_path(
+        CLAUDE_CODE_AUTH_SOURCE_ID,
+        &first_path,
+    )
+    .unwrap();
+    assert!(
+        crate::config::Config::external_auth_source_allowed_for_path(
+            CLAUDE_CODE_AUTH_SOURCE_ID,
+            &first_path,
+        )
+    );
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &second);
+    let second_path = second.join(".credentials.json");
+    assert_eq!(claude_code_path().unwrap(), second_path);
+    assert!(
+        !crate::config::Config::external_auth_source_allowed_for_path(
+            CLAUDE_CODE_AUTH_SOURCE_ID,
+            &second_path,
+        )
+    );
+}
+
+#[test]
+fn trusted_config_dir_file_precedes_consented_native_env_token() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let config_dir = temp.path().join("claude-config");
+    let _config = EnvVarGuard::set("CLAUDE_CONFIG_DIR", &config_dir);
+    let _native = EnvVarGuard::set(
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        std::path::Path::new("native-test-token"),
+    );
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let path = config_dir.join(".credentials.json");
+    std::fs::write(
+        &path,
+        r#"{"claudeAiOauth":{"accessToken":"file-test-token","refreshToken":"file-refresh","expiresAt":4102444800000}}"#,
+    ).unwrap();
+
+    crate::config::Config::allow_external_auth_source_for_path(CLAUDE_CODE_AUTH_SOURCE_ID, &path)
+        .unwrap();
+    crate::config::Config::allow_external_auth_source(CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID).unwrap();
+    assert_eq!(load_credentials().unwrap().access_token, "file-test-token");
+}
+
+#[test]
 fn sandboxed_jcode_home_is_detected_without_hiding_explicit_env_credentials() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();

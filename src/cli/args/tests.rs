@@ -2,6 +2,45 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn claude_code_login_flag_parses_and_conflicts_with_no_browser() {
+    let args =
+        Args::try_parse_from(["jcode", "login", "--provider", "claude", "--claude-code"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Login {
+            claude_code: true,
+            ..
+        })
+    ));
+
+    for browser_flag in ["--no-browser", "--headless"] {
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                "login",
+                "--provider",
+                "claude",
+                "--claude-code",
+                browser_flag,
+            ])
+            .is_err()
+        );
+    }
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "login",
+            "--provider",
+            "claude",
+            "--claude-code",
+            "--account",
+            "work",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn credential_import_cli_requires_stdin_and_preserves_explicit_provider() {
     for provider in ["openai", "claude"] {
         let args = Args::try_parse_from([
@@ -468,6 +507,7 @@ fn login_no_browser_flag_parses() {
             provider,
             account,
             no_browser,
+            claude_code,
             print_auth_url,
             callback_url,
             auth_code,
@@ -484,6 +524,7 @@ fn login_no_browser_flag_parses() {
             assert!(provider.is_none());
             assert!(account.is_none());
             assert!(no_browser);
+            assert!(!claude_code);
             assert!(!print_auth_url);
             assert!(callback_url.is_none());
             assert!(auth_code.is_none());
