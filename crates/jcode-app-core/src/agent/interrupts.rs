@@ -531,8 +531,8 @@ mod user_external_attribution_tests {
     /// serde name is part of the contract, not an implementation detail.
     #[test]
     fn stored_display_role_serialises_as_snake_case() {
-        let json =
-            serde_json::to_string(&StoredDisplayRole::UserExternal).expect("serialise UserExternal");
+        let json = serde_json::to_string(&StoredDisplayRole::UserExternal)
+            .expect("serialise UserExternal");
         assert_eq!(json, "\"user_external\"");
     }
 
