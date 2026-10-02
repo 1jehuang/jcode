@@ -1370,24 +1370,24 @@ mod tests {
 
     #[test]
     fn recovery_reminder_alone_is_not_a_tool_result() {
-    // The recovery continuation is itself a User-role `<system-reminder>`. If the
-    // predicate counted it, the injected reminder would keep
-    // `prompt_has_recent_tool_result` true on the following turn even with no
-    // tool result anywhere near, so every whitespace-only provider response
-    // would inject another recovery reminder, up to the attempt cap, spending
-    // an API call each time.
-    let messages = vec![user_text(
-        "<system-reminder>The previous provider response was empty after tool results. Provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.</system-reminder>",
-    )];
+        // The recovery continuation is itself a User-role `<system-reminder>`. If the
+        // predicate counted it, the injected reminder would keep
+        // `prompt_has_recent_tool_result` true on the following turn even with no
+        // tool result anywhere near, so every whitespace-only provider response
+        // would inject another recovery reminder, up to the attempt cap, spending
+        // an API call each time.
+        let messages = vec![user_text(
+            "<system-reminder>The previous provider response was empty after tool results. Provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.</system-reminder>",
+        )];
 
-    assert!(
-        !Agent::messages_end_with_tool_result(&messages),
-        "a recovery reminder must not count as evidence of tool results"
-    );
-}
+        assert!(
+            !Agent::messages_end_with_tool_result(&messages),
+            "a recovery reminder must not count as evidence of tool results"
+        );
+    }
 
-#[test]
-fn messages_end_with_tool_result_ignores_plain_user_prompt() {
+    #[test]
+    fn messages_end_with_tool_result_ignores_plain_user_prompt() {
         let messages = vec![user_text("hello")];
 
         assert!(!Agent::messages_end_with_tool_result(&messages));
