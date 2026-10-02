@@ -467,18 +467,48 @@ impl McpManager {
         tool: &str,
         arguments: serde_json::Value,
     ) -> Result<ToolCallResult> {
-        // Fast path: already connected via pool handle.
+        // Fast path: already connected via pool handle. Skip (and prune) the
+        // handle if its child already exited: keeping a closed handle in the
+        // map would fail every call with "exited (stdout closed)" forever,
+        // because the connect-on-first-call path below only runs when the
+        // server is absent from the map.
         {
-            let handles = self.pool_handles.read().await;
+            let mut handles = self.pool_handles.write().await;
+            let dead = handles
+                .get(server)
+                .map(|h| h.is_closed())
+                .unwrap_or(false);
+            if dead {
+                crate::logging::warn(&format!(
+                    "MCP: '{server}' handle is closed (child exited); pruning and reconnecting"
+                ));
+                handles.remove(server);
+                if let Some(pool) = &self.pool {
+                    pool.release_handles(&self.session_id, &[server.to_string()])
+                        .await;
+                }
+            }
             if let Some(handle) = handles.get(server) {
                 let result = handle.call_tool(tool, arguments).await;
                 meter_provenance_call(server, &result);
                 return result;
             }
         }
-        // Fast path: already connected via owned client.
+        // Fast path: already connected via owned client. Same dead-child prune.
         {
-            let clients = self.owned_clients.read().await;
+            let mut clients = self.owned_clients.write().await;
+            let dead = clients
+                .get(server)
+                .map(|c| c.is_closed())
+                .unwrap_or(false);
+            if dead {
+                crate::logging::warn(&format!(
+                    "MCP: '{server}' client is closed (child exited); pruning and reconnecting"
+                ));
+                if let Some(mut client) = clients.remove(server) {
+                    client.shutdown().await;
+                }
+            }
             if let Some(client) = clients.get(server) {
                 let result = client.call_tool(tool, arguments).await;
                 meter_provenance_call(server, &result);
@@ -653,6 +683,50 @@ mod tests {
 
     fn empty_config() -> McpConfig {
         McpConfig::default()
+    }
+
+    // Regression: a closed (dead-child) handle in the map must be pruned by
+    // call_tool's fast path instead of failing every call forever. The
+    // prune logic lives inside call_tool; here we verify the is_closed
+    // accessor flips when the handle's reader observes EOF, which is the
+    // signal the prune relies on. Full E2E reconnect is covered by the
+    // daemon-level acceptance (dead server + live call succeeds).
+    #[test]
+    fn mcp_handle_is_closed_starts_false() {
+        // McpHandle construction requires a spawned child; use the client
+        // connect path against a server that exits immediately is unreliable
+        // cross-platform, so assert the accessor contract on the atomic via
+        // a fabricated handle through the public constructor of the struct
+        // module is not exposed. Instead, verify via a real client against
+        // /bin/cat, which never exits on its own: is_closed() == false.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            let config = McpServerConfig {
+                command: "/bin/cat".into(),
+                ..Default::default()
+            };
+            let client = McpClient::connect("cat-probe".into(), &config)
+                .await
+                .expect("connect cat");
+            assert!(!client.is_closed());
+            let handle = client.handle();
+            assert!(!handle.is_closed());
+            drop(client); // kills child per Drop impl
+            // Give the reader task a moment to observe EOF.
+            for _ in 0..50 {
+                if handle.is_closed() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(
+                handle.is_closed(),
+                "handle must report closed after child exit"
+            );
+        });
     }
 
     #[test]
