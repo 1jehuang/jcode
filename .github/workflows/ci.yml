@@ -208,6 +208,31 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 900 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} --lib --bins --no-run
 
+      - name: Run opt-in parallel native tool regressions (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in jcode-base jcode-provider-openai-runtime; do
+            python3 .github/scripts/run_with_timeout.py 600 \
+              "$(rustup which cargo)" test --target ${{ matrix.target }} \
+              -p "$package" --lib parallel -- --test-threads=1
+          done
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p jcode-app-core --lib parallel_tools -- --test-threads=1
+
+      - name: Exercise parallel tools through the built CLI (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        # Both the scripted provider and delayed webfetch targets are loopback
+        # servers. The fixture uses isolated homes and no real credentials.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 300 \
+            python3 scripts/test_parallel_tools_cli.py \
+            --binary "target/${{ matrix.target }}/release/jcode" \
+            --output-dir "${RUNNER_TEMP}/parallel-tools-cli"
+
       - name: Run deterministic retention-readiness cohort
         shell: bash
         run: |
