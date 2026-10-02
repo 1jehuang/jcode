@@ -69,6 +69,19 @@ pub fn approx_tool_output_token_severity(tokens: usize) -> ApproxTokenSeverity {
     }
 }
 
+/// Severity thresholds for a tool call's wall-clock duration (#1453). Mirrors
+/// the token-badge severity: slow tools are worth noticing while scanning a
+/// transcript. Normal < 10s <= Warning < 60s <= Danger.
+pub fn tool_duration_severity(duration_ms: u64) -> ApproxTokenSeverity {
+    if duration_ms >= 60_000 {
+        ApproxTokenSeverity::Danger
+    } else if duration_ms >= 10_000 {
+        ApproxTokenSeverity::Warning
+    } else {
+        ApproxTokenSeverity::Normal
+    }
+}
+
 /// Extract the payload from an SSE `data:` line.
 ///
 /// The SSE spec allows an optional single space after the colon, so both
@@ -380,6 +393,16 @@ mod tests {
     fn test_process_fd_diagnostic_snapshot_mentions_pid() {
         let snapshot = process_fd_diagnostic_snapshot();
         assert!(snapshot.contains("pid="));
+    }
+
+    #[test]
+    fn test_tool_duration_severity_thresholds() {
+        // Boundaries are inclusive: >= 10s warns, >= 60s alarms.
+        assert_eq!(tool_duration_severity(0), ApproxTokenSeverity::Normal);
+        assert_eq!(tool_duration_severity(9_999), ApproxTokenSeverity::Normal);
+        assert_eq!(tool_duration_severity(10_000), ApproxTokenSeverity::Warning);
+        assert_eq!(tool_duration_severity(59_999), ApproxTokenSeverity::Warning);
+        assert_eq!(tool_duration_severity(60_000), ApproxTokenSeverity::Danger);
     }
 
     #[test]

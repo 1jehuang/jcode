@@ -198,6 +198,8 @@ impl App {
                 duration_secs: None,
                 title: Some("Connection".to_string()),
                 tool_data: None,
+                timestamp: None,
+                tool_duration_ms: None,
             });
         }
         true
@@ -276,6 +278,8 @@ impl App {
                         duration_secs: None,
                         title: Some("Connection".to_string()),
                         tool_data: None,
+                        timestamp: None,
+                        tool_duration_ms: None,
                     });
                 }
                 true
