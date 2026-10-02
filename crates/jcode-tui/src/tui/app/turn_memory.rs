@@ -27,12 +27,22 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
+        // Session working dir, not process cwd: the TUI process cwd is
+        // wherever the user launched the client, but AGENTS.md/PROGRESS.md
+        // belong to the session's project. Passing None here loaded "." and
+        // silently showed zeros in the context report for every session
+        // whose project differs from the client cwd.
+        let working_dir = self
+            .session
+            .working_dir
+            .as_ref()
+            .map(std::path::PathBuf::from);
         let (mut split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
             memory_prompt,
-            None,
+            working_dir.as_deref(),
         );
         self.append_current_turn_system_reminder(&mut split);
         crate::prompt::append_swarm_effort_directive(
@@ -41,6 +51,32 @@ impl App {
         );
         self.context_info = context_info;
         split
+    }
+
+    /// Refresh the AGENTS.md/PROGRESS.md presence flags from the session
+    /// working dir without rebuilding the prompt.
+    ///
+    /// Remote clients never run the per-turn rebuild (turns execute on the
+    /// server), so their `context_info` would stay at the constructor default
+    /// and `/context` would report zeros. The History handler calls this
+    /// after absorbing the server session so the report mirrors what the
+    /// session's project carries. Only the file-presence flags are mirrored;
+    /// the server remains the owner of the prompt itself.
+    pub(crate) fn refresh_agents_context_info(&mut self) {
+        let working_dir = self
+            .session
+            .working_dir
+            .as_ref()
+            .map(std::path::PathBuf::from);
+        let (_, md_info) =
+            crate::prompt::load_agents_md_files_from_dir(working_dir.as_deref());
+        self.context_info.has_project_agents_md = md_info.has_project_agents_md;
+        self.context_info.project_agents_md_chars = md_info.project_agents_md_chars;
+        self.context_info.has_global_agents_md = md_info.has_global_agents_md;
+        self.context_info.global_agents_md_chars = md_info.global_agents_md_chars;
+        self.context_info.has_project_progress_md = md_info.has_project_progress_md;
+        self.context_info.project_progress_md_chars = md_info.project_progress_md_chars;
+        self.bump_context_revision();
     }
 
     pub(in crate::tui::app) fn show_injected_memory_context(
