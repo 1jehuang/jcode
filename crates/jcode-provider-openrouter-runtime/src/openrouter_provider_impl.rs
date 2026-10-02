@@ -718,10 +718,18 @@ impl Provider for OpenRouterProvider {
         // the (large) provider default and over-budgeting the request. See #403.
         let raw_model = self.model();
         let model_id = self.strip_session_profile_prefix(&raw_model).to_string();
+        // A pinned variant suffix is routing syntax, not part of the catalog id.
+        // OpenRouter's `/models` lists `stealth/space-bunny-alpha` while the pinned
+        // runtime model is `stealth/space-bunny-alpha@Stealth`, so comparing only the
+        // pinned form matched nothing and fell through to the 200K default even
+        // though the catalog entry carries context_length 1000000. Try the base id too.
+        let base_model_id = model_id.split_once('@').map(|(b, _)| b).filter(|b| !b.is_empty());
         // Try cached model data from OpenRouter API
         let cache = self.models_cache.try_read();
         if let Ok(cache) = cache
-            && let Some(model) = cache.models.iter().find(|m| m.id == model_id)
+            && let Some(model) = std::iter::once(model_id.as_str())
+                .chain(base_model_id)
+                .find_map(|id| cache.models.iter().find(|m| m.id == id))
             && let Some(ctx) = model.context_length
         {
             return ctx as usize;
@@ -731,7 +739,9 @@ impl Provider for OpenRouterProvider {
         // in-memory cache. Use that live catalog context length before falling
         // back to static defaults.
         if let Some(cache_entry) = self.load_usable_model_disk_cache_entry()
-            && let Some(model) = cache_entry.models.iter().find(|m| m.id == model_id)
+            && let Some(model) = std::iter::once(model_id.as_str())
+                .chain(base_model_id)
+                .find_map(|id| cache_entry.models.iter().find(|m| m.id == id))
             && let Some(ctx) = model.context_length
         {
             return ctx as usize;
