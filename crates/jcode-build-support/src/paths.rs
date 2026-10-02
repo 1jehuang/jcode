@@ -75,6 +75,37 @@ pub fn binary_name() -> &'static str {
 
 pub const SELFDEV_CARGO_PROFILE: &str = "selfdev";
 
+/// Canonical payload path of the binary this process is actually running,
+/// captured once (see [`capture_running_binary`]).
+static RUNNING_BINARY: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Pin the running binary's identity. Call this first thing in `main`.
+///
+/// On macOS `current_exe()` returns the path the process was launched through,
+/// which is usually a channel symlink such as `builds/shared-server/jcode`.
+/// Canonicalizing it *later* follows the symlink's current target, so once the
+/// channel is promoted to a new build, a process still running the old image
+/// resolves to the new build and concludes it is already up to date: a
+/// non-forced `jcode server reload` becomes a no-op and the update signal never
+/// fires. Resolving once at startup pins the identity to the image that was
+/// actually loaded. (Linux's `/proc/self/exe` already names the real file.)
+pub fn capture_running_binary() {
+    RUNNING_BINARY.get_or_init(resolve_running_binary);
+}
+
+/// The pinned canonical payload path of the running binary, if resolvable.
+pub fn running_binary() -> Option<PathBuf> {
+    RUNNING_BINARY.get_or_init(resolve_running_binary).clone()
+}
+
+/// `None` when the OS cannot name the executable; callers then fall back to
+/// resolving `current_exe()` themselves, exactly as before pinning existed.
+fn resolve_running_binary() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|exe| resolve_binary_payload(&exe))
+}
+
 /// Resolve a channel/launcher binary path to the file that actually runs.
 ///
 /// Release archives install a tiny `jcode` wrapper script alongside the real
