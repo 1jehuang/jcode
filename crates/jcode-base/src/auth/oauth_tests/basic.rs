@@ -88,6 +88,10 @@ fn save_openai_tokens_uses_jcode_home_sandbox() -> Result<()> {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    // The sandbox token below is expired, so an OPENAI_API_KEY inherited from
+    // the developer's shell would win the credential race and the test would
+    // assert against the wrong source.
+    let _env_api_key = EnvVarGuard::set_value("OPENAI_API_KEY", "");
 
     let tokens = OAuthTokens {
         access_token: "at_sandbox".to_string(),
@@ -110,13 +114,166 @@ fn save_openai_tokens_uses_jcode_home_sandbox() -> Result<()> {
     Ok(())
 }
 
+/// Two-account refresh regression: refreshing a sibling account must send
+/// that account's refresh token and rotate only that account on disk,
+/// leaving the active account untouched.
+#[tokio::test]
+async fn sibling_refresh_rotates_only_that_account() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    crate::auth::codex::set_active_account_override(None);
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    // First upsert becomes the active account.
+    let active_label = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        label: "openai-1".to_string(),
+        access_token: "at_active".to_string(),
+        refresh_token: "rt_active".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms + 3_600_000),
+        email: None,
+    })
+    .map_err(|e| anyhow!(e))?;
+    let sibling_label = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        label: "openai-2".to_string(),
+        access_token: "at_sibling_old".to_string(),
+        refresh_token: "rt_sibling_old".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms - 60_000),
+        email: None,
+    })
+    .map_err(|e| anyhow!(e))?;
+
+    let body = serde_json::json!({
+        "access_token": "at_sibling_new",
+        "refresh_token": "rt_sibling_new",
+        "expires_in": 3600,
+        "id_token": null,
+    })
+    .to_string();
+    let (port, handle) = mock_token_server(200, &body).await;
+    let url = format!("http://127.0.0.1:{}/oauth/token", port);
+
+    let tokens = refresh_openai_tokens_for_account_at_url(&url, "rt_sibling_old", &sibling_label)
+        .await
+        .map_err(|e| anyhow!(e))?;
+
+    let (method, _path, _headers, request_body) = handle.await.unwrap();
+    assert_eq!(method, "POST");
+    assert!(
+        request_body.contains("refresh_token=rt_sibling_old"),
+        "refresh request must carry the sibling's refresh token, got: {request_body}"
+    );
+    assert_eq!(tokens.access_token, "at_sibling_new");
+    assert_eq!(tokens.refresh_token, "rt_sibling_new");
+
+    let accounts = crate::auth::codex::list_accounts().map_err(|e| anyhow!(e))?;
+    let sibling = accounts
+        .iter()
+        .find(|account| account.label == sibling_label)
+        .expect("sibling account");
+    assert_eq!(sibling.access_token, "at_sibling_new");
+    assert_eq!(sibling.refresh_token, "rt_sibling_new");
+    let active = accounts
+        .iter()
+        .find(|account| account.label == active_label)
+        .expect("active account");
+    assert_eq!(active.access_token, "at_active", "active account must be untouched");
+    assert_eq!(active.refresh_token, "rt_active");
+    assert_eq!(
+        crate::auth::codex::active_account_label().as_deref(),
+        Some(active_label.as_str()),
+        "active account must not change after a sibling refresh"
+    );
+    Ok(())
+}
+
+/// A refresh token that matches no stored account must refresh directly and
+/// persist nothing. Falling back to the active account here would send the
+/// active account's stored token and save the rotation under the active
+/// account, clobbering an account the caller never named.
+#[tokio::test]
+async fn unmatched_refresh_token_does_not_touch_stored_accounts() -> Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    crate::auth::codex::set_active_account_override(None);
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let active_label = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        label: "openai-1".to_string(),
+        access_token: "at_active".to_string(),
+        refresh_token: "rt_active".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms + 3_600_000),
+        email: None,
+    })
+    .map_err(|e| anyhow!(e))?;
+    crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        label: "openai-2".to_string(),
+        access_token: "at_sibling".to_string(),
+        refresh_token: "rt_sibling".to_string(),
+        id_token: None,
+        account_id: None,
+        expires_at: Some(now_ms + 3_600_000),
+        email: None,
+    })
+    .map_err(|e| anyhow!(e))?;
+
+    let body = serde_json::json!({
+        "access_token": "at_external_new",
+        "refresh_token": "rt_external_new",
+        "expires_in": 3600,
+        "id_token": null,
+    })
+    .to_string();
+    let (port, handle) = mock_token_server(200, &body).await;
+    let url = format!("http://127.0.0.1:{}/oauth/token", port);
+
+    let tokens = refresh_openai_tokens_at_url(&url, "rt_unmatched")
+        .await
+        .map_err(|e| anyhow!(e))?;
+
+    let (method, _path, _headers, request_body) = handle.await.unwrap();
+    assert_eq!(method, "POST");
+    assert!(
+        request_body.contains("refresh_token=rt_unmatched"),
+        "unmatched token must be refreshed directly, got: {request_body}"
+    );
+    assert_eq!(tokens.access_token, "at_external_new");
+
+    let accounts = crate::auth::codex::list_accounts().map_err(|e| anyhow!(e))?;
+    for account in &accounts {
+        assert_ne!(account.access_token, "at_external_new",
+            "unmatched refresh must not persist into any stored account");
+        assert_ne!(account.refresh_token, "rt_external_new");
+    }
+    let active = accounts
+        .iter()
+        .find(|account| account.label == active_label)
+        .expect("active account");
+    assert_eq!(active.access_token, "at_active");
+    assert_eq!(active.refresh_token, "rt_active");
+    assert_eq!(
+        crate::auth::codex::active_account_label().as_deref(),
+        Some(active_label.as_str())
+    );
+    Ok(())
+}
+
 #[test]
 fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().map_err(|e| anyhow!(e))?;
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
-    crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+    // Upsert may canonicalize the label (animal scheme), so use the returned
+    // label for the follow-up save and lookup instead of the requested one.
+    let label = crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
         label: "claude-1".to_string(),
         access: "old_access".to_string(),
         refresh: "old_refresh".to_string(),
@@ -125,7 +282,6 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
         subscription_type: Some("pro".to_string()),
         scopes: vec!["user:inference".to_string()],
     })?;
-
     let refreshed = OAuthTokens {
         access_token: "new_access".to_string(),
         refresh_token: "new_refresh".to_string(),
@@ -133,11 +289,11 @@ fn save_claude_tokens_preserves_existing_account_metadata() -> Result<()> {
         id_token: None,
         scopes: Vec::new(),
     };
-    save_claude_tokens_for_account(&refreshed, "claude-otter")?;
+    save_claude_tokens_for_account(&refreshed, &label)?;
 
     let account = crate::auth::claude::list_accounts()?
         .into_iter()
-        .find(|account| account.label == "claude-otter")
+        .find(|account| account.label == label)
         .expect("claude account should exist");
     assert_eq!(account.access, "new_access");
     assert_eq!(account.refresh, "new_refresh");

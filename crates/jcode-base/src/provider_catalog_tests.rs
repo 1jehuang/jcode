@@ -1307,6 +1307,12 @@ fn minimax_default_provider_applies_minimax_api_key_env_not_openrouter() {
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_NAMED_PROVIDER_PROFILE",
+        // Developer-shell API keys leak into profile resolution and can flip
+        // the expected key name (e.g. OPENAI_API_KEY winning over
+        // MINIMAX_API_KEY), so clear them for a deterministic assertion.
+        "OPENAI_API_KEY",
+        "MINIMAX_API_KEY",
+        "OPENROUTER_API_KEY",
     ]);
     for v in [
         "JCODE_OPENROUTER_API_KEY_NAME",
@@ -1315,6 +1321,9 @@ fn minimax_default_provider_applies_minimax_api_key_env_not_openrouter() {
         "JCODE_OPENROUTER_CACHE_NAMESPACE",
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_NAMED_PROVIDER_PROFILE",
+        "OPENAI_API_KEY",
+        "MINIMAX_API_KEY",
+        "OPENROUTER_API_KEY",
     ] {
         crate::env::remove_var(v);
     }

@@ -12,6 +12,14 @@ impl EnvVarGuard {
         crate::env::set_var(key, value);
         Self { key, previous }
     }
+
+    /// Set `key` to a string value. An empty string clears the variable for
+    /// lookups that treat blank values as unset.
+    fn set_value(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, previous }
+    }
 }
 
 impl Drop for EnvVarGuard {
