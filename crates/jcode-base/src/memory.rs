@@ -404,7 +404,7 @@ impl MemoryManager {
         Ok(id)
     }
 
-    fn remember_in_graph(graph: &mut MemoryGraph, entry: MemoryEntry) -> String {
+    fn remember_in_graph(graph: &mut MemoryGraph, mut entry: MemoryEntry) -> String {
         let normalized = entry.content.trim();
         let duplicate = graph
             .active_memories()
@@ -419,7 +419,185 @@ impl MemoryManager {
             }
             return id;
         }
+        // Write-path embedding (restored): persist the incoming entry's vector
+        // so hybrid retrieval can see this row later. Fail-open: without a
+        // usable backend this is a no-op and the entry stays keyword-only.
+        // The R2 scan below is unchanged: candidate vectors stay transient and
+        // are never persisted.
+        entry.ensure_embedding();
+        // R2 (UPDATE): candidate scan between the exact-dup check and add.
+        // Same store (this graph) + same category; supersede only on high
+        // vector similarity AND an explicit update signal / deterministic
+        // contradiction. Never on similarity alone (H-006 near-miss guard).
+        // Fail-open: without embeddings the scan is skipped and the entry is
+        // added exactly as before. Scan-generated candidate vectors are
+        // transient and never persisted (only the incoming entry's own
+        // write-path vector, set above, is stored).
+        if let Some(stale_id) = Self::find_update_candidate(
+            graph,
+            &entry,
+            Self::UPDATE_SIMILARITY_THRESHOLD,
+            &|text| {
+                crate::embedding_backend::embed_passage_active(text)
+                    .ok()
+                    .map(|(vec, _)| vec)
+            },
+        ) {
+            let id = graph.add_memory(entry);
+            graph.supersede(&id, &stale_id);
+            return id;
+        }
         graph.add_memory(entry)
+    }
+
+    pub(crate) const UPDATE_SIMILARITY_THRESHOLD: f32 = 0.80;
+
+    /// Substrings (lowercased) marking an explicit supersede signal: the new
+    /// text announces a replacement rather than an additional fact.
+    const UPDATE_MARKERS: &'static [&'static str] = &[
+        "moved to",
+        "changed to",
+        "update",
+        "updated",
+        "reschedul",
+        "switch",
+        "is now",
+        "are now",
+        "became",
+        "become",
+        "replac",
+        "extended to",
+        "extend to",
+    ];
+
+    /// Minimum shared-anchor coverage for the R2 UPDATE gate: the fraction
+    /// of the OLD (candidate) fact's content tokens that must also appear in
+    /// the incoming text. Calibrated 2026-09-27 on the blind harness pairs
+    /// (11-r2-precision): 16 true UPDATE pairs cover 0.25..1.0, the 4 cosine
+    /// false-supersede pairs cover 0.062..0.143, so 0.20 separates them with
+    /// margin on both sides. Threshold-only separation is impossible
+    /// (coffee true-min 0.8235 < false-max 0.8340), hence this lexical gate.
+    pub(crate) const UPDATE_MIN_ANCHOR_COVERAGE: f32 = 0.20;
+
+    /// Stopwords excluded from the shared-anchor extraction in `detect_update`.
+    const UPDATE_STOPWORDS: &'static [&'static str] = &[
+        "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "has",
+        "have", "had", "will", "would", "can", "not", "but", "our", "your",
+    ];
+
+    /// Content tokens of `text`: lowercased alphanumeric runs longer than 2
+    /// chars (numeric runs kept at any length: values like `09:00` split into
+    /// `09`/`00`, and the replaced-value check needs them), minus stopwords.
+    /// Deterministic; no model involved.
+    fn update_content_tokens(text: &str) -> Vec<String> {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|tok| {
+                if Self::UPDATE_STOPWORDS.contains(tok) {
+                    return false;
+                }
+                // Numeric runs kept at len >= 2: values like `09:00` split
+                // into `09`/`00`, and the replaced-value check needs them.
+                tok.len() > 2 || (tok.len() == 2 && tok.chars().all(|c| c.is_ascii_digit()))
+            })
+            .map(|tok| tok.to_string())
+            .collect()
+    }
+
+    /// Deterministic same-predicate contradiction test (R2 gate, no LLM).
+    ///
+    /// True iff ALL hold: (a) the new text carries an explicit update marker;
+    /// (b) the incoming text covers at least `UPDATE_MIN_ANCHOR_COVERAGE of
+    /// the old fact's content tokens (same predicate scope — the update must
+    /// restate the old fact's subject, not merely share generic vocabulary);
+    /// (c) each side has content the other lacks (a value was REPLACED, not
+    /// merely restated or extended). The H-006 guard pair (Ana/Theo
+    /// mentorship vs Ana/Ravi buddy) fails (a): no update markers, so the two
+    /// stay distinct no matter how similar their vectors are. The 4 harness
+    /// false-supersede pairs (K-003-new→K-002, K-006-new→K-001, K-001-new→R-003,
+    /// R-003-new→R-001, all cosine ≥ 0.80 with markers present) fail (b):
+    /// they share only generic tokens (`update`, `moved`, `minutes`, `00`),
+    /// covering ≤ 0.143 of the victim fact, while every true UPDATE pair
+    /// covers ≥ 0.25 with subject nouns.
+    pub(crate) fn detect_update(old_content: &str, new_content: &str) -> bool {
+        let new_lower = new_content.to_lowercase();
+        if !Self::UPDATE_MARKERS
+            .iter()
+            .any(|marker| new_lower.contains(marker))
+        {
+            return false;
+        }
+        let old_tokens = Self::update_content_tokens(old_content);
+        let new_tokens = Self::update_content_tokens(new_content);
+        if old_tokens.is_empty() || new_tokens.is_empty() {
+            return false;
+        }
+        let old_unique: std::collections::HashSet<&str> =
+            old_tokens.iter().map(|tok| tok.as_str()).collect();
+        let new_unique: std::collections::HashSet<&str> =
+            new_tokens.iter().map(|tok| tok.as_str()).collect();
+        let shared = old_unique.intersection(&new_unique).count();
+        if (shared as f32) / (old_unique.len() as f32) < Self::UPDATE_MIN_ANCHOR_COVERAGE
+        {
+            return false;
+        }
+        let old_minus_new = old_unique.difference(&new_unique).next().is_some();
+        let new_minus_old = new_unique.difference(&old_unique).next().is_some();
+        old_minus_new && new_minus_old
+    }
+
+    /// R2 candidate scan: find the active same-category memory `entry` updates.
+    ///
+    /// `embed` produces passage vectors (production: `embed_passage_active`;
+    /// tests inject stubs). Returns `None` (fail-open, plain add) when the
+    /// incoming text cannot be embedded. Candidate vectors prefer the stored
+    /// embedding when its model matches the active backend, else embed the
+    /// candidate content transiently. A candidate wins only on cosine >=
+    /// `threshold` AND `detect_update` — never on similarity alone.
+    pub(crate) fn find_update_candidate(
+        graph: &MemoryGraph,
+        entry: &MemoryEntry,
+        threshold: f32,
+        embed: &dyn Fn(&str) -> Option<Vec<f32>>,
+    ) -> Option<String> {
+        let active_model = crate::embedding_backend::active_model_id();
+        let incoming_vec: Vec<f32> = match entry.embedding.as_deref() {
+            Some(stored) if entry.effective_embedding_model() == active_model => {
+                stored.to_vec()
+            }
+            _ => embed(&entry.content)?,
+        };
+        let mut best: Option<(String, f32)> = None;
+        for candidate in graph.active_memories() {
+            if candidate.id == entry.id || candidate.category != entry.category {
+                continue;
+            }
+            let candidate_vec: Vec<f32> = match candidate.embedding.as_deref() {
+                Some(stored) if candidate.effective_embedding_model() == active_model => {
+                    stored.to_vec()
+                }
+                _ => match embed(&candidate.content) {
+                    Some(vec) => vec,
+                    None => continue,
+                },
+            };
+            let similarity =
+                crate::embedding::cosine_similarity(&incoming_vec, &candidate_vec);
+            if similarity < threshold {
+                continue;
+            }
+            if !Self::detect_update(&candidate.content, &entry.content) {
+                continue;
+            }
+            let replace = match &best {
+                Some((_, best_sim)) => similarity > *best_sim,
+                None => true,
+            };
+            if replace {
+                best = Some((candidate.id.clone(), similarity));
+            }
+        }
+        best.map(|(id, _)| id)
     }
 
     /// Insert or update a memory with a stable ID in the project graph.
