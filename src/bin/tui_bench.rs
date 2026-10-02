@@ -607,6 +607,10 @@ fn session_to_display_messages(session: &Session, max_messages: usize) -> Vec<Di
                 out.push(DisplayMessage::background_task(text));
                 continue;
             }
+            Some(StoredDisplayRole::UserExternal) => {
+                out.push(DisplayMessage::user_external(text));
+                continue;
+            }
             None => {}
         }
         match message.role {

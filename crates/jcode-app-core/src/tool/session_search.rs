@@ -1828,6 +1828,7 @@ fn role_label(msg: &StoredMessage) -> &'static str {
         return match display_role {
             crate::session::StoredDisplayRole::System => "system",
             crate::session::StoredDisplayRole::BackgroundTask => "background",
+            crate::session::StoredDisplayRole::UserExternal => "user_external",
         };
     }
 

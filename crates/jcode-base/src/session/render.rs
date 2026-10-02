@@ -414,6 +414,7 @@ pub fn render_messages_and_images_with_compacted_history(
         let role = match msg.display_role {
             Some(StoredDisplayRole::System) => "system",
             Some(StoredDisplayRole::BackgroundTask) => "background_task",
+            Some(StoredDisplayRole::UserExternal) => "user_external",
             None if is_auto_poke_user_message(msg) => "system",
             None if super::is_scheduled_task_message(msg) => "system",
             None => match msg.role {
