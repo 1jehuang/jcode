@@ -1686,3 +1686,11 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
         ));
     }
 }
+
+#[test]
+fn memory_prefilter_stats_command_runs_human_and_json() {
+    // Smoke: read-only command completes without scoring or I/O.
+    super::run_memory_prefilter_stats_command(false)
+        .expect("human prefilter stats must print");
+    super::run_memory_prefilter_stats_command(true).expect("json prefilter stats must print");
+}

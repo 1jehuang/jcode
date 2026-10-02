@@ -302,6 +302,249 @@ fn swarm_spawn_mode_as_str_round_trips() {
 }
 
 #[test]
+fn test_env_override_memory_rrf_k() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_RRF_K");
+    crate::env::remove_var("JCODE_MEMORY_RRF_K");
+
+    crate::env::set_var("JCODE_MEMORY_RRF_K", "10");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_rrf_k, 10.0);
+
+    // Non-finite and garbage values leave the file value in place.
+    for bad in ["NaN", "inf", "-inf", "abc", ""] {
+        crate::env::set_var("JCODE_MEMORY_RRF_K", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_rrf_k = 25.0;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_rrf_k, 25.0, "env {bad} must not apply");
+    }
+
+    restore_env_var("JCODE_MEMORY_RRF_K", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_env_override_memory_rrf_dense_w() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_RRF_DENSE_W");
+    crate::env::remove_var("JCODE_MEMORY_RRF_DENSE_W");
+
+    crate::env::set_var("JCODE_MEMORY_RRF_DENSE_W", "2");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_rrf_dense_weight, 2.0);
+
+    // Non-finite, non-positive, and garbage values leave the file value in place.
+    for bad in ["NaN", "inf", "-inf", "abc", "", "0", "-1.5"] {
+        crate::env::set_var("JCODE_MEMORY_RRF_DENSE_W", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_rrf_dense_weight = 1.5;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_rrf_dense_weight, 1.5, "env {bad} must not apply");
+    }
+
+    restore_env_var("JCODE_MEMORY_RRF_DENSE_W", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_env_override_memory_recency_w() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_RECENCY_W");
+    crate::env::remove_var("JCODE_MEMORY_RECENCY_W");
+
+    crate::env::set_var("JCODE_MEMORY_RECENCY_W", "0.5");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_recency_weight, 0.5);
+
+    // Non-finite, negative, and garbage values leave the file value in place.
+    // 0.0 is a legal value (off) and applies.
+    for bad in ["NaN", "inf", "-inf", "abc", "", "-1.5"] {
+        crate::env::set_var("JCODE_MEMORY_RECENCY_W", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_recency_weight = 1.5;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_recency_weight, 1.5, "env {bad} must not apply");
+    }
+
+    restore_env_var("JCODE_MEMORY_RECENCY_W", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_env_override_memory_recency_tau_days() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_RECENCY_TAU_DAYS");
+    crate::env::remove_var("JCODE_MEMORY_RECENCY_TAU_DAYS");
+
+    crate::env::set_var("JCODE_MEMORY_RECENCY_TAU_DAYS", "30");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_recency_tau_days, 30.0);
+
+    // Non-finite, negative, and garbage values leave the file value in place.
+    for bad in ["NaN", "inf", "-inf", "abc", "", "-7"] {
+        crate::env::set_var("JCODE_MEMORY_RECENCY_TAU_DAYS", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_recency_tau_days = 90.0;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_recency_tau_days, 90.0, "env {bad} must not apply");
+    }
+
+    restore_env_var("JCODE_MEMORY_RECENCY_TAU_DAYS", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_env_override_memory_prefilter_mode() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_PREFILTER_MODE");
+    crate::env::remove_var("JCODE_MEMORY_PREFILTER_MODE");
+
+    crate::env::set_var("JCODE_MEMORY_PREFILTER_MODE", "hybrid-topk");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_prefilter_mode, "hybrid-topk");
+
+    // Anything else (including garbage) leaves the file value in place.
+    for bad in ["HYBRID", "on", "true", "abc", "", "hybrid-topk "] {
+        crate::env::set_var("JCODE_MEMORY_PREFILTER_MODE", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_prefilter_mode = "off".to_string();
+        cfg.apply_env_overrides();
+        // "hybrid-topk " with trailing space trims to a valid value; the
+        // rest must not apply.
+        if bad.trim().to_ascii_lowercase() == "hybrid-topk" {
+            assert_eq!(cfg.agents.memory_prefilter_mode, "hybrid-topk");
+        } else {
+            assert_eq!(cfg.agents.memory_prefilter_mode, "off", "env {bad} must not apply");
+        }
+    }
+
+    restore_env_var("JCODE_MEMORY_PREFILTER_MODE", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_env_override_memory_prefilter_top_k() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_PREFILTER_TOP_K");
+    crate::env::remove_var("JCODE_MEMORY_PREFILTER_TOP_K");
+
+    crate::env::set_var("JCODE_MEMORY_PREFILTER_TOP_K", "128");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_prefilter_top_k, 128);
+
+    // Out-of-range and garbage leave the file value in place.
+    for bad in ["0", "23", "481", "abc", "", "-5"] {
+        crate::env::set_var("JCODE_MEMORY_PREFILTER_TOP_K", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_prefilter_top_k = 96;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_prefilter_top_k, 96, "env {bad} must not apply");
+    }
+
+    restore_env_var("JCODE_MEMORY_PREFILTER_TOP_K", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_env_override_memory_prefilter_min_corpus() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_PREFILTER_MIN_CORPUS");
+    crate::env::remove_var("JCODE_MEMORY_PREFILTER_MIN_CORPUS");
+
+    crate::env::set_var("JCODE_MEMORY_PREFILTER_MIN_CORPUS", "200");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_prefilter_min_corpus, 200);
+
+    for bad in ["0", "abc", "", "-3"] {
+        crate::env::set_var("JCODE_MEMORY_PREFILTER_MIN_CORPUS", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_prefilter_min_corpus = 96;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_prefilter_min_corpus, 96, "env {bad} must not apply");
+    }
+
+    restore_env_var("JCODE_MEMORY_PREFILTER_MIN_CORPUS", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_env_override_memory_prefilter_budget_ms() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_PREFILTER_BUDGET_MS");
+    crate::env::remove_var("JCODE_MEMORY_PREFILTER_BUDGET_MS");
+
+    crate::env::set_var("JCODE_MEMORY_PREFILTER_BUDGET_MS", "1000");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_prefilter_budget_ms, 1000);
+
+    for bad in ["0", "abc", "", "-1"] {
+        crate::env::set_var("JCODE_MEMORY_PREFILTER_BUDGET_MS", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_prefilter_budget_ms = 500;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.agents.memory_prefilter_budget_ms, 500, "env {bad} must not apply");
+    }
+
+    restore_env_var("JCODE_MEMORY_PREFILTER_BUDGET_MS", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_env_override_memory_prefilter_shadow_rate() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_PREFILTER_SHADOW_RATE");
+    crate::env::remove_var("JCODE_MEMORY_PREFILTER_SHADOW_RATE");
+
+    crate::env::set_var("JCODE_MEMORY_PREFILTER_SHADOW_RATE", "0.05");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert!((cfg.agents.memory_prefilter_shadow_rate - 0.05).abs() < 1e-6);
+
+    for bad in ["NaN", "inf", "-inf", "abc", "", "-0.1", "1.5"] {
+        crate::env::set_var("JCODE_MEMORY_PREFILTER_SHADOW_RATE", bad);
+        let mut cfg = Config::default();
+        cfg.agents.memory_prefilter_shadow_rate = 0.01;
+        cfg.apply_env_overrides();
+        assert!(
+            (cfg.agents.memory_prefilter_shadow_rate - 0.01).abs() < 1e-9,
+            "env {bad} must not apply"
+        );
+    }
+
+    restore_env_var("JCODE_MEMORY_PREFILTER_SHADOW_RATE", prev);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn test_rrf_k_falls_back_on_nan_file_value() {
+    // TOML accepts `nan`, and f32::clamp preserves NaN: the helper must
+    // fall back to the default instead of poisoning every fused score.
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_rrf = std::env::var_os("JCODE_MEMORY_RRF_K");
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::remove_var("JCODE_MEMORY_RRF_K");
+    let mut cfg = Config::default();
+    cfg.agents.memory_rrf_k = f32::NAN;
+    cfg.save().unwrap();
+    Config::invalidate_cache();
+    assert_eq!(crate::memory::MemoryManager::rrf_k(), 60.0);
+    restore_env_var("JCODE_HOME", prev_home);
+    restore_env_var("JCODE_MEMORY_RRF_K", prev_rrf);
+    Config::invalidate_cache();
+}
+
+#[test]
 fn test_env_override_swarm_spawn_mode() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_SWARM_SPAWN_MODE");

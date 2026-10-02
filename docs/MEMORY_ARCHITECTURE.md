@@ -71,8 +71,11 @@ or a separate charge. **The companion gateway change must be deployed and its
 upstream Jev credential configured before this route works.** Older gateways
 without the capability fail closed. With a Jcode login configured, `auto` still
 selects Jcode on an older gateway. To use BYOK in that situation, explicitly set
-`memory_jev_provider` to `openrouter`, `typesafe`, or `aimlapi` (or use
-`JCODE_MEMORY_JEV_PROVIDER`). There is no automatic fallback. BYOK does not depend
+`memory_jev_provider` to `openrouter`, `typesafe`, `aimlapi`, or `proxy` (or use
+`JCODE_MEMORY_JEV_PROVIDER`). `proxy` is explicit opt-in only: it routes memory
+Decisions through the local proxy (`POST http://127.0.0.1:8787/v1/systemone`,
+model `jev-1.13-free`, key `OPENAI_COMPAT_API_KEY` from `opencode-proxy.env`);
+`auto` and voice never select it. There is no automatic fallback. BYOK does not depend
 on the gateway rollout.
 
 ## Request and failure boundaries

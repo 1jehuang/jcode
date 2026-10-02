@@ -396,6 +396,40 @@ pub struct CompactionConfig {
     /// on large-window providers. This bounds the compaction trigger budget,
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
+    /// External command producing the compaction summary instead of the
+    /// built-in model prompt. Receives the summarization request as JSON on
+    /// stdin; its trimmed stdout becomes the summary text. Empty output,
+    /// non-zero exit, timeout, or spawn failure all fail open to the built-in
+    /// summarizer. Takes precedence over provider-native compaction while set.
+    ///
+    /// Preservation contract (what a summarizer must protect — a summary
+    /// that drops these strands the next session): architectural decisions
+    /// and why they were taken, unresolved bugs/errors, implementation
+    /// paths still in flight, and system state (working dir, branch, active
+    /// plan). Merge, don't replace, any `existing_summary` in the request.
+    /// Recommended shape for a custom prompt mirrors the built-in schema
+    /// (`SUMMARY_PROMPT` in `jcode-compaction-core`): task / current state /
+    /// decisions+rationale / discoveries (verified evidence) / failed attempts
+    /// (never omit — prevents retrying dead ends) / information gaps
+    /// (facts vs guesses separated) / blocked (with unblock conditions) /
+    /// next steps (priority-ordered) / relevant files (exact paths+symbols) /
+    /// verbatim user prefs and security constraints (word for word).
+    pub summary_command: Option<String>,
+    /// Max milliseconds to wait for the summary command before failing open
+    /// to the built-in summarizer (default: 120000).
+    pub summary_command_timeout_ms: u64,
+    /// Proactive tool-result clearing: when set to N, tool results older than
+    /// the last N provider-bound messages are offloaded at send time to a
+    /// session-scoped file (`<jcode_dir>/sessions/offloaded/...`), substituted
+    /// with the file path plus a first-10-lines preview so the model can
+    /// re-read the full result with existing tools. When the offload write
+    /// fails, falls back to the lossy `[cleared by retention: was N chars]`
+    /// stub. The ToolUse blocks (name + input) and result IDs are always kept,
+    /// so provider tool-pairing never breaks; results under 200 chars are left
+    /// alone. The session file is never modified — clearing applies to the
+    /// send view only, so a later compaction still summarizes the full
+    /// history. Off when unset.
+    pub clear_tool_results_older_than: Option<usize>,
 }
 
 impl Default for CompactionConfig {
@@ -412,6 +446,9 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            summary_command: None,
+            summary_command_timeout_ms: 120_000,
+            clear_tool_results_older_than: None,
         }
     }
 }
@@ -676,6 +713,12 @@ pub struct AgentsConfig {
     #[serde(default = "default_memory_prefilter_shadow_rate")]
     pub memory_prefilter_shadow_rate: f32,
     /// Legacy benchmark/debug embedding backend. Jev recall never uses it.
+    /// Token budget for the opt-in structural repo map (`repomap` tool).
+    /// Ranked symbol stubs without bodies, truncated at this many estimated
+    /// tokens. Default 0 (disabled: the tool is not registered); set nonzero to opt in.
+    /// Env override: `JCODE_REPOMAP_TOKEN_BUDGET` (wins over file).
+    #[serde(default = "default_repomap_token_budget")]
+    pub repomap_token_budget: usize,
     #[serde(default = "default_memory_embedding_backend")]
     pub memory_embedding_backend: String,
     /// OpenAI embedding model name when `memory_embedding_backend = "openai"`.
@@ -759,6 +802,11 @@ fn default_memory_prefilter_budget_ms() -> u64 {
 fn default_memory_prefilter_shadow_rate() -> f32 {
     0.01
 }
+fn default_repomap_token_budget() -> usize {
+    // Default-off: the map is opt-in (see #1230). A nonzero budget (file
+    // or JCODE_REPOMAP_TOKEN_BUDGET) registers the tool.
+    0
+}
 
 impl Default for AgentsConfig {
     fn default() -> Self {
@@ -786,6 +834,7 @@ impl Default for AgentsConfig {
             memory_prefilter_min_corpus: default_memory_prefilter_min_corpus(),
             memory_prefilter_budget_ms: default_memory_prefilter_budget_ms(),
             memory_prefilter_shadow_rate: default_memory_prefilter_shadow_rate(),
+            repomap_token_budget: default_repomap_token_budget(),
             memory_embedding_backend: default_memory_embedding_backend(),
             memory_embedding_model: None,
             memory_embedding_base_url: None,
@@ -1030,6 +1079,31 @@ pub struct HooksConfig {
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
+    /// Runs when background compaction starts summarizing.
+    /// Fields: TRIGGER, MODE, ACTIVE_MESSAGES, ESTIMATED_TOKENS.
+    /// Env override: JCODE_HOOK_COMPACTION_STARTED.
+    pub compaction_started: Option<HookCommands>,
+    /// Runs when a background compaction result is applied.
+    /// Fields: TRIGGER, MODE, SUMMARIZER (custom/native/builtin),
+    /// PRE_TOKENS, POST_TOKENS, TOKENS_SAVED, DURATION_MS,
+    /// MESSAGES_COMPACTED, SUMMARY_CHARS, ACTIVE_MESSAGES.
+    /// Env override: JCODE_HOOK_COMPACTION_COMPLETED.
+    pub compaction_completed: Option<HookCommands>,
+    /// Runs when emergency compaction drops context (hard compact at the
+    /// critical threshold, or auto-recovery after a context-limit error).
+    /// Fields: TRIGGER, MODE, MESSAGES_DROPPED, USAGE_PCT.
+    /// Env override: JCODE_HOOK_COMPACTION_EMERGENCY.
+    pub compaction_emergency: Option<HookCommands>,
+    /// Transform hook before each provider request. Receives the full request
+    /// (messages, tools, system_static, system_dynamic) as JSON on stdin;
+    /// stdout may carry a rewritten request in the same shape. Exit 0 applies
+    /// stdout (empty stdout = unchanged); any other outcome (non-zero exit,
+    /// invalid JSON, timeout, spawn failure) fails open with the original
+    /// request. Env override: JCODE_HOOK_PRE_REQUEST.
+    pub pre_request: Option<HookCommands>,
+    /// Max milliseconds to wait for pre_request before failing open
+    /// (default: 5000). Env override: JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS.
+    pub pre_request_timeout_ms: u64,
 }
 
 impl Default for HooksConfig {
@@ -1044,6 +1118,11 @@ impl Default for HooksConfig {
             pre_tool: None,
             post_tool: None,
             pre_tool_timeout_ms: 5000,
+            compaction_started: None,
+            compaction_completed: None,
+            compaction_emergency: None,
+            pre_request: None,
+            pre_request_timeout_ms: 5000,
         }
     }
 }

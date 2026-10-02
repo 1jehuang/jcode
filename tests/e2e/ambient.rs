@@ -58,6 +58,7 @@ fn test_ambient_scheduled_queue() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     queue.push(ScheduledItem {
@@ -73,6 +74,7 @@ fn test_ambient_scheduled_queue() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     queue.push(ScheduledItem {
@@ -88,6 +90,7 @@ fn test_ambient_scheduled_queue() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     assert_eq!(queue.len(), 3);

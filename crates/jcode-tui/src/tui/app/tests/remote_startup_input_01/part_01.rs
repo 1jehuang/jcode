@@ -247,6 +247,9 @@ fn test_prepare_review_spawned_session_uses_visible_transcript_for_judge_session
                 covers_up_to_turn: 1,
                 original_turn_count: 1,
                 compacted_count: 1,
+                trigger: None,
+                summarizer: None,
+                mode: None,
             });
             child.save().expect("save child session");
 

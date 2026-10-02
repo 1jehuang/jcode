@@ -147,6 +147,13 @@ impl Config {
             self.tools.mcp_tools_token_threshold = parsed;
         }
 
+        // Compaction / retention
+        if let Ok(v) = std::env::var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN")
+            && let Ok(parsed) = v.trim().parse::<usize>()
+        {
+            self.compaction.clear_tool_results_older_than = Some(parsed);
+        }
+
         // ACP adapter
         if let Ok(v) = std::env::var("JCODE_ACP_PROFILE") {
             let trimmed = v.trim().to_ascii_lowercase();
@@ -507,6 +514,11 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
+        if let Ok(v) = std::env::var("JCODE_REPOMAP_TOKEN_BUDGET") {
+            if let Ok(parsed) = v.trim().parse::<usize>() {
+                self.agents.repomap_token_budget = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.agents.memory_sidecar_enabled = parsed;
@@ -596,9 +608,43 @@ impl Config {
             self.hooks.pre_tool_transform_timeout_ms = parsed;
         }
         hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
+        hook_env_override(
+            &mut self.hooks.compaction_started,
+            "JCODE_HOOK_COMPACTION_STARTED",
+        );
+        hook_env_override(
+            &mut self.hooks.compaction_completed,
+            "JCODE_HOOK_COMPACTION_COMPLETED",
+        );
+        hook_env_override(
+            &mut self.hooks.compaction_emergency,
+            "JCODE_HOOK_COMPACTION_EMERGENCY",
+        );
+        hook_env_override(&mut self.hooks.pre_request, "JCODE_HOOK_PRE_REQUEST");
         if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 self.hooks.pre_tool_timeout_ms = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.hooks.pre_request_timeout_ms = parsed;
+            }
+        }
+
+        // Custom compaction summarizer. Empty env values disable the
+        // config-file command.
+        if let Ok(v) = std::env::var("JCODE_COMPACTION_SUMMARY_COMMAND") {
+            let trimmed = v.trim();
+            self.compaction.summary_command = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_COMPACTION_SUMMARY_COMMAND_TIMEOUT_MS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.compaction.summary_command_timeout_ms = parsed;
             }
         }
 

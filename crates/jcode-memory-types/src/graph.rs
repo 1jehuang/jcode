@@ -15,16 +15,24 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 /// Current graph format version for migration detection
 pub const GRAPH_VERSION: u32 = 2;
 
+/// Heap item for cascade top-k. Total order (ascending = worst first):
+/// score ascending, then id DESCENDING. Here T IS the id (callers push
+/// `(String, f32)` with the memory id as value), so `.then_with(id)` on
+/// the value doubles as the tiebreak and the ordinal arm keeps earlier
+/// arrival first — which, after the id pre-sort below, means smaller id.
 #[derive(Debug)]
 struct TopKItem<T> {
     score: f32,
+    id: String,
     ordinal: usize,
     value: T,
 }
 
 impl<T> PartialEq for TopKItem<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.score.to_bits() == other.score.to_bits() && self.ordinal == other.ordinal
+        self.score.to_bits() == other.score.to_bits()
+            && self.id == other.id
+            && self.ordinal == other.ordinal
     }
 }
 
@@ -38,23 +46,29 @@ impl<T> PartialOrd for TopKItem<T> {
 
 impl<T> Ord for TopKItem<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Worst-first: larger id sorts worse on ties so the final
+        // descending sort yields id ascending.
         self.score
             .total_cmp(&other.score)
-            .then_with(|| self.ordinal.cmp(&other.ordinal))
+            .then_with(|| other.id.cmp(&self.id))
+            .then_with(|| other.ordinal.cmp(&self.ordinal))
     }
 }
 
-fn top_k_scored<T, I>(items: I, limit: usize) -> Vec<(T, f32)>
-where
-    I: IntoIterator<Item = (T, f32)>,
-{
+fn top_k_scored(items: HashMap<String, f32>, limit: usize) -> Vec<(String, f32)> {
     if limit == 0 {
         return Vec::new();
     }
 
-    let mut heap: BinaryHeap<Reverse<TopKItem<T>>> = BinaryHeap::new();
-    for (ordinal, (value, score)) in items.into_iter().enumerate() {
+    // Pre-sort by id so ordinals track id order: arrival position then
+    // doubles as the final tie key and output is HashMap-order free.
+    let mut drained: Vec<(String, f32)> = items.into_iter().collect();
+    drained.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut heap: BinaryHeap<Reverse<TopKItem<String>>> = BinaryHeap::new();
+    for (ordinal, (value, score)) in drained.into_iter().enumerate() {
         let candidate = Reverse(TopKItem {
+            id: value.clone(),
             score,
             ordinal,
             value,
@@ -65,9 +79,11 @@ where
             continue;
         }
 
+        // Full-order retention: the old score-only gate never replaced on
+        // ties, leaving truncation to HashMap arrival order.
         let replace = heap
             .peek()
-            .map(|smallest| score > smallest.0.score)
+            .map(|smallest| candidate.0 > smallest.0)
             .unwrap_or(false);
         if replace {
             heap.pop();
@@ -77,12 +93,16 @@ where
 
     let mut results: Vec<_> = heap
         .into_iter()
-        .map(|Reverse(item)| (item.value, item.score, item.ordinal))
+        .map(|Reverse(item)| (item.value, item.score, item.id, item.ordinal))
         .collect();
-    results.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+    results.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
+    });
     results
         .into_iter()
-        .map(|(value, score, _)| (value, score))
+        .map(|(value, score, _, _)| (value, score))
         .collect()
 }
 
@@ -101,6 +121,10 @@ pub enum EdgeKind {
     },
     /// Newer memory replaces older one
     Supersedes,
+    /// Invalidator memory explicitly voids a tombstoned one (DELETE path).
+    /// Direction: invalidator -> tombstone. The tombstone keeps
+    /// `active=false, superseded_by=None`; readers filter on `active`.
+    Invalidates,
     /// Conflicting information (both kept, flagged)
     Contradicts,
     /// Procedural knowledge derived from facts
@@ -119,6 +143,8 @@ impl EdgeKind {
             EdgeKind::InCluster => 0.6,
             EdgeKind::RelatesTo { weight } => *weight,
             EdgeKind::Supersedes => 0.9,
+            // Tombstones must never propagate rank through the graph.
+            EdgeKind::Invalidates => 0.0,
             EdgeKind::Contradicts => 0.3,
             EdgeKind::DerivedFrom => 0.7,
         }
@@ -523,6 +549,25 @@ impl MemoryGraph {
         self.add_edge(id_b, id_a, EdgeKind::Contradicts);
     }
 
+    /// Tombstone a memory via an explicit invalidator (R3 DELETE path).
+    ///
+    /// Adds an `Invalidates` edge invalidator -> tombstone, sets
+    /// `tombstone.active=false` and clears `superseded_by` (a tombstone is
+    /// void, not replaced). The row is preserved for provenance; readers
+    /// filter on `active`. No-op when either id is unknown.
+    pub fn invalidate(&mut self, invalidator_id: &str, tombstone_id: &str) {
+        if !self.memories.contains_key(invalidator_id)
+            || !self.memories.contains_key(tombstone_id)
+        {
+            return;
+        }
+        self.add_edge(invalidator_id, tombstone_id, EdgeKind::Invalidates);
+        if let Some(tombstone) = self.memories.get_mut(tombstone_id) {
+            tombstone.active = false;
+            tombstone.superseded_by = None;
+        }
+    }
+
     // ==================== Graph Stats ====================
 
     /// Get total number of nodes (memories + tags + clusters)
@@ -613,7 +658,8 @@ impl MemoryGraph {
             }
         }
 
-        // Keep only the top-scoring results
+        // Keep only the top-scoring results (id pre-sort lives inside
+        // top_k_scored).
         top_k_scored(results, max_results)
     }
 

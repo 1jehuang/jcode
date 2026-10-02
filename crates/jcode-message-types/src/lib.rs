@@ -17,7 +17,7 @@ pub struct ToolCall {
 }
 
 /// Tool definition advertised to model providers.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     /// Prompt-visible text sent to the model by provider adapters.
@@ -982,6 +982,86 @@ mod tests {
             cache_relevant_message_hashes(&[original]),
             cache_relevant_message_hashes(&[edited]),
             "real content edits must still change the hash"
+        );
+    }
+
+    /// V2: stamped history bytes must be stable across a turn boundary.
+    ///
+    /// `with_timestamps` re-stamps every historical user message each turn
+    /// from its stored `timestamp` field. If anything rewrites those fields
+    /// (re-materialization, session restore, clock skew) or recomputes
+    /// `tool_duration_ms`, history bytes churn and the provider prefix cache
+    /// dies from the front. This pins the good case: stamp the same history
+    /// twice across a simulated turn boundary including a JSON save/restore
+    /// round-trip, and require byte-identity of everything but the appended
+    /// suffix. Redesign (stamp-once-at-creation) only if this fails.
+    #[test]
+    fn stamped_history_is_stable_across_turn_boundary_and_restore() {
+        fn stamped_texts(messages: &[Message]) -> Vec<String> {
+            Message::with_timestamps(messages)
+                .iter()
+                .map(|msg| {
+                    serde_json::to_string(&msg.content).expect("content serializes")
+                })
+                .collect()
+        }
+
+        let ts = |secs: i64| {
+            chrono::DateTime::from_timestamp(secs, 0).expect("valid test timestamp")
+        };
+        let history = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "first question".to_string(),
+                    cache_control: None,
+                }],
+                timestamp: Some(ts(1_700_000_000)),
+                tool_duration_ms: None,
+            },
+            Message::assistant_text("first answer"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "tool output".to_string(),
+                    is_error: None,
+                }],
+                timestamp: Some(ts(1_700_000_060)),
+                tool_duration_ms: Some(3_200),
+            },
+        ];
+
+        // Turn 1: stamp history as the provider-bound list.
+        let turn1 = stamped_texts(&history);
+
+        // Turn boundary: session save/restore round-trip through JSON, then
+        // the next user message is appended and the whole list re-stamped.
+        let restored: Vec<Message> = serde_json::from_str(
+            &serde_json::to_string(&history).expect("history serializes"),
+        )
+        .expect("history round-trips");
+        let mut turn2_history = restored;
+        turn2_history.push(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "follow-up question".to_string(),
+                cache_control: None,
+            }],
+            timestamp: Some(ts(1_700_000_120)),
+            tool_duration_ms: None,
+        });
+        let turn2 = stamped_texts(&turn2_history);
+
+        assert_eq!(
+            turn2.len(),
+            turn1.len() + 1,
+            "only the new turn message is appended"
+        );
+        assert_eq!(
+            turn2[..turn1.len()],
+            turn1,
+            "stamped history prefix must be byte-identical across the turn boundary"
         );
     }
 }

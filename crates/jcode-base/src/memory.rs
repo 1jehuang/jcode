@@ -31,8 +31,9 @@ mod pending;
 mod prompt_support;
 
 pub use crate::memory_types::{
-    MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement, TrustLevel,
-    format_relevant_display_prompt, format_relevant_prompt,
+    CitationStatus, MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement,
+    SourceCitation, TrustLevel, citation_stale_mark, format_relevant_display_prompt,
+    format_relevant_prompt, format_relevant_prompt_verified,
 };
 use crate::memory_types::{
     bm25_token_stream, collect_skill_query_terms, format_entries_for_prompt,
@@ -384,8 +385,12 @@ impl MemoryManager {
         storage::write_json(&path, store)
     }
 
-    /// Store without embedding inference. Exact duplicates reinforce an existing
+    /// Store with embedding inference. Exact duplicates reinforce an existing
     /// entry only within the requested scope, never mutate a different project.
+    /// The incoming entry is embedded (persisted) before the R2 scan, so the
+    /// scan reads the stored vector and `find_similar_hybrid` can retrieve the
+    /// row later. Fail-open: without a usable backend the entry is added
+    /// exactly as before (no vector, keyword-only).
     pub fn remember_project(&self, entry: MemoryEntry) -> Result<String> {
         anyhow::ensure!(
             self.project_memory_path()?.is_some(),
@@ -450,6 +455,10 @@ impl MemoryManager {
         graph.add_memory(entry)
     }
 
+    /// Minimum cosine similarity for the R2 UPDATE candidate scan.
+    /// Validated end to end by the 08-stale-writer arm (2026-09-27): real
+    /// ONNX passage cosine clears this on all 6 UPDATE fixtures while the
+    /// H-006-shaped near-miss stays distinct via `detect_update`.
     pub(crate) const UPDATE_SIMILARITY_THRESHOLD: f32 = 0.80;
 
     /// Substrings (lowercased) marking an explicit supersede signal: the new
@@ -759,6 +768,20 @@ impl MemoryManager {
         ))
     }
 
+    /// Bench/diagnostic helper for the slot-B gate: the EXACT collection +
+    /// active-filter the live `get_relevant_parallel` path applies
+    /// (`collect_scoped(self, MemoryScope::All)` + `entry.active`; the
+    /// already-injected filter is session-pipeline state with no bench
+    /// equivalent, and the seeded bench graphs have no injected ids anyway),
+    /// WITHOUT the embedding-presence filter (the stage keeps
+    /// embedding-less entries reachable via BM25).
+    pub fn prefilter_bench_entries(&self) -> Result<Vec<MemoryEntry>> {
+        Ok(crate::memory_jev::collect_scoped(self, MemoryScope::All)?
+            .into_iter()
+            .filter(|entry| entry.active)
+            .collect())
+    }
+
     /// RRF k from config, clamped to [1.0, 1000.0]. Config knob
     /// `memory_rrf_k` (default 60.0); env `JCODE_MEMORY_RRF_K` wins.
     /// NaN/inf can arrive via TOML (`nan`) since clamp preserves NaN:
@@ -917,1081 +940,7 @@ impl MemoryManager {
         }
         v.clamp(0.0, 1.0)
     }
-
-    /// Pull pool, rank by dense and BM25 separately, fuse with RRF.
-    fn hybrid_fuse(
-        entries: Vec<MemoryEntry>,
-        query_text: &str,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> Vec<(MemoryEntry, f32)> {
-        let entries: Vec<MemoryEntry> = entries
-            .into_iter()
-            .filter(|e| e.embedding.is_some())
-            .collect();
-        if entries.is_empty() {
-            return Vec::new();
-        }
-
-        // Generous per-retriever pool so fusion has signal to work with.
-        let pool = limit.saturating_mul(5).max(HYBRID_POOL_MIN);
-        Self::hybrid_prefilter_rank(entries, query_text, query_embedding, limit, pool)
-    }
-
-    /// Slot-B hybrid ranking core: dense (cosine, active-model space only) +
-    /// BM25 lexical, fused with RRF, over a CALLER-SUPPLIED entry set.
-    ///
-    /// Unlike [`Self::hybrid_fuse`] this does NOT re-collect and does NOT
-    /// drop embedding-less entries: they stay reachable via the BM25 half
-    /// (backend-switch contract, §3.2). Output ⊆ input by construction.
-    /// `pool` is the per-retriever candidate depth (hybrid_fuse passes
-    /// `(limit*5).max(50)`; the slot-B stage passes the same shape).
-    ///
-    /// Public so the recall bench measures the exact shipped ranking.
-    pub fn hybrid_prefilter_rank(
-        entries: Vec<MemoryEntry>,
-        query_text: &str,
-        query_embedding: &[f32],
-        limit: usize,
-        pool: usize,
-    ) -> Vec<(MemoryEntry, f32)> {
-        if entries.is_empty() || limit == 0 {
-            return Vec::new();
-        }
-
-        // Dense ranking (no hard threshold; just take the top by cosine).
-        // Vector-space gate: only entries embedded by the ACTIVE backend share a
-        // comparable space, so dense scores are computed over those only. Other
-        // entries (different model, e.g. not-yet-re-embedded local memories when
-        // OpenAI is active) still participate via the BM25 lexical half below, so
-        // they remain reachable rather than disappearing on a backend switch.
-        let active_model = crate::embedding_backend::active_model_id();
-        let dense_eligible: Vec<usize> = entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.effective_embedding_model() == active_model)
-            .map(|(i, _)| i)
-            .collect();
-        let emb_refs: Vec<&[f32]> = dense_eligible
-            .iter()
-            .filter_map(|&i| entries[i].embedding.as_deref())
-            .collect();
-        let dense_scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
-        let mut dense: Vec<(usize, f32)> =
-            dense_eligible.iter().copied().zip(dense_scores).collect();
-        dense.sort_by(|a, b| {
-            b.1.total_cmp(&a.1)
-                .then_with(|| entries[a.0].id.cmp(&entries[b.0].id))
-        });
-        dense.truncate(pool);
-
-        // Sparse (BM25) ranking over memory search text.
-        let sparse = bm25_rank(&entries, query_text, pool);
-
-        // RRF fusion. k comes from config (default 60.0); higher k
-        // compresses rank gaps, lower k rewards top ranks more steeply.
-        // The dense list is weighted by `memory_rrf_dense_weight`
-        // (default 1.0 = equal weights); the sparse list keeps weight 1.0.
-        let rrf_k = Self::rrf_k();
-        let w_dense = Self::rrf_dense_weight();
-        let mut fused: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
-        for (rank, (idx, _)) in dense.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += w_dense / (rrf_k + rank as f32 + 1.0);
-        }
-        for (rank, (idx, _)) in sparse.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
-        }
-
-        // G-R recency prior: bounded additive bonus per fused candidate.
-        // Touch-aware age, global tau=90 default (0.0 = per-category table).
-        // Applies only among live rows: tombstoned / superseded entries
-        // never reach this pool (active-only collection upstream).
-        if Self::recency_weight() > 0.0 {
-            for (idx, score) in fused.iter_mut() {
-                if let Some(e) = entries.get(*idx) {
-                    *score += Self::recency_bonus(e);
-                }
-            }
-        }
-
-        let mut entries: Vec<Option<MemoryEntry>> = entries.into_iter().map(Some).collect();
-        top_k_by_score(
-            fused
-                .into_iter()
-                .filter_map(|(idx, score)| entries[idx].take().map(|e| (e, score))),
-            limit,
-            |entry| entry.id.as_str(),
-        )
-    }
-
-    /// Bench/diagnostic helper for the slot-B gate: the EXACT collection +
-    /// active-filter the live `get_relevant_parallel` path applies
-    /// (`collect_scoped(self, MemoryScope::All)` + `entry.active`; the
-    /// already-injected filter is session-pipeline state with no bench
-    /// equivalent, and the seeded bench graphs have no injected ids anyway),
-    /// WITHOUT the embedding-presence filter (the stage keeps
-    /// embedding-less entries reachable via BM25).
-    pub fn prefilter_bench_entries(&self) -> Result<Vec<MemoryEntry>> {
-        Ok(crate::memory_jev::collect_scoped(self, MemoryScope::All)?
-            .into_iter()
-            .filter(|entry| entry.active)
-            .collect())
-    }
-
-    fn collect_all_memories_with_embeddings(&self) -> Result<Vec<MemoryEntry>> {
-        self.collect_memories_with_embeddings_scoped(MemoryScope::All)
-    }
-
-    fn collect_memories_with_embeddings_scoped(
-        &self,
-        scope: MemoryScope,
-    ) -> Result<Vec<MemoryEntry>> {
-        let mut entries: Vec<MemoryEntry> = Vec::new();
-        if scope.includes_project()
-            && let Ok(project) = self.load_project_graph()
-        {
-            entries.extend(
-                project
-                    .active_memories()
-                    .filter(|m| m.embedding.is_some())
-                    .cloned(),
-            );
-        }
-        if scope.includes_global()
-            && let Ok(global) = self.load_global_graph()
-        {
-            entries.extend(
-                global
-                    .active_memories()
-                    .filter(|m| m.embedding.is_some())
-                    .cloned(),
-            );
-        }
-        Ok(entries)
-    }
-
-    fn collect_memories_scoped(&self, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
-        let mut entries = Vec::new();
-        if scope.includes_project()
-            && let Ok(project) = self.load_project_graph()
-        {
-            entries.extend(project.all_memories().cloned());
-        }
-        if scope.includes_global()
-            && let Ok(global) = self.load_global_graph()
-        {
-            entries.extend(global.all_memories().cloned());
-        }
-        Ok(entries)
-    }
-
-    #[cfg(test)]
-    fn synthetic_skill_entries(&self) -> Vec<MemoryEntry> {
-        if !self.include_skills {
-            return Vec::new();
-        }
-
-        collect_synthetic_entries()
-    }
-
-    #[cfg(test)]
-    fn collect_retrieval_candidates_scoped(&self, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
-        let mut entries = self.collect_memories_scoped(scope)?;
-        if scope.includes_global() {
-            entries.extend(self.synthetic_skill_entries());
-        }
-        Ok(entries)
-    }
-
-    fn score_and_filter(
-        entries: Vec<MemoryEntry>,
-        query_embedding: &[f32],
-        query_text: &str,
-        threshold: f32,
-        limit: usize,
-    ) -> Result<Vec<(MemoryEntry, f32)>> {
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut filtered_entries = Vec::with_capacity(entries.len());
-        let mut skipped_missing_embeddings = 0usize;
-        // Vector-space gate: only compare embeddings produced by the ACTIVE
-        // backend (same model id). When the active backend differs from an
-        // entry's stored model (e.g. user switched to OpenAI but this memory was
-        // embedded with local MiniLM, not yet re-embedded), the cosine would be
-        // meaningless, so we exclude it from dense scoring. Such memories remain
-        // reachable via the lexical/BM25 path in hybrid retrieval.
-        let active_model = crate::embedding_backend::active_model_id();
-        let mut skipped_model_mismatch = 0usize;
-        for entry in entries {
-            if entry.embedding.is_none() {
-                skipped_missing_embeddings += 1;
-            } else if entry.effective_embedding_model() != active_model {
-                skipped_model_mismatch += 1;
-            } else {
-                filtered_entries.push(entry);
-            }
-        }
-        if skipped_missing_embeddings > 0 {
-            crate::logging::warn(&format!(
-                "Skipped {} retrieval candidate(s) without embeddings during similarity scoring",
-                skipped_missing_embeddings
-            ));
-        }
-        if skipped_model_mismatch > 0 {
-            crate::logging::info(&format!(
-                "Skipped {} retrieval candidate(s) embedded with a different model than the active backend ({})",
-                skipped_model_mismatch, active_model
-            ));
-        }
-        if filtered_entries.is_empty() {
-            return Ok(Vec::new());
-        }
-        let emb_refs: Vec<&[f32]> = filtered_entries
-            .iter()
-            .filter_map(|entry| entry.embedding.as_deref())
-            .collect();
-        let scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
-        let skill_query_terms = collect_skill_query_terms(query_text);
-
-        let scored = top_k_by_score(
-            filtered_entries
-                .into_iter()
-                .zip(scores)
-                .map(|(entry, sim)| {
-                    let adjusted = sim + skill_retrieval_bonus(&entry, &skill_query_terms);
-                    (entry, adjusted)
-                })
-                .filter(|(_, sim)| *sim >= threshold),
-            limit,
-            |entry| entry.id.as_str(),
-        );
-
-        let scored = Self::apply_gap_filter(scored);
-
-        Ok(scored)
-    }
-
-    /// Drop trailing low-relevance results by detecting natural gaps in the
-    /// score distribution. If the top hit is 0.85 and the next cluster is
-    /// 0.40-0.42, the 0.15+ gap tells us those lower results are noise.
-    ///
-    /// Algorithm: walk the sorted scores and cut when the drop from one score
-    /// to the next exceeds `GAP_FACTOR` of the range (top - floor_threshold).
-    fn apply_gap_filter(scored: Vec<(MemoryEntry, f32)>) -> Vec<(MemoryEntry, f32)> {
-        if scored.len() <= 1 {
-            return scored;
-        }
-
-        const GAP_FACTOR: f32 = 0.25;
-        const MIN_KEEP: usize = 1;
-
-        let top_score = scored[0].1;
-        let range = (top_score - EMBEDDING_SIMILARITY_THRESHOLD).max(0.01);
-        let max_gap = range * GAP_FACTOR;
-
-        let mut keep = scored.len();
-        for i in 1..scored.len() {
-            let drop = scored[i - 1].1 - scored[i].1;
-            if drop > max_gap && i >= MIN_KEEP {
-                keep = i;
-                break;
-            }
-        }
-
-        scored.into_iter().take(keep).collect()
-    }
-
-    /// Ensure all memories have embeddings (backfill for existing memories)
-    pub fn backfill_embeddings(&self) -> Result<(usize, usize)> {
-        let mut generated = 0;
-        let mut failed = 0;
-
-        // Process project memories
-        if let Ok(mut graph) = self.load_project_graph() {
-            let mut changed = false;
-            for entry in graph.memories.values_mut() {
-                if entry.embedding.is_none() {
-                    if entry.ensure_embedding() {
-                        generated += 1;
-                        changed = true;
-                    } else {
-                        failed += 1;
-                    }
-                }
-            }
-            if changed {
-                self.save_project_graph(&graph)?;
-            }
-        }
-
-        // Process global memories
-        if let Ok(mut graph) = self.load_global_graph() {
-            let mut changed = false;
-            for entry in graph.memories.values_mut() {
-                if entry.embedding.is_none() {
-                    if entry.ensure_embedding() {
-                        generated += 1;
-                        changed = true;
-                    } else {
-                        failed += 1;
-                    }
-                }
-            }
-            if changed {
-                self.save_global_graph(&graph)?;
-            }
-        }
-
-        Ok((generated, failed))
-    }
-
-    pub fn get_prompt_memories(&self, limit: usize) -> Option<String> {
-        self.get_prompt_memories_scoped(limit, MemoryScope::All)
-    }
-
-    pub fn get_prompt_memories_scoped(&self, limit: usize, scope: MemoryScope) -> Option<String> {
-        let all_entries: Vec<_> = top_k_by_ord(
-            self.collect_memories_scoped(scope)
-                .ok()?
-                .into_iter()
-                .map(|entry| {
-                    let updated_at = entry.updated_at.timestamp_millis();
-                    (entry, updated_at)
-                }),
-            limit,
-        )
-        .into_iter()
-        .map(|(entry, _)| entry)
-        .collect();
-
-        if all_entries.is_empty() {
-            return None;
-        }
-
-        format_entries_for_prompt(&all_entries, limit)
-    }
-
-    pub async fn relevant_prompt_for_messages(
-        &self,
-        messages: &[crate::message::Message],
-    ) -> Result<Option<String>> {
-        let context = format_context_for_relevance(messages);
-        if context.is_empty() {
-            return Ok(None);
-        }
-        self.relevant_prompt_for_context(
-            &context,
-            MEMORY_RELEVANCE_MAX_CANDIDATES,
-            MEMORY_RELEVANCE_MAX_RESULTS,
-        )
-        .await
-    }
-
-    pub async fn relevant_prompt_for_context(
-        &self,
-        context: &str,
-        max_candidates: usize,
-        limit: usize,
-    ) -> Result<Option<String>> {
-        let relevant = self
-            .get_relevant_for_context(context, max_candidates)
-            .await?;
-        if relevant.is_empty() {
-            return Ok(None);
-        }
-        Ok(format_relevant_prompt(&relevant, limit))
-    }
-
-    pub fn search(&self, query: &str) -> Result<Vec<MemoryEntry>> {
-        self.search_scoped(query, MemoryScope::All)
-    }
-
-    pub fn search_scoped(&self, query: &str, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
-        let query_lower = normalize_search_text(query);
-        if query_lower.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut results = Vec::new();
-
-        for memory in self.collect_memories_scoped(scope)? {
-            if memory_matches_search(&memory, &query_lower) {
-                results.push(memory);
-            }
-        }
-
-        Ok(results)
-    }
-
-    pub fn list_all(&self) -> Result<Vec<MemoryEntry>> {
-        self.list_all_scoped(MemoryScope::All)
-    }
-
-    pub fn list_all_scoped(&self, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
-        let mut all = self.collect_memories_scoped(scope)?;
-        all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        Ok(all)
-    }
-
-    pub fn forget(&self, id: &str) -> Result<bool> {
-        // Try graph-based removal first (new format)
-        let mut project_graph = self.load_project_graph()?;
-        if project_graph.remove_memory(id).is_some() {
-            self.save_project_graph(&project_graph)?;
-            return Ok(true);
-        }
-
-        let mut global_graph = self.load_global_graph()?;
-        if global_graph.remove_memory(id).is_some() {
-            self.save_global_graph(&global_graph)?;
-            return Ok(true);
-        }
-
-        Ok(false)
-    }
-
-    // === Sidecar Integration ===
-
-    /// Extract memories from a session transcript using the Haiku sidecar
-    pub async fn extract_from_transcript(
-        &self,
-        transcript: &str,
-        session_id: &str,
-    ) -> Result<Vec<String>> {
-        if !memory_llm_judge_available() {
-            crate::logging::info("Memory transcript extraction skipped: LLM judge unavailable");
-            return Ok(Vec::new());
-        }
-
-        let sidecar = Sidecar::new();
-        let extracted = sidecar.extract_memories(transcript).await?;
-
-        let mut ids = Vec::new();
-        for memory in extracted {
-            let category: MemoryCategory = memory.category.parse().unwrap_or(MemoryCategory::Fact);
-            let trust = match memory.trust.as_str() {
-                "high" => TrustLevel::High,
-                "medium" => TrustLevel::Medium,
-                _ => TrustLevel::Low,
-            };
-
-            let entry = MemoryEntry::new(category, memory.content)
-                .with_source(session_id)
-                .with_trust(trust);
-
-            // Store in project scope by default
-            let id = self.remember_project(entry)?;
-            ids.push(id);
-        }
-
-        Ok(ids)
-    }
-
-    /// Recall directly through Jev. The legacy `max_candidates` argument now
-    /// limits output, not the input pool: old memories must remain discoverable.
-    pub async fn get_relevant_for_context(
-        &self,
-        context: &str,
-        max_candidates: usize,
-    ) -> Result<Vec<MemoryEntry>> {
-        Ok(
-            crate::memory_jev::recall(self, context, max_candidates, MemoryScope::All)
-                .await?
-                .into_iter()
-                .map(|(entry, _)| entry)
-                .collect(),
-        )
-    }
-
-    /// Local keyword lookup, available without a remote decision provider.
-    pub fn get_relevant_keywords(
-        &self,
-        keywords: &[&str],
-        limit: usize,
-    ) -> Result<Vec<MemoryEntry>> {
-        let normalized_keywords: Vec<String> = keywords
-            .iter()
-            .map(|keyword| normalize_search_text(keyword))
-            .filter(|keyword| !keyword.is_empty())
-            .collect();
-        if normalized_keywords.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let matches: Vec<_> = top_k_by_ord(
-            self.collect_memories_scoped(MemoryScope::All)?
-                .into_iter()
-                .filter(|entry| {
-                    let content_lower = normalize_search_text(&entry.content);
-                    normalized_keywords
-                        .iter()
-                        .any(|kw| content_lower.contains(kw))
-                })
-                .map(|entry| {
-                    let updated_at = entry.updated_at.timestamp_millis();
-                    (entry, updated_at)
-                }),
-            limit,
-        )
-        .into_iter()
-        .map(|(entry, _)| entry)
-        .collect();
-
-        Ok(matches)
-    }
-
-    // === Async Memory Checking ===
-
-    /// Spawn a background task to check memory relevance for a specific session.
-    /// Results are stored in PENDING_MEMORY keyed by session_id and can be retrieved
-    /// with take_pending_memory(session_id).
-    /// This method returns immediately and never blocks the caller.
-    /// Only ONE memory check runs at a time per session - additional calls are ignored.
-    pub fn spawn_relevance_check(
-        &self,
-        session_id: &str,
-        messages: std::sync::Arc<[crate::message::Message]>,
-        event_tx: Option<MemoryEventSink>,
-    ) {
-        let sid = session_id.to_string();
-
-        if !begin_memory_check(&sid) {
-            return;
-        }
-
-        let manager = self.clone();
-
-        tokio::spawn(async move {
-            match manager
-                .get_relevant_parallel(&sid, &messages, event_tx.clone())
-                .await
-            {
-                Ok(MemoryRelevanceResult {
-                    prompt: Some(prompt),
-                    display_prompt,
-                    selected_entries,
-                }) => {
-                    let count = selected_entries.len();
-                    set_pending_memory_for_project_with_selection(
-                        &sid,
-                        prompt,
-                        count,
-                        &selected_entries,
-                        display_prompt,
-                        manager
-                            .project_dir
-                            .as_deref()
-                            .and_then(|path| path.to_str()),
-                    );
-                    emit_memory_activity(event_tx.as_ref());
-                }
-                Ok(MemoryRelevanceResult { prompt: None, .. }) => {
-                    clear_pending_memory(&sid);
-                    set_state(MemoryState::Idle);
-                    emit_memory_activity(event_tx.as_ref());
-                }
-                Err(e) => {
-                    clear_pending_memory(&sid);
-                    crate::logging::error(&format!("Background memory check failed: {}", e));
-                    add_event(MemoryEventKind::Error {
-                        message: e.to_string(),
-                    });
-                    set_state(MemoryState::Idle);
-                    emit_memory_activity(event_tx.as_ref());
-                }
-            }
-
-            finish_memory_check(&sid);
-        });
-    }
-
-    /// Jev-only automatic recall. Storage and per-session dedup remain local;
-    /// there is no embedding, conventional LLM, or unjudged fallback path.
-    pub async fn get_relevant_parallel(
-        &self,
-        session_id: &str,
-        messages: &[crate::message::Message],
-        event_tx: Option<MemoryEventSink>,
-    ) -> Result<MemoryRelevanceResult> {
-        let query = format_focused_query_for_relevance(messages);
-        let query = crate::util::truncate_str(&query, crate::memory_jev::MAX_QUERY_BYTES);
-        if query.trim().is_empty() {
-            return Ok(MemoryRelevanceResult::default());
-        }
-        pipeline_start();
-        let entries = match crate::memory_jev::collect_scoped(self, MemoryScope::All) {
-            Ok(entries) => entries,
-            Err(error) => {
-                clear_pending_memory(session_id);
-                pipeline_update(|p| {
-                    p.search = StepStatus::Error;
-                    p.verify = StepStatus::Skipped;
-                    p.inject = StepStatus::Skipped;
-                });
-                set_state(MemoryState::Idle);
-                emit_memory_activity(event_tx.as_ref());
-                return Err(error);
-            }
-        };
-        let entries: Vec<_> = entries
-            .into_iter()
-            .filter(|entry| entry.active && !is_memory_injected(session_id, &entry.id))
-            .collect();
-        // Slot-B R3 composition (rebase onto upstream 72-cap): our
-        // Option-take stage runs when engaged; upstream's BM25 top-72
-        // `prefilter_for_jev` is the disengaged/fail-open floor (kept
-        // verbatim for next-rebase merging). The two stages never act on
-        // the same query (no double-narrow); the floor only changes
-        // behavior where raw exhaustive is dangerous (large stores).
-        let mut entries_opt = Some(entries);
-        Self::prefilter_for_jev_take(&mut entries_opt, &query);
-        let entries = entries_opt.expect("prefilter stage always leaves a set");
-        // Floor queries (mode-off / fail-open) arrive here as the raw set;
-        // cap them at 72 via the upstream floor fn so the disengaged path
-        // never reproduces the 107-call outage.
-        let entries = prefilter_for_jev(entries, &query);
-        pipeline_update(|p| {
-            p.search = StepStatus::Done;
-            p.search_result = Some(StepResult {
-                summary: format!("{} local memories", entries.len()),
-                latency_ms: 0,
-            });
-            p.verify = StepStatus::Running;
-            p.maintain = StepStatus::Skipped;
-        });
-        set_state(MemoryState::SidecarChecking {
-            count: entries.len(),
-        });
-        emit_memory_activity(event_tx.as_ref());
-        let started = Instant::now();
-        let result = async {
-            if entries.is_empty() {
-                return Ok(Vec::new());
-            }
-            let client = crate::jev::JevClient::new()?;
-            crate::memory_jev::select(&client, query, entries, 5).await
-        }
-        .await;
-        let relevant: Vec<MemoryEntry> = match result {
-            Ok(results) => results.into_iter().map(|(entry, _)| entry).collect(),
-            Err(error) => {
-                clear_pending_memory(session_id);
-                pipeline_update(|p| {
-                    p.verify = StepStatus::Error;
-                    p.inject = StepStatus::Skipped;
-                });
-                set_state(MemoryState::Idle);
-                emit_memory_activity(event_tx.as_ref());
-                return Err(error);
-            }
-        };
-        let count = relevant.len();
-        pipeline_update(|p| {
-            p.verify = StepStatus::Done;
-            p.verify_result = Some(StepResult {
-                summary: format!("Jev: {count} relevant"),
-                latency_ms: started.elapsed().as_millis() as u64,
-            });
-            p.inject = if count == 0 {
-                StepStatus::Skipped
-            } else {
-                StepStatus::Pending
-            };
-        });
-        let prompt = format_relevant_prompt(&relevant, 5);
-        let display = format_relevant_display_prompt(&relevant, 5);
-        set_state(if count == 0 {
-            MemoryState::Idle
-        } else {
-            MemoryState::FoundRelevant { count }
-        });
-        emit_memory_activity(event_tx.as_ref());
-        Ok(MemoryRelevanceResult {
-            prompt,
-            display_prompt: display,
-            selected_entries: relevant,
-        })
-    }
-
-    /// Load the existing project graph without generating embeddings.
-    pub fn load_project_graph(&self) -> Result<MemoryGraph> {
-        let Some(path) = self.project_memory_path()? else {
-            return Ok(MemoryGraph::new());
-        };
-
-        if !self.test_mode
-            && let Some(mut graph) = cached_graph(&path)
-        {
-            if Self::normalize_graph_search_text(&mut graph) {
-                cache_graph(path.clone(), &graph);
-            }
-            return Ok(graph);
-        }
-
-        if path.exists() {
-            // Try loading as MemoryGraph first
-            if let Ok(graph) = storage::read_json::<MemoryGraph>(&path)
-                && graph.graph_version == GRAPH_VERSION
-            {
-                let mut graph = graph;
-                let normalized = Self::normalize_graph_search_text(&mut graph);
-                if self.import_legacy_notes_into_graph(&mut graph)? {
-                    self.save_project_graph(&graph)?;
-                } else if normalized {
-                    storage::write_json(&path, &graph)?;
-                }
-                if !self.test_mode {
-                    cache_graph(path, &graph);
-                }
-                return Ok(graph);
-            }
-
-            // Fall back to legacy MemoryStore and migrate
-            let store: MemoryStore = storage::read_json(&path)?;
-            let mut graph = MemoryGraph::from_legacy_store(store);
-            let _ = self.import_legacy_notes_into_graph(&mut graph)?;
-
-            // Save migrated format (create backup first)
-            let backup_path = path.with_extension("json.bak");
-            if !backup_path.exists() {
-                let _ = std::fs::copy(&path, &backup_path);
-            }
-            storage::write_json(&path, &graph)?;
-
-            crate::logging::info(&format!(
-                "Migrated memory store to graph format: {}",
-                path.display()
-            ));
-            if !self.test_mode {
-                cache_graph(path, &graph);
-            }
-            Ok(graph)
-        } else {
-            let mut graph = MemoryGraph::new();
-            if self.import_legacy_notes_into_graph(&mut graph)? {
-                self.save_project_graph(&graph)?;
-            }
-            if !self.test_mode {
-                cache_graph(path, &graph);
-            }
-            Ok(graph)
-        }
-    }
-
-    /// Load global memories as a MemoryGraph with automatic migration
-    pub fn load_global_graph(&self) -> Result<MemoryGraph> {
-        let path = self.global_memory_path()?;
-        if !self.test_mode
-            && let Some(mut graph) = cached_graph(&path)
-        {
-            if Self::normalize_graph_search_text(&mut graph) {
-                cache_graph(path.clone(), &graph);
-            }
-            return Ok(graph);
-        }
-
-        if path.exists() {
-            // Try loading as MemoryGraph first
-            if let Ok(graph) = storage::read_json::<MemoryGraph>(&path)
-                && graph.graph_version == GRAPH_VERSION
-            {
-                let mut graph = graph;
-                if Self::normalize_graph_search_text(&mut graph) {
-                    storage::write_json(&path, &graph)?;
-                }
-                if !self.test_mode {
-                    cache_graph(path, &graph);
-                }
-                return Ok(graph);
-            }
-
-            // Fall back to legacy MemoryStore and migrate
-            let store: MemoryStore = storage::read_json(&path)?;
-            let graph = MemoryGraph::from_legacy_store(store);
-
-            // Save migrated format (create backup first)
-            let backup_path = path.with_extension("json.bak");
-            if !backup_path.exists() {
-                let _ = std::fs::copy(&path, &backup_path);
-            }
-            storage::write_json(&path, &graph)?;
-
-            crate::logging::info(&format!(
-                "Migrated global memory store to graph format: {}",
-                path.display()
-            ));
-            if !self.test_mode {
-                cache_graph(path, &graph);
-            }
-            Ok(graph)
-        } else {
-            let graph = MemoryGraph::new();
-            if !self.test_mode {
-                cache_graph(path, &graph);
-            }
-            Ok(graph)
-        }
-    }
-
-    /// Save project memories as a MemoryGraph
-    pub fn save_project_graph(&self, graph: &MemoryGraph) -> Result<()> {
-        if let Some(path) = self.project_memory_path()? {
-            storage::write_json(&path, graph)?;
-            if !self.test_mode {
-                cache_graph(path, graph);
-            }
-        }
-        Ok(())
-    }
-
-    /// Save global memories as a MemoryGraph
-    pub fn save_global_graph(&self, graph: &MemoryGraph) -> Result<()> {
-        let path = self.global_memory_path()?;
-        storage::write_json(&path, graph)?;
-        if !self.test_mode {
-            cache_graph(path, graph);
-        }
-        Ok(())
-    }
-
-    /// Add a tag to a memory
-    pub fn tag_memory(&self, memory_id: &str, tag: &str) -> Result<()> {
-        // Try project first
-        let mut graph = self.load_project_graph()?;
-        if graph.memories.contains_key(memory_id) {
-            graph.tag_memory(memory_id, tag);
-            return self.save_project_graph(&graph);
-        }
-
-        // Try global
-        let mut graph = self.load_global_graph()?;
-        if graph.memories.contains_key(memory_id) {
-            graph.tag_memory(memory_id, tag);
-            return self.save_global_graph(&graph);
-        }
-
-        Err(anyhow::anyhow!("Memory not found: {}", memory_id))
-    }
-
-    /// Link two memories with a RelatesTo edge
-    pub fn link_memories(&self, from_id: &str, to_id: &str, weight: f32) -> Result<()> {
-        // Try project first
-        let mut graph = self.load_project_graph()?;
-        if graph.memories.contains_key(from_id) && graph.memories.contains_key(to_id) {
-            graph.link_memories(from_id, to_id, weight);
-            return self.save_project_graph(&graph);
-        }
-
-        // Try global
-        let mut graph = self.load_global_graph()?;
-        if graph.memories.contains_key(from_id) && graph.memories.contains_key(to_id) {
-            graph.link_memories(from_id, to_id, weight);
-            return self.save_global_graph(&graph);
-        }
-
-        // Cross-store links not supported for now
-        Err(anyhow::anyhow!(
-            "Both memories must be in the same store (project or global)"
-        ))
-    }
-
-    /// Get memories related to a given memory via graph traversal
-    pub fn get_related(&self, memory_id: &str, depth: usize) -> Result<Vec<MemoryEntry>> {
-        // Find which store contains the memory
-        let (mut graph, _is_project) = {
-            let project_graph = self.load_project_graph()?;
-            if project_graph.memories.contains_key(memory_id) {
-                (project_graph, true)
-            } else {
-                let global_graph = self.load_global_graph()?;
-                if global_graph.memories.contains_key(memory_id) {
-                    (global_graph, false)
-                } else {
-                    return Err(anyhow::anyhow!("Memory not found: {}", memory_id));
-                }
-            }
-        };
-
-        // Use cascade retrieval to find related memories
-        let results = graph.cascade_retrieve(&[memory_id.to_string()], &[1.0], depth, 20);
-
-        // Collect memory entries (excluding the seed)
-        let entries: Vec<MemoryEntry> = results
-            .into_iter()
-            .filter(|(id, _)| id != memory_id)
-            .filter_map(|(id, _)| graph.get_memory(&id).cloned())
-            .collect();
-
-        Ok(entries)
-    }
-
-    /// Find similar memories with cascade retrieval through the graph
-    ///
-    /// This extends the basic embedding search by also traversing through
-    /// tags to find related memories that might not have direct embedding similarity.
-    pub fn find_similar_with_cascade(
-        &self,
-        text: &str,
-        threshold: f32,
-        limit: usize,
-    ) -> Result<Vec<(MemoryEntry, f32)>> {
-        self.find_similar_with_cascade_scoped(text, threshold, limit, MemoryScope::All)
-    }
-
-    pub fn find_similar_with_cascade_scoped(
-        &self,
-        text: &str,
-        threshold: f32,
-        limit: usize,
-        scope: MemoryScope,
-    ) -> Result<Vec<(MemoryEntry, f32)>> {
-        // First, do basic embedding search
-        let embedding_hits = self.find_similar_scoped(text, threshold, limit, scope)?;
-
-        if embedding_hits.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Get seed IDs and scores
-        let seed_ids: Vec<String> = embedding_hits.iter().map(|(e, _)| e.id.clone()).collect();
-        let seed_scores: Vec<f32> = embedding_hits.iter().map(|(_, s)| *s).collect();
-
-        // Load graphs and perform cascade retrieval
-        let mut project_graph = if scope.includes_project() {
-            Some(self.load_project_graph()?)
-        } else {
-            None
-        };
-        let mut global_graph = if scope.includes_global() {
-            Some(self.load_global_graph()?)
-        } else {
-            None
-        };
-
-        // Cascade through project graph
-        let project_cascade = project_graph
-            .as_mut()
-            .map(|graph| graph.cascade_retrieve(&seed_ids, &seed_scores, 2, limit * 2))
-            .unwrap_or_default();
-
-        // Cascade through global graph
-        let global_cascade = global_graph
-            .as_mut()
-            .map(|graph| graph.cascade_retrieve(&seed_ids, &seed_scores, 2, limit * 2))
-            .unwrap_or_default();
-
-        // Merge results, keeping highest score for each memory
-        let mut merged: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
-
-        for (id, score) in embedding_hits.iter() {
-            merged.insert(id.id.clone(), *score);
-        }
-        for (id, score) in project_cascade {
-            let existing = merged.get(&id).copied().unwrap_or(0.0);
-            if score > existing {
-                merged.insert(id, score);
-            }
-        }
-        for (id, score) in global_cascade {
-            let existing = merged.get(&id).copied().unwrap_or(0.0);
-            if score > existing {
-                merged.insert(id, score);
-            }
-        }
-
-        // Look up entries and keep only the top-scoring results
-        let results: Vec<(MemoryEntry, f32)> = top_k_by_score(
-            merged.into_iter().filter_map(|(id, score)| {
-                project_graph
-                    .as_ref()
-                    .and_then(|graph| graph.get_memory(&id))
-                    .or_else(|| {
-                        global_graph
-                            .as_ref()
-                            .and_then(|graph| graph.get_memory(&id))
-                    })
-                    .cloned()
-                    .map(|entry| (entry, score))
-            }),
-            limit,
-            |entry| entry.id.as_str(),
-        );
-
-        Ok(results)
-    }
-
-    /// Get graph statistics for display
-    pub fn graph_stats(&self) -> Result<(usize, usize, usize, usize)> {
-        let project = self.load_project_graph()?;
-        let global = self.load_global_graph()?;
-
-        let memories = project.memories.len() + global.memories.len();
-        let tags = project.tags.len() + global.tags.len();
-        let edges = project.edge_count() + global.edge_count();
-        let clusters = project.clusters.len() + global.clusters.len();
-
-        Ok((memories, tags, edges, clusters))
-    }
 }
-
-
-/// Slot-B shadow-audit counters: (queries, engaged, failopen, sampled).
-/// Process-wide atomics; the 7-day live window reads them via
-/// `MemoryManager::prefilter_shadow_stats`.
-static PREFILTER_QUERIES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static PREFILTER_ENGAGED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static PREFILTER_FAILOPEN: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static PREFILTER_SHADOW_SAMPLED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Slot-B per-arm fail-open counters (SHADOW-GATE Metric 4): the five arms
-/// conflated in `PREFILTER_FAILOPEN`, indexed by `PrefilterFailopenArm`.
-/// Every increment pairs with the coarse bump at the
-/// `prefilter_for_jev_take` call site, so `failopen == sum(arms)`.
-static PREFILTER_FAILOPEN_ARMS: [std::sync::atomic::AtomicU64; 5] = [
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-];
-
-/// Slot-B engaged-AND-sampled joint counter (SHADOW-GATE Metric 2
-/// denominator). Sampled-but-failopen queries have no tail by design, so
-/// only queries whose tail is actually emitted bump this.
-static PREFILTER_ENGAGED_SAMPLED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Slot-B tail re-judge counters (SHADOW-GATE Metric 2 numerator): how
-/// many sampled engaged tails finished a second `select` (`REJUDGED`),
-/// and how many of those had >= 1 judge-relevant tail memory (`HITS`).
-/// Process-wide, `Relaxed` (monotonic; exact cross-counter consistency
-/// not required). The hook bumps these read-only: no recall counts or
-/// priors are touched (none exist yet; keep it that way).
-static PREFILTER_TAIL_REJUDGED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static PREFILTER_TAIL_HITS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-/// Slot-B stage-elapsed accumulators (SHADOW-GATE Metric 3 live half):
-/// embed half (query-embed wall clock) and rank half (hot rank pass).
-static PREFILTER_STAGE_EMBED: PrefilterStageAccum = PrefilterStageAccum::new();
-static PREFILTER_STAGE_RANK: PrefilterStageAccum = PrefilterStageAccum::new();
-
-/// Embedding similarity threshold (0.0 - 1.0)
-/// Lower = more candidates, higher = fewer but more relevant
-pub const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.5;
-
-/// Maximum embedding hits to verify with sidecar
-pub const EMBEDDING_MAX_HITS: usize = 10;
-
-/// Minimum per-retriever candidate pool size for hybrid fusion.
-const HYBRID_POOL_MIN: usize = 50;
 
 /// Slot-B prefilter diagnostics for the 7-day shadow audit (21 §4 gate c).
 /// Kept at module level for bench/test use; the live path uses the
@@ -2742,7 +1691,1148 @@ impl MemoryManager {
         let spread = Z * (p * (1.0 - p) / n + Z2 / (4.0 * n * n)).sqrt();
         ((center + spread) / denom).clamp(0.0, 1.0)
     }
+
+    /// Pull pool, rank by dense and BM25 separately, fuse with RRF.
+    ///
+    /// Delegates to [`Self::hybrid_prefilter_rank`] after the legacy
+    /// embedding-presence filter, so the live `find_similar_hybrid` API and
+    /// the slot-B prefilter share ONE fusion implementation.
+    fn hybrid_fuse(
+        entries: Vec<MemoryEntry>,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Vec<(MemoryEntry, f32)> {
+        let entries: Vec<MemoryEntry> = entries
+            .into_iter()
+            .filter(|e| e.embedding.is_some())
+            .collect();
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Generous per-retriever pool so fusion has signal to work with.
+        let pool = limit.saturating_mul(5).max(HYBRID_POOL_MIN);
+        Self::hybrid_prefilter_rank(entries, query_text, query_embedding, limit, pool)
+    }
+
+    /// Slot-B hybrid ranking core: dense (cosine, active-model space only) +
+    /// BM25 lexical, fused with RRF, over a CALLER-SUPPLIED entry set.
+    ///
+    /// Unlike [`Self::hybrid_fuse`] this does NOT re-collect and does NOT
+    /// drop embedding-less entries: they stay reachable via the BM25 half
+    /// (backend-switch contract, §3.2). Output ⊆ input by construction.
+    /// `pool` is the per-retriever candidate depth (hybrid_fuse passes
+    /// `(limit*5).max(50)`; the slot-B stage passes the same shape).
+    ///
+    /// Public so the recall bench measures the exact shipped ranking.
+    pub fn hybrid_prefilter_rank(
+        entries: Vec<MemoryEntry>,
+        query_text: &str,
+        query_embedding: &[f32],
+        limit: usize,
+        pool: usize,
+    ) -> Vec<(MemoryEntry, f32)> {
+        if entries.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        // Dense ranking (no hard threshold; just take the top by cosine).
+        // Vector-space gate: only entries embedded by the ACTIVE backend share a
+        // comparable space, so dense scores are computed over those only. Other
+        // entries (different model, e.g. not-yet-re-embedded local memories when
+        // OpenAI is active) still participate via the BM25 lexical half below, so
+        // they remain reachable rather than disappearing on a backend switch.
+        let active_model = crate::embedding_backend::active_model_id();
+        let dense_eligible: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.effective_embedding_model() == active_model)
+            .map(|(i, _)| i)
+            .collect();
+        let emb_refs: Vec<&[f32]> = dense_eligible
+            .iter()
+            .filter_map(|&i| entries[i].embedding.as_deref())
+            .collect();
+        let dense_scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
+        let mut dense: Vec<(usize, f32)> =
+            dense_eligible.iter().copied().zip(dense_scores).collect();
+        dense.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then_with(|| entries[a.0].id.cmp(&entries[b.0].id))
+        });
+        dense.truncate(pool);
+
+        // Sparse (BM25) ranking over memory search text.
+        let sparse = bm25_rank(&entries, query_text, pool);
+
+        // RRF fusion. k comes from config (default 60.0); higher k
+        // compresses rank gaps, lower k rewards top ranks more steeply.
+        // The dense list is weighted by `memory_rrf_dense_weight`
+        // (default 1.0 = equal weights); the sparse list keeps weight 1.0.
+        let rrf_k = Self::rrf_k();
+        let w_dense = Self::rrf_dense_weight();
+        let mut fused: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
+        for (rank, (idx, _)) in dense.iter().enumerate() {
+            *fused.entry(*idx).or_insert(0.0) += w_dense / (rrf_k + rank as f32 + 1.0);
+        }
+        for (rank, (idx, _)) in sparse.iter().enumerate() {
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
+        }
+
+        // G-R recency prior: bounded additive bonus per fused candidate.
+        // Touch-aware age, global tau=90 default (0.0 = per-category table).
+        // Applies only among live rows: tombstoned / superseded entries
+        // never reach this pool (active-only collection upstream).
+        if Self::recency_weight() > 0.0 {
+            for (idx, score) in fused.iter_mut() {
+                if let Some(e) = entries.get(*idx) {
+                    *score += Self::recency_bonus(e);
+                }
+            }
+        }
+
+        let mut entries: Vec<Option<MemoryEntry>> = entries.into_iter().map(Some).collect();
+        top_k_by_score(
+            fused
+                .into_iter()
+                .filter_map(|(idx, score)| entries[idx].take().map(|e| (e, score))),
+            limit,
+            |entry| entry.id.as_str(),
+        )
+    }
+
+    fn collect_all_memories_with_embeddings(&self) -> Result<Vec<MemoryEntry>> {
+        self.collect_memories_with_embeddings_scoped(MemoryScope::All)
+    }
+
+    fn collect_memories_with_embeddings_scoped(
+        &self,
+        scope: MemoryScope,
+    ) -> Result<Vec<MemoryEntry>> {
+        let mut entries: Vec<MemoryEntry> = Vec::new();
+        if scope.includes_project()
+            && let Ok(project) = self.load_project_graph()
+        {
+            entries.extend(
+                project
+                    .active_memories()
+                    .filter(|m| m.embedding.is_some())
+                    .cloned(),
+            );
+        }
+        if scope.includes_global()
+            && let Ok(global) = self.load_global_graph()
+        {
+            entries.extend(
+                global
+                    .active_memories()
+                    .filter(|m| m.embedding.is_some())
+                    .cloned(),
+            );
+        }
+        Ok(entries)
+    }
+
+    fn collect_memories_scoped(&self, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
+        let mut entries = Vec::new();
+        if scope.includes_project()
+            && let Ok(project) = self.load_project_graph()
+        {
+            entries.extend(project.all_memories().cloned());
+        }
+        if scope.includes_global()
+            && let Ok(global) = self.load_global_graph()
+        {
+            entries.extend(global.all_memories().cloned());
+        }
+        Ok(entries)
+    }
+
+    #[cfg(test)]
+    fn synthetic_skill_entries(&self) -> Vec<MemoryEntry> {
+        if !self.include_skills {
+            return Vec::new();
+        }
+
+        collect_synthetic_entries()
+    }
+
+    #[cfg(test)]
+    fn collect_retrieval_candidates_scoped(&self, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
+        let mut entries = self.collect_memories_scoped(scope)?;
+        if scope.includes_global() {
+            entries.extend(self.synthetic_skill_entries());
+        }
+        Ok(entries)
+    }
+
+    fn score_and_filter(
+        entries: Vec<MemoryEntry>,
+        query_embedding: &[f32],
+        query_text: &str,
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut filtered_entries = Vec::with_capacity(entries.len());
+        let mut skipped_missing_embeddings = 0usize;
+        // Vector-space gate: only compare embeddings produced by the ACTIVE
+        // backend (same model id). When the active backend differs from an
+        // entry's stored model (e.g. user switched to OpenAI but this memory was
+        // embedded with local MiniLM, not yet re-embedded), the cosine would be
+        // meaningless, so we exclude it from dense scoring. Such memories remain
+        // reachable via the lexical/BM25 path in hybrid retrieval.
+        let active_model = crate::embedding_backend::active_model_id();
+        let mut skipped_model_mismatch = 0usize;
+        for entry in entries {
+            if entry.embedding.is_none() {
+                skipped_missing_embeddings += 1;
+            } else if entry.effective_embedding_model() != active_model {
+                skipped_model_mismatch += 1;
+            } else {
+                filtered_entries.push(entry);
+            }
+        }
+        if skipped_missing_embeddings > 0 {
+            crate::logging::warn(&format!(
+                "Skipped {} retrieval candidate(s) without embeddings during similarity scoring",
+                skipped_missing_embeddings
+            ));
+        }
+        if skipped_model_mismatch > 0 {
+            crate::logging::info(&format!(
+                "Skipped {} retrieval candidate(s) embedded with a different model than the active backend ({})",
+                skipped_model_mismatch, active_model
+            ));
+        }
+        if filtered_entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let emb_refs: Vec<&[f32]> = filtered_entries
+            .iter()
+            .filter_map(|entry| entry.embedding.as_deref())
+            .collect();
+        let scores = crate::embedding::batch_cosine_similarity(query_embedding, &emb_refs);
+        let skill_query_terms = collect_skill_query_terms(query_text);
+
+        let scored = top_k_by_score(
+            filtered_entries
+                .into_iter()
+                .zip(scores)
+                .map(|(entry, sim)| {
+                    let adjusted = sim + skill_retrieval_bonus(&entry, &skill_query_terms);
+                    (entry, adjusted)
+                })
+                .filter(|(_, sim)| *sim >= threshold),
+            limit,
+            |entry| entry.id.as_str(),
+        );
+
+        let scored = Self::apply_gap_filter(scored);
+
+        Ok(scored)
+    }
+
+    /// Drop trailing low-relevance results by detecting natural gaps in the
+    /// score distribution. If the top hit is 0.85 and the next cluster is
+    /// 0.40-0.42, the 0.15+ gap tells us those lower results are noise.
+    ///
+    /// Algorithm: walk the sorted scores and cut when the drop from one score
+    /// to the next exceeds `GAP_FACTOR` of the range (top - floor_threshold).
+    fn apply_gap_filter(scored: Vec<(MemoryEntry, f32)>) -> Vec<(MemoryEntry, f32)> {
+        if scored.len() <= 1 {
+            return scored;
+        }
+
+        const GAP_FACTOR: f32 = 0.25;
+        const MIN_KEEP: usize = 1;
+
+        let top_score = scored[0].1;
+        let range = (top_score - EMBEDDING_SIMILARITY_THRESHOLD).max(0.01);
+        let max_gap = range * GAP_FACTOR;
+
+        let mut keep = scored.len();
+        for i in 1..scored.len() {
+            let drop = scored[i - 1].1 - scored[i].1;
+            if drop > max_gap && i >= MIN_KEEP {
+                keep = i;
+                break;
+            }
+        }
+
+        scored.into_iter().take(keep).collect()
+    }
+
+    /// Ensure all memories have embeddings (backfill for existing memories)
+    pub fn backfill_embeddings(&self) -> Result<(usize, usize)> {
+        let mut generated = 0;
+        let mut failed = 0;
+
+        // Process project memories
+        if let Ok(mut graph) = self.load_project_graph() {
+            let mut changed = false;
+            for entry in graph.memories.values_mut() {
+                if entry.embedding.is_none() {
+                    if entry.ensure_embedding() {
+                        generated += 1;
+                        changed = true;
+                    } else {
+                        failed += 1;
+                    }
+                }
+            }
+            if changed {
+                self.save_project_graph(&graph)?;
+            }
+        }
+
+        // Process global memories
+        if let Ok(mut graph) = self.load_global_graph() {
+            let mut changed = false;
+            for entry in graph.memories.values_mut() {
+                if entry.embedding.is_none() {
+                    if entry.ensure_embedding() {
+                        generated += 1;
+                        changed = true;
+                    } else {
+                        failed += 1;
+                    }
+                }
+            }
+            if changed {
+                self.save_global_graph(&graph)?;
+            }
+        }
+
+        Ok((generated, failed))
+    }
+
+    pub fn get_prompt_memories(&self, limit: usize) -> Option<String> {
+        self.get_prompt_memories_scoped(limit, MemoryScope::All)
+    }
+
+    pub fn get_prompt_memories_scoped(&self, limit: usize, scope: MemoryScope) -> Option<String> {
+        let all_entries: Vec<_> = top_k_by_ord(
+            self.collect_memories_scoped(scope)
+                .ok()?
+                .into_iter()
+                .map(|entry| {
+                    let updated_at = entry.updated_at.timestamp_millis();
+                    (entry, updated_at)
+                }),
+            limit,
+        )
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect();
+
+        if all_entries.is_empty() {
+            return None;
+        }
+
+        format_entries_for_prompt(&all_entries, limit)
+    }
+
+    pub async fn relevant_prompt_for_messages(
+        &self,
+        messages: &[crate::message::Message],
+    ) -> Result<Option<String>> {
+        let context = format_context_for_relevance(messages);
+        if context.is_empty() {
+            return Ok(None);
+        }
+        self.relevant_prompt_for_context(
+            &context,
+            MEMORY_RELEVANCE_MAX_CANDIDATES,
+            MEMORY_RELEVANCE_MAX_RESULTS,
+        )
+        .await
+    }
+
+    pub async fn relevant_prompt_for_context(
+        &self,
+        context: &str,
+        max_candidates: usize,
+        limit: usize,
+    ) -> Result<Option<String>> {
+        let relevant = self
+            .get_relevant_for_context(context, max_candidates)
+            .await?;
+        if relevant.is_empty() {
+            return Ok(None);
+        }
+        Ok(format_relevant_prompt(&relevant, limit))
+    }
+
+    pub fn search(&self, query: &str) -> Result<Vec<MemoryEntry>> {
+        self.search_scoped(query, MemoryScope::All)
+    }
+
+    pub fn search_scoped(&self, query: &str, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
+        let query_lower = normalize_search_text(query);
+        if query_lower.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results = Vec::new();
+
+        for memory in self.collect_memories_scoped(scope)? {
+            // Tombstoned (inactive) memories are invisible to retrieval (R3).
+            if !memory.active {
+                continue;
+            }
+            if memory_matches_search(&memory, &query_lower) {
+                results.push(memory);
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub fn list_all(&self) -> Result<Vec<MemoryEntry>> {
+        self.list_all_scoped(MemoryScope::All)
+    }
+
+    pub fn list_all_scoped(&self, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
+        let mut all = self.collect_memories_scoped(scope)?;
+        all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(all)
+    }
+
+    /// Forget a memory: tombstone by default (R3 DELETE policy).
+    ///
+    /// Tombstoning preserves the row with `active=false, superseded_by=None`
+    /// for provenance; every retrieval path filters on `active`, so the fact
+    /// becomes invisible while its history survives. Pass `privacy=true` only
+    /// for erasure the user asked to be unrecoverable — the row is hard-removed
+    /// exactly as `forget` behaved before.
+    pub fn forget(&self, id: &str) -> Result<bool> {
+        self.forget_with_policy(id, false)
+    }
+
+    pub fn forget_with_policy(&self, id: &str, privacy: bool) -> Result<bool> {
+        if privacy {
+            return self.hard_forget(id);
+        }
+        // Tombstone first in project, then global scope (same order as the
+        // old hard removal). No Invalidates edge here: a forget carries no
+        // invalidator memory, and inventing one would be a phantom node.
+        let mut project_graph = self.load_project_graph()?;
+        if let Some(tombstone) = project_graph.get_memory_mut(id) {
+            tombstone.active = false;
+            tombstone.superseded_by = None;
+            self.save_project_graph(&project_graph)?;
+            return Ok(true);
+        }
+
+        let mut global_graph = self.load_global_graph()?;
+        if let Some(tombstone) = global_graph.get_memory_mut(id) {
+            tombstone.active = false;
+            tombstone.superseded_by = None;
+            self.save_global_graph(&global_graph)?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Privacy-flagged erasure: hard row removal, no tombstone, no edge.
+    fn hard_forget(&self, id: &str) -> Result<bool> {
+        // Try graph-based removal first (new format)
+        let mut project_graph = self.load_project_graph()?;
+        if project_graph.remove_memory(id).is_some() {
+            self.save_project_graph(&project_graph)?;
+            return Ok(true);
+        }
+
+        let mut global_graph = self.load_global_graph()?;
+        if global_graph.remove_memory(id).is_some() {
+            self.save_global_graph(&global_graph)?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    // === Sidecar Integration ===
+
+    /// Extract memories from a session transcript using the Haiku sidecar
+    pub async fn extract_from_transcript(
+        &self,
+        transcript: &str,
+        session_id: &str,
+    ) -> Result<Vec<String>> {
+        if !memory_llm_judge_available() {
+            crate::logging::info("Memory transcript extraction skipped: LLM judge unavailable");
+            return Ok(Vec::new());
+        }
+
+        let sidecar = Sidecar::new();
+        let extracted = sidecar.extract_memories(transcript).await?;
+
+        let mut ids = Vec::new();
+        for memory in extracted {
+            let category: MemoryCategory = memory.category.parse().unwrap_or(MemoryCategory::Fact);
+            let trust = match memory.trust.as_str() {
+                "high" => TrustLevel::High,
+                "medium" => TrustLevel::Medium,
+                _ => TrustLevel::Low,
+            };
+
+            let entry = MemoryEntry::new(category, memory.content)
+                .with_source(session_id)
+                .with_trust(trust);
+
+            // Store in project scope by default
+            let id = self.remember_project(entry)?;
+            ids.push(id);
+        }
+
+        Ok(ids)
+    }
+
+    /// Recall directly through Jev. The legacy `max_candidates` argument now
+    /// limits output, not the input pool: old memories must remain discoverable.
+    pub async fn get_relevant_for_context(
+        &self,
+        context: &str,
+        max_candidates: usize,
+    ) -> Result<Vec<MemoryEntry>> {
+        Ok(
+            crate::memory_jev::recall(self, context, max_candidates, MemoryScope::All)
+                .await?
+                .into_iter()
+                .map(|(entry, _)| entry)
+                .collect(),
+        )
+    }
+
+    /// Local keyword lookup, available without a remote decision provider.
+    pub fn get_relevant_keywords(
+        &self,
+        keywords: &[&str],
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>> {
+        let normalized_keywords: Vec<String> = keywords
+            .iter()
+            .map(|keyword| normalize_search_text(keyword))
+            .filter(|keyword| !keyword.is_empty())
+            .collect();
+        if normalized_keywords.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let matches: Vec<_> = top_k_by_ord(
+            self.collect_memories_scoped(MemoryScope::All)?
+                .into_iter()
+                // Tombstoned (inactive) memories are invisible to retrieval (R3).
+                .filter(|entry| entry.active)
+                .filter(|entry| {
+                    let content_lower = normalize_search_text(&entry.content);
+                    normalized_keywords
+                        .iter()
+                        .any(|kw| content_lower.contains(kw))
+                })
+                .map(|entry| {
+                    let updated_at = entry.updated_at.timestamp_millis();
+                    (entry, updated_at)
+                }),
+            limit,
+        )
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect();
+
+        Ok(matches)
+    }
+
+    // === Async Memory Checking ===
+
+    /// Spawn a background task to check memory relevance for a specific session.
+    /// Results are stored in PENDING_MEMORY keyed by session_id and can be retrieved
+    /// with take_pending_memory(session_id).
+    /// This method returns immediately and never blocks the caller.
+    /// Only ONE memory check runs at a time per session - additional calls are ignored.
+    pub fn spawn_relevance_check(
+        &self,
+        session_id: &str,
+        messages: std::sync::Arc<[crate::message::Message]>,
+        event_tx: Option<MemoryEventSink>,
+    ) {
+        let sid = session_id.to_string();
+
+        if !begin_memory_check(&sid) {
+            return;
+        }
+
+        let manager = self.clone();
+
+        tokio::spawn(async move {
+            match manager
+                .get_relevant_parallel(&sid, &messages, event_tx.clone())
+                .await
+            {
+                Ok(MemoryRelevanceResult {
+                    prompt: Some(prompt),
+                    display_prompt,
+                    selected_entries,
+                }) => {
+                    let count = selected_entries.len();
+                    set_pending_memory_for_project_with_selection(
+                        &sid,
+                        prompt,
+                        count,
+                        &selected_entries,
+                        display_prompt,
+                        manager
+                            .project_dir
+                            .as_deref()
+                            .and_then(|path| path.to_str()),
+                    );
+                    emit_memory_activity(event_tx.as_ref());
+                }
+                Ok(MemoryRelevanceResult { prompt: None, .. }) => {
+                    clear_pending_memory(&sid);
+                    set_state(MemoryState::Idle);
+                    emit_memory_activity(event_tx.as_ref());
+                }
+                Err(e) => {
+                    clear_pending_memory(&sid);
+                    crate::logging::error(&format!("Background memory check failed: {}", e));
+                    add_event(MemoryEventKind::Error {
+                        message: e.to_string(),
+                    });
+                    set_state(MemoryState::Idle);
+                    emit_memory_activity(event_tx.as_ref());
+                }
+            }
+
+            finish_memory_check(&sid);
+        });
+    }
+
+    /// Jev-only automatic recall. Storage and per-session dedup remain local;
+    /// there is no embedding, conventional LLM, or unjudged fallback path.
+    pub async fn get_relevant_parallel(
+        &self,
+        session_id: &str,
+        messages: &[crate::message::Message],
+        event_tx: Option<MemoryEventSink>,
+    ) -> Result<MemoryRelevanceResult> {
+        let query = format_focused_query_for_relevance(messages);
+        let query = crate::util::truncate_str(&query, crate::memory_jev::MAX_QUERY_BYTES);
+        if query.trim().is_empty() {
+            return Ok(MemoryRelevanceResult::default());
+        }
+        pipeline_start();
+        let entries = match crate::memory_jev::collect_scoped(self, MemoryScope::All) {
+            Ok(entries) => entries,
+            Err(error) => {
+                clear_pending_memory(session_id);
+                pipeline_update(|p| {
+                    p.search = StepStatus::Error;
+                    p.verify = StepStatus::Skipped;
+                    p.inject = StepStatus::Skipped;
+                });
+                set_state(MemoryState::Idle);
+                emit_memory_activity(event_tx.as_ref());
+                return Err(error);
+            }
+        };
+        let entries: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| entry.active && !is_memory_injected(session_id, &entry.id))
+            .collect();
+        // Slot-B R3 composition (rebase onto upstream 72-cap): our
+        // Option-take stage runs when engaged; upstream's BM25 top-72
+        // `prefilter_for_jev` is the disengaged/fail-open floor (kept
+        // verbatim for next-rebase merging). The two stages never act on
+        // the same query (no double-narrow); the floor only changes
+        // behavior where raw exhaustive is dangerous (large stores).
+        let mut entries_opt = Some(entries);
+        Self::prefilter_for_jev_take(&mut entries_opt, &query);
+        let entries = entries_opt.expect("prefilter stage always leaves a set");
+        // Floor queries (mode-off / fail-open) arrive here as the raw set;
+        // cap them at 72 via the upstream floor fn so the disengaged path
+        // never reproduces the 107-call outage.
+        let entries = prefilter_for_jev(entries, &query);
+        pipeline_update(|p| {
+            p.search = StepStatus::Done;
+            p.search_result = Some(StepResult {
+                summary: format!("{} local memories", entries.len()),
+                latency_ms: 0,
+            });
+            p.verify = StepStatus::Running;
+            p.maintain = StepStatus::Skipped;
+        });
+        set_state(MemoryState::SidecarChecking {
+            count: entries.len(),
+        });
+        emit_memory_activity(event_tx.as_ref());
+        let started = Instant::now();
+        // Slot-B hybrid prefilter (§3): narrows the ALREADY-COLLECTED set
+        // (post-`entry.active`, post-already-injected) to prefilter_top_k
+        // before Jev judges it. `entries` is Option-wrapped so the stage can
+        // fail open pre-rank WITHOUT consuming the input: None from the
+        // stage means disengaged/failed-open (take the input back and judge
+        // exhaustively); Some carries the narrowed-or-recombined set.
+        // Downstream fail-closed (JevClient::new Err, select Err) is
+        // bit-for-bit unchanged below.
+        let mut entries_opt = Some(entries);
+        let prefilter_dropped =
+            match Self::prefilter_for_jev_take(&mut entries_opt, &query) {
+                Some(dropped) => dropped,
+                None => Vec::new(),
+            };
+        let entries = entries_opt.take().expect("prefilter stage always leaves a set");
+        let _ = prefilter_dropped;
+        let result = async {
+            if entries.is_empty() {
+                return Ok(Vec::new());
+            }
+            let client = crate::jev::JevClient::new()?;
+            crate::memory_jev::select(&client, query, entries, 5).await
+        }
+        .await;
+        let relevant: Vec<MemoryEntry> = match result {
+            Ok(results) => results.into_iter().map(|(entry, _)| entry).collect(),
+            Err(error) => {
+                clear_pending_memory(session_id);
+                pipeline_update(|p| {
+                    p.verify = StepStatus::Error;
+                    p.inject = StepStatus::Skipped;
+                });
+                set_state(MemoryState::Idle);
+                emit_memory_activity(event_tx.as_ref());
+                return Err(error);
+            }
+        };
+        let count = relevant.len();
+        pipeline_update(|p| {
+            p.verify = StepStatus::Done;
+            p.verify_result = Some(StepResult {
+                summary: format!("Jev: {count} relevant"),
+                latency_ms: started.elapsed().as_millis() as u64,
+            });
+            p.inject = if count == 0 {
+                StepStatus::Skipped
+            } else {
+                StepStatus::Pending
+            };
+        });
+        // Citation verification rides here (not in the agent): the Jev
+        // refactor builds the prompt inside the manager, so the repo root
+        // comes from the manager's own project dir. Unverifiable entries
+        // (no root, legacy) fall back to the unverified prompt — recall
+        // never withholds a memory.
+        let prompt = match self.get_project_dir() {
+            Some(root) => format_relevant_prompt_verified(&relevant, 5, &root)
+                .or_else(|| format_relevant_prompt(&relevant, 5)),
+            None => format_relevant_prompt(&relevant, 5),
+        };
+        let display = format_relevant_display_prompt(&relevant, 5);
+        set_state(if count == 0 {
+            MemoryState::Idle
+        } else {
+            MemoryState::FoundRelevant { count }
+        });
+        emit_memory_activity(event_tx.as_ref());
+        Ok(MemoryRelevanceResult {
+            prompt,
+            display_prompt: display,
+            selected_entries: relevant,
+        })
+    }
+
+    /// Load the existing project graph without generating embeddings.
+    pub fn load_project_graph(&self) -> Result<MemoryGraph> {
+        let Some(path) = self.project_memory_path()? else {
+            return Ok(MemoryGraph::new());
+        };
+
+        if !self.test_mode
+            && let Some(mut graph) = cached_graph(&path)
+        {
+            if Self::normalize_graph_search_text(&mut graph) {
+                cache_graph(path.clone(), &graph);
+            }
+            return Ok(graph);
+        }
+
+        if path.exists() {
+            // Try loading as MemoryGraph first
+            if let Ok(graph) = storage::read_json::<MemoryGraph>(&path)
+                && graph.graph_version == GRAPH_VERSION
+            {
+                let mut graph = graph;
+                let normalized = Self::normalize_graph_search_text(&mut graph);
+                if self.import_legacy_notes_into_graph(&mut graph)? {
+                    self.save_project_graph(&graph)?;
+                } else if normalized {
+                    storage::write_json(&path, &graph)?;
+                }
+                if !self.test_mode {
+                    cache_graph(path, &graph);
+                }
+                return Ok(graph);
+            }
+
+            // Fall back to legacy MemoryStore and migrate
+            let store: MemoryStore = storage::read_json(&path)?;
+            let mut graph = MemoryGraph::from_legacy_store(store);
+            let _ = self.import_legacy_notes_into_graph(&mut graph)?;
+
+            // Save migrated format (create backup first)
+            let backup_path = path.with_extension("json.bak");
+            if !backup_path.exists() {
+                let _ = std::fs::copy(&path, &backup_path);
+            }
+            storage::write_json(&path, &graph)?;
+
+            crate::logging::info(&format!(
+                "Migrated memory store to graph format: {}",
+                path.display()
+            ));
+            if !self.test_mode {
+                cache_graph(path, &graph);
+            }
+            Ok(graph)
+        } else {
+            let mut graph = MemoryGraph::new();
+            if self.import_legacy_notes_into_graph(&mut graph)? {
+                self.save_project_graph(&graph)?;
+            }
+            if !self.test_mode {
+                cache_graph(path, &graph);
+            }
+            Ok(graph)
+        }
+    }
+
+    /// Load global memories as a MemoryGraph with automatic migration
+    pub fn load_global_graph(&self) -> Result<MemoryGraph> {
+        let path = self.global_memory_path()?;
+        if !self.test_mode
+            && let Some(mut graph) = cached_graph(&path)
+        {
+            if Self::normalize_graph_search_text(&mut graph) {
+                cache_graph(path.clone(), &graph);
+            }
+            return Ok(graph);
+        }
+
+        if path.exists() {
+            // Try loading as MemoryGraph first
+            if let Ok(graph) = storage::read_json::<MemoryGraph>(&path)
+                && graph.graph_version == GRAPH_VERSION
+            {
+                let mut graph = graph;
+                if Self::normalize_graph_search_text(&mut graph) {
+                    storage::write_json(&path, &graph)?;
+                }
+                if !self.test_mode {
+                    cache_graph(path, &graph);
+                }
+                return Ok(graph);
+            }
+
+            // Fall back to legacy MemoryStore and migrate
+            let store: MemoryStore = storage::read_json(&path)?;
+            let graph = MemoryGraph::from_legacy_store(store);
+
+            // Save migrated format (create backup first)
+            let backup_path = path.with_extension("json.bak");
+            if !backup_path.exists() {
+                let _ = std::fs::copy(&path, &backup_path);
+            }
+            storage::write_json(&path, &graph)?;
+
+            crate::logging::info(&format!(
+                "Migrated global memory store to graph format: {}",
+                path.display()
+            ));
+            if !self.test_mode {
+                cache_graph(path, &graph);
+            }
+            Ok(graph)
+        } else {
+            let graph = MemoryGraph::new();
+            if !self.test_mode {
+                cache_graph(path, &graph);
+            }
+            Ok(graph)
+        }
+    }
+
+    /// Save project memories as a MemoryGraph
+    pub fn save_project_graph(&self, graph: &MemoryGraph) -> Result<()> {
+        if let Some(path) = self.project_memory_path()? {
+            storage::write_json(&path, graph)?;
+            if !self.test_mode {
+                cache_graph(path, graph);
+            }
+        }
+        Ok(())
+    }
+
+    /// Save global memories as a MemoryGraph
+    pub fn save_global_graph(&self, graph: &MemoryGraph) -> Result<()> {
+        let path = self.global_memory_path()?;
+        storage::write_json(&path, graph)?;
+        if !self.test_mode {
+            cache_graph(path, graph);
+        }
+        Ok(())
+    }
+
+    /// Add a tag to a memory
+    pub fn tag_memory(&self, memory_id: &str, tag: &str) -> Result<()> {
+        // Try project first
+        let mut graph = self.load_project_graph()?;
+        if graph.memories.contains_key(memory_id) {
+            graph.tag_memory(memory_id, tag);
+            return self.save_project_graph(&graph);
+        }
+
+        // Try global
+        let mut graph = self.load_global_graph()?;
+        if graph.memories.contains_key(memory_id) {
+            graph.tag_memory(memory_id, tag);
+            return self.save_global_graph(&graph);
+        }
+
+        Err(anyhow::anyhow!("Memory not found: {}", memory_id))
+    }
+
+    /// Link two memories with a RelatesTo edge
+    pub fn link_memories(&self, from_id: &str, to_id: &str, weight: f32) -> Result<()> {
+        // Try project first
+        let mut graph = self.load_project_graph()?;
+        if graph.memories.contains_key(from_id) && graph.memories.contains_key(to_id) {
+            graph.link_memories(from_id, to_id, weight);
+            return self.save_project_graph(&graph);
+        }
+
+        // Try global
+        let mut graph = self.load_global_graph()?;
+        if graph.memories.contains_key(from_id) && graph.memories.contains_key(to_id) {
+            graph.link_memories(from_id, to_id, weight);
+            return self.save_global_graph(&graph);
+        }
+
+        // Cross-store links not supported for now
+        Err(anyhow::anyhow!(
+            "Both memories must be in the same store (project or global)"
+        ))
+    }
+
+    /// Get memories related to a given memory via graph traversal
+    pub fn get_related(&self, memory_id: &str, depth: usize) -> Result<Vec<MemoryEntry>> {
+        // Find which store contains the memory
+        let (mut graph, _is_project) = {
+            let project_graph = self.load_project_graph()?;
+            if project_graph.memories.contains_key(memory_id) {
+                (project_graph, true)
+            } else {
+                let global_graph = self.load_global_graph()?;
+                if global_graph.memories.contains_key(memory_id) {
+                    (global_graph, false)
+                } else {
+                    return Err(anyhow::anyhow!("Memory not found: {}", memory_id));
+                }
+            }
+        };
+
+        // Use cascade retrieval to find related memories
+        let results = graph.cascade_retrieve(&[memory_id.to_string()], &[1.0], depth, 20);
+
+        // Collect memory entries (excluding the seed)
+        let entries: Vec<MemoryEntry> = results
+            .into_iter()
+            .filter(|(id, _)| id != memory_id)
+            .filter_map(|(id, _)| graph.get_memory(&id).cloned())
+            .collect();
+
+        Ok(entries)
+    }
+
+    /// Find similar memories with cascade retrieval through the graph
+    ///
+    /// This extends the basic embedding search by also traversing through
+    /// tags to find related memories that might not have direct embedding similarity.
+    pub fn find_similar_with_cascade(
+        &self,
+        text: &str,
+        threshold: f32,
+        limit: usize,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
+        self.find_similar_with_cascade_scoped(text, threshold, limit, MemoryScope::All)
+    }
+
+    pub fn find_similar_with_cascade_scoped(
+        &self,
+        text: &str,
+        threshold: f32,
+        limit: usize,
+        scope: MemoryScope,
+    ) -> Result<Vec<(MemoryEntry, f32)>> {
+        // First, do basic embedding search
+        let embedding_hits = self.find_similar_scoped(text, threshold, limit, scope)?;
+
+        if embedding_hits.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Get seed IDs and scores
+        let seed_ids: Vec<String> = embedding_hits.iter().map(|(e, _)| e.id.clone()).collect();
+        let seed_scores: Vec<f32> = embedding_hits.iter().map(|(_, s)| *s).collect();
+
+        // Load graphs and perform cascade retrieval
+        let mut project_graph = if scope.includes_project() {
+            Some(self.load_project_graph()?)
+        } else {
+            None
+        };
+        let mut global_graph = if scope.includes_global() {
+            Some(self.load_global_graph()?)
+        } else {
+            None
+        };
+
+        // Cascade through project graph
+        let project_cascade = project_graph
+            .as_mut()
+            .map(|graph| graph.cascade_retrieve(&seed_ids, &seed_scores, 2, limit * 2))
+            .unwrap_or_default();
+
+        // Cascade through global graph
+        let global_cascade = global_graph
+            .as_mut()
+            .map(|graph| graph.cascade_retrieve(&seed_ids, &seed_scores, 2, limit * 2))
+            .unwrap_or_default();
+
+        // Merge results, keeping highest score for each memory
+        let mut merged: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+
+        for (id, score) in embedding_hits.iter() {
+            merged.insert(id.id.clone(), *score);
+        }
+        for (id, score) in project_cascade {
+            let existing = merged.get(&id).copied().unwrap_or(0.0);
+            if score > existing {
+                merged.insert(id, score);
+            }
+        }
+        for (id, score) in global_cascade {
+            let existing = merged.get(&id).copied().unwrap_or(0.0);
+            if score > existing {
+                merged.insert(id, score);
+            }
+        }
+
+        // Look up entries and keep only the top-scoring results
+        let results: Vec<(MemoryEntry, f32)> = top_k_by_score(
+            merged.into_iter().filter_map(|(id, score)| {
+                project_graph
+                    .as_ref()
+                    .and_then(|graph| graph.get_memory(&id))
+                    .or_else(|| {
+                        global_graph
+                            .as_ref()
+                            .and_then(|graph| graph.get_memory(&id))
+                    })
+                    .cloned()
+                    .map(|entry| (entry, score))
+            }),
+            limit,
+            |entry| entry.id.as_str(),
+        );
+
+        Ok(results)
+    }
+
+    /// Get graph statistics for display
+    pub fn graph_stats(&self) -> Result<(usize, usize, usize, usize)> {
+        let project = self.load_project_graph()?;
+        let global = self.load_global_graph()?;
+
+        let memories = project.memories.len() + global.memories.len();
+        let tags = project.tags.len() + global.tags.len();
+        let edges = project.edge_count() + global.edge_count();
+        let clusters = project.clusters.len() + global.clusters.len();
+
+        Ok((memories, tags, edges, clusters))
+    }
 }
+
+
+/// Slot-B shadow-audit counters: (queries, engaged, failopen, sampled).
+/// Process-wide atomics; the 7-day live window reads them via
+/// `MemoryManager::prefilter_shadow_stats`.
+static PREFILTER_QUERIES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_ENGAGED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_FAILOPEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_SHADOW_SAMPLED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Slot-B per-arm fail-open counters (SHADOW-GATE Metric 4): the five arms
+/// conflated in `PREFILTER_FAILOPEN`, indexed by `PrefilterFailopenArm`.
+/// Every increment pairs with the coarse bump at the
+/// `prefilter_for_jev_take` call site, so `failopen == sum(arms)`.
+static PREFILTER_FAILOPEN_ARMS: [std::sync::atomic::AtomicU64; 5] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// Slot-B engaged-AND-sampled joint counter (SHADOW-GATE Metric 2
+/// denominator). Sampled-but-failopen queries have no tail by design, so
+/// only queries whose tail is actually emitted bump this.
+static PREFILTER_ENGAGED_SAMPLED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Slot-B tail re-judge counters (SHADOW-GATE Metric 2 numerator): how
+/// many sampled engaged tails finished a second `select` (`REJUDGED`),
+/// and how many of those had >= 1 judge-relevant tail memory (`HITS`).
+/// Process-wide, `Relaxed` (monotonic; exact cross-counter consistency
+/// not required). The hook bumps these read-only: no recall counts or
+/// priors are touched (none exist yet; keep it that way).
+static PREFILTER_TAIL_REJUDGED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_TAIL_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Slot-B stage-elapsed accumulators (SHADOW-GATE Metric 3 live half):
+/// embed half (query-embed wall clock) and rank half (hot rank pass).
+static PREFILTER_STAGE_EMBED: PrefilterStageAccum = PrefilterStageAccum::new();
+static PREFILTER_STAGE_RANK: PrefilterStageAccum = PrefilterStageAccum::new();
+
+/// Embedding similarity threshold (0.0 - 1.0)
+/// Lower = more candidates, higher = fewer but more relevant
+pub const EMBEDDING_SIMILARITY_THRESHOLD: f32 = 0.5;
+
+/// Maximum embedding hits to verify with sidecar
+pub const EMBEDDING_MAX_HITS: usize = 10;
+
+/// Minimum per-retriever candidate pool size for hybrid fusion.
+const HYBRID_POOL_MIN: usize = 50;
+
+/// Rank memories by BM25F-lite over content + tag fields.
+///
+/// Two-field BM25F following Robertson-Zaragoza-Taylor 2004: per-field
+/// length norms fold into an additive field-weighted tf BEFORE saturation
+/// (normalize-then-saturate, no second global dl factor). Shared b=0.75.
+/// Tag terms reuse the same pool-local unigram IDF (lite simplification;
+/// no per-field IDF).
 
 /// Most memories Jcode sends to Jev per automatic recall. Every 24 entries costs
 /// one Jev decision, so judging a whole store (thousands of memories) each turn

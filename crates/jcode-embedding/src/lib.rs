@@ -357,7 +357,9 @@ impl CrossEncoder {
             let s = self.score(query, text)?;
             scored.push((id.clone(), s));
         }
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // Id arm fires only on bitwise score equality; cross-encoder
+        // scores themselves are untouched.
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         Ok(scored)
     }
 }

@@ -7,6 +7,7 @@ mod interrupts;
 mod messages;
 #[cfg(test)]
 mod model_usage_tests;
+mod pre_request;
 mod prompting;
 mod provider;
 pub(crate) mod pruner;
@@ -41,6 +42,7 @@ use crate::skill::SkillRegistry;
 use crate::tool::{Registry, ToolContext, ToolExecutionMode};
 use anyhow::Result;
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
@@ -286,7 +288,17 @@ pub struct Agent {
     pending_alerts: Vec<String>,
     /// Transient reminder injected into provider requests for the current turn only.
     /// Not persisted to session history.
-    current_turn_system_reminder: Option<String>,
+    pub(crate) current_turn_system_reminder: Option<String>,
+    /// Highest context-pressure band already notified this session cycle (0 =
+    /// none, 1 = advisory, 2 = urgent). Resets when usage drops back below
+    /// the re-arm level (e.g. after compaction) so notices can fire again on
+    /// regrowth. Backs the deterministic budget notices: the session model
+    /// pages its own memory instead of needing a manager model.
+    last_pressure_band: u8,
+    /// Set when messages_for_provider fires a pressure notice this call, so
+    /// the turn loop rebuilds the already-built prompt and the crossing turn
+    /// carries the notice instead of arriving a turn late.
+    pressure_notice_fired_this_turn: bool,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -446,6 +458,8 @@ impl Agent {
             last_status_detail: None,
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
+            last_pressure_band: 0,
+            pressure_notice_fired_this_turn: false,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
@@ -529,7 +543,7 @@ impl Agent {
         Self::new_with_initial_ownership(provider, registry, working_dir, None, false)
     }
 
-    pub(crate) fn new_with_parent_and_initial_working_dir(
+    pub fn new_with_parent_and_initial_working_dir(
         provider: Arc<dyn Provider>,
         registry: Registry,
         working_dir: Option<&str>,
@@ -765,6 +779,10 @@ impl Agent {
         self.last_status_detail = None;
         self.pending_alerts.clear();
         self.current_turn_system_reminder = None;
+        // Pressure state belongs to a session's cycle: a restored session
+        // above the old band must still get its own notice.
+        self.last_pressure_band = 0;
+        self.pressure_notice_fired_this_turn = false;
         self.reset_tool_output_tracking();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             queue.clear();
@@ -835,6 +853,9 @@ impl Agent {
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,
+            trigger: None,
+            summarizer: Some("native".to_string()),
+            mode: None,
         };
 
         self.session.compaction = Some(state.clone());
@@ -862,13 +883,368 @@ impl Agent {
         Ok(())
     }
 
-    fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
+    /// Results shorter than this are never stubbed: clearing them saves
+    /// nothing and only adds noise.
+    const TOOL_RESULT_CLEAR_MIN_CHARS: usize = 200;
+
+    /// Preview lines substituted into the send view for an offloaded result
+    /// (LangChain Deep Agents shape: path reference + first-N-lines preview;
+    /// the model re-reads the file with existing tools when it needs more).
+    const TOOL_RESULT_OFFLOAD_PREVIEW_LINES: usize = 10;
+    /// Hard cap on the substituted preview so the substitution itself never
+    /// becomes a context hog on single-line-megablob outputs.
+    const TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS: usize = 500;
+    /// Max chars per offload chunk (§3 of phase1/01-masking-spec): results
+    /// over the floor split into line-preserving chunks of at most this
+    /// size so each masked unit stays coherent (ChunkKV mechanism).
+    const TOOL_RESULT_OFFLOAD_CHUNK_CHARS: usize = 2000;
+    /// Cue chars per chunk in the cue+ref substitution (§4): first-N chars
+    /// of each chunk, truncated with `...` iff longer.
+    const TOOL_RESULT_CUE_CHARS: usize = 60;
+
+    /// Sanitize an id for use as a single path component: keep
+    /// `[A-Za-z0-9-_]`, fold anything else to `_`, truncate, and suffix 8 hex
+    /// of SHA-256 over the raw id so distinct raw ids that sanitize alike
+    /// never share a file. Both ids reaching here are provider- or
+    /// control-plane-influenced strings, never trust them as paths directly.
+    pub(crate) fn sanitize_offload_component(raw: &str) -> String {
+        const KEEP: usize = 64;
+        let kept: String = raw
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(KEEP)
+            .collect();
+        let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
+        format!("{kept}_{}", &hash[..8])
+    }
+
+    /// First-N-lines preview of an offloaded result, capped at
+    /// `TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS` so a 10-line wall of minified
+    /// JSON still cannot blow the substitution budget.
+    pub(crate) fn offload_preview(content: &str) -> String {
+        let first = content
+            .lines()
+            .take(Self::TOOL_RESULT_OFFLOAD_PREVIEW_LINES)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if first.chars().count() > Self::TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS {
+            let truncated: String = first
+                .chars()
+                .take(Self::TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS)
+                .collect();
+            format!("{truncated}...(truncated)")
+        } else {
+            first
+        }
+    }
+
+    /// Split content into line-preserving chunks of at most
+    /// `TOOL_RESULT_OFFLOAD_CHUNK_CHARS` chars (§3 of phase1/01-masking-spec).
+    /// Never splits mid-line; a single over-long line is its own chunk.
+    pub(crate) fn split_offload_chunks(content: &str) -> Vec<String> {
+        let mut chunks: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut current_len = 0usize;
+        for line in content.lines() {
+            let line_len = line.chars().count() + 1; // +1 for the newline
+            if !current.is_empty() && current_len + line_len > Self::TOOL_RESULT_OFFLOAD_CHUNK_CHARS
+            {
+                chunks.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+            current.push_str(line);
+            current.push('\n');
+            current_len += line_len;
+        }
+        if !current.is_empty() {
+            chunks.push(current);
+        }
+        chunks
+    }
+
+    /// First-N-chars cue of one chunk (§4): truncated with `...` iff longer.
+    pub(crate) fn chunk_cue(chunk: &str) -> String {
+        let cue: String = chunk.chars().take(Self::TOOL_RESULT_CUE_CHARS).collect();
+        if chunk.chars().count() > Self::TOOL_RESULT_CUE_CHARS {
+            format!("{cue}...")
+        } else {
+            cue
+        }
+    }
+
+    /// Write a cleared tool result to its session-scoped offload file
+    /// (`<jcode_dir>/sessions/offloaded/<session>/<tool>_<hash>.txt`), full
+    /// original bytes under a small deterministic header (no timestamps, so
+    /// rewrites are byte-identical). Returns the absolute path plus the
+    /// preview for the send-view substitution, or `None` on any I/O failure —
+    /// the caller falls back to the lossy stub, so offload can never break a
+    /// send.
+    fn offload_tool_result(
+        session_id: &str,
+        tool_use_id: &str,
+        tool_name: Option<&str>,
+        content: &str,
+    ) -> Option<(PathBuf, String)> {
+        Self::offload_chunk_result(session_id, tool_use_id, tool_name, content, None).map(
+            |(path, preview, _)| (path, preview),
+        )
+    }
+
+    /// Chunk-aware offload (§3): split content into chunks, write one file
+    /// per chunk (`<tool-id>_c{nn}.txt`, header gains `chunk: {nn}/{total}`),
+    /// return the base path, the cue+ref substitution (§4), and the chunk
+    /// count. `None` on any I/O failure (caller fails open to the stub).
+    fn offload_chunk_result(
+        session_id: &str,
+        tool_use_id: &str,
+        tool_name: Option<&str>,
+        content: &str,
+        was_override: Option<usize>,
+    ) -> Option<(PathBuf, String, usize)> {
+        let _ = was_override;
+        let dir = crate::storage::jcode_dir()
+            .ok()?
+            .join("sessions")
+            .join("offloaded")
+            .join(Self::sanitize_offload_component(session_id));
+        std::fs::create_dir_all(&dir).ok()?;
+        let base = Self::sanitize_offload_component(tool_use_id);
+        let was = content.chars().count();
+        let chunks = Self::split_offload_chunks(content);
+        let total = chunks.len().max(1);
+        let tool_label = tool_name.unwrap_or("unknown");
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let path = dir.join(format!("{base}_c{idx:02}.txt"));
+            let body = format!(
+                "# jcode offloaded tool result\nsession: {session_id}\ntool_use_id: {tool_use_id}\ntool: {tool_label}\nchars: {was}\nchunk: {idx}/{total}\n--- result ---\n{chunk}"
+            );
+            std::fs::write(&path, body).ok()?;
+        }
+        let first_path = dir.join(format!("{base}_c00.txt"));
+        let mut refs = String::new();
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let path = dir.join(format!("{base}_c{idx:02}.txt"));
+            let cue = Self::chunk_cue(chunk);
+            let chunk_lines = chunk.lines().count().max(1);
+            refs.push_str(&format!(
+                "c{idx:02}: {cue} -> {}:1 (read file_path=\"{}\" limit={chunk_lines}); ",
+                path.display(),
+                path.display()
+            ));
+        }
+        let substitution = format!(
+            "[jcode-retention:offloaded was {was} chars, {total} chunks, tool {tool_label}; {refs}expand: read file_path=\"{}\" start_line=1 (1-based, whole chunk)]",
+            first_path.display()
+        );
+        Some((first_path, substitution, total))
+    }
+
+    /// Proactive tool-result clearing (Anthropic `clear_tool_uses` primitive,
+    /// deterministic edition). Results older than the configured window are
+    /// offloaded to a session-scoped file with a path + preview substitution
+    /// (Deep Agents tier-1: recoverable beats unrecoverable); when the offload
+    /// write fails, falls back to the lossy `[cleared by retention]` stub.
+    /// ToolUse blocks (name + input) and result IDs are always kept, so
+    /// provider tool-pairing never breaks. Operates on the send view
+    /// only — the session file keeps the full history for later compaction.
+    /// Off when unconfigured: input returns unchanged.
+    pub(crate) fn apply_tool_result_clearing(
+        messages: Vec<Message>,
+        session_id: &str,
+    ) -> Vec<Message> {
+        let keep = match crate::config::config()
+            .compaction
+            .clear_tool_results_older_than
+        {
+            Some(keep) => keep,
+            None => return messages,
+        };
+        if messages.len() <= keep {
+            return messages;
+        }
+        let mut messages = messages;
+        let cutoff = messages.len() - keep;
+        // Tool names live on the ToolUse blocks, not the results: correlate
+        // once (owned — the borrow cannot survive the mutation loop below) so
+        // offloaded files carry the originating tool name in their header.
+        let mut tool_names: HashMap<String, String> = HashMap::new();
+        for message in messages.iter() {
+            for block in message.content.iter() {
+                if let ContentBlock::ToolUse { id, name, .. } = block {
+                    tool_names.entry(id.clone()).or_insert_with(|| name.clone());
+                }
+            }
+        }
+        for message in messages.iter_mut().take(cutoff) {
+            // Tool-returned images ride in the same message as the ToolResult
+            // (tool_output_to_content_blocks) as base64, often 100KB-1MB each:
+            // the largest context hog and the first thing to go. Only images
+            // in a message that also carries a ToolResult are tool output;
+            // user-uploaded images arrive in plain user messages and must
+            // survive — clearing those would destroy user-provided vision
+            // context. Image blocks carry no tool-pairing ID, so a text
+            // placeholder keeps message structure intact.
+            let is_tool_message = message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
+            if !is_tool_message {
+                continue;
+            }
+            for block in message.content.iter_mut() {
+                if let ContentBlock::Image { media_type, data } = block {
+                    let was = data.len();
+                    let media_type = media_type.clone();
+                    *block = ContentBlock::Text {
+                        text: format!(
+                            "[cleared image by retention: was {media_type}, ~{was} base64 chars]"
+                        ),
+                        cache_control: None,
+                    };
+                }
+            }
+            for block in message.content.iter_mut() {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } = block
+                    // Character count, not byte length: a 100-CJK-char result
+                    // is 300 bytes but reads as 100 chars of context.
+                    && content.chars().count() > Self::TOOL_RESULT_CLEAR_MIN_CHARS
+                    && !content.starts_with("[jcode-retention:")
+                {
+                    let was = content.chars().count();
+                    let tool_name = tool_names.get(tool_use_id).map(String::as_str);
+                    match Self::offload_chunk_result(
+                        session_id,
+                        tool_use_id,
+                        tool_name,
+                        content,
+                        None,
+                    ) {
+                        Some((_path, substitution, nchunks)) => {
+                            *content = substitution;
+                            jcode_base::cache_invalidation::record(
+                                "tool-result clearing",
+                                format!(
+                                    "{}/{tool_use_id} {was}ch {nchunks}c -> offload",
+                                    tool_name.unwrap_or("unknown"),
+                                ),
+                            );
+                        }
+                        // Fail open: an unwritable offload dir (read-only
+                        // home, full disk) must never break a send.
+                        None => {
+                            *content = format!(
+                                "[jcode-retention:cleared was {was} chars]"
+                            );
+                            jcode_base::cache_invalidation::record(
+                                "tool-result clearing",
+                                format!(
+                                    "{}/{tool_use_id} {was}ch -> stub",
+                                    tool_name.unwrap_or("unknown"),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        messages
+    }
+
+    /// Usage fraction at which the advisory pressure notice fires.
+    ///
+    /// Evidence: benchmark consensus (2026) puts the *effective* context of
+    /// production LLMs at ~60-70% of the advertised window (lost-in-the-middle
+    /// U-curve: Liu et al. 2023; FLLM 2025 notes newer flagships recover but
+    /// smaller/free-tier models still degrade). Firing at 75% means the model
+    /// is told to bank while its middle context is still readable — later,
+    /// the bank instruction itself would sit in the rotted zone.
+    const PRESSURE_ADVISORY: f64 = 0.75;
+    /// Usage fraction at which the urgent pressure notice fires.
+    ///
+    /// Evidence: past ~90% the middle is fully diluted and only primacy /
+    /// recency survive, so anything not banked or recent is already
+    /// unreliable. The notice sets expectations instead of asking: stale
+    /// tool output is dropped automatically and only banked facts plus the
+    /// summary survive compaction.
+    const PRESSURE_URGENT: f64 = 0.90;
+    /// Usage fraction below which notification bands re-arm (hysteresis, so a
+    /// turn hovering at a threshold notifies once, not every turn).
+    const PRESSURE_REARM: f64 = 0.70;
+
+    /// Decide whether a context-pressure notice fires this turn. Pure function
+    /// of current usage and the highest band already notified: returns the
+    /// band to notify (1 = advisory, 2 = urgent) or None. Bands only move
+    /// upward until usage drops below the re-arm level.
+    pub(crate) fn pressure_band_for_usage(usage: f64, last_band: u8) -> Option<u8> {
+        if usage >= Self::PRESSURE_URGENT && last_band < 2 {
+            Some(2)
+        } else if usage >= Self::PRESSURE_ADVISORY && last_band < 1 {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    /// Render the pressure notice for a band. Names only tools that exist
+    /// (`memory` with remember/recall/search), so the session model can act
+    /// immediately: bank durable facts now, recall on demand later.
+    /// Render the pressure notice for a band. Names the `memory` tool only
+    /// when the session can actually call it; otherwise stays tool-neutral
+    /// so a restricted session never burns context on an unavailable tool.
+    fn pressure_notice(band: u8, usage_pct: f64, tokens: u64, memory_exposed: bool) -> String {
+        let bank_line = if memory_exposed {
+            "Bank anything the next session must know with the memory tool (remember) NOW"
+        } else {
+            "Bank anything the next session must know in durable notes NOW"
+        };
+        let recall_line = if memory_exposed {
+            "Recall (recall/search) on demand instead of keeping everything live."
+        } else {
+            "Keep only what is needed live."
+        };
+        match band {
+            2 => format!(
+                "Context is {usage_pct:.0}% full (~{tokens} tokens) and compaction is near. \
+                 {bank_line} — after compaction only the summary plus the most recent messages survive, older tool output \
+                 is dropped automatically, and middle context is already unreliable: do not \
+                 trust details you have not banked or re-read. {recall_line}",
+            ),
+            _ => format!(
+                "Context is {usage_pct:.0}% full (~{tokens} tokens). Before continuing, consider \
+                 banking durable facts and decisions {} and recalling \
+                 only what is needed, so the coming compaction has less to summarize. \
+                 No action needed if the remaining work is short.",
+                if memory_exposed {
+                    "with the memory tool (remember)"
+                } else {
+                    "in durable notes"
+                },
+            ),
+        }
+    }
+
+    pub(crate) fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         if self.provider.supports_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
                 Ok(mut manager) => {
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
+                    // Pre-cloned for the compaction hooks below: `provider_messages`
+                    // holds `&mut self` for the rest of this block.
+                    let hook_session = self.session.id.clone();
+                    let hook_model = self.provider_model();
+                    let hook_cwd = self.working_dir().map(str::to_string);
                     let messages = {
                         let all_messages = self.session.provider_messages();
                         if self.provider.uses_jcode_compaction() {
@@ -882,12 +1258,48 @@ impl Agent {
                                         "Background compaction started ({})",
                                         trigger
                                     ));
+                                    Self::fire_compaction_hook(
+                                        hook_session.clone(),
+                                        hook_model.clone(),
+                                        hook_cwd.clone(),
+                                        "compaction_started",
+                                        &[
+                                            ("TRIGGER", trigger.clone()),
+                                            ("MODE", manager.mode().as_str().to_string()),
+                                            ("ACTIVE_MESSAGES", all_messages.len().to_string()),
+                                            (
+                                                "ESTIMATED_TOKENS",
+                                                manager
+                                                    .effective_token_count_with(all_messages)
+                                                    .to_string(),
+                                            ),
+                                        ],
+                                    );
                                 }
                                 crate::compaction::CompactionAction::HardCompacted(dropped) => {
                                     logging::warn(&format!(
                                         "Emergency hard compact: dropped {} messages (context was critical)",
                                         dropped
                                     ));
+                                    Self::fire_compaction_hook(
+                                        hook_session.clone(),
+                                        hook_model.clone(),
+                                        hook_cwd.clone(),
+                                        "compaction_emergency",
+                                        &[
+                                            ("TRIGGER", "critical".to_string()),
+                                            ("MODE", manager.mode().as_str().to_string()),
+                                            ("MESSAGES_DROPPED", dropped.to_string()),
+                                            (
+                                                "USAGE_PCT",
+                                                format!(
+                                                    "{:.1}",
+                                                    manager.context_usage_with(all_messages)
+                                                        * 100.0
+                                                ),
+                                            ),
+                                        ],
+                                    );
                                 }
                                 crate::compaction::CompactionAction::None => {}
                             }
@@ -895,6 +1307,41 @@ impl Agent {
                         manager.messages_for_api_with(all_messages)
                     };
                     let event = manager.take_compaction_event();
+                    // Deterministic budget notice: when usage crosses a band
+                    // without compaction firing, tell the session model its
+                    // budget state so it pages its own memory via tools
+                    // (remember/recall) instead of needing a manager model.
+                    let usage = manager.context_usage_with(&messages) as f64;
+                    self.pressure_notice_fired_this_turn = false;
+                    if usage < Self::PRESSURE_REARM {
+                        self.last_pressure_band = 0;
+                    } else if event.is_none()
+                        && let Some(band) =
+                            Self::pressure_band_for_usage(usage, self.last_pressure_band)
+                    {
+                        self.last_pressure_band = band;
+                        self.pressure_notice_fired_this_turn = true;
+                        let tokens = manager.effective_token_count_with(&messages) as u64;
+                        let memory_exposed = self
+                            .allowed_tools
+                            .as_ref()
+                            .is_none_or(|allowed| allowed.contains("memory"))
+                            && !self.disabled_tools.contains("memory")
+                            && crate::tool::session_tool_policy_allows_tool(
+                                &self.session.id,
+                                "memory",
+                            );
+                        self.current_turn_system_reminder = Some(Self::pressure_notice(
+                            band,
+                            usage * 100.0,
+                            tokens,
+                            memory_exposed,
+                        ));
+                        logging::info(&format!(
+                            "Context pressure band {band} notified ({:.0}% full)",
+                            usage * 100.0
+                        ));
+                    }
                     if event.is_some() || discarded_oversized_native {
                         self.sync_session_compaction_state_from_manager(&manager);
                     }
@@ -913,7 +1360,10 @@ impl Agent {
                         user_count,
                         assistant_count,
                     ));
-                    return (messages, event);
+                    return (
+                        Self::apply_tool_result_clearing(messages, &self.session.id),
+                        event,
+                    );
                 }
                 Err(_) => {
                     logging::info("messages_for_provider: compaction lock failed, using session");
@@ -934,7 +1384,10 @@ impl Agent {
             user_count,
             assistant_count,
         ));
-        (messages, None)
+        (
+            Self::apply_tool_result_clearing(messages, &self.session.id),
+            None,
+        )
     }
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {
@@ -1130,6 +1583,33 @@ impl Agent {
             crate::telemetry::SessionEndReason::NormalExit,
         );
         self.fire_session_lifecycle_hook("session_end", "close");
+    }
+
+    /// Fire a compaction lifecycle observer hook (`compaction_started` /
+    /// `compaction_completed` / `compaction_emergency`). No-op when the hook
+    /// is not configured. Free function (not a method): several call sites
+    /// hold a `&mut self` borrow from `provider_messages()`, so callers pass
+    /// pre-cloned identity values instead of `&self`.
+    pub(crate) fn fire_compaction_hook(
+        session_id: String,
+        model: String,
+        cwd: Option<String>,
+        event_name: &'static str,
+        fields: &[(&'static str, String)],
+    ) {
+        if !crate::hooks::hook_configured(event_name) {
+            return;
+        }
+        let mut event = crate::hooks::HookEvent::new(event_name)
+            .session_id(session_id)
+            .field("MODEL", model);
+        for (key, value) in fields {
+            event = event.field(key, value.clone());
+        }
+        if let Some(cwd) = cwd {
+            event = event.cwd(cwd);
+        }
+        crate::hooks::dispatch_observer(event);
     }
 
     /// Fire a session lifecycle observer hook (`session_start`/`session_end`).

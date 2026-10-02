@@ -230,6 +230,9 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
         covers_up_to_turn: TURNS,
         original_turn_count: TURNS,
         compacted_count,
+        trigger: None,
+        summarizer: None,
+        mode: None,
     });
 
     let (rendered_messages, _images, _compacted_info) =

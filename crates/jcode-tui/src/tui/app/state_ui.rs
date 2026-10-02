@@ -2229,13 +2229,15 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             context.tool_definition_tokens(),
         ));
         context_report.push_str(&format!(
-            "- system prompt: {} chars\n- session context: {} chars\n- project AGENTS.md: {} ({})\n- global ~/AGENTS.md: {} ({})\n- prompt overlays: {} chars\n- preferred tools: {} chars\n- skills section: {} chars\n- self-dev section: {} chars\n- memory section: {} chars\n- tool definitions: {} chars across {} tools\n- user messages: {} chars across {} messages\n- assistant messages: {} chars across {} messages\n- tool calls: {} chars across {} calls\n- tool results: {} chars across {} results\n",
+            "- system prompt: {} chars\n- session context: {} chars\n- project AGENTS.md: {} ({})\n- global ~/AGENTS.md: {} ({})\n- project PROGRESS.md: {} ({})\n- prompt overlays: {} chars\n- preferred tools: {} chars\n- skills section: {} chars\n- self-dev section: {} chars\n- memory section: {} chars\n- tool definitions: {} chars across {} tools\n- user messages: {} chars across {} messages\n- assistant messages: {} chars across {} messages\n- tool calls: {} chars across {} calls\n- tool results: {} chars across {} results\n",
             context.system_prompt_chars,
             context.session_context_chars,
             if context.has_project_agents_md { "loaded" } else { "not loaded" },
             context.project_agents_md_chars,
             if context.has_global_agents_md { "loaded" } else { "not loaded" },
             context.global_agents_md_chars,
+            if context.has_project_progress_md { "loaded" } else { "not loaded" },
+            context.project_progress_md_chars,
             context.prompt_overlay_chars,
             context.preferred_tools_chars,
             context.skills_chars,

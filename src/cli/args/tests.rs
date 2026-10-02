@@ -765,6 +765,7 @@ fn run_json_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(json);
             assert!(!ndjson);
@@ -782,6 +783,7 @@ fn run_ndjson_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(!json);
             assert!(ndjson);
@@ -1043,4 +1045,18 @@ fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
             "stdio must not silently ignore an API socket override"
         );
     }
+}
+
+#[test]
+fn memory_prefilter_stats_parses_with_and_without_json() {
+    let args = Args::try_parse_from(["jcode", "memory-prefilter-stats"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::MemoryPrefilterStats { json: false })
+    ));
+    let args = Args::try_parse_from(["jcode", "memory-prefilter-stats", "--json"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::MemoryPrefilterStats { json: true })
+    ));
 }

@@ -285,6 +285,7 @@ fn edge_kind_name(kind: &EdgeKind) -> &'static str {
         EdgeKind::InCluster => "in_cluster",
         EdgeKind::RelatesTo { .. } => "relates_to",
         EdgeKind::Supersedes => "supersedes",
+        EdgeKind::Invalidates => "invalidates",
         EdgeKind::Contradicts => "contradicts",
         EdgeKind::DerivedFrom => "derived_from",
     }

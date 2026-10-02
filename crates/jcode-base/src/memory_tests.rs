@@ -21,7 +21,7 @@ pub(super) static PENDING_MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 static PREFILTER_SHADOW_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
-fn jev_storage_preserves_code_spelling_and_scope_without_embeddings() {
+fn jev_storage_preserves_code_spelling_and_scope() {
     with_temp_home(|_| {
         let manager = MemoryManager::new().with_project_dir("/jev-storage");
         let first = manager
@@ -45,7 +45,17 @@ fn jev_storage_preserves_code_spelling_and_scope_without_embeddings() {
         assert_ne!(first, global);
         let all = manager.list_all().unwrap();
         assert_eq!(all.len(), 4);
-        assert!(all.iter().all(|entry| entry.embedding.is_none()));
+        // Write path embeds when a backend is available (restored); entries
+        // stay keyword-only where it is absent. Either way spelling/scope
+        // assertions above hold. Where vectors exist they must be full-dim
+        // and tagged with the backend that produced them.
+        assert!(all.iter().all(|entry| match &entry.embedding {
+            None => true,
+            Some(vec) =>
+                vec.len() == crate::embedding::embedding_dim()
+                    && entry.embedding_model.as_deref()
+                        == Some(crate::embedding_backend::active_model_id().as_str()),
+        }));
         assert_eq!(
             manager
                 .load_project_graph()
@@ -455,10 +465,24 @@ fn manager_persists_and_forgets_memories() {
         assert_eq!(search.len(), 1);
 
         assert!(manager.forget(&project_id).expect("forget project"));
+        // R3 policy: forget tombstones by default. The row survives with
+        // active=false (management-visible), but retrieval skips it.
         let remaining = manager.list_all().expect("list all");
-        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining.len(), 2, "tombstone row is preserved");
+        let tombstoned = remaining
+            .iter()
+            .find(|e| e.id == project_id)
+            .expect("tombstone listed");
+        assert!(!tombstoned.active);
+        assert!(tombstoned.superseded_by.is_none());
+        let search = manager.search("project").expect("search after forget");
+        assert!(
+            search.iter().all(|e| e.id != project_id),
+            "tombstone invisible to search"
+        );
 
-        assert!(!manager.forget(&project_id).expect("forget missing"));
+        assert!(manager.forget(&project_id).expect("re-forget tombstone"));
+        assert!(!manager.forget("missing-id").expect("forget missing"));
         assert!(manager.forget(&global_id).expect("forget global"));
     });
 }
@@ -1046,6 +1070,689 @@ fn jev_recall_prefilter_leaves_small_stores_untouched() {
         prefilter_for_jev(entries, "completely different words").len(),
         10
     );
+}
+
+// ---------- Harness scorer unit tests (02-harness-spec §5.2) ----------
+
+/// Pure scorer for C1 recall items: 1 iff `returned` contains `gold_fact`
+/// verbatim (case-sensitive substring, trimmed outer whitespace only) AND
+/// the gold span id is among `spans`, and no listed distractor turn alone
+/// satisfies. Mirrors run.sh C1 HIT logic at unit scale.
+fn harness_score_recall(
+    returned: &str,
+    gold_fact: &str,
+    gold_span: &str,
+    spans: &[&str],
+    distractor_turns: &[&str],
+    distractor_texts: &[(&str, &str)],
+) -> u8 {
+    let ret = returned.trim();
+    let gold = gold_fact.trim();
+    if !spans.contains(&gold_span) {
+        return 0;
+    }
+    if !ret.contains(gold) {
+        return 0;
+    }
+    // A distractor turn holding identical text must not satisfy on its own:
+    // if the ONLY matching span is a distractor, score 0.
+    let gold_in_distractor = distractor_texts
+        .iter()
+        .any(|(tid, text)| distractor_turns.contains(tid) && text.contains(gold));
+    if gold_in_distractor && !spans.contains(&gold_span) {
+        return 0;
+    }
+    1
+}
+
+#[test]
+fn harness_recall_scorer_gold_and_distractor() {
+    // Gold fact + valid span scores 1.
+    assert_eq!(
+        harness_score_recall(
+            "answer: deploy freeze starts Friday 18:00 UTC",
+            "deploy freeze starts Friday 18:00 UTC",
+            "harness-R-001",
+            &["harness-R-001"],
+            &[],
+            &[],
+        ),
+        1
+    );
+    // Missing gold fact scores 0.
+    assert_eq!(
+        harness_score_recall(
+            "answer: no record of any freeze",
+            "deploy freeze starts Friday 18:00 UTC",
+            "harness-R-001",
+            &["harness-R-001"],
+            &[],
+            &[],
+        ),
+        0
+    );
+    // Gold span absent scores 0 even when text matches (wrong evidence).
+    assert_eq!(
+        harness_score_recall(
+            "answer: deploy freeze starts Friday 18:00 UTC",
+            "deploy freeze starts Friday 18:00 UTC",
+            "harness-R-001",
+            &["harness-R-009"],
+            &[],
+            &[],
+        ),
+        0
+    );
+    // Distractor-only match scores 0: distractor turn S04-T02 carries the
+    // same text but is not the gold turn.
+    assert_eq!(
+        harness_score_recall(
+            "answer: staging database password is river-stone-77",
+            "staging database password is river-stone-77",
+            "harness-R-002",
+            &["S04-T02"],
+            &["S04-T02"],
+            &[("S04-T02", "staging database password is river-stone-77")],
+        ),
+        0
+    );
+}
+
+/// Pure scorer for C2 KU items: (current_ok, invalid_reuse).
+/// UPDATE/NEUTRAL: current_ok iff `expected` present verbatim and no
+/// forbidden string present. DELETE: current_ok iff an abstention marker
+/// from the fixed set is present and no forbidden string present.
+fn harness_score_ku(
+    returned: &str,
+    expected: &str,
+    forbidden: &[&str],
+    answerable: bool,
+) -> (bool, bool) {
+    const MARKERS: &[&str] = &["no record", "forgotten", "unknown", "No memories found"];
+    let invalid_reuse = forbidden.iter().any(|fb| !fb.is_empty() && returned.contains(fb));
+    if invalid_reuse {
+        return (false, true);
+    }
+    if !answerable {
+        let abstains = MARKERS.iter().any(|m| returned.contains(m));
+        return (abstains, false);
+    }
+    (!expected.is_empty() && returned.contains(expected), false)
+}
+
+#[test]
+fn harness_ku_current_and_forbidden() {
+    // UPDATE: current value accepted.
+    assert_eq!(
+        harness_score_ku("standup moved to 10:30", "10:30", &["09:00"], true),
+        (true, false)
+    );
+    // UPDATE: forbidden old value present -> invalid reuse veto.
+    assert_eq!(
+        harness_score_ku("standup at 09:00 (was 10:30?)", "10:30", &["09:00"], true),
+        (false, true)
+    );
+    // DELETE: abstention marker accepted, forbidden absent.
+    assert_eq!(
+        harness_score_ku("No memories found matching 'door code'", "", &["4410"], false),
+        (true, false)
+    );
+    // DELETE: deleted value resurfaced -> veto even with marker.
+    assert_eq!(
+        harness_score_ku("no record, but old code 4410?", "", &["4410"], false),
+        (false, true)
+    );
+    // DELETE: confident wrong answer with no marker and no forbidden -> incorrect.
+    assert_eq!(
+        harness_score_ku("your code is 0000", "", &["4410"], false),
+        (false, false)
+    );
+    // NEUTRAL: expected present, no forbidden list.
+    assert_eq!(
+        harness_score_ku("passport ends in ZX-4021", "ZX-4021", &[], true),
+        (true, false)
+    );
+}
+
+/// Pin-five checker unit test: rejects tampered pin files with PIN-MISMATCH.
+/// Mirrors run.sh step 0 at unit scale (unknown key, wrong sha, wrong seed).
+fn harness_check_pin(pin_json: &str, actual_sha: &str) -> Result<(), String> {
+    let v: serde_json::Value =
+        serde_json::from_str(pin_json).map_err(|e| format!("PIN-MISMATCH parse: {e}"))?;
+    let obj = v.as_object().ok_or("PIN-MISMATCH shape: expected object")?;
+    let extra: Vec<&String> = obj
+        .keys()
+        .filter(|k| {
+            !["embedder", "judge", "judge_version", "query_set_sha256", "seed"].contains(&k.as_str())
+        })
+        .collect();
+    if !extra.is_empty() {
+        return Err(format!("PIN-MISMATCH unknown-keys: {extra:?}"));
+    }
+    for key in ["embedder", "judge", "judge_version", "query_set_sha256", "seed"] {
+        if obj.get(key).is_none() {
+            return Err(format!("PIN-MISMATCH {key}: expected <present> got <missing>"));
+        }
+    }
+    let sha = obj["query_set_sha256"].as_str().unwrap_or("");
+    if sha != actual_sha {
+        return Err(format!("PIN-MISMATCH query_set_sha256: expected {sha} got {actual_sha}"));
+    }
+    let seed = obj["seed"].as_i64().unwrap_or(-1);
+    if seed != 42 {
+        return Err(format!("PIN-MISMATCH seed: expected 42 got {seed}"));
+    }
+    let emb = obj["embedder"].as_str().unwrap_or("");
+    if emb != "minilm-l6-v2:LOCAL-384d" {
+        return Err(format!(
+            "PIN-MISMATCH embedder: expected minilm-l6-v2:LOCAL-384d got {emb}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn harness_pin_five_mismatch_exits() {
+    let good = r#"{"embedder":"minilm-l6-v2:LOCAL-384d","judge":"exact-match-plus-span-check","judge_version":"v1","query_set_sha256":"ABC","seed":42}"#;
+    assert!(harness_check_pin(good, "ABC").is_ok());
+    // Wrong sha.
+    assert!(harness_check_pin(good, "DEF").unwrap_err().contains("query_set_sha256"));
+    // Wrong seed.
+    let bad_seed = good.replace("\"seed\":42", "\"seed\":43");
+    assert!(harness_check_pin(&bad_seed, "ABC").unwrap_err().contains("seed"));
+    // Unknown key.
+    let extra = good.replace("}", ",\"extra\":1}");
+    assert!(harness_check_pin(&extra, "ABC").unwrap_err().contains("unknown-keys"));
+    // Missing key.
+    let missing: serde_json::Value = serde_json::from_str(good).unwrap();
+    let mut map = missing.as_object().unwrap().clone();
+    map.remove("judge_version");
+    let missing_json = serde_json::Value::Object(map).to_string();
+    assert!(harness_check_pin(&missing_json, "ABC").unwrap_err().contains("judge_version"));
+}
+
+// ==================== 08-stale-writer: R2 UPDATE scan ====================
+
+#[test]
+fn stale_writer_detect_update_fires_on_all_update_fixture_shapes() {
+    // Every K/H UPDATE pair (old state text -> supersede-op text) must read
+    // as an update: marker + shared anchor + replaced value.
+    let pairs = [
+        (
+            "my standup is at 09:00",
+            "Morning ritual update: my daily standup moved to 10:30, still fifteen minutes, Cam stays optional",
+        ),
+        (
+            "gym sessions on Mondays",
+            "Training plan update: my gym sessions moved to Wednesdays, split into strength plus a short run",
+        ),
+        (
+            "project deadline is March 1st",
+            "Planning horizon update: the project deadline extended to April 15th, design freeze two weeks prior",
+        ),
+        (
+            "favorite editor is vim",
+            "Editor switch: my favorite editor is now helix after the modal trial, old config archived",
+        ),
+        (
+            "coffee order is a flat white",
+            "Caffeine order update: my regular coffee order changed to black filter, oat milk on request only",
+        ),
+        (
+            "team retro is biweekly Friday",
+            "Team retro rescheduled: the team retro moved to Thursday afternoons, weekly cadence, forty-five minutes",
+        ),
+        (
+            "piano practice is on Tuesdays, thirty minutes with scales",
+            "Practice schedule update: piano practice moved to Saturdays, forty minutes, scales still first",
+        ),
+        (
+            "my thesis advisor is Dr. Rao, office hours Thursdays",
+            "Advisor change: my thesis advisor is now Dr. Osei after the department reshuffle, Rao on sabbatical",
+        ),
+    ];
+    for (old, new) in pairs {
+        assert!(
+            MemoryManager::detect_update(old, new),
+            "UPDATE pair must detect: {old:?} -> {new:?}"
+        );
+    }
+}
+
+#[test]
+fn stale_writer_detect_update_rejects_guard_and_neutral_shapes() {
+    // H-006 near-miss: high similarity expected, but no update marker and a
+    // different relation noun (mentorship vs buddy) -> must stay distinct.
+    assert!(!MemoryManager::detect_update(
+        "Mentorship news: new-grad mentorship pairs Ana with Theo, kickoff in September",
+        "intern buddy pairs Ana with Ravi for the summer, a separate program",
+    ));
+    // Neutral filler: no marker.
+    assert!(!MemoryManager::detect_update(
+        "Travel document: my passport number ends in ZX-4021, renewal appointment booked for March",
+        "bought milk and eggs",
+    ));
+    // Pure addition (old value restated, not replaced): old-minus-new empty.
+    assert!(!MemoryManager::detect_update(
+        "my standup is at 09:00",
+        "my standup is at 09:00, and gym sessions on Mondays",
+    ));
+    // Restatement with marker but same value: nothing replaced.
+    assert!(!MemoryManager::detect_update(
+        "my standup is at 09:00",
+        "standup update: still at 09:00, room changed",
+    ));
+    // Unrelated predicates sharing no anchor.
+    assert!(!MemoryManager::detect_update(
+        "my standup is at 09:00",
+        "Training plan update: gym sessions moved to Wednesdays",
+    ));
+}
+
+#[test]
+fn stale_writer_detect_update_requires_anchor_coverage() {
+    // 11-r2-precision: the 4 blind-harness false-supersede pairs all clear
+    // cosine >= 0.80 AND carry update markers, but share only generic
+    // vocabulary with the victim fact (coverage <= 0.143 < 0.20) -> reject.
+    // (old = victim fact already in the graph, new = incoming text.)
+    let false_pairs = [
+        (
+            "Training plan update: my gym sessions moved to Wednesdays, split into strength plus a short run",
+            "Planning horizon update: the project deadline extended to April 15th, design freeze two weeks prior",
+        ),
+        (
+            "Morning ritual update: my daily standup moved to 10:30, still fifteen minutes, Cam stays optional",
+            "Team retro rescheduled: the team retro moved to Thursday afternoons, weekly cadence, forty-five minutes capped",
+        ),
+        (
+            "Calendar reshuffle: the quarterly business review moved to Thursday 14:00 in the main conference room",
+            "Morning ritual update: my daily standup moved to 10:30, still fifteen minutes, Cam stays optional",
+        ),
+        (
+            "Friday change control: the production deploy freeze starts Friday 18:00 UTC and lifts Monday 06:00, pager stays with Priya",
+            "Calendar reshuffle: the quarterly business review moved to Thursday 14:00 in the main conference room",
+        ),
+    ];
+    for (old, new) in false_pairs {
+        assert!(
+            !MemoryManager::detect_update(old, new),
+            "generic-vocabulary pair must not detect: {old:?} -> {new:?}"
+        );
+    }
+    // Boundary true pair: single shared subject token still clears 0.20
+    // (1/4 = 0.25) -> fires.
+    assert!(MemoryManager::detect_update(
+        "standup at 09:00 daily",
+        "standup update: moved to 10:30 effective Monday",
+    ));
+    assert!(
+        MemoryManager::UPDATE_MIN_ANCHOR_COVERAGE == 0.20,
+        "coverage bar is a calibrated constant, not a tunable"
+    );
+}
+
+#[test]
+fn stale_writer_find_candidate_hits_on_similarity_plus_signal() {
+    let mut graph = MemoryGraph::new();
+    let old = MemoryEntry::new(MemoryCategory::Fact, "my standup is at 09:00");
+    let old_id = old.id.clone();
+    graph.add_memory(old);
+    let incoming = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "Morning ritual update: my daily standup moved to 10:30",
+    );
+    // Stub embedder: near-identical vectors (high similarity), so the
+    // detect_update gate decides.
+    let embed = |_: &str| Some(vec![1.0, 0.0, 0.0]);
+    let hit = MemoryManager::find_update_candidate(
+        &graph,
+        &incoming,
+        MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
+        &embed,
+    );
+    assert_eq!(hit.as_deref(), Some(old_id.as_str()));
+}
+
+#[test]
+fn stale_writer_find_candidate_never_fires_on_similarity_alone() {
+    let mut graph = MemoryGraph::new();
+    // H-006 guard shape: vectors near-identical, but no update signal.
+    let old = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "Mentorship news: new-grad mentorship pairs Ana with Theo",
+    );
+    graph.add_memory(old);
+    let incoming = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "intern buddy pairs Ana with Ravi for the summer",
+    );
+    let embed = |_: &str| Some(vec![1.0, 0.0, 0.0]);
+    let hit = MemoryManager::find_update_candidate(
+        &graph,
+        &incoming,
+        MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
+        &embed,
+    );
+    assert!(
+        hit.is_none(),
+        "near-miss must stay distinct despite high similarity; got {hit:?}"
+    );
+}
+
+#[test]
+fn stale_writer_find_candidate_rejects_low_similarity_and_missing_vectors() {
+    let mut graph = MemoryGraph::new();
+    let old = MemoryEntry::new(MemoryCategory::Fact, "my standup is at 09:00");
+    graph.add_memory(old);
+    let incoming = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "Morning ritual update: my daily standup moved to 10:30",
+    );
+    // Orthogonal vectors: marker present, similarity absent -> no hit.
+    let orthogonal = |text: &str| {
+        if text.contains("09:00") {
+            Some(vec![1.0, 0.0])
+        } else {
+            Some(vec![0.0, 1.0])
+        }
+    };
+    assert!(MemoryManager::find_update_candidate(
+        &graph,
+        &incoming,
+        MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
+        &orthogonal,
+    )
+    .is_none());
+    // No vectors at all (embedder unavailable): fail-open, plain add.
+    let unavailable = |_: &str| None;
+    assert!(MemoryManager::find_update_candidate(
+        &graph,
+        &incoming,
+        MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
+        &unavailable,
+    )
+    .is_none());
+}
+
+#[test]
+fn stale_writer_find_candidate_scopes_to_same_category_and_picks_best() {
+    let mut graph = MemoryGraph::new();
+    // Same words, different category: out of scope.
+    let other_category =
+        MemoryEntry::new(MemoryCategory::Preference, "my standup is at 09:00");
+    graph.add_memory(other_category);
+    // Same category anchor with high similarity but no marker: not eligible.
+    let same_category_no_signal =
+        MemoryEntry::new(MemoryCategory::Fact, "my coffee order is a flat white");
+    graph.add_memory(same_category_no_signal);
+    // Same category with a full update signal: eligible.
+    let stale = MemoryEntry::new(MemoryCategory::Fact, "standup at 09:00 daily");
+    let stale_id = stale.id.clone();
+    graph.add_memory(stale);
+    let incoming = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "standup update: moved to 10:30 effective Monday",
+    );
+    let embed = |_: &str| Some(vec![1.0, 0.0, 0.0]);
+    let hit = MemoryManager::find_update_candidate(
+        &graph,
+        &incoming,
+        MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
+        &embed,
+    );
+    assert_eq!(hit.as_deref(), Some(stale_id.as_str()));
+}
+
+#[test]
+fn stale_writer_remember_project_supersedes_through_real_write_path() {
+    with_temp_home(|_| {
+        // Stored embeddings tagged with the ACTIVE model id: the R2 scan
+        // uses them with no model load, so this deterministically covers the
+        // fired branch even where ONNX files are absent (fail-open covered
+        // by stale_writer_find_candidate_rejects_low_similarity...).
+        let model = crate::embedding_backend::active_model_id();
+        let manager = MemoryManager::new().with_project_dir("/stale-writer-r2");
+        let old_id = manager
+            .remember_project(
+                MemoryEntry::new(MemoryCategory::Fact, "my standup is at 09:00")
+                    .with_embedding_for_model(vec![1.0, 0.0, 0.0], model.clone()),
+            )
+            .expect("remember old");
+        let new_id = manager
+            .remember_project(
+                MemoryEntry::new(
+                    MemoryCategory::Fact,
+                    "Morning ritual update: my daily standup moved to 10:30",
+                )
+                .with_embedding_for_model(vec![0.99, 0.01, 0.0], model.clone()),
+            )
+            .expect("remember new");
+        assert_ne!(old_id, new_id, "update is a new row, not a dup");
+        let graph = manager.load_project_graph().expect("load graph");
+        let old = graph.get_memory(&old_id).expect("old row preserved");
+        let new = graph.get_memory(&new_id).expect("new row present");
+        assert!(!old.active, "old value superseded via remember_project");
+        assert_eq!(old.superseded_by.as_deref(), Some(new_id.as_str()));
+        assert!(new.active);
+        assert!(
+            graph
+                .get_edges(&new_id)
+                .iter()
+                .any(|e| e.target == old_id
+                    && matches!(e.kind, crate::memory_graph::EdgeKind::Supersedes)),
+            "Supersedes edge new -> old must exist"
+        );
+        // Superseded rows stay out of hybrid retrieval (reader contract).
+        let ranked = manager
+            .find_similar_hybrid("standup moved to 10:30", &[0.99, 0.01, 0.0], 10)
+            .expect("hybrid");
+        let ids: Vec<&str> = ranked.iter().map(|(e, _)| e.id.as_str()).collect();
+        assert!(!ids.contains(&old_id.as_str()), "old must not surface; got {ids:?}");
+        assert!(ids.contains(&new_id.as_str()), "new must surface; got {ids:?}");
+    });
+}
+
+#[test]
+fn stale_writer_remember_project_fails_open_without_vectors() {
+    with_temp_home(|_| {
+        // No stored embeddings here. Where the ONNX model is absent the R2
+        // scan skips (fail-open) and both rows stay active; where it is
+        // present, real cosine on these similar texts plus the update marker
+        // fires the scan. Either way the new row is stored, active, and
+        // keyword-retrievable. (Hybrid needs stored vectors, so the keyword
+        // path is the model-independent assertion here.)
+        let manager = MemoryManager::new().with_project_dir("/stale-writer-r2-open");
+        let old_id = manager
+            .remember_project(MemoryEntry::new(MemoryCategory::Fact, "my standup is at 09:00"))
+            .expect("remember old");
+        let new_id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "Morning ritual update: my daily standup moved to 10:30",
+            ))
+            .expect("remember new");
+        assert_ne!(old_id, new_id);
+        let graph = manager.load_project_graph().expect("load graph");
+        let old = graph.get_memory(&old_id).expect("old row");
+        let new = graph.get_memory(&new_id).expect("new row");
+        assert!(new.active, "new row active");
+        if !old.active {
+            assert_eq!(
+                old.superseded_by.as_deref(),
+                Some(new_id.as_str()),
+                "inactive old row must point at its replacement"
+            );
+        }
+        let hits = manager.search("standup").expect("search");
+        assert!(
+            hits.iter().any(|e| e.id == new_id),
+            "new row keyword-retrievable"
+        );
+        assert_eq!(
+            hits.iter().any(|e| e.id == old_id),
+            old.active,
+            "old row visible iff still active"
+        );
+    });
+}
+
+// ==================== 08-stale-writer: R3 DELETE branch ====================
+
+#[test]
+fn stale_writer_forget_tombstones_by_default() {
+    with_temp_home(|_| {
+        let manager = MemoryManager::new().with_project_dir("/stale-writer-r3");
+        let id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "my door code is 4410",
+            ))
+            .expect("remember");
+        assert!(manager.forget(&id).expect("forget"));
+        let graph = manager.load_project_graph().expect("load graph");
+        let tombstone = graph.get_memory(&id).expect("tombstone row preserved");
+        assert!(!tombstone.active, "tombstone is inactive");
+        assert!(
+            tombstone.superseded_by.is_none(),
+            "tombstone is void, not replaced"
+        );
+        // Retrieval-invisible: keyword search and keyword relevance skip it.
+        assert!(
+            manager
+                .search("door code")
+                .expect("search")
+                .iter()
+                .all(|e| e.id != id),
+            "tombstone must not surface from search"
+        );
+        assert!(
+            manager
+                .get_relevant_keywords(&["door"], 10)
+                .expect("keywords")
+                .iter()
+                .all(|e| e.id != id),
+            "tombstone must not surface from keyword relevance"
+        );
+        // Second forget still reports found (idempotent tombstone).
+        assert!(manager.forget(&id).expect("re-forget"));
+        assert!(!manager.forget("missing-id").expect("forget missing"));
+    });
+}
+
+#[test]
+fn stale_writer_forget_with_privacy_hard_deletes() {
+    with_temp_home(|_| {
+        let manager = MemoryManager::new().with_project_dir("/stale-writer-r3p");
+        let id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "my bike lock combination is 33-18-07",
+            ))
+            .expect("remember");
+        assert!(
+            manager
+                .forget_with_policy(&id, true)
+                .expect("privacy forget")
+        );
+        let graph = manager.load_project_graph().expect("load graph");
+        assert!(
+            graph.get_memory(&id).is_none(),
+            "privacy erasure removes the row entirely"
+        );
+        assert!(!manager.forget(&id).expect("forget after erase"));
+    });
+}
+
+// ==================== 08-stale-writer: Invalidates edge ====================
+
+#[test]
+fn stale_writer_invalidate_edge_tombstones_without_replacement() {
+    let mut graph = MemoryGraph::new();
+    let invalidator = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "forget my door code completely",
+    );
+    let invalidator_id = invalidator.id.clone();
+    graph.add_memory(invalidator);
+    let tombstone = MemoryEntry::new(MemoryCategory::Fact, "my door code is 4410");
+    let tombstone_id = tombstone.id.clone();
+    graph.add_memory(tombstone);
+    graph.invalidate(&invalidator_id, &tombstone_id);
+    let tomb = graph.get_memory(&tombstone_id).expect("tombstone present");
+    assert!(!tomb.active);
+    assert!(tomb.superseded_by.is_none());
+    assert!(
+        graph
+            .get_edges(&invalidator_id)
+            .iter()
+            .any(|e| e.target == tombstone_id
+                && matches!(e.kind, crate::memory_graph::EdgeKind::Invalidates)),
+        "Invalidates edge invalidator -> tombstone must exist"
+    );
+    assert_eq!(
+        crate::memory_graph::EdgeKind::Invalidates.traversal_weight(),
+        0.0,
+        "tombstones must not propagate rank"
+    );
+    // Unknown ids are a safe no-op.
+    graph.invalidate(&invalidator_id, "no-such-id");
+    graph.invalidate("no-such-id", &tombstone_id);
+}
+
+// ==================== G-R recency prior: pure math ====================
+
+#[test]
+fn recency_bonus_for_zero_age_returns_full_weight() {
+    assert_eq!(MemoryManager::recency_bonus_for(0.5, 30.0, 0.0), 0.5);
+}
+
+#[test]
+fn recency_bonus_for_one_half_life_halves_weight() {
+    let got = MemoryManager::recency_bonus_for(1.0, 30.0, 30.0);
+    assert!((got - 0.5).abs() < 1e-6, "got {got}");
+}
+
+#[test]
+fn recency_bonus_for_two_half_lives_quarters_weight() {
+    let got = MemoryManager::recency_bonus_for(1.0, 30.0, 60.0);
+    assert!((got - 0.25).abs() < 1e-6, "got {got}");
+}
+
+#[test]
+fn recency_bonus_for_rejects_bad_inputs() {
+    // Non-positive / non-finite weight.
+    for w in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert_eq!(
+            MemoryManager::recency_bonus_for(w, 30.0, 5.0),
+            0.0,
+            "weight {w}"
+        );
+    }
+    // Non-finite / non-positive tau.
+    for tau in [0.0, -7.0, f32::NAN, f32::INFINITY] {
+        assert_eq!(
+            MemoryManager::recency_bonus_for(1.0, tau, 5.0),
+            0.0,
+            "tau {tau}"
+        );
+    }
+    // Negative / non-finite age.
+    for age in [-1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert_eq!(
+            MemoryManager::recency_bonus_for(1.0, 30.0, age),
+            0.0,
+            "age {age}"
+        );
+    }
+}
+
+#[test]
+fn recency_bonus_for_is_bounded_by_weight() {
+    // Very old entries decay toward zero but never exceed w or go negative.
+    for age in [0.0, 1.0, 30.0, 365.0, 3650.0] {
+        let got = MemoryManager::recency_bonus_for(0.75, 30.0, age);
+        assert!(got >= 0.0 && got <= 0.75, "age {age} got {got}");
+    }
 }
 
 #[test]

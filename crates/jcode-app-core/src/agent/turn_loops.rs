@@ -103,6 +103,7 @@ impl Agent {
                 .prewarm(&tools, &split_prompt.static_part)
                 .await;
             let (messages, compaction_event) = self.messages_for_provider();
+            let had_compaction_event = compaction_event.is_some();
             if let Some(event) = compaction_event {
                 // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
@@ -125,6 +126,12 @@ impl Agent {
                 split_prompt = self.build_system_prompt_split(None);
             }
 
+            // A pressure notice fired on the crossing turn: the prompt above
+            // was built before messages_for_provider set the reminder, so
+            // rebuild it now (compaction already rebuilt above; skip twice).
+            if self.pressure_notice_fired_this_turn && !had_compaction_event {
+                split_prompt = self.build_system_prompt_split(None);
+            }
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending =
@@ -196,15 +203,43 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            // Last-chance rewrite of the provider-bound request. No hook
+            // configured: passthrough, no subprocess. On rewrite the cache
+            // tracker is re-seeded with what the provider actually receives.
+            let outgoing = super::pre_request::apply_pre_request_transform(
+                &self.session.id,
+                self.session.working_dir.as_deref(),
+                send_messages,
+                &tools,
+                &split_prompt.static_part,
+                &split_prompt.dynamic_part,
+            )
+            .await;
+            // Exit-2 abort: the hook deliberately vetoed the provider call
+            // (prompt-injection tripwire, policy gate). End the turn with the
+            // hook's reason surfaced — no retry, the abort was deliberate.
+            if let Some(reason) = outgoing.aborted {
+                return Err(anyhow::anyhow!(
+                    "pre_request hook aborted the turn: {reason}"
+                ));
+            }
+            if outgoing.rewritten {
+                logging::info(&format!(
+                    "pre_request hook rewrote the provider-bound request ({} messages)",
+                    outgoing.messages.len()
+                ));
+                self.cache_tracker.record_request(&outgoing.messages);
+            }
+            let send_messages: &[Message] = &outgoing.messages;
             let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             self.last_status_detail = None;
             let mut stream = match self
                 .provider
                 .complete_split(
                     send_messages,
-                    &tools,
-                    &split_prompt.static_part,
-                    &split_prompt.dynamic_part,
+                    &outgoing.tools,
+                    &outgoing.system_static,
+                    &outgoing.system_dynamic,
                     self.provider_session_id.as_deref(),
                 )
                 .await

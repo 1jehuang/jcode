@@ -284,6 +284,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             message,
             json,
             ndjson,
+            parent,
         }) => {
             commands::run_single_message_command(
                 &args.provider,
@@ -292,6 +293,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 &message,
                 json,
                 ndjson,
+                parent.as_deref(),
             )
             .await?;
         }
@@ -756,6 +758,9 @@ fn map_memory_subcommand(subcmd: MemoryCommand) -> commands::MemorySubcommand {
             scope,
             overwrite,
         },
+        MemoryCommand::Forget { id, privacy } => {
+            commands::MemorySubcommand::Forget { id, privacy }
+        }
         MemoryCommand::Stats => commands::MemorySubcommand::Stats,
         MemoryCommand::ClearTest => commands::MemorySubcommand::ClearTest,
     }

@@ -71,6 +71,7 @@ fn scheduled_live_delivery_reaches_subscribed_client() {
                 relevant_files: vec![],
                 git_branch: None,
                 additional_context: None,
+                repeat: None,
             };
             runner
                 .deliver_scheduled_direct_item(&provider, &item)

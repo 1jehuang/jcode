@@ -494,6 +494,8 @@ pub fn build_system_prompt_full_with_capabilities(
     info.project_agents_md_chars = md_info.project_agents_md_chars;
     info.has_global_agents_md = md_info.has_global_agents_md;
     info.global_agents_md_chars = md_info.global_agents_md_chars;
+    info.has_project_progress_md = md_info.has_project_progress_md;
+    info.project_progress_md_chars = md_info.project_progress_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
     let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
@@ -1053,6 +1055,19 @@ fn load_agents_md_files_from_dirs(
     {
         info.has_global_agents_md = true;
         info.global_agents_md_chars = size;
+        contents.push(content);
+    }
+
+    // Cross-session progress state (U4 historian-lite). Project-dir only by
+    // design — progress belongs to one project, never global. State, not
+    // instructions: loads AFTER the instruction files. Off by absence: no
+    // file means no bytes and no behavior change. The model owns the write
+    // side (updates via edit at milestones + session end); core only reads.
+    let project_progress_md = project_dir.join("PROGRESS.md");
+    if let Some((content, size)) = load_file(&project_progress_md, "Project Progress (PROGRESS.md)")
+    {
+        info.has_project_progress_md = true;
+        info.project_progress_md_chars = size;
         contents.push(content);
     }
 

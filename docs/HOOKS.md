@@ -16,11 +16,14 @@ session_end   = ""                            # observer
 pre_tool      = "~/bin/jcode-tool-policy"     # gate
 post_tool     = ""                            # observer
 pre_tool_timeout_ms = 5000
+pre_request   = ""                            # transform (see below)
+pre_request_timeout_ms = 5000
 ```
 
 Env overrides (always win; empty value disables a config hook):
 `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
-`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`.
+`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`,
+`JCODE_HOOK_PRE_REQUEST`, `JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS`.
 
 ## Common contract
 
@@ -32,7 +35,7 @@ Env overrides (always win; empty value disables a config hook):
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
+| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool`, `pre_request` |
 | `JCODE_HOOK_SESSION_ID` | Session the event belongs to |
 | `JCODE_HOOK_CWD` | Session working directory |
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
@@ -40,9 +43,9 @@ Env overrides (always win; empty value disables a config hook):
 
 ## Observer hooks
 
-`turn_end`, `session_start`, `session_end`, and `post_tool` are
-**observers**: spawned detached, fire-and-forget. They can never block or slow
-the agent; failures are only logged.
+`turn_end`, `session_start`, `session_end`, `post_tool`, and the three
+compaction hooks are **observers**: spawned detached, fire-and-forget. They
+can never block or slow the agent; failures are only logged.
 
 ### `turn_end`
 
@@ -65,6 +68,21 @@ attached), or `resume` (restored by id). `session_end` fires on normal close
 Fires after every tool call. Extra fields: `JCODE_HOOK_TOOL_NAME`,
 `JCODE_HOOK_STATUS`, `JCODE_HOOK_DURATION_MS`, `JCODE_HOOK_OUTPUT_BYTES` (on
 success), `JCODE_HOOK_ERROR` (on failure).
+
+### `compaction_started` / `compaction_completed` / `compaction_emergency`
+
+Lifecycle events for background compaction. `compaction_started` fires when a
+background summarization begins (fields: `JCODE_HOOK_TRIGGER`,
+`JCODE_HOOK_MODE`, `JCODE_HOOK_ACTIVE_MESSAGES`,
+`JCODE_HOOK_ESTIMATED_TOKENS`). `compaction_completed` fires when its result
+is applied (adds `JCODE_HOOK_SUMMARIZER` = `custom`/`native`/`builtin`,
+`JCODE_HOOK_PRE_TOKENS`, `JCODE_HOOK_POST_TOKENS`, `JCODE_HOOK_TOKENS_SAVED`,
+`JCODE_HOOK_DURATION_MS`, `JCODE_HOOK_MESSAGES_COMPACTED`,
+`JCODE_HOOK_SUMMARY_CHARS`). `compaction_emergency` fires when context is
+dropped without a summary: hard compact at the critical threshold or
+context-limit auto-recovery (fields: `JCODE_HOOK_TRIGGER`
+(`critical`/`context_limit`), `JCODE_HOOK_MODE`,
+`JCODE_HOOK_MESSAGES_DROPPED`, `JCODE_HOOK_USAGE_PCT`).
 
 ## Gate hook: `pre_tool`
 
@@ -129,6 +147,39 @@ esac
 exit 0
 ```
 
+## Transform hook: `pre_request`
+
+`pre_request` runs **synchronously before every provider request** (both the
+blocking and streaming turn paths) and may rewrite the request:
+
+- The hook receives the full request as JSON on **stdin**:
+  `{event, session_id, messages, tools, system_static, system_dynamic}`.
+- **Exit 0 with a request-shaped JSON object on stdout**: applied as the new
+  request. Keys may be omitted to keep their original value (`messages`
+  should stay an array; `tools` must decode as tool definitions).
+- **Exit 0 with empty stdout**: request unchanged.
+- **Anything else fails open** with a logged warning: non-zero exit,
+  invalid JSON, oversize stdout (>64 MB), timeout
+  (`pre_request_timeout_ms`, default 5s), missing binary, spawn errors.
+- Multiple commands chain in order: each sees the previous command's output.
+- When the wire array changes, the client-side cache tracker is re-seeded
+  with what the provider actually receives, so transforms don't trip false
+  cache-violation warnings.
+
+### Example tagging script
+
+```python
+#!/usr/bin/env python3
+# ~/bin/jcode-tag-request: append a marker message to every request.
+import json, sys
+req = json.load(sys.stdin)
+req["messages"].append({
+    "role": "user",
+    "content": [{"type": "text", "text": "[marker: tagged]"}],
+})
+json.dump(req, sys.stdout)
+```
+
 ## Example: tmux status + desktop notification on turn end
 
 ```bash
@@ -158,6 +209,45 @@ session_start = "~/bin/jcode-event-log"
 session_end   = "~/bin/jcode-event-log"
 post_tool     = "~/bin/jcode-event-log"
 ```
+
+## Example: historian-lite (session_end consolidation)
+
+On `session_end`, spawn a fire-and-forget headless worker that extracts
+durable facts from the just-closed session and writes them to memory.
+The closed session's transcript stays on disk, so the worker reads it by
+session id — no new API needed. Fail-open by design: the hook exits 0
+immediately after spawning; a failed consolidation never breaks the
+session that triggered it.
+
+```bash
+#!/usr/bin/env bash
+# ~/bin/jcode-historian
+# session_end observer: consolidate the closed session into memory.
+# Env: JCODE_HOOK_SESSION_ID. Spawns headless, exits 0 immediately.
+[ "$JCODE_HOOK_EVENT" = "session_end" ] || exit 0
+[ -n "$JCODE_HOOK_SESSION_ID" ] || exit 0
+# Timeout-bounded; empty extraction writes nothing.
+# Provider auto-detect is the default; no --model flag needed.
+timeout 300 jcode run \
+  "Consolidate session $JCODE_HOOK_SESSION_ID into memory. Read its transcript, \
+extract durable facts in the resume-critical shape (decisions+why, discoveries, \
+failed attempts, open gaps). Search memory first and skip anything already stored \
+(dedup). Write new facts via the memory tool, project scope. If nothing durable, \
+write nothing." \
+  >/dev/null 2>&1 &
+exit 0
+```
+
+```toml
+[hooks]
+session_end = "~/bin/jcode-historian"
+```
+
+Extraction guidance (not a validation schema): decisions+why, discoveries,
+failed attempts, gaps — the resume-critical subset. The model owns what to
+keep; core only reads. Note: the hook fires on ANY ended session, including
+trivial one-turn fixtures — the worker should skip sessions with nothing
+durable rather than writing noise.
 
 ## Design notes
 

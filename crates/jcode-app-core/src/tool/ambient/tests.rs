@@ -496,3 +496,159 @@ async fn test_schedule_tool_requires_time() {
         .expect_err("should require wake_in_minutes or wake_at");
     assert!(err.to_string().contains("wake_in_minutes"));
 }
+
+fn repeat_test_ctx(session: &str) -> ToolContext {
+    ToolContext {
+        session_id: session.to_string(),
+        message_id: "msg_1".to_string(),
+        tool_call_id: "call_1".to_string(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async tool execution"
+)]
+async fn test_schedule_tool_create_with_repeat_stamps_series() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let tool = ScheduleTool::new();
+    let output = tool
+        .execute(
+            json!({
+                "task": "Nightly garden pass",
+                "wake_in_minutes": 60,
+                "target": "spawn",
+                "repeat_every_minutes": 1440,
+                "repeat_max_iterations": 7
+            }),
+            repeat_test_ctx("origin_session"),
+        )
+        .await
+        .expect("repeat schedule should succeed");
+    assert!(
+        output.output.contains("Repeats every 1440 minute(s)"),
+        "got: {}",
+        output.output
+    );
+
+    let manager = AmbientManager::new().expect("ambient manager");
+    let item = manager.queue().items().first().expect("item queued");
+    let repeat = item.repeat.as_ref().expect("series stamped");
+    assert_eq!(repeat.every_minutes, 1440);
+    assert_eq!(repeat.remaining, Some(7));
+    assert!(repeat.recurrence_id.starts_with("recur_"));
+
+    // List surfaces the series.
+    let listed = tool
+        .execute(
+            json!({ "action": "list" }),
+            repeat_test_ctx("origin_session"),
+        )
+        .await
+        .expect("list");
+    assert!(
+        listed.output.contains("repeats every 1440m"),
+        "got: {}",
+        listed.output
+    );
+
+    // Folded (late-wake) intervals surface in the human-readable row.
+    let folded = ScheduledItem {
+        id: "latewake-item".into(),
+        scheduled_for: chrono::Utc::now(),
+        context: "garden".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Spawn {
+            parent_session_id: "parent".into(),
+        },
+        created_by_session: "test".into(),
+        created_at: chrono::Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        repeat: Some(crate::ambient::RepeatState {
+            every_minutes: 60,
+            remaining: None,
+            recurrence_id: "recur_latewake".into(),
+            skipped: 17,
+        }),
+    };
+    let row = format_scheduled_item(&folded);
+    assert!(row.contains("17 folded"), "got: {row}");
+    // Zero stays quiet: no noise on healthy series.
+    let mut healthy = folded.clone();
+    healthy.repeat.as_mut().expect("repeat").skipped = 0;
+    assert!(!format_scheduled_item(&healthy).contains("folded"));
+    assert!(
+        listed.output.contains(&repeat.recurrence_id),
+        "got: {}",
+        listed.output
+    );
+
+    // Cancel by series id removes the whole series.
+    let cancelled = tool
+        .execute(
+            json!({ "action": "cancel", "schedule_id": repeat.recurrence_id }),
+            repeat_test_ctx("origin_session"),
+        )
+        .await
+        .expect("cancel series");
+    assert!(cancelled.output.contains("1 queued occurrence(s) removed"));
+    let manager = AmbientManager::new().expect("ambient manager");
+    assert!(manager.queue().is_empty());
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn test_schedule_tool_repeat_rejected_for_ambient() {
+    let tool = ScheduleTool::new();
+    let err = tool
+        .execute(
+            json!({
+                "task": "Garden pass",
+                "wake_in_minutes": 60,
+                "target": "ambient",
+                "repeat_every_minutes": 60
+            }),
+            repeat_test_ctx("origin_session"),
+        )
+        .await
+        .expect_err("ambient+repeat must fail");
+    assert!(err.to_string().contains("direct target"), "got: {err}");
+}
+
+#[tokio::test]
+async fn test_schedule_tool_repeat_needs_interval() {
+    let tool = ScheduleTool::new();
+    let err = tool
+        .execute(
+            json!({
+                "task": "Garden pass",
+                "wake_in_minutes": 60,
+                "repeat_max_iterations": 5
+            }),
+            repeat_test_ctx("origin_session"),
+        )
+        .await
+        .expect_err("max without interval must fail");
+    assert!(
+        err.to_string().contains("repeat_every_minutes"),
+        "got: {err}"
+    );
+}

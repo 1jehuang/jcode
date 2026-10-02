@@ -495,13 +495,18 @@ swarm_max_concurrent_agents = 32
 # swarm_strip_layout = "vertical"
 #
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
-# Provider values: auto, jcode, openrouter, typesafe, aimlapi.
+# Provider values: auto, jcode, openrouter, typesafe, aimlapi, proxy.
 # auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.
 # Env override: JCODE_MEMORY_JEV_PROVIDER
 # memory_jev_provider = "auto"
 # Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
 # memory_jev_threshold = 0.8
 # BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.
+# proxy uses OPENAI_COMPAT_API_KEY from opencode-proxy.env.
+# proxy routes memory Decisions through the local proxy (POST
+# http://127.0.0.1:8787/v1/systemone, model jev-1.13-free).
+# Explicit opt-in only:
+# auto and voice never select it.
 # Jcode requires an eligible subscription and gateway memory_jev capability.
 # With a Jcode login and an older gateway, explicitly select a BYOK provider.
 # No fallback after entitlement, auth, billing, or network failure; no silent BYOK spend.
@@ -516,6 +521,50 @@ swarm_max_concurrent_agents = 32
 # memory_model = "gpt-5.6-luna"
 # Legacy memory_rerank_* and memory_embedding_* settings are accepted for
 # backwards compatibility, but have no effect on Jev recall.
+#
+# RRF k for hybrid (BM25 + dense) fusion: shared by manual hybrid recall,
+# the recall bench, and the public find_similar_hybrid API. (Jev auto-recall
+# does not fuse this way.) k=60 suits thousand-item corpora; memory stores
+# are far smaller, so 10-30 separates top ranks better there. Default 60.
+# Env override: JCODE_MEMORY_RRF_K (wins over file).
+# memory_rrf_k = 60.0
+# Dense-list weight for hybrid RRF fusion (sparse/BM25 keeps weight 1.0).
+# 1.0 = equal weights; > 1.0 prioritizes dense (paraphrase-heavy queries).
+# Default 3.0 (L1 grid winner). Env override: JCODE_MEMORY_RRF_DENSE_W (wins over file).
+# memory_rrf_dense_weight = 3.0
+# Recency prior for hybrid RRF fusion (G-R, shipped 2026-09-30): bounded
+# additive bonus w_r * 0.5^(age_days / half_life) applied post-fusion.
+# Default w=0.05, tau=90 (tuning grid safe cell + blind no-regression).
+# Env overrides: JCODE_MEMORY_RECENCY_W / JCODE_MEMORY_RECENCY_TAU_DAYS.
+# memory_recency_weight = 0.05
+# memory_recency_tau_days = 90.0 (0 = per-category half-lives:
+# Fact 30 / Entity 60 / Preference 90 / Correction 365 / Custom 45;
+# positive forces a single global tau for sweeps {7, 30, 90}).
+#
+# Slot-B hybrid prefilter for Jev automatic recall: narrows the exhaustive
+# active set via hybrid dense+BM25 RRF ranking before Jev judges the top-K.
+# Default OFF until the 21 §4 gate passes (shadow audit + recall@96 bars);
+# the ship commit flips the default separately. Fail-open: any stage error
+# flows the exhaustive set to Jev; downstream Jev fail-closed is untouched.
+# Env override: JCODE_MEMORY_PREFILTER_MODE (wins over file).
+# memory_prefilter_mode = "off"
+# Jev judges at most this many narrowed memories (96 = 4 batches of 24).
+# Clamped to [24, 480] at use. Env override: JCODE_MEMORY_PREFILTER_TOP_K.
+# memory_prefilter_top_k = 96
+# Stage disengages (exhaustive flows) at or below this many memories.
+# Env override: JCODE_MEMORY_PREFILTER_MIN_CORPUS.
+# memory_prefilter_min_corpus = 96
+# Local-stage wall-clock budget in ms; over-budget fails open to exhaustive.
+# Env override: JCODE_MEMORY_PREFILTER_BUDGET_MS.
+# memory_prefilter_budget_ms = 500
+# Shadow-audit sampling rate (fraction of queries running the drop-tail audit).
+# Env override: JCODE_MEMORY_PREFILTER_SHADOW_RATE.
+# memory_prefilter_shadow_rate = 0.01
+#
+# Opt-in structural repo map (repomap tool): ranked files with symbol stubs
+# (kind name:line), no bodies, truncated at this many estimated tokens.
+# 0 disables the map entirely (the tool is not registered). Default 0.
+# repomap_token_budget = 0
 
 [terminal]
 # Without a hook, clients inside tmux automatically use a right-side pane.
@@ -591,7 +640,9 @@ swarm_max_concurrent_agents = 32
 # (quotes work) but executed directly, with JCODE_HOOK_* env vars describing
 # the event:
 #   JCODE_HOOK_EVENT       - "turn_start", "turn_end", "session_start",
-#                            "session_end", "pre_tool", "post_tool"
+#                            "session_end", "pre_tool", "post_tool",
+#                            "compaction_started", "compaction_completed",
+#                            "compaction_emergency"
 #   JCODE_HOOK_SESSION_ID  - the session the event belongs to
 #   JCODE_HOOK_CWD         - session working directory (also the hook's cwd)
 #   JCODE_HOOK_PAYLOAD     - JSON mirror of all fields
@@ -600,7 +651,9 @@ swarm_max_concurrent_agents = 32
 # All hooks except pre_tool are observers: detached, fire-and-forget, failures
 # only logged. Env overrides: JCODE_HOOK_TURN_START, JCODE_HOOK_TURN_END,
 # JCODE_HOOK_SESSION_START, JCODE_HOOK_SESSION_END, JCODE_HOOK_PRE_TOOL,
-# JCODE_HOOK_POST_TOOL (set empty to disable a config hook).
+# JCODE_HOOK_POST_TOOL, JCODE_HOOK_COMPACTION_STARTED,
+# JCODE_HOOK_COMPACTION_COMPLETED, JCODE_HOOK_COMPACTION_EMERGENCY
+# (set empty to disable a config hook).
 #
 # Runs when an agent turn begins, before the model starts generating and before
 # the first pre_tool. Lets integrations detect the agent is working during the
@@ -633,6 +686,34 @@ swarm_max_concurrent_agents = 32
 # JCODE_HOOK_STATUS, JCODE_HOOK_DURATION_MS, JCODE_HOOK_OUTPUT_BYTES,
 # JCODE_HOOK_ERROR.
 # post_tool = ""
+#
+# Runs when background compaction starts summarizing. Extra fields:
+# JCODE_HOOK_TRIGGER, JCODE_HOOK_MODE, JCODE_HOOK_ACTIVE_MESSAGES,
+# JCODE_HOOK_ESTIMATED_TOKENS.
+# compaction_started = ""
+#
+# Runs when a background compaction result is applied. Extra fields:
+# JCODE_HOOK_TRIGGER, JCODE_HOOK_MODE, JCODE_HOOK_SUMMARIZER
+# (custom/native/builtin), JCODE_HOOK_PRE_TOKENS, JCODE_HOOK_POST_TOKENS,
+# JCODE_HOOK_TOKENS_SAVED, JCODE_HOOK_DURATION_MS,
+# JCODE_HOOK_MESSAGES_COMPACTED, JCODE_HOOK_SUMMARY_CHARS,
+# JCODE_HOOK_ACTIVE_MESSAGES.
+# compaction_completed = ""
+#
+# Runs when emergency compaction drops context. Extra fields:
+# JCODE_HOOK_TRIGGER (critical/context_limit), JCODE_HOOK_MODE,
+# JCODE_HOOK_MESSAGES_DROPPED, JCODE_HOOK_USAGE_PCT.
+# compaction_emergency = ""
+#
+# Transform hook before each provider request. Receives the full request
+# (messages, tools, system_static, system_dynamic) as JSON on stdin; stdout
+# may carry a rewritten request in the same shape. Exit 0 applies stdout
+# (empty stdout = unchanged); any other outcome fails open with the
+# original request.
+# pre_request = ""
+#
+# Max milliseconds to wait for pre_request before failing open (default: 5000).
+# pre_request_timeout_ms = 5000
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase

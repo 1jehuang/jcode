@@ -75,14 +75,32 @@ pub const EMBEDDING_HISTORY_WINDOW: usize = 10;
 pub const SEMANTIC_EMBED_CACHE_CAPACITY: usize = 256;
 
 pub const SUMMARY_PROMPT: &str = r#"Summarize our conversation so you can continue this work later.
+The summary is the resuming model's only record: write STATE (what is true now),
+not a retelling of the conversation. Err on the side of including anything that
+prevents duplicate work or repeated mistakes.
 
-Write in natural language with these sections:
-- **Context:** What we're working on and why (1-2 sentences)
-- **What we did:** Key actions taken, files changed, problems solved
-- **Current state:** What works, what's broken, what's next
-- **User preferences:** Specific requirements or decisions they made
+Keep every section below (write "none" when empty). Terse bullets, not prose.
+Quote file paths, symbol names, command lines, and error strings EXACTLY as they
+appeared — never paraphrase an identifier.
 
-Be concise but preserve important details. You can search the full conversation later if you need exact error messages or code snippets."#;
+- **Task:** What we're working on and why (1-2 sentences).
+- **Current state:** What works, what's broken, where we are right now.
+- **Decisions:** Choices made and WHY (rationale, not just outcome).
+- **Discoveries:** Verified facts and evidence found (what was PROVEN, by what).
+- **Failed attempts:** What was tried and did NOT work, with cause. Never omit:
+  this section exists so the next session doesn't retry dead ends.
+- **Information gaps:** What is still unknown or unverified (facts vs guesses
+  must stay separated — never present a guess as a finding).
+- **Blocked:** Blockers and what unblocks them (distinct from queued work below).
+- **Next steps:** Pending actions, priority-ordered, immediate first.
+- **Relevant files:** Every touched or referenced path plus one line on why it
+  matters. Include exact identifiers (function names, flags, hashes) seen.
+- **Preserve verbatim:** User preferences, promises made, and any
+  security-relevant instructions — copied WORD FOR WORD. These must survive
+  compaction unchanged; do not summarize them away.
+
+Be concise but preserve important details. The full session file remains on disk
+if exact error messages or code snippets are needed later."#;
 
 /// A completed summary covering turns up to a certain point
 #[derive(Debug, Clone)]
@@ -850,6 +868,40 @@ mod tests {
         assert!(prompt.contains("prior work"));
         assert!(prompt.contains("**User:**"));
         assert!(prompt.contains(SUMMARY_PROMPT));
+    }
+
+    #[test]
+    fn summary_prompt_carries_structured_resume_schema() {
+        // ReSum/Claude/opencode convergence, fixed 2026-09-25: a resumed model
+        // needs state (decisions+why, proven facts, dead ends, gaps, blockers,
+        // queued work, files, verbatim constraints) — not a retelling. Every
+        // section header below is load-bearing; keep this test in sync with
+        // the prompt when sections change.
+        for section in [
+            "**Task:**",
+            "**Current state:**",
+            "**Decisions:**",
+            "**Discoveries:**",
+            "**Failed attempts:**",
+            "**Information gaps:**",
+            "**Blocked:**",
+            "**Next steps:**",
+            "**Relevant files:**",
+            "**Preserve verbatim:**",
+        ] {
+            assert!(
+                SUMMARY_PROMPT.contains(section),
+                "missing schema section {section}"
+            );
+        }
+        assert!(
+            SUMMARY_PROMPT.contains("WORD FOR WORD"),
+            "verbatim-preservation rule must survive edits"
+        );
+        assert!(
+            SUMMARY_PROMPT.contains("never present a guess as a finding"),
+            "fact-vs-guess separation must survive edits"
+        );
     }
 
     #[test]

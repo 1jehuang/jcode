@@ -1,0 +1,141 @@
+# STACK.toml — single source of truth for the local jcode stack.
+#
+# POLICY (2026-09-26): build locally, publish once.
+# - New work lands as a feat/* branch merged into local/pr-stack. No clean
+#   export, no upstream PR, until the stack is declared done.
+# - The open PRs stay open (harmless). No new PRs are filed meanwhile.
+# - Exception: genuine fixes to upstream bugs may file anytime.
+# - NEVER file features or docs stacked on our own unmerged work
+#   (lesson: #1515 garden docs filed on unmerged #1282, had to close it).
+# - When the stack is declared done, export clean off-master branches in
+#   dependency order (compaction-hooks first) and file in one batch.
+#
+# update-pr-stack.sh merges [order] top to bottom, skipping state="nested"
+# and state="parked". gen-stack-md.sh regenerates STACK.md from this file
+# plus live git/gh state. Edit THIS file to add/remove branches — never the
+# script's branch list (it reads from here).
+
+[stack]
+base = "origin/master"
+branch = "local/pr-stack"
+
+# Merge order. Do not reorder without reason: later branches may assume
+# earlier ones (e.g. progress-file assumes summary-schema fields exist).
+[[branch]]
+name = "feat/compaction-hooks"
+state = "in-stack"
+pr = 1282
+note = "Base of the stack. Garden docs + historian depend on it."
+
+[[branch]]
+name = "feat/tool-result-clearing"
+state = "in-stack"
+pr = 1313
+note = "Send-view clearing + offload. KV-invalidation record() ported to stack HEAD."
+
+[[branch]]
+name = "feat/pressure-notices"
+state = "in-stack"
+pr = 1312
+
+[[branch]]
+name = "feat/pre-request-transform"
+state = "in-stack"
+pr = 1280
+
+[[branch]]
+name = "feat/recurring-schedules"
+state = "in-stack"
+pr = 1281
+
+[[branch]]
+name = "feat/span-citations"
+state = "in-stack"
+pr = 1315
+
+[[branch]]
+name = "feat/repomap-provider"
+state = "in-stack"
+pr = 1320
+
+[[branch]]
+name = "feat/memory-age-hedge"
+state = "in-stack"
+pr = 0
+note = "UN-PR-D: file in publish batch. tunable-dedup-rrf rides nested inside."
+
+[[branch]]
+name = "feat/offload-with-ref"
+state = "in-stack"
+pr = 0
+note = "UN-PR-D: file in publish batch."
+
+[[branch]]
+name = "feat/summary-schema"
+state = "in-stack"
+pr = 0
+note = "UN-PR-D: file in publish batch."
+
+[[branch]]
+name = "feat/progress-file"
+state = "in-stack"
+pr = 0
+note = "UN-PR-D: file in publish batch. fix/tui-agentsmd-working-dir rides nested inside."
+
+[[branch]]
+name = "feat/mcp-request-timeout-config"
+state = "in-stack"
+pr = 0
+note = "UN-PR-D: file in publish batch. Was dropped by stale script once; manifest now prevents repeats."
+
+[[branch]]
+name = "feat/garden-historian-lite"
+state = "in-stack"
+pr = 0
+note = "UN-PR-D, DO-NOT-FILE-EARLY: docs sample depends on #1282. #1515 filed prematurely, CLOSED."
+
+[[branch]]
+name = "feat/session-worker-view"
+state = "in-stack"
+pr = 1516
+note = "Worker filter tab + run --parent + hook tagging. Stack carries it as cherry-pick a8f61ead4 (branch tip c0d5f64f2 has 29 upstream-behind commits); PR branch is 1 clean commit. Rebuild merges branch tip: expect upstream drift review."
+
+[[branch]]
+name = "exp/gr-recency"
+state = "in-stack"
+pr = 0
+note = "G-R recency prior for hybrid RRF fusion (default-off gate, w_r=0.0 inert). Merged 2026-09-30 post-rebuild-script; rebuild script predates it — entry added so future rebuilds keep it. Sweep: a667 directional gain at w=0.05 per-category tau; blind confirm + non-zero defaults still pending (GR-SWEEP-VERDICT.md)."
+
+# Nested: merged as part of another branch, NEVER merged directly
+# (merging them standalone conflicts on replay).
+[[branch]]
+name = "feat/tunable-dedup-rrf"
+state = "nested"
+pr = 1314
+note = "Rides inside feat/memory-age-hedge."
+
+[[branch]]
+name = "fix/tui-agentsmd-working-dir"
+state = "nested"
+pr = 0
+note = "Rides inside feat/progress-file. Clean export fix/tui-agentsmd-clean carries PR #1514."
+
+# Parked: exists, deliberately out of the stack.
+[[branch]]
+name = "feat/rerank-fuse"
+state = "parked"
+pr = 0
+note = "OFF by design: upstream rejected local cross-encoders, #1228 open."
+
+# Export: clean off-master branches built for PR filing. Not merged into stack.
+[[branch]]
+name = "fix/tui-agentsmd-clean"
+state = "export"
+pr = 1514
+note = "5 commits over master, bot P1/P2 fixed, tests pass. OPEN."
+
+[[branch]]
+name = "feat/garden-historian-clean"
+state = "export"
+pr = 0
+note = "1 commit docs-only. #1515 CLOSED premature. Re-file only after #1282 lands."

@@ -119,6 +119,11 @@ path = "src/bin/memory_recall_bench.rs"
 required-features = ["dev-bins"]
 
 [[bin]]
+name = "stale_rank"
+path = "src/bin/stale_rank.rs"
+required-features = ["dev-bins"]
+
+[[bin]]
 name = "mermaid_side_panel_probe"
 path = "src/bin/mermaid_side_panel_probe.rs"
 required-features = ["dev-bins"]

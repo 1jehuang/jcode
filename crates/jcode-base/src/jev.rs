@@ -90,6 +90,7 @@ enum JevProvider {
     TypeSafe,
     Aimlapi,
     Jcode,
+    Proxy,
 }
 
 impl JevProvider {
@@ -99,6 +100,7 @@ impl JevProvider {
             Self::TypeSafe => "typesafe",
             Self::Aimlapi => "aimlapi",
             Self::Jcode => "jcode",
+            Self::Proxy => "proxy",
         }
     }
 
@@ -111,6 +113,7 @@ impl JevProvider {
                 crate::subscription_catalog::JCODE_API_KEY_ENV,
                 crate::subscription_catalog::JCODE_ENV_FILE,
             ),
+            Self::Proxy => ("OPENAI_COMPAT_API_KEY", "opencode-proxy.env"),
         }
     }
 
@@ -126,6 +129,7 @@ impl JevProvider {
             Self::OpenRouter | Self::Jcode => "typesafe/jev-1.13",
             Self::TypeSafe => "jev-latest",
             Self::Aimlapi => "typesafe/jev",
+            Self::Proxy => "jev-1.13-free",
         }
     }
 
@@ -135,6 +139,7 @@ impl JevProvider {
             Self::TypeSafe => "https://api.typesafe.ai/v1/systemone".into(),
             Self::Aimlapi => "https://api.aimlapi.com/v1/decisions".into(),
             Self::Jcode => format!("{}/decisions", trusted_gateway_base(gateway_base)?),
+            Self::Proxy => "http://127.0.0.1:8787/v1/systemone".into(),
         })
     }
 }
@@ -458,7 +463,10 @@ fn resolve_with(
         "typesafe" => &[JevProvider::TypeSafe],
         "aimlapi" => &[JevProvider::Aimlapi],
         "jcode" | "subscription" | "jcode-subscription" => &[JevProvider::Jcode],
-        _ => bail!("Invalid Jev provider. Choose auto, openrouter, typesafe, aimlapi, or jcode"),
+        "proxy" => &[JevProvider::Proxy],
+        _ => bail!(
+            "Invalid Jev provider. Choose auto, openrouter, typesafe, aimlapi, jcode, or proxy"
+        ),
     };
     resolve_providers(providers, load)
 }
@@ -1049,6 +1057,125 @@ mod tests {
             ))
             .is_err()
         );
+    }
+
+    #[test]
+    fn proxy_routes_memory_decisions_through_the_local_proxy_without_touching_other_routes() {
+        // Selector parsing: proxy is accepted (case/whitespace tolerant) and
+        // loads no key for anything else. Voice never accepts it: browser and
+        // voice routing stay exactly the existing jcode-then-typesafe auto.
+        for selector in ["proxy", "Proxy", "  PROXY\t"] {
+            let (provider, secret) = resolve_with(selector, |env, env_file| {
+                assert_eq!(
+                    (env, env_file),
+                    ("OPENAI_COMPAT_API_KEY", "opencode-proxy.env")
+                );
+                Some("proxy-test-key".into())
+            })
+            .unwrap();
+            assert_eq!(provider, JevProvider::Proxy);
+            assert_eq!(secret, "proxy-test-key");
+        }
+        assert!(
+            resolve_voice_with("proxy", |_, _| panic!("voice must not route to the proxy"))
+                .is_err()
+        );
+        assert!(
+            resolve_with("prox", |_, _| panic!(
+                "near-miss selector must not load keys"
+            ))
+            .is_err()
+        );
+        // Constants: local systemone endpoint, REPORT §3 pinned free model id.
+        assert_eq!(JevProvider::Proxy.name(), "proxy");
+        assert_eq!(JevProvider::Proxy.model(), "jev-1.13-free");
+        assert_eq!(
+            JevProvider::Proxy.endpoint("").unwrap(),
+            "http://127.0.0.1:8787/v1/systemone"
+        );
+        assert_eq!(JevProvider::Proxy.max_questions(), MAX_QUESTIONS);
+        // Missing key fails closed naming exactly this route's credential and
+        // never consults another provider's key.
+        let mut lookups = Vec::new();
+        let error = resolve_with("proxy", |env, _| {
+            lookups.push(env.to_string());
+            (env != "OPENAI_COMPAT_API_KEY").then(|| "other-provider-secret".into())
+        })
+        .err()
+        .unwrap();
+        assert_eq!(lookups, ["OPENAI_COMPAT_API_KEY"]);
+        assert!(!error.to_string().contains("other-provider-secret"));
+        assert!(
+            error
+                .to_string()
+                .contains("OPENAI_COMPAT_API_KEY (opencode-proxy.env)")
+        );
+        // Memory noul contract holds on the proxy route with the free model id,
+        // and structured state is preserved (Proxy is not stringified).
+        let body: Value = serde_json::from_slice(
+            &request_body(
+                JevProvider::Proxy,
+                json!({"memory": "example"}),
+                &questions(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["model"], "jev-1.13-free");
+        assert_eq!(body["questions"], Value::Object(questions()));
+        assert!(body.get("messages").is_none());
+        let structured = serde_json::from_slice::<Value>(
+            &request_body(JevProvider::Proxy, json!(["a", "b"]), &questions()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(structured["state"], json!(["a", "b"]));
+        // Browser-purpose contract is unchanged on the proxy route: choice is
+        // accepted, memory noul is rejected.
+        assert!(
+            request_body_for(
+                JevPurpose::Browser,
+                JevProvider::Proxy,
+                json!("page"),
+                &browser_questions()
+            )
+            .is_ok()
+        );
+        assert!(
+            request_body_for(
+                JevPurpose::Browser,
+                JevProvider::Proxy,
+                json!("page"),
+                &questions()
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_posts_systemone_with_bearer_and_no_openrouter_headers() {
+        let (base, worker) = mock_server(vec![(200, response().to_string(), vec![])]);
+        let mut client = mock_client(&base, JevProvider::Proxy);
+        client.endpoint = format!("{base}/v1/systemone");
+        let value = client
+            .evaluate(json!({"query": "synthetic"}), questions())
+            .await
+            .unwrap();
+        assert_eq!(value, response());
+        let requests = worker.join().unwrap();
+        assert_eq!(requests.len(), 1, "proxy route has no gateway preflight");
+        let request = &requests[0];
+        assert!(request.starts_with("POST /v1/systemone "));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-route-secret\r\n")
+        );
+        assert!(!request.to_ascii_lowercase().contains("http-referer:"));
+        assert!(!request.to_ascii_lowercase().contains("x-title:"));
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["model"], "jev-1.13-free");
+        assert_eq!(body["questions"], Value::Object(questions()));
+        assert_eq!(body["state"]["query"], "synthetic");
     }
 
     #[test]

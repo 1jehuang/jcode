@@ -103,6 +103,13 @@ fn test_mcp_config_deserialization() {
     assert_eq!(server.command, "/usr/bin/test-mcp");
     assert_eq!(server.args, vec!["--port", "8080"]);
     assert_eq!(server.env.get("API_KEY"), Some(&"secret".to_string()));
+    // timeout_secs is optional and defaults to None (request() falls back to 30s)
+    assert_eq!(server.timeout_secs, None);
+
+    let with_timeout = r#"{"servers":{"s":{"command":"/bin/x","timeout_secs":120}}}"#;
+    let config: McpConfig = serde_json::from_str(with_timeout).unwrap();
+    let server = config.servers.get("s").unwrap();
+    assert_eq!(server.timeout_secs, Some(120));
 }
 
 #[test]

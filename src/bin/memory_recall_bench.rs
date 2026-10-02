@@ -13,6 +13,8 @@
 //! Subcommands:
 //!   queries  - replay sessions -> emit per-turn query windows (labels/queries.jsonl)
 //!   pool     - run retrievers over queries -> emit candidate pool (labels/pool.jsonl)
+//!   judge    - LLM-grade pool -> gold labels (labels/gold.jsonl)
+//!              [--swap --ledger=PATH: d1-runner swap_agree + superset ledger]
 //!   metrics  - read cached gold labels -> emit recall@k/MRR/nDCG (results/*.json)
 //!
 //! Run via: cargo run --profile selfdev --features dev-bins --bin memory_recall_bench -- <subcmd> ...
@@ -179,7 +181,8 @@ fn dense_retrieve(
         .filter(|(_, s)| *s >= threshold)
         .map(|(m, s)| (m.id.clone(), s))
         .collect();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // Bench mirror of the prod path: id arm on ties only, scores untouched.
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     scored.truncate(limit);
 
     if apply_gap {
@@ -265,7 +268,7 @@ impl Bm25 {
                 out.push((id.clone(), score));
             }
         }
-        out.sort_by(|a, b| b.1.total_cmp(&a.1));
+        out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         out.truncate(limit);
         out
     }
@@ -356,7 +359,8 @@ fn rrf(lists: &[Vec<(String, f32)>], k: f32, limit: usize) -> Vec<(String, f32)>
         }
     }
     let mut out: Vec<(String, f32)> = fused.into_iter().collect();
-    out.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // Bench mirror of the prod path: id arm on ties only, scores untouched.
+    out.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out.truncate(limit);
     out
 }
@@ -582,7 +586,7 @@ struct PoolRecord {
     candidates: Vec<PoolCandidate>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct PoolCandidate {
     id: String,
     content: String,
@@ -623,7 +627,7 @@ fn cmd_pool(args: &[String]) -> Result<()> {
         // Multiple diverse retrievers widen the pool (reduces pooling bias).
         let dense = dense_retrieve(&q_emb, &corpus, 0.0, pool_n, false);
         let lexical = bm25.search(&q.query, pool_n);
-        let fused = rrf(&[dense.clone(), lexical.clone()], 60.0, pool_n);
+        let fused = rrf(&[dense.clone(), lexical.clone()], jcode::memory::MemoryManager::rrf_k(), pool_n);
 
         let mut retrievers_by_id: HashMap<String, Vec<String>> = HashMap::new();
         for (id, _) in &dense {
@@ -674,11 +678,19 @@ fn cmd_pool(args: &[String]) -> Result<()> {
 
 // ---------------- LLM judge (direct Anthropic via jcode Sidecar) ----------------
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct JudgeInput {
     qid: String,
     query: String,
     candidates: Vec<PoolCandidate>,
+    /// Blind arm label (d1-runner): stripped at grade time, recorded in the
+    /// ledger only. Absent in legacy judge_ready.jsonl -> "base".
+    #[serde(default = "default_judge_arm")]
+    arm: String,
+}
+
+fn default_judge_arm() -> String {
+    "base".to_string()
 }
 
 const JUDGE_SYSTEM: &str = "You judge whether stored MEMORIES would be genuinely useful to surface to an AI coding agent given the CURRENT conversation context. \
@@ -864,6 +876,95 @@ fn parse_scored_response(resp: &str, n: usize) -> Vec<(usize, f32)> {
     out
 }
 
+/// One graded item: base verdict, optional swap re-grade, error taxonomy.
+/// `swap_agree` is Some iff the swap pass ran clean on both arms; a pair
+/// where either arm errored is a NEEDS-WORK row, never an agreement claim.
+/// `error` follows the d1-runner taxonomy: parse | credential | timeout |
+/// rate_limit | transport (None = clean).
+struct JudgeOutcome {
+    qid: String,
+    arm: String,
+    relevant_ids: Vec<String>,
+    swap_relevant_ids: Option<Vec<String>>,
+    swap_agree: Option<bool>,
+    needs_work: bool,
+    error: Option<String>,
+}
+
+/// Grade one input through Sidecar. Returns (relevant_ids, error).
+/// error=None on clean grade (even when the verdict set is empty);
+/// Some(class) after both attempts fail (NEEDS-WORK, never guessed).
+async fn grade_input(
+    sidecar: &jcode::sidecar::Sidecar,
+    input: &JudgeInput,
+    prompt: &str,
+    qid_for_log: &str,
+) -> (Vec<String>, Option<String>) {
+    let n = input.candidates.len();
+    // Retry once on transient failure (mirrors the pre-delta behavior).
+    for attempt in 0..2 {
+        match sidecar.complete(JUDGE_SYSTEM, prompt).await {
+            Ok(resp) => {
+                let idxs = parse_judge_response(&resp, n);
+                // Empty verdict set is a CLEAN grade (judge excluded all);
+                // only the two prose-fallback shapes below are NEEDS-WORK.
+                if !idxs.is_empty() || is_empty_verdict(&resp, n) {
+                    let ids = idxs
+                        .into_iter()
+                        .map(|i| input.candidates[i].id.clone())
+                        .collect();
+                    return (ids, None);
+                }
+                if attempt == 1 {
+                    eprintln!("judge parse NEEDS-WORK for {}: no JSON array", qid_for_log);
+                    return (Vec::new(), Some("parse".to_string()));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let class = classify_judge_error(&msg);
+                if attempt == 1 {
+                    eprintln!("judge failed for {}: {}", qid_for_log, e);
+                    return (Vec::new(), Some(class));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+    (Vec::new(), Some("transport".to_string()))
+}
+
+/// True when the response is a clean "none relevant" verdict: an empty
+/// JSON array, or prose the strict parser already rejects but which
+/// unambiguously means empty (the [] shape plus common abstentions).
+/// Anything else with no parseable array stays NEEDS-WORK.
+fn is_empty_verdict(resp: &str, n: usize) -> bool {
+    if !parse_judge_response(resp, n).is_empty() {
+        return false;
+    }
+    let t = resp.trim();
+    if t == "[]" {
+        return true;
+    }
+    let low = resp.to_lowercase();
+    low.contains("no relevant") || low.contains("none relevant") || low.contains("none of")
+}
+
+/// Map a Sidecar error string onto the d1-runner NEEDS-WORK taxonomy.
+fn classify_judge_error(msg: &str) -> String {
+    let low = msg.to_lowercase();
+    if low.contains("401") || low.contains("403") || low.contains("unauthorized") {
+        "credential".to_string()
+    } else if low.contains("timed out") || low.contains("timeout") || low.contains("deadline") {
+        "timeout".to_string()
+    } else if low.contains("429") || low.contains("rate limit") || low.contains("rate_limit") {
+        "rate_limit".to_string()
+    } else {
+        "transport".to_string()
+    }
+}
+
 fn cmd_judge(args: &[String]) -> Result<()> {
     let opts = parse_kv(args);
     let model = opts
@@ -887,6 +988,12 @@ fn cmd_judge(args: &[String]) -> Result<()> {
         .get("reasoning")
         .cloned()
         .unwrap_or_else(|| "none".to_string());
+    // d1-runner delta: --swap=1 re-grades with REVERSED candidate order and
+    // records swap_agree (d2-P2 + X2); --ledger=PATH emits the §6 superset
+    // schema (one row per qid) alongside gold.jsonl. parse_kv only takes
+    // --key=value, so both bare (--swap) and valued (--swap=1) forms work.
+    let do_swap = args.iter().any(|a| a == "--swap" || a == "--swap=1" || a == "--swap=true");
+    let ledger_path = opts.get("ledger").map(PathBuf::from);
 
     let input_path = bench_root().join("labels/judge_ready.jsonl");
     let text = std::fs::read_to_string(&input_path)
@@ -896,18 +1003,23 @@ fn cmd_judge(args: &[String]) -> Result<()> {
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
     eprintln!(
-        "Judging {} queries with model {} backend={} (concurrency {})",
+        "Judging {} queries with model {} backend={} (concurrency {}, swap={}, ledger={})",
         inputs.len(),
         model,
         backend,
-        concurrency
+        concurrency,
+        do_swap,
+        ledger_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string())
     );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    let results = rt.block_on(async {
+    let results: Vec<JudgeOutcome> = rt.block_on(async {
         use futures::stream::{self, StreamExt};
         stream::iter(inputs)
             .map(|input| {
@@ -926,31 +1038,44 @@ fn cmd_judge(args: &[String]) -> Result<()> {
                         jcode::sidecar::Sidecar::with_claude_model(&model)
                     };
                     let prompt = build_judge_prompt(&input);
-                    let n = input.candidates.len();
-                    let mut relevant_ids = Vec::new();
-                    // Retry once on transient failure.
-                    for attempt in 0..2 {
-                        match sidecar.complete(JUDGE_SYSTEM, &prompt).await {
-                            Ok(resp) => {
-                                let idxs = parse_judge_response(&resp, n);
-                                relevant_ids = idxs
-                                    .into_iter()
-                                    .map(|i| input.candidates[i].id.clone())
-                                    .collect();
-                                break;
+                    let (relevant_ids, error) =
+                        grade_input(&sidecar, &input, &prompt, &input.qid).await;
+                    // Swap re-grade: same item, REVERSED candidate order,
+                    // prompt rebuilt over the reversed list so position i
+                    // in the swap prompt shows the mirrored candidate.
+                    // Index sets map back by id (never by position), so a
+                    // position-biased judge yields swap_agree=false.
+                    let (swap_relevant_ids, swap_agree) = if do_swap {
+                        let mut swapped = input.clone();
+                        swapped.candidates.reverse();
+                        let swap_prompt = build_judge_prompt(&swapped);
+                        let (swap_ids, swap_err) =
+                            grade_input(&sidecar, &swapped, &swap_prompt, &input.qid).await;
+                        match (error.clone(), swap_err) {
+                            (None, None) => {
+                                let mut a = relevant_ids.clone();
+                                let mut b = swap_ids.clone();
+                                a.sort();
+                                b.sort();
+                                (Some(swap_ids), Some(a == b))
                             }
-                            Err(e) => {
-                                if attempt == 1 {
-                                    eprintln!("judge failed for {}: {}", input.qid, e);
-                                } else {
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                }
-                            }
+                            // Either arm errored: NEEDS-WORK pair, never an
+                            // agreement claim.
+                            _ => (None, None),
                         }
-                    }
-                    GoldRecord {
+                    } else {
+                        (None, None)
+                    };
+                    let needs_work = error.is_some()
+                        || (do_swap && swap_agree.is_none());
+                    JudgeOutcome {
                         qid: input.qid,
+                        arm: input.arm,
                         relevant_ids,
+                        swap_relevant_ids,
+                        swap_agree,
+                        needs_work,
+                        error,
                     }
                 }
             })
@@ -966,22 +1091,92 @@ fn cmd_judge(args: &[String]) -> Result<()> {
     let mut out = String::new();
     let mut with_rel = 0usize;
     let mut total = 0usize;
+    let mut n_nw = 0usize;
+    let mut n_swap_agree = 0usize;
+    let mut n_swap_flip = 0usize;
     for g in &results {
+        if g.needs_work {
+            n_nw += 1;
+        }
         if !g.relevant_ids.is_empty() {
             with_rel += 1;
         }
         total += g.relevant_ids.len();
-        out.push_str(&serde_json::to_string(g)?);
+        match g.swap_agree {
+            Some(true) => n_swap_agree += 1,
+            Some(false) => n_swap_flip += 1,
+            None => {}
+        }
+        out.push_str(&serde_json::to_string(&GoldRecord {
+            qid: g.qid.clone(),
+            relevant_ids: g.relevant_ids.clone(),
+        })?);
         out.push('\n');
     }
     std::fs::write(&out_path, out)?;
     println!(
-        "Judged {} queries -> {} ({} with >=1 relevant, {} total labels)",
+        "Judged {} queries -> {} ({} with >=1 relevant, {} total labels, {} needswork{})",
         results.len(),
         out_path.display(),
         with_rel,
-        total
+        total,
+        n_nw,
+        if do_swap {
+            format!(", swap_agree={} flip={}", n_swap_agree, n_swap_flip)
+        } else {
+            String::new()
+        }
     );
+    if let Some(ledger) = ledger_path {
+        write_judge_ledger(&ledger, &results, &model)?;
+        println!("Ledger -> {}", ledger.display());
+    }
+    Ok(())
+}
+
+/// Emit the d1-runner §6 superset ledger: one row per qid, base verdict +
+/// optional swap columns. NEEDS-WORK rows carry verdict nulls and the error
+/// class; they are never graded fail-open.
+fn write_judge_ledger(path: &Path, results: &[JudgeOutcome], model: &str) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = String::new();
+    for g in results {
+        let err = g.error.as_deref();
+        let verdict = if g.needs_work {
+            serde_json::Value::Null
+        } else {
+            serde_json::json!({"relevant_ids": g.relevant_ids})
+        };
+        // votes/unanimous stay null here: H5 writes them at vote time.
+        let row = serde_json::json!({
+            "record": "judge",
+            "qid": g.qid,
+            "head": "listwise",
+            "arm": g.arm,
+            "step": "judge",
+            "model": model,
+            "attempt": 2,
+            "judge": {"verdict": verdict, "error": err, "model": model},
+            "em_correct": null,
+            "agree": null,
+            "abstained": null,
+            "swap_agree": g.swap_agree,
+            "swap_relevant_ids": g.swap_relevant_ids,
+            "votes": null,
+            "unanimous": null,
+            "category": null,
+            "tokens": null,
+            "dollars": null,
+            "error": err,
+        });
+        out.push_str(&serde_json::to_string(&row)?);
+        out.push('\n');
+    }
+    std::fs::write(path, out)?;
     Ok(())
 }
 
@@ -1006,7 +1201,8 @@ fn alt_dense_rank(
         .zip(scores)
         .map(|((id, _), s)| (id.clone(), s))
         .collect();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    // Bench mirror of the prod path: id arm on ties only, scores untouched.
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     scored.truncate(limit);
     scored
 }
@@ -1029,11 +1225,41 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
     let queries = read_queries()?;
     let gold = read_gold()?;
 
-    // For `prod_hybrid`: seed a temp JCODE_HOME project graph with the corpus and
-    // exercise the REAL shipped MemoryManager::find_similar_hybrid end-to-end.
-    let prod_mgr = if config == "prod_hybrid" {
+    // For `prod_hybrid` / `prod_hybrid_w`: seed a temp JCODE_HOME project graph
+    // with the corpus and exercise the REAL shipped
+    // MemoryManager::find_similar_hybrid end-to-end. `prod_hybrid_w` is the
+    // L1 dense-weighted arm: identical path, dense weight comes from the
+    // `JCODE_MEMORY_RRF_DENSE_W` env at the bench process (default 1.0 =
+    // same as prod_hybrid).
+    let prod_mgr = if config == "prod_hybrid"
+        || config == "prod_hybrid_w"
+        || config == "prefilter96"
+    {
         let tmp = std::env::temp_dir().join(format!("memrecall-prod-{}", std::process::id()));
         std::fs::create_dir_all(&tmp)?;
+        // Hermetic model cache (mirrors harness/run.sh scratch seeding):
+        // JCODE_HOME is redirected below, so without this every query embed
+        // re-downloads the 90MB ONNX (proven 2026-09-30: red gate on bad
+        // network + 14G of memrecall-prod-* leftovers). Seed from the real
+        // user cache; bins then never touch the network. Fails soft (warn)
+        // if the real cache is absent (download path unchanged).
+        if let Some(home) = std::env::var_os("HOME") {
+            let real = std::path::Path::new(&home).join(".jcode/models/all-MiniLM-L6-v2");
+            let dst = tmp.join("models/all-MiniLM-L6-v2");
+            let have =
+                real.join("model.onnx").exists() && real.join("tokenizer.json").exists();
+            if have {
+                let _ = std::fs::create_dir_all(&dst);
+                let _ = std::fs::copy(real.join("model.onnx"), dst.join("model.onnx"));
+                let _ =
+                    std::fs::copy(real.join("tokenizer.json"), dst.join("tokenizer.json"));
+            } else {
+                eprintln!(
+                    "WARN: real model cache absent ({:?}); bench embeds may download",
+                    real
+                );
+            }
+        }
         // SAFETY: single-threaded setup before any embedding work.
         unsafe { std::env::set_var("JCODE_HOME", &tmp) };
         let project_dir = "/bench/prod-validate";
@@ -1228,7 +1454,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             let q_emb = embedding::embed(&q.query)?;
             let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
             let lex = bm25.search(&q.query, rerank_pool);
-            let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+            let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
             let cands: Vec<(String, String)> = pool
                 .into_iter()
                 .map(|(id, _)| {
@@ -1466,7 +1692,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             let q_emb = embedding::embed(&q.query)?;
             let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
             let lex = bm25.search(&q.query, rerank_pool);
-            let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+            let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
             let cands: Vec<(String, String)> = pool
                 .into_iter()
                 .map(|(id, _)| {
@@ -1598,7 +1824,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             let q_emb = embedding::embed(&q.query)?;
             let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
             let lex = bm25.search(&q.query, rerank_pool);
-            let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+            let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
             let cands: Vec<(String, String)> = pool
                 .into_iter()
                 .map(|(id, _)| {
@@ -1696,6 +1922,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
 
     let mut recall5 = 0.0;
     let mut recall10 = 0.0;
+    let mut recall96 = 0.0; // slot-B gate (a): only accumulated for prefilter96
     let mut precision5 = 0.0;
     let mut precision10 = 0.0;
     let mut mrr = 0.0;
@@ -1735,13 +1962,14 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 "hybrid_dyn" => {
                     let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                     let lex = bm25.search(&q.query, 50);
-                    let pool = rrf(&[dense, lex], 60.0, 50);
+                    let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                     dynamic_gate_abs(&pool, gate_floor, gate_drop, gate_max, gate_abs)
                 }
                 "oracle_dyn" => Vec::new(), // gold is empty -> oracle injects nothing
                 "llm_scored" | "llm_scored_cached" | "llm_ensemble" => {
                     let mut scored = llm_score_map.get(&q.qid).cloned().unwrap_or_default();
-                    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    // Bench mirror of the prod path: id arm on ties only.
+                    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                     scored
                         .into_iter()
                         .filter(|(_, s)| *s >= score_threshold)
@@ -1827,7 +2055,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             "hybrid" => {
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), EMBEDDING_MAX_HITS)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
@@ -1841,7 +2069,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .expect("--reranker required for ce_rerank");
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
                 let lex = bm25.search(&q.query, rerank_pool);
-                let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
                 let cands: Vec<(String, String)> = pool
                     .into_iter()
                     .map(|(id, _)| {
@@ -1864,7 +2092,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .expect("--reranker required for ce_rerank_focused");
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, rerank_pool, false);
                 let lex = bm25.search(&q.query, rerank_pool);
-                let pool = rrf(&[dense, lex], 60.0, rerank_pool);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), rerank_pool);
                 let cands: Vec<(String, String)> = pool
                     .into_iter()
                     .map(|(id, _)| {
@@ -1890,7 +2118,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // irrelevant filler up to N even when only 1-2 are relevant.
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let pool = rrf(&[dense, lex], 60.0, 50);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 let rel_set: HashSet<&String> = rel.iter().collect();
                 let mut ids: Vec<String> = pool.into_iter().map(|(id, _)| id).collect();
                 // Stable sort: relevant candidates first, original order otherwise.
@@ -1907,7 +2135,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // top-k structurally throws away.
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let pool = rrf(&[dense, lex], 60.0, 50);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 let rel_set: HashSet<&String> = rel.iter().collect();
                 pool.into_iter()
                     .map(|(id, _)| id)
@@ -1921,7 +2149,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // precision improvement. Tune via --gate_floor/--gate_drop/--gate_max.
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let pool = rrf(&[dense, lex], 60.0, 50);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 dynamic_gate_abs(&pool, gate_floor, gate_drop, gate_max, gate_abs)
             }
             "llm_rerank" | "llm_rerank_padded" | "llm_strict" | "llm_judge" | "llm_synth"
@@ -1943,7 +2171,8 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // score_threshold, best-first, capped at gate_max. Dynamic count
                 // (incl. 0). Raising --score_threshold trades recall for precision.
                 let mut scored = llm_score_map.get(&q.qid).cloned().unwrap_or_default();
-                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                // Bench mirror of the prod path: id arm on ties only.
+                scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 scored
                     .into_iter()
                     .filter(|(_, s)| *s >= score_threshold)
@@ -1954,7 +2183,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             "hybrid_priors" => {
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let fused = rrf(&[dense, lex], 60.0, 50);
+                let fused = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 // Multiply fused RRF score by a gentle prior derived from
                 // confidence / strength / recency. Priors only re-order within
                 // the already-retrieved set; they never add/remove candidates.
@@ -1967,7 +2196,8 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                         (id, s * p)
                     })
                     .collect();
-                adj.sort_by(|a, b| b.1.total_cmp(&a.1));
+                // Bench mirror of the prod path: id arm on ties only.
+                adj.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 adj.into_iter()
                     .take(EMBEDDING_MAX_HITS)
                     .map(|(id, _)| id)
@@ -1976,7 +2206,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
             "hybrid_focused" => {
                 let dense = dense_retrieve(&q_emb_focused, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&focused, 50);
-                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), EMBEDDING_MAX_HITS)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
@@ -1986,7 +2216,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                 // contributes its graph neighbors with a decayed score, fused in.
                 let dense = dense_retrieve(&q_emb, &corpus, 0.0, 50, false);
                 let lex = bm25.search(&q.query, 50);
-                let base = rrf(&[dense, lex], 60.0, 50);
+                let base = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), 50);
                 let mut scored: HashMap<String, f32> = base.iter().cloned().collect();
                 // Expansion: add neighbors of the top base hits with 0.5 decay.
                 for (id, score) in base.iter().take(10) {
@@ -2001,7 +2231,8 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     }
                 }
                 let mut v: Vec<(String, f32)> = scored.into_iter().collect();
-                v.sort_by(|a, b| b.1.total_cmp(&a.1));
+                // Bench mirror of the prod path: id arm on ties only.
+                v.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                 v.into_iter()
                     .take(EMBEDDING_MAX_HITS)
                     .map(|(id, _)| id)
@@ -2022,7 +2253,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .expect("--embedder required for bge_hybrid");
                 let dense = alt_dense_rank(qe, &alt_corpus_emb, 50);
                 let lex = bm25.search(&q.query, 50);
-                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), EMBEDDING_MAX_HITS)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
@@ -2045,12 +2276,12 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .expect("openai_hybrid requires the OpenAI backend");
                 let dense = alt_dense_rank(qe, &openai_corpus_emb, 50);
                 let lex = bm25.search(&q.query, 50);
-                rrf(&[dense, lex], 60.0, EMBEDDING_MAX_HITS)
+                rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), EMBEDDING_MAX_HITS)
                     .into_iter()
                     .map(|(id, _)| id)
                     .collect()
             }
-            "prod_hybrid" => {
+            "prod_hybrid" | "prod_hybrid_w" => {
                 // Validate the ACTUAL shipped production method end-to-end.
                 prod_mgr
                     .as_ref()
@@ -2059,6 +2290,38 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
                     .into_iter()
                     .map(|(e, _)| e.id)
                     .collect()
+            }
+            "prefilter96" => {
+                // Slot-B gate (a): the EXACT shipped prefilter ranking core
+                // (MemoryManager::hybrid_prefilter_rank) at top-K 96 over the
+                // full active set. Timed per query for gate (b) evidence.
+                // NOTE: limit/pool are FULL-DEPTH (usize::MAX): recall@96 is
+                // measured by truncating the full ranking to 96 in
+                // recall_at, exactly as Jev would see the narrowed set.
+                // Passing limit=96 to the core would conflate the core's
+                // heap truncation with the gate metric. Per-query top-96 id
+                // lists go to stderr for miss forensics (gate evidence).
+                let entries = prod_mgr
+                    .as_ref()
+                    .expect("prod manager")
+                    .prefilter_bench_entries()
+                    .expect("prefilter bench entries");
+                let t0 = std::time::Instant::now();
+                let ranked = jcode::memory::MemoryManager::hybrid_prefilter_rank(
+                    entries,
+                    &q.query,
+                    &q_emb,
+                    usize::MAX,
+                    usize::MAX,
+                );
+                let ids: Vec<String> = ranked.into_iter().map(|(e, _)| e.id).collect();
+                eprintln!("prefilter96 q={} ms={}", q.qid, t0.elapsed().as_millis());
+                eprintln!(
+                    "prefilter96 top96 q={} {}",
+                    q.qid,
+                    ids.iter().take(96).cloned().collect::<Vec<_>>().join(",")
+                );
+                ids
             }
             other => anyhow::bail!("unknown config: {other}"),
         };
@@ -2071,6 +2334,10 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
 
         recall5 += recall_at(&ranked, &rel_set, 5);
         recall10 += recall_at(&ranked, &rel_set, 10);
+        // Slot-B gate (a): recall@96 = would gold survive the prefilter top-K.
+        if config == "prefilter96" {
+            recall96 += recall_at(&ranked, &rel_set, 96);
+        }
         precision5 += precision_at(&ranked, &rel_set, 5);
         precision10 += precision_at(&ranked, &rel_set, 10);
         mrr += reciprocal_rank(&ranked, &rel_set);
@@ -2084,6 +2351,7 @@ fn cmd_metrics(args: &[String]) -> Result<()> {
         "queries_judged": judged,
         "recall@5": recall5 / n,
         "recall@10": recall10 / n,
+        "recall@96": if config == "prefilter96" { Some(recall96 / n) } else { None },
         "precision@5": precision5 / n,
         "precision@10": precision10 / n,
         "mrr": mrr / n,
@@ -2420,7 +2688,7 @@ fn cmd_gate(args: &[String]) -> Result<()> {
                 let query = format_context_for_relevance(window);
                 let dense = dense_retrieve(emb, corpus, 0.0, pool_k, false);
                 let lex = bm25.search(&query, pool_k);
-                let pool = rrf(&[dense, lex], 60.0, pool_k);
+                let pool = rrf(&[dense, lex], jcode::memory::MemoryManager::rrf_k(), pool_k);
                 let ids: std::collections::HashSet<String> =
                     pool.into_iter().map(|(id, _)| id).collect();
                 pool_total += 1;
@@ -2652,10 +2920,11 @@ fn main() -> Result<()> {
         "cosdiag" => cmd_cosdiag(rest),
         _ => {
             eprintln!(
-                "usage: memory_recall_bench <queries|pool|metrics> [--key=value ...]\n\
+                "usage: memory_recall_bench <queries|pool|judge|metrics|probe|gate|cosdiag> [--key=value ...]\n\
                  \n\
                  queries  --corpus=PATH --sessions=DIR --max_sessions=N --per_session=N [--working_dir=DIR]\n\
                  pool     --corpus=PATH --pool_n=50\n\
+                 judge    [--model=ID --backend=claude|openai --reasoning=none --concurrency=N --swap --ledger=PATH]\n\
                  metrics  --corpus=PATH --config=baseline|dense_nogap|bm25|hybrid\n\
                  \n\
                  Bench dir: {} (override with MEMORY_BENCH_DIR)",
