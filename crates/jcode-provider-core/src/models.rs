@@ -612,58 +612,62 @@ mod tests {
     }
 
     /// Regression for upstream #1625: a custom OpenAI-compatible endpoint can
-/// serve ids that carry another vendor's name, and the static Claude table was
-/// returning before the configured limit was ever read. `anthropic/claude-sonnet-4`
-/// behind an endpoint configured as `deepseek` resolved to 200K even with an
-/// explicit 1M configured, contradicting the comment on `cached_context_limit`
-/// and the README's `context_window` escape hatch.
-#[test]
-fn custom_endpoint_claude_named_id_honours_configured_window() {
-    let one_m = Some(1_000_000);
-    assert_eq!(
-        context_limit_for_model_with_provider_and_cache(
-            "anthropic/claude-sonnet-4",
-            Some("deepseek"),
-            |_| one_m,
-        ),
-        one_m,
-        "a custom endpoint's own window must win over the static Claude table"
-    );
+    /// serve ids that carry another vendor's name, and the static Claude table was
+    /// returning before the configured limit was ever read. `anthropic/claude-sonnet-4`
+    /// behind an endpoint configured as `deepseek` resolved to 200K even with an
+    /// explicit 1M configured, contradicting the comment on `cached_context_limit`
+    /// and the README's `context_window` escape hatch.
+    #[test]
+    fn custom_endpoint_claude_named_id_honours_configured_window() {
+        let one_m = Some(1_000_000);
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "anthropic/claude-sonnet-4",
+                Some("deepseek"),
+                |_| one_m,
+            ),
+            one_m,
+            "a custom endpoint's own window must win over the static Claude table"
+        );
 
-    // A routing gateway still labels ids `vendor/model` and the static table
-    // stays authoritative there, so this behaviour is deliberately unchanged.
-    assert_eq!(
-        context_limit_for_model_with_provider_and_cache(
-            "anthropic/claude-sonnet-4",
-            Some("openrouter"),
-            |_| one_m,
-        ),
-        Some(200_000)
-    );
+        // A routing gateway still labels ids `vendor/model` and the static table
+        // stays authoritative there, so this behaviour is deliberately unchanged.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "anthropic/claude-sonnet-4",
+                Some("openrouter"),
+                |_| one_m,
+            ),
+            Some(200_000)
+        );
 
-    // A plain unqualified Claude id on Anthropic keeps the static answer too.
-    assert_eq!(
-        context_limit_for_model_with_provider_and_cache("claude-sonnet-4", Some("claude"), |_| one_m),
-        Some(200_000)
-    );
-}
+        // A plain unqualified Claude id on Anthropic keeps the static answer too.
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "claude-sonnet-4",
+                Some("claude"),
+                |_| one_m
+            ),
+            Some(200_000)
+        );
+    }
 
-/// With nothing configured the custom endpoint still falls back to the static
-/// Claude value as a last resort, rather than reporting no limit at all.
-#[test]
-fn custom_endpoint_claude_named_id_still_falls_back_without_config() {
-    assert_eq!(
-        context_limit_for_model_with_provider_and_cache(
-            "anthropic/claude-sonnet-4",
-            Some("deepseek"),
-            |_| None,
-        ),
-        Some(200_000)
-    );
-}
+    /// With nothing configured the custom endpoint still falls back to the static
+    /// Claude value as a last resort, rather than reporting no limit at all.
+    #[test]
+    fn custom_endpoint_claude_named_id_still_falls_back_without_config() {
+        assert_eq!(
+            context_limit_for_model_with_provider_and_cache(
+                "anthropic/claude-sonnet-4",
+                Some("deepseek"),
+                |_| None,
+            ),
+            Some(200_000)
+        );
+    }
 
-#[test]
-fn context_limit_classifies_claude_by_context_mode() {
+    #[test]
+    fn context_limit_classifies_claude_by_context_mode() {
         // Native-1M: 1M by default, suffix is a no-op.
         assert_eq!(
             context_limit_for_model_with_provider("claude-opus-5", Some("claude")),

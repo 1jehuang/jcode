@@ -723,7 +723,10 @@ impl Provider for OpenRouterProvider {
         // runtime model is `stealth/space-bunny-alpha@Stealth`, so comparing only the
         // pinned form matched nothing and fell through to the 200K default even
         // though the catalog entry carries context_length 1000000. Try the base id too.
-        let base_model_id = model_id.split_once('@').map(|(b, _)| b).filter(|b| !b.is_empty());
+        let base_model_id = model_id
+            .split_once('@')
+            .map(|(b, _)| b)
+            .filter(|b| !b.is_empty());
         // Try cached model data from OpenRouter API
         let cache = self.models_cache.try_read();
         if let Ok(cache) = cache

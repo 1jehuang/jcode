@@ -1687,7 +1687,13 @@ pub(super) async fn handle_resume_session(
 
             // Captured before the history call, which takes the agent, so the restored
             // route can still be reported to a client that has never been told.
-            let (resumed_model, resumed_provider_name, resumed_context_window, resumed_credential, resumed_reasoning_effort) = {
+            let (
+                resumed_model,
+                resumed_provider_name,
+                resumed_context_window,
+                resumed_credential,
+                resumed_reasoning_effort,
+            ) = {
                 let guard = agent.lock().await;
                 (
                     guard.provider_model(),
