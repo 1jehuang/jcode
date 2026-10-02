@@ -135,6 +135,73 @@ pub(super) fn tool_output_to_content_blocks(
     blocks
 }
 
+/// Like [`tool_output_to_content_blocks`], but when the provider cannot accept
+/// image input the image blocks are replaced with an explicit note.
+///
+/// This is the primary guard for text-only models: screenshot/`read`-image
+/// tools still run (their textual summary and the side-pane rendering for the
+/// human are unaffected), but no image is persisted into the model context,
+/// so the follow-up provider request cannot fail on the image modality and
+/// the model is told why it cannot inspect the pixels.
+pub(super) fn tool_output_to_content_blocks_with_image_support(
+    tool_use_id: String,
+    output: ToolOutput,
+    supports_image_input: bool,
+) -> Vec<ContentBlock> {
+    if supports_image_input {
+        return tool_output_to_content_blocks(tool_use_id, output);
+    }
+
+    // Deferred tool references (native MCP tool loading) must survive the
+    // image folding: the provider loads the discovered definitions from
+    // these blocks, and dropping them would strand tools that mcp_search /
+    // connect just reported in the result text.
+    let references = tool_output_references(&output);
+    let mut blocks = vec![ContentBlock::ToolResult {
+        tool_use_id: tool_use_id.clone(),
+        content: output.output,
+        is_error: None,
+    }];
+    if !output.images.is_empty() {
+        let labels: Vec<String> = output
+            .images
+            .iter()
+            .map(|img| {
+                img.label
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| img.media_type.clone())
+            })
+            .collect();
+        blocks.push(ContentBlock::Text {
+            text: format!(
+                "[Image output omitted: the active provider/model does not support image input. \
+                 {count} image(s) were produced by this tool ({labels}). The image is visible to \
+                 the user but its pixels were not attached to the conversation; do not attempt to \
+                 inspect or analyze the image visually. Use text-based alternatives such as the \
+                 `ocr` action, file contents, or ask the user.]",
+                count = output.images.len(),
+                labels = labels.join(", "),
+            ),
+            cache_control: None,
+        });
+    }
+    // Same ordering rule as the image-capable path: references last, after
+    // the omission note, so deferred MCP definitions still load on providers
+    // with native tool references even when images are folded away.
+    blocks.extend(
+        references
+            .into_iter()
+            .map(|tool_name| ContentBlock::ToolReference {
+                tool_use_id: tool_use_id.clone(),
+                tool_name,
+            }),
+    );
+    blocks
+}
+
 pub(super) fn print_tool_summary(tool: &ToolCall) {
     match tool.name.as_str() {
         "bash" => {

@@ -1755,7 +1755,11 @@ impl Agent {
                                 });
                             }
 
-                            let blocks = tool_output_to_content_blocks(tc.id.clone(), output);
+                            let blocks = tool_output_to_content_blocks_with_image_support(
+                                tc.id.clone(),
+                                output,
+                                self.provider.supports_image_input(),
+                            );
                             self.add_message_with_duration(
                                 Role::User,
                                 blocks,
