@@ -85,13 +85,49 @@ fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> 
 }
 
 /// Merge any number of optional reminder sections, preserving order.
-fn merge_reminder_sections(parts: [Option<String>; 3]) -> Option<String> {
+fn merge_reminder_sections(parts: [Option<String>; 4]) -> Option<String> {
     let joined: Vec<String> = parts.into_iter().flatten().collect();
     if joined.is_empty() {
         None
     } else {
         Some(joined.join("\n\n"))
     }
+}
+
+/// State the live context budget once per turn.
+///
+/// Without this the model reasons about its remaining room from whatever
+/// figure was last in view, and that goes stale the moment a compaction
+/// resets it: it keeps reporting a full window while actually sitting at a
+/// fraction of one. Report the same value the status bar shows so the two can
+/// never disagree.
+fn context_budget_turn_reminder(app: &App) -> Option<String> {
+    let limit = app.context_limit;
+    if limit == 0 {
+        return None;
+    }
+    // Mirror the status bar: prefer the provider-reported count, otherwise the
+    // estimate over the active messages. There is always a figure to report
+    // unless nothing has been measured at all, so the model reasons from the
+    // same number the user is looking at instead of a separate derivation.
+    let used_tokens = match app.current_stream_context_tokens() {
+        Some(tokens) => tokens,
+        None => {
+            let compaction = app.registry.compaction();
+            let Ok(manager) = compaction.try_write() else {
+                return None;
+            };
+            let provider_messages = app.materialized_provider_messages();
+            u64::try_from(manager.stats_with(&provider_messages).effective_tokens).ok()?
+        }
+    };
+    Some(format!(
+        "Context budget: {used_tokens} of {limit} tokens in use ({:.1}%). Judge how much room is \
+         left from this figure and not from an earlier one, because compaction resets it. \
+         Compaction here is normal policy, not a failure: it runs proactively on an EWMA \
+         forecast as the window fills, and only runs emergently after a context-limit error.",
+        (used_tokens as f64 / limit as f64) * 100.0
+    ))
 }
 
 /// Tell the model every turn whether it is operating in self-dev mode.
@@ -4141,6 +4177,7 @@ impl App {
         if images.is_empty() {
             self.current_turn_system_reminder = merge_reminder_sections([
                 self_dev_turn_reminder(self),
+                context_budget_turn_reminder(self),
                 None,
                 mission_turn_reminder(&self.session.id),
             ]);
@@ -4155,6 +4192,7 @@ impl App {
         } else {
             self.current_turn_system_reminder = merge_reminder_sections([
                 self_dev_turn_reminder(self),
+                context_budget_turn_reminder(self),
                 None,
                 mission_turn_reminder(&self.session.id),
             ]);
@@ -4241,6 +4279,7 @@ impl App {
             self.current_turn_system_reminder =
                 merge_reminder_sections([
                     self_dev_turn_reminder(self),
+                    context_budget_turn_reminder(self),
                     reminder,
                     mission_turn_reminder(&self.session.id),
                 ]);
