@@ -1067,6 +1067,40 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
 }
 
 #[test]
+fn auto_poke_rearms_when_new_open_work_appears_after_the_breaker_disarmed_it() {
+    // The completion-gate breaker clears `auto_poke_incomplete_todos`, and the
+    // guard at the top of `schedule_auto_poke_followup_if_needed` returns on
+    // that same flag, so the re-arm assignment further down is unreachable.
+    // One exhausted budget then disables auto-poke silently for the rest of
+    // the session, even once real open work appears.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the workflow".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save open work");
+
+        app.auto_poke_incomplete_todos = false;
+        app.todo_completion_gate_attempts = 0;
+
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "new open work must re-arm auto-poke after the breaker disarmed it"
+        );
+    });
+}
+
+#[test]
 fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

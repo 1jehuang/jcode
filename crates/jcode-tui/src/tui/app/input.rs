@@ -1746,6 +1746,22 @@ impl App {
     }
 
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        // The completion-gate breaker clears the poke flag, and the guard
+        // below returns on that very flag, so the re-arm assignment further
+        // down is unreachable once the budget is spent. One exhausted budget
+        // then silently disables the poke for the rest of the session, even
+        // once real open work appears. Settle the owed re-arm first.
+        //
+        // Checking auto_poke_default_on keeps an explicit /poke off
+        // authoritative, and incomplete_poke_todos keeps a fully completed
+        // plan from re-arming. See issue #1666.
+        if !self.auto_poke_incomplete_todos && self.auto_poke_default_on {
+            if !super::commands::incomplete_poke_todos(self).is_empty() {
+                self.auto_poke_incomplete_todos = true;
+                self.todo_completion_gate_attempts = 0;
+            }
+        }
+
         if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
             || self.pending_turn
