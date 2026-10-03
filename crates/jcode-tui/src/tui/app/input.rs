@@ -321,41 +321,175 @@ fn download_image_url_content(url: &str) -> Option<ClipboardPasteContent> {
 }
 
 fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent {
-    read_clipboard_for_paste_with(
-        kind,
-        read_clipboard_text,
-        super::clipboard_image,
-        download_image_url_content,
-    )
+    match kind {
+        ClipboardPasteKind::Smart => {
+            // Native-only reader first, so copied web text whose HTML carries
+            // an <img> stays text. Only when the clipboard offers nothing else
+            // fall back to the HTML <img> URL path (e.g. Discord on Wayland).
+            match read_clipboard_for_paste_with_files(
+                kind,
+                read_clipboard_text,
+                super::clipboard_image_native,
+                download_image_url_content,
+                read_clipboard_file_list,
+            ) {
+                // The HTML <img> fallback downloads a URL; never do that
+                // implicitly over SSH (direct image-URL paste has the same rule).
+                ClipboardPasteContent::Empty if !crate::tui::is_ssh_remote() => {
+                    super::clipboard_image()
+                        .map(|(media_type, base64_data)| image_content(media_type, base64_data))
+                        .unwrap_or(ClipboardPasteContent::Empty)
+                }
+                content => content,
+            }
+        }
+        _ => {
+            // ImageOnly and ImageUrl can use full clipboard_image with HTML fallback
+            read_clipboard_for_paste_with_files(
+                kind,
+                read_clipboard_text,
+                super::clipboard_image,
+                download_image_url_content,
+                Vec::new,
+            )
+        }
+    }
 }
 
+/// File paths the clipboard advertises alongside its other targets (Finder
+/// and file managers put the copied files here as file URLs). Only consulted
+/// to confirm an ambiguous image name, so ordinary text pastes never pay it.
+fn read_clipboard_file_list() -> Vec<std::path::PathBuf> {
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut clipboard| clipboard.get().file_list().ok())
+        .unwrap_or_default()
+}
+
+/// True when clipboard text is just a reference to a picture: a single line
+/// that is a local path, `file://` URL, or bare file name with an image
+/// extension. Copying an image commonly leaves exactly this on the text
+/// target alongside the image bytes. Web URLs are excluded: those go through
+/// the explicit image-URL download path instead.
+///
+/// A line with whitespace may be prose that merely ends in a file name
+/// (`Please check figure.png`), and treating it as a name would replace the
+/// user's sentence with an image. Such text only counts when it is quoted as
+/// a path, names a file that exists (absolute, under `~/`, or relative to the
+/// working directory), or matches a file the clipboard itself
+/// lists (e.g. Finder's `Screenshot 2026-09-24 at 10.41.00.png`).
+fn text_names_an_image<CopiedFiles>(text: &str, copied_files: CopiedFiles) -> bool
+where
+    CopiedFiles: FnOnce() -> Vec<std::path::PathBuf>,
+{
+    let text = text.trim();
+    if text.contains('\n') || text.len() > 4096 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return false;
+    }
+    let unquoted = text.trim_matches(['\'', '"']);
+    let quoted = unquoted.len() != text.len();
+    let path = unquoted
+        .strip_prefix("file://")
+        .or_else(|| unquoted.strip_prefix("FILE://"))
+        .unwrap_or(unquoted);
+    if image_media_type(std::path::Path::new(&path.to_ascii_lowercase())).is_none() {
+        return false;
+    }
+    if !path.chars().any(char::is_whitespace) {
+        return true;
+    }
+    let path_like = path.starts_with('/') || path.starts_with("~/");
+    if path_like && quoted {
+        return true;
+    }
+    // An existing file, absolute, `~/`, or relative to the working directory.
+    if names_existing_file(path, dirs::home_dir(), std::env::current_dir().ok()) {
+        return true;
+    }
+    copied_files()
+        .iter()
+        .any(|file| file.as_os_str() == path || file.file_name().is_some_and(|name| name == path))
+}
+
+/// True when `path` names an existing file: absolute, under `~/` (expanded
+/// against `home`), or relative to `cwd`.
+fn names_existing_file(
+    path: &str,
+    home: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+) -> bool {
+    let candidate = if let Some(rest) = path.strip_prefix("~/") {
+        home.map(|home| home.join(rest))
+    } else if std::path::Path::new(path).is_absolute() {
+        Some(std::path::PathBuf::from(path))
+    } else {
+        cwd.map(|cwd| cwd.join(path))
+    };
+    candidate.is_some_and(|candidate| candidate.is_file())
+}
+
+#[cfg(test)]
 fn read_clipboard_for_paste_with<ReadText, ReadImage, DownloadImageUrl>(
     kind: &ClipboardPasteKind,
-    mut read_text: ReadText,
-    mut read_image: ReadImage,
-    mut download_image_url: DownloadImageUrl,
+    read_text: ReadText,
+    read_image: ReadImage,
+    download_image_url: DownloadImageUrl,
 ) -> ClipboardPasteContent
 where
     ReadText: FnMut() -> Option<String>,
     ReadImage: FnMut() -> Option<(String, String)>,
     DownloadImageUrl: FnMut(&str) -> Option<ClipboardPasteContent>,
 {
+    read_clipboard_for_paste_with_files(kind, read_text, read_image, download_image_url, Vec::new)
+}
+
+fn read_clipboard_for_paste_with_files<ReadText, ReadImage, DownloadImageUrl, CopiedFiles>(
+    kind: &ClipboardPasteKind,
+    mut read_text: ReadText,
+    mut read_image: ReadImage,
+    mut download_image_url: DownloadImageUrl,
+    copied_files: CopiedFiles,
+) -> ClipboardPasteContent
+where
+    ReadText: FnMut() -> Option<String>,
+    ReadImage: FnMut() -> Option<(String, String)>,
+    DownloadImageUrl: FnMut(&str) -> Option<ClipboardPasteContent>,
+    CopiedFiles: FnOnce() -> Vec<std::path::PathBuf>,
+{
     match kind {
         ClipboardPasteKind::Smart => {
-            // Only treat the clipboard as text when it has *non-empty* text.
-            // Image-only clipboards (especially on Wayland/arboard) frequently
-            // expose an empty text target, which previously short-circuited the
-            // image path and produced a silent "0 char" paste.
-            if let Some(text) = read_text().filter(|t| !t.trim().is_empty()) {
+            // Read text first: it is cheap, and ordinary text pastes must not
+            // wait on an image probe or be replaced by an image.
+            let text = read_text().filter(|t| !t.trim().is_empty());
+            // Copying a picture (Finder, Preview, screenshots, browsers) often
+            // also puts its file name, path or file:// URL on the text target.
+            // Only then, or when there is no text at all, probe for native
+            // image bytes and prefer them. Image-only clipboards (especially
+            // on Wayland/arboard) frequently expose an empty text target.
+            //
+            // This holds over SSH too: the TUI reads the local clipboard, and
+            // a copy replaces every target at once, so image bytes next to the
+            // name mean a local app copied that picture. A remote path copied
+            // from the terminal carries no image bytes and stays text below.
+            let text_is_image_name = text
+                .as_deref()
+                .is_some_and(|text| text_names_an_image(text, copied_files));
+            if (text.is_none() || text_is_image_name)
+                && let Some((media_type, base64_data)) = read_image()
+            {
+                return image_content(media_type, base64_data);
+            }
+            if let Some(text) = text {
                 if let Some(url) = super::extract_image_url(&text)
                     && let Some(content) = download_image_url(&url)
                 {
                     return content;
                 }
                 return ClipboardPasteContent::Text(text);
-            }
-            if let Some((media_type, base64_data)) = read_image() {
-                return image_content(media_type, base64_data);
             }
             ClipboardPasteContent::Empty
         }
@@ -411,6 +545,29 @@ mod tests {
             super::download_image_url_content,
         );
         assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
+        // The TUI reads the local clipboard over SSH too. A picture copied
+        // locally (file name plus image bytes) still attaches the bytes.
+        let content = super::read_clipboard_for_paste_with(
+            &super::ClipboardPasteKind::Smart,
+            || Some("screenshot.png".to_string()),
+            || Some(("image/png".to_string(), "aW1hZ2U=".to_string())),
+            |_| panic!("clipboard image bytes must not fetch a URL"),
+        );
+        assert!(matches!(
+            content,
+            super::ClipboardPasteContent::Image { .. }
+        ));
+        // A remote path copied from the terminal has no image bytes on the
+        // clipboard, so it stays text.
+        let content = super::read_clipboard_for_paste_with(
+            &super::ClipboardPasteKind::Smart,
+            || Some("/home/me/screenshot.png".to_string()),
+            || None,
+            |_| None,
+        );
+        assert!(
+            matches!(content, super::ClipboardPasteContent::Text(ref t) if t == "/home/me/screenshot.png")
+        );
     }
 
     use super::{
@@ -456,17 +613,146 @@ mod tests {
     }
 
     #[test]
-    fn smart_paste_prefers_normal_text_when_clipboard_has_text() {
-        let content = read_clipboard_for_paste_with(
+    fn smart_paste_prefers_image_when_text_is_its_file_name() {
+        for name in [
+            "screenshot.png",
+            "/Users/me/Desktop/photo.JPG",
+            "FILE:///tmp/Diagram.PNG",
+            "file:///tmp/diagram.webp",
+            "'/tmp/with space.gif'",
+        ] {
+            let content = read_clipboard_for_paste_with(
+                &ClipboardPasteKind::Smart,
+                || Some(name.to_string()),
+                || Some(("image/png".to_string(), "base64".to_string())),
+                |_| None,
+            );
+            assert!(
+                matches!(content, ClipboardPasteContent::Image { .. }),
+                "{name}: expected image, got {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_paste_keeps_prose_ending_in_an_image_name() {
+        // Greptile #1450: a sentence that ends in a file name must not be
+        // replaced by image bytes that happen to be on the clipboard.
+        for text in [
+            "Please check figure.png",
+            "fix the layout in screenshot.png",
+            "see /tmp/a.png",
+            "file:///tmp/no such dir/a.png",
+            "/definitely/missing dir/a.png",
+        ] {
+            let content = super::read_clipboard_for_paste_with_files(
+                &ClipboardPasteKind::Smart,
+                || Some(text.to_string()),
+                || Some(("image/png".to_string(), "base64".to_string())),
+                |_| None,
+                Vec::new,
+            );
+            assert!(
+                matches!(content, ClipboardPasteContent::Text(ref t) if t == text),
+                "{text}: expected text, got {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_paste_attaches_spaced_names_the_clipboard_confirms() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("my shot.png");
+        std::fs::write(&existing, b"png").unwrap();
+        let finder_name = "Screenshot 2026-09-24 at 10.41.00.png";
+        let finder_file = std::path::PathBuf::from("/Users/me/Desktop").join(finder_name);
+        let cases: [(String, Vec<std::path::PathBuf>); 4] = [
+            // Finder/Preview: bare name, the copied file is on the clipboard.
+            (finder_name.to_string(), vec![finder_file.clone()]),
+            // Full path of the copied file.
+            (finder_file.display().to_string(), vec![finder_file.clone()]),
+            // Unquoted local path that exists.
+            (existing.display().to_string(), Vec::new()),
+            // Quoted path with spaces.
+            ("'/tmp/with space.gif'".to_string(), Vec::new()),
+        ];
+        for (text, files) in cases {
+            let content = super::read_clipboard_for_paste_with_files(
+                &ClipboardPasteKind::Smart,
+                || Some(text.clone()),
+                || Some(("image/png".to_string(), "base64".to_string())),
+                |_| None,
+                move || files,
+            );
+            assert!(
+                matches!(content, ClipboardPasteContent::Image { .. }),
+                "{text}: expected image, got {content:?}"
+            );
+        }
+        // Without clipboard confirmation the same spaced name stays text.
+        let content = super::read_clipboard_for_paste_with_files(
             &ClipboardPasteKind::Smart,
-            || Some("plain text".to_string()),
+            || Some(finder_name.to_string()),
             || Some(("image/png".to_string(), "base64".to_string())),
             |_| None,
+            || vec![std::path::PathBuf::from("/Users/me/Desktop/other.png")],
         );
+        assert!(matches!(content, ClipboardPasteContent::Text(_)));
+    }
 
-        match content {
-            ClipboardPasteContent::Text(text) => assert_eq!(text, "plain text"),
-            other => panic!("expected text paste, got {other:?}"),
+    #[test]
+    fn existing_relative_and_home_names_with_spaces_are_recognized() {
+        // Greptile #1450: an existing file named relative to the working
+        // directory (or under ~/), with no clipboard file list, must count
+        // as an image name. Uses an injected base directory so the test does
+        // not need a writable working directory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("shots")).unwrap();
+        std::fs::write(dir.path().join("shots/my shot.png"), b"png").unwrap();
+        let base = Some(dir.path().to_path_buf());
+        assert!(super::names_existing_file(
+            "shots/my shot.png",
+            None,
+            base.clone()
+        ));
+        assert!(super::names_existing_file(
+            "~/shots/my shot.png",
+            base.clone(),
+            None
+        ));
+        let absolute = dir.path().join("shots/my shot.png");
+        assert!(super::names_existing_file(
+            absolute.to_str().unwrap(),
+            None,
+            None
+        ));
+        assert!(!super::names_existing_file(
+            "shots/missing shot.png",
+            None,
+            base.clone()
+        ));
+        assert!(!super::names_existing_file("shots/my shot.png", None, None));
+        assert!(!super::names_existing_file("shots", None, base));
+    }
+
+    #[test]
+    fn smart_paste_keeps_ordinary_text_without_probing_for_images() {
+        for text in [
+            "plain text",
+            "see screenshot.png and fix the layout",
+            "line one\n/tmp/a.png",
+            "https://example.com/a.png",
+        ] {
+            let content = read_clipboard_for_paste_with(
+                &ClipboardPasteKind::Smart,
+                || Some(text.to_string()),
+                || panic!("ordinary text must not wait on an image probe"),
+                |_| None,
+            );
+            assert!(
+                matches!(content, ClipboardPasteContent::Text(ref t) if t == text),
+                "{text}: expected text, got {content:?}"
+            );
         }
     }
 
@@ -488,6 +774,21 @@ mod tests {
                 assert_eq!(base64_data, "base64");
             }
             other => panic!("expected image paste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smart_paste_uses_text_when_no_image_is_available() {
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || Some("plain text".to_string()),
+            || None,
+            |_| None,
+        );
+
+        match content {
+            ClipboardPasteContent::Text(text) => assert_eq!(text, "plain text"),
+            other => panic!("expected text paste, got {other:?}"),
         }
     }
 
