@@ -454,7 +454,24 @@ impl MemoryManager {
             graph.supersede(&id, &stale_id);
             return id;
         }
-        graph.add_memory(entry)
+        // C1: profile-affecting writes (Preference/Correction dock in the R5
+        // block at the END of the cached static prefix) invalidate that
+        // prefix. Record in the invalidation journal so the harness-bust
+        // alarm never false-positives on an empty journal after a memory
+        // write. Cheap string match; never blocks the write.
+        let is_profile = matches!(
+            entry.category,
+            MemoryCategory::Preference | MemoryCategory::Correction
+        );
+        let entry_id = entry.id.clone();
+        let added_id = graph.add_memory(entry);
+        if is_profile {
+            crate::cache_invalidation::record(
+                "memory profile",
+                format!("{entry_id} profile-category write"),
+            );
+        }
+        added_id
     }
 
     /// Minimum cosine similarity for the R2 UPDATE candidate scan.
@@ -594,6 +611,9 @@ impl MemoryManager {
                 continue;
             }
             if !Self::detect_update(&candidate.content, &entry.content) {
+                // L5c: high similarity but no supersede signal — count the
+                // near-miss for the L1 audit to mine. Never acted on here.
+                UPDATE_NEAR_MISS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             let replace = match &best {
@@ -2942,6 +2962,17 @@ static PREFILTER_ENGAGED_SAMPLED: std::sync::atomic::AtomicU64 =
 /// priors are touched (none exist yet; keep it that way).
 static PREFILTER_TAIL_REJUDGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PREFILTER_TAIL_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// L5c near-miss counter: write-path pairs with cosine >= threshold that
+/// FAIL `detect_update` (high similarity, no supersede signal). Observability
+/// only — counted, never acted on. Mined by the L1 audit to prioritize
+/// marker/gate work. Process-wide, `Relaxed`.
+static UPDATE_NEAR_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Read the L5c near-miss count (observability; see `UPDATE_NEAR_MISS`).
+pub fn update_near_miss_count() -> u64 {
+    UPDATE_NEAR_MISS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Slot-B stage-elapsed accumulators (SHADOW-GATE Metric 3 live half):
 /// embed half (query-embed wall clock) and rank half (hot rank pass).
