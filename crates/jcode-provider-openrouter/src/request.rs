@@ -498,7 +498,7 @@ pub fn build_chat_messages(
 
     let mut reordered: Vec<Value> = Vec::with_capacity(api_messages.len());
     let mut injected_ordered = 0usize;
-    let mut dropped_orphans = 0usize;
+    let mut relocated_tool_outputs = 0usize;
 
     for msg in api_messages.into_iter() {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
@@ -533,7 +533,13 @@ pub fn build_chat_messages(
         }
 
         if role == "tool" {
-            dropped_orphans += 1;
+            // Reached for every `role: tool` message, not only unmatchable ones:
+            // the assistant branch above already popped it from
+            // `tool_output_map` and emitted it next to its call, so what is
+            // dropped here is the stale position. This therefore counts the
+            // session's tool outputs, and a rising value means a growing
+            // conversation, not accumulating orphans.
+            relocated_tool_outputs += 1;
             continue;
         }
 
@@ -548,10 +554,10 @@ pub fn build_chat_messages(
             injected_ordered
         ));
     }
-    if dropped_orphans > 0 {
+    if relocated_tool_outputs > 0 {
         jcode_logging::info(&format!(
-            "[openrouter] Dropped {} orphaned tool output(s) during re-ordering",
-            dropped_orphans
+            "[openrouter] Relocated {} tool output(s) to follow their tool call",
+            relocated_tool_outputs
         ));
     }
 
