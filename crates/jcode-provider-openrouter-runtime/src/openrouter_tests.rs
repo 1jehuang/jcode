@@ -3192,6 +3192,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
             tx,
             Arc::new(Mutex::new(None)),
             "test-model".to_string(),
+            "openrouter::test-scope".to_string(),
         )
         .await;
 
@@ -3703,6 +3704,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
             tx,
             Arc::new(Mutex::new(None)),
             "m".to_string(),
+            "openrouter::test-scope".to_string(),
         )
         .await;
         while events.recv().await.is_some() {}
@@ -3896,4 +3898,408 @@ fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
     assert_eq!(body["tools"][0]["function"]["name"], "bash");
     assert_eq!(body["messages"][0]["role"], "system");
     assert!(body.get("reasoning_effort").is_none());
+}
+
+// ============================================================================
+// Stream-level image-modality retry (text-only model behind optimistic endpoint)
+// ============================================================================
+
+/// Fake SSE server for the streaming modality retry: the first request is
+/// rejected with a 400 "does not support image input" error; the retry request
+/// (which must no longer carry `image_url` parts) gets a clean SSE completion.
+/// Both raw request bodies are captured for assertions.
+fn spawn_image_rejecting_then_clean_server() -> (
+    String,
+    std::sync::mpsc::Receiver<String>,
+    std::sync::mpsc::Receiver<String>,
+) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (tx_first, rx_first) = std::sync::mpsc::channel::<String>();
+    let (tx_retry, rx_retry) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        // Connection 1: modality rejection.
+        {
+            let (mut stream, _) = listener.accept().expect("accept first");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = tx_first.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = r#"{"error": {"message": "This model does not support image input. The image_url content part is not supported: text-only model.", "type": "invalid_request_error", "code": "unsupported_modality"}}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+        // Connection 2 (modality retry): clean completion.
+        {
+            let (mut stream, _) = listener.accept().expect("accept retry");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let mut buf = vec![0u8; 65536];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let _ = tx_retry.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"described marker only\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (format!("http://{addr}/v1"), rx_first, rx_retry)
+}
+
+/// The streaming twin of the failover-layer regression: HTTP errors surface
+/// inside the async stream, so the modality retry must fire there. A request
+/// carrying `image_url` parts that the endpoint rejects with a modality error
+/// must be replayed once with the images replaced by a text marker, on the
+/// same endpoint, and the final answer must still stream to the consumer.
+#[test]
+fn image_modality_rejection_is_retried_with_filtered_request() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    rt.block_on(async {
+        let (api_base, rx_first, rx_retry) = spawn_image_rejecting_then_clean_server();
+        let client = reqwest::Client::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
+
+        let request = serde_json::json!({
+            "model": "text-only-test-model",
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "describe red.png"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aVZC"}}
+                ]}
+            ]
+        });
+
+        super::openrouter_sse_stream::run_stream_with_retries(
+            client,
+            api_base,
+            ProviderAuth::None {
+                label: "test".to_string(),
+            },
+            false,
+            new_conversation_id(),
+            request,
+            tx,
+            Arc::new(Mutex::new(None)),
+            "text-only-test-model".to_string(),
+            "openrouter::test-scope".to_string(),
+        )
+        .await;
+
+        let mut final_text = String::new();
+        let mut errored = false;
+        while let Some(item) = rx.recv().await {
+            match item {
+                Ok(StreamEvent::TextDelta(text)) => final_text.push_str(&text),
+                Err(_) => errored = true,
+                _ => {}
+            }
+        }
+
+        assert!(
+            !errored,
+            "stream surfaced an error instead of replaying with filtered request"
+        );
+        assert_eq!(final_text, "described marker only");
+
+        let first = rx_first
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first request captured");
+        assert!(
+            first.contains(r#""type":"image_url""#),
+            "first request must carry the image_url part"
+        );
+
+        let retry = rx_retry
+            .recv_timeout(Duration::from_secs(5))
+            .expect("retry request captured");
+        assert!(
+            !retry.contains(r#""type":"image_url""#),
+            "modality retry must not carry image_url parts: {retry}"
+        );
+        assert!(
+            retry.contains("[Image omitted: this model does not support image input"),
+            "modality retry must carry the text marker replacing the image: {retry}"
+        );
+    });
+}
+
+/// The modality retry is one-shot and only fires for modality errors: a
+/// request without `image_url` parts that fails with a 400 must surface the
+/// error immediately, with no phantom retry attempt.
+#[test]
+fn non_image_requests_get_no_modality_retry() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    rt.block_on(async {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (tx_done, rx_done) = std::sync::mpsc::channel::<usize>();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut requests = 0usize;
+            while let Ok((mut stream, _)) = listener.accept() {
+                requests += 1;
+                let _ = tx_done.send(requests);
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("timeout");
+                let mut buf = vec![0u8; 65536];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"error": {"message": "Invalid request: max_tokens must be greater than 0", "type": "invalid_request_error"}}"#;
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
+        let request = serde_json::json!({
+            "model": "text-only-test-model",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+
+        super::openrouter_sse_stream::run_stream_with_retries(
+            client,
+            format!("http://{addr}/v1"),
+            ProviderAuth::None {
+                label: "test".to_string(),
+            },
+            false,
+            new_conversation_id(),
+            request,
+            tx,
+            Arc::new(Mutex::new(None)),
+            "text-only-test-model".to_string(),
+            "openrouter::test-scope".to_string(),
+        )
+        .await;
+
+        let mut errored = false;
+        while let Some(item) = rx.recv().await {
+            if item.is_err() {
+                errored = true;
+            }
+        }
+        assert!(errored, "deterministic 400 must surface as an error");
+        let total_requests = rx_done.recv_timeout(Duration::from_secs(5)).expect("counted");
+        assert_eq!(
+            total_requests, 1,
+            "non-modality 400 must not be replayed with a filtered request"
+        );
+    });
+}
+
+/// The modality replay must not consume a user-visible retry attempt: with
+/// `max_retries = 1` the first (and only) attempt is rejected for the image
+/// modality, the replayed request must still run, stream its answer, and not
+/// end the stream silently (regression: a `continue` on the outer loop used to
+/// exit with no error and no output when `max_retries == 1`).
+#[test]
+fn image_modality_retry_survives_max_retries_one() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    rt.block_on(async {
+        let (api_base, rx_first, rx_retry) = spawn_image_rejecting_then_clean_server();
+        let client = reqwest::Client::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
+
+        let request = serde_json::json!({
+            "model": "text-only-test-model",
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "describe red.png"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,aVZC"}}
+                ]}
+            ]
+        });
+
+        let _env_guard = ENV_LOCK.lock();
+        let _max_retries_guard = EnvVarGuard::set("JCODE_MAX_RETRIES", "1");
+        super::openrouter_sse_stream::run_stream_with_retries(
+            client,
+            api_base,
+            ProviderAuth::None {
+                label: "test".to_string(),
+            },
+            false,
+            new_conversation_id(),
+            request,
+            tx,
+            Arc::new(Mutex::new(None)),
+            "text-only-test-model".to_string(),
+            "openrouter::test-scope".to_string(),
+        )
+        .await;
+        drop(_max_retries_guard);
+        drop(_env_guard);
+
+        let mut final_text = String::new();
+        let mut stream_ended_without_output = true;
+        while let Some(item) = rx.recv().await {
+            match item {
+                Ok(StreamEvent::TextDelta(text)) => {
+                    stream_ended_without_output = false;
+                    final_text.push_str(&text);
+                }
+                Err(_) => stream_ended_without_output = false,
+                _ => {}
+            }
+        }
+        assert!(
+            !stream_ended_without_output,
+            "with max_retries=1 the modality replay must still stream an answer, not end silently"
+        );
+        assert_eq!(final_text, "described marker only");
+
+        let retry = rx_retry
+            .recv_timeout(Duration::from_secs(5))
+            .expect("retry request captured even with max_retries=1");
+        assert!(
+            !retry.contains(r#""type":"image_url""#),
+            "replayed request must carry the text marker, not pixels: {retry}"
+        );
+        let _ = rx_first;
+    });
+}
+
+/// Regression for the record/lookup key mismatch in the streaming image
+/// replay: `complete()` hands the stream the runtime's raw model state, but
+/// the consumers of the recorded rejection (`supports_image_input` here, and
+/// `MultiProvider::supports_image_input` via `candidate_model`) compare
+/// against the *prefix-stripped* model id that `set_model` normally
+/// normalizes into state. Right after session restore the state can still
+/// carry the session-routing `<profile>:<model>` prefix (#403), so a
+/// rejection recorded as `ollama:llava` would never match the `llava`
+/// lookup and the NEXT request would ship pixels again.
+///
+/// Wire-level, through `complete()` on a real provider instance: the first
+/// request carries the image and is rejected, the replay arrives pixel-free,
+/// and afterwards the recorded rejection must be visible under the stripped
+/// model key so `supports_image_input()` flips to false for follow-up turns.
+#[test]
+fn image_modality_rejection_records_under_stripped_model_key() {
+    let _lock = ENV_LOCK.lock();
+    let key = jcode_provider_core::selection::provider_key(
+        jcode_provider_core::selection::ActiveProvider::OpenRouter,
+    );
+    // Rejections are recorded under the runtime's capability scope (here the
+    // profile id, since `profile_id` is set), not the bare OpenRouter slot key.
+    let scoped = format!("{}::profile:ollama", key);
+    jcode_provider_core::image_capability::clear_image_input_overrides_for_provider(key);
+
+    let (api_base, rx_first, rx_retry) = spawn_image_rejecting_then_clean_server();
+    // Simulate the #403 transient: session restore left the raw state
+    // prefixed. `profile_id` matches the prefix so the strip logic applies.
+    let provider = OpenRouterProvider {
+        api_base,
+        model: Arc::new(RwLock::new("ollama:llava".to_string())),
+        profile_id: Some("ollama".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "describe red.png".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "aVZC".to_string(),
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        // Before the rejection is known, the compat default is optimistic.
+        assert!(
+            provider.supports_image_input(),
+            "prefixed state must not break the pre-record capability answer"
+        );
+
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("complete returns a stream handle");
+        let mut saw_text = false;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                StreamEvent::TextDelta(_) => saw_text = true,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_text,
+            "the pixel-free replay must still stream an answer"
+        );
+
+        // The self-heal replay fired on the wire.
+        let retry = rx_retry
+            .recv_timeout(Duration::from_secs(5))
+            .expect("retry request captured");
+        assert!(
+            !retry.contains(r#""type":"image_url""#),
+            "replayed request must carry the text marker, not pixels: {retry}"
+        );
+        let _ = rx_first;
+
+        // Prevention layer: the rejection must be recorded under the stripped
+        // model id (`llava`), which is the key the lookups use. Without the
+        // fix this was recorded as `ollama:llava` and never matched.
+        assert!(
+            !provider.supports_image_input(),
+            "recorded rejection must flip supports_image_input to false under the stripped key"
+        );
+        assert!(jcode_provider_core::image_capability::image_input_rejected(
+            &scoped, "llava"
+        ));
+        assert!(
+            !jcode_provider_core::image_capability::image_input_rejected(&scoped, "ollama:llava"),
+            "the record must not be stored under the raw prefixed spelling"
+        );
+        assert!(
+            !jcode_provider_core::image_capability::image_input_rejected(key, "llava"),
+            "the record must be scoped to the profile, not the bare slot key"
+        );
+    });
+
+    jcode_provider_core::image_capability::clear_image_input_overrides_for_provider(key);
+    jcode_provider_core::image_capability::clear_image_input_overrides_for_provider(&scoped);
 }

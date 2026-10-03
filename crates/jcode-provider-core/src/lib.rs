@@ -5,6 +5,7 @@ pub mod catalog_refresh;
 pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
+pub mod image_capability;
 pub mod model_id;
 pub mod model_names;
 pub mod models;
@@ -129,6 +130,18 @@ pub trait Provider: Send + Sync {
     /// Get the model identifier being used.
     fn model(&self) -> String {
         "unknown".to_string()
+    }
+
+    /// Stable identity of the concrete endpoint/profile this runtime instance
+    /// serves, used to scope runtime capability records (image-input rejections)
+    /// so two profiles that share the `name()` slot do not share capability
+    /// state. `None` falls back to `name()`.
+    ///
+    /// The value must be stable for the lifetime of the runtime instance and
+    /// identical across all writers (record + lookup paths); the OpenRouter
+    /// slot returns its profile id or api base.
+    fn capability_scope(&self) -> Option<String> {
+        None
     }
 
     /// Human-readable description of the auth method the active provider will
