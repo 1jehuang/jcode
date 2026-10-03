@@ -705,6 +705,89 @@ fn opencode_db_fixture(home: &Path) -> crate::opencode_db::fixture::Fixture {
 }
 
 #[test]
+fn opencode_sqlite_search_preserves_unicode_case_matches() {
+    with_temp_home(|home| {
+        let f = opencode_db_fixture(home);
+        f.session(
+            "ses_unicode",
+            None,
+            "Chat",
+            "/tmp/c",
+            "p",
+            "m",
+            3_000_000,
+            None,
+        )
+        .message("ses_unicode", "msg_unicode", "user", 100)
+        .text(
+            "ses_unicode",
+            "msg_unicode",
+            "prt_unicode",
+            "Kubernetes deployment",
+        );
+        drop(f);
+        let mut options = SearchOptions::for_test("current-session");
+        options.source_filter = Some("opencode".to_string());
+        for include_tools in [false, true] {
+            options.include_tools = include_tools;
+            let results = run_search(home, "kubernetes deployment", &options);
+            assert!(
+                results
+                    .iter()
+                    .any(|r| r.message_id.as_deref() == Some("msg_unicode")),
+                "Unicode case match must reach integrated search results"
+            );
+        }
+    });
+}
+
+#[test]
+fn opencode_sources_rank_stored_updates_before_applying_scan_cap() {
+    with_temp_home(|home| {
+        let f = opencode_db_fixture(home);
+        f.session("ses_db", None, "Chat", "/tmp/c", "p", "m", 3_000_000, None)
+            .message("ses_db", "msg_db", "user", 100)
+            .text("ses_db", "msg_db", "prt_db", "recency-needle");
+        drop(f);
+        let legacy = home.join("external/.local/share/opencode/storage/session/proj");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("ses_old.json"), json!({"id": "ses_old", "title": "Old copied file", "time": {"created": 1, "updated": 2_000_000}}).to_string()).unwrap();
+        let mut options = SearchOptions::for_test("current-session");
+        options.source_filter = Some("opencode".to_string());
+        options.max_scan_sessions = 1;
+        let report = run_report(home, "recency-needle", &options);
+        assert!(report.truncated);
+        assert_eq!(report.scanned_external_sessions, 1);
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.session_id == "opencode:ses_db"),
+            "A copied old JSON file must not displace the newer database session"
+        );
+
+        // The legacy-only preselection must also use stored update time, not mtime.
+        let newest = legacy.join("ses_newest.json");
+        std::fs::write(&newest, json!({"id": "ses_newest", "title": "recency-needle", "time": {"created": 1, "updated": 4_000_000}}).to_string()).unwrap();
+        std::fs::File::open(&newest)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+        let results = run_search(home, "recency-needle", &options);
+        assert!(
+            results
+                .iter()
+                .any(|r| r.session_id == "opencode:ses_newest"),
+            "Stored timestamps must determine selection even within the legacy store"
+        );
+        assert!(!results.iter().any(|r| r.session_id == "opencode:ses_db"));
+    });
+}
+
+#[test]
 fn opencode_sqlite_tool_output_is_searchable_with_include_tools() {
     with_temp_home(|home| {
         let f = opencode_db_fixture(home);

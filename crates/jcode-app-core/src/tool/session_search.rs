@@ -1374,19 +1374,35 @@ fn collect_opencode_external_sessions(
         found_store = true;
         let db_ids: std::collections::HashSet<String> =
             candidates.iter().map(|(_, id, _)| id.clone()).collect();
-        for path in collect_recent_files_recursive(root, "json", options.max_scan_sessions) {
-            let Some(id) = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_string)
+        // Read small session metadata before capping candidates. Filesystem mtime
+        // can change when old stores are copied, including within the legacy store.
+        // Message histories are still loaded only for the selected sessions.
+        for path in jcode_import_core::collect_files_recursive(root, "json") {
+            let Some(value) = std::fs::File::open(&path)
+                .ok()
+                .and_then(|file| serde_json::from_reader::<_, Value>(file).ok())
+            else {
+                report.parse_errors += 1;
+                continue;
+            };
+            let Some(id) = value
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
             else {
                 continue;
             };
-            if db_ids.contains(&id) {
+            if db_ids.contains(id) {
                 continue;
             }
-            let modified = jcode_import_core::file_modified_datetime(&path).unwrap_or_default();
-            candidates.push((modified, id, OpenCodeCandidate::Legacy(path)));
+            let updated = value
+                .get("time")
+                .and_then(|time| time.get("updated"))
+                .and_then(Value::as_i64)
+                .and_then(DateTime::<Utc>::from_timestamp_millis)
+                .or_else(|| jcode_import_core::file_modified_datetime(&path))
+                .unwrap_or_default();
+            candidates.push((updated, id.to_string(), OpenCodeCandidate::Legacy(path)));
         }
     }
     if found_store {

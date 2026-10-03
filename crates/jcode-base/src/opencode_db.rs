@@ -306,8 +306,9 @@ fn search_part_texts(json: &str) -> Vec<String> {
 /// histories get loaded. A session qualifies when at least `min_term_matches`
 /// of `terms` occur somewhere in its searchable parts (a superset of the
 /// per-message matcher, which needs the same terms inside one message).
-/// Matching is ASCII case-insensitive in SQLite, so a term with non-ASCII
-/// characters is treated as present to never drop a real match.
+/// SQLite only folds ASCII case. Non-ASCII query terms are assumed present,
+/// and parts containing Unicode bypass filtering so Rust's Unicode lowercase
+/// matcher can decide. This also covers escaped Unicode in raw tool JSON.
 pub fn sessions_matching_terms(
     path: &Path,
     session_ids: &[String],
@@ -353,7 +354,9 @@ pub fn sessions_matching_terms(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT p.session_id, {hits} FROM part p \
+        "SELECT p.session_id, {hits}, \
+         MAX(length(CAST({field} AS BLOB)) != length({field}) OR instr({field}, '\\u') > 0) \
+         FROM part p \
          WHERE p.session_id IN ({ids}) AND json_extract(p.data, '$.type') IN {types} \
          GROUP BY p.session_id"
     );
@@ -367,7 +370,8 @@ pub fn sessions_matching_terms(
     let mut rows = stmt.query(values.as_slice())?;
     while let Some(row) = rows.next()? {
         let hits: i64 = row.get(1)?;
-        if hits.max(0) as usize >= needed {
+        let has_unicode: bool = row.get::<_, Option<bool>>(2)?.unwrap_or(false);
+        if has_unicode || hits.max(0) as usize >= needed {
             matched.insert(row.get(0)?);
         }
     }
