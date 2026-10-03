@@ -2004,6 +2004,13 @@ pub(super) async fn handle_client(
             }
 
             Request::ResumeAllSessions { id } => {
+                // Scope the sweep to this connection's project. Read from the
+                // agent rather than the daemon's cwd: the daemon serves many
+                // projects and its cwd is whichever one happened to start it.
+                let caller_working_dir = {
+                    let agent_guard = agent.lock().await;
+                    agent_guard.working_dir().map(str::to_string)
+                };
                 super::client_actions::handle_resume_all_sessions(
                     id,
                     &sessions,
@@ -2013,6 +2020,7 @@ pub(super) async fn handle_client(
                     &event_counter,
                     &swarm_event_tx,
                     &client_event_tx,
+                    caller_working_dir.as_deref(),
                 )
                 .await;
             }

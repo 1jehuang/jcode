@@ -1068,6 +1068,17 @@ fn live_session_owes_continuation(agent: &Agent) -> bool {
 /// the currently-live sessions, and for each idle one that still owes the model
 /// a continuation, injects the standard "continue where you left off" reminder
 /// so the session picks back up without the user having to open each one.
+///
+/// Scope: `caller_working_dir` bounds the sweep to the caller's own project.
+/// One daemon serves many projects, so without this a `/continue` typed in
+/// project A injects a continuation into every live session in the daemon,
+/// including projects the user has open elsewhere and is not looking at.
+///
+/// The startup sweep in `recover_headless_sessions_on_startup` deliberately
+/// stays daemon-wide: no client asked for it, it is the daemon tidying up after
+/// its own restart, and narrowing it would strand sessions belonging to projects
+/// that have no attached client at all. This one is user-initiated, so it is
+/// scoped to the user's project.
 #[expect(
     clippy::too_many_arguments,
     reason = "resuming live sessions needs session, swarm membership, and status event state"
@@ -1081,6 +1092,7 @@ pub(super) async fn handle_resume_all_sessions(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    caller_working_dir: Option<&str>,
 ) {
     // Snapshot live sessions (those with at least one live client attachment).
     let live_session_ids: Vec<String> = {
@@ -1094,6 +1106,7 @@ pub(super) async fn handle_resume_all_sessions(
 
     let mut resumed_sessions: Vec<String> = Vec::new();
     let mut skipped = 0usize;
+    let mut out_of_scope = 0usize;
 
     for session_id in live_session_ids {
         let agent = {
@@ -1110,6 +1123,16 @@ pub(super) async fn handle_resume_all_sessions(
             skipped += 1;
             continue;
         };
+
+        // Project scope check. Runs on the already-reserved guard rather than
+        // taking a second lock: a separate `agent.lock().await` here races with
+        // the `try_lock_owned` above and can report an idle session as busy,
+        // which would silently drop sessions the user asked to continue.
+        if !working_dir_in_scope(agent_guard.working_dir(), caller_working_dir) {
+            drop(agent_guard);
+            out_of_scope += 1;
+            continue;
+        }
 
         if !live_session_owes_continuation(&agent_guard) {
             drop(agent_guard);
@@ -1173,8 +1196,8 @@ pub(super) async fn handle_resume_all_sessions(
     };
 
     crate::logging::info(&format!(
-        "resume_all_sessions: resumed={} skipped={} sessions={:?}",
-        resumed, skipped, resumed_sessions
+        "resume_all_sessions: resumed={} skipped={} out_of_scope={} sessions={:?}",
+        resumed, skipped, out_of_scope, resumed_sessions
     ));
 
     let _ = client_event_tx.send(ServerEvent::ResumeAllResult {
@@ -1184,6 +1207,46 @@ pub(super) async fn handle_resume_all_sessions(
         resumed_sessions,
         message,
     });
+}
+
+/// Whether a session's working directory counts as being in the caller's project.
+///
+/// Both sides are canonicalized before comparing, so a symlinked checkout, a
+/// `..` segment, or a Windows short/long path pair does not read as a different
+/// project and silently skip sessions the user asked to continue.
+///
+/// The `None` cases follow the project-isolation invariants: `working_dir: None`
+/// must never mean "the daemon's cwd", because the daemon's cwd is whichever
+/// project happened to start it. This function compares the two directories
+/// only when both are present; it never falls back to a process-global default.
+///
+/// When either side is absent the session is treated as in scope, and that is a
+/// deliberate choice rather than an oversight:
+///
+/// - A session with no directory is not attributable to any project, so
+///   scoping it away would silently drop it from a sweep the user asked for.
+/// - A caller with no directory means the daemon could not attribute the
+///   request to a project at all. Scoping nothing would make `/continue`
+///   report "no interrupted sessions" while real sessions sat interrupted,
+///   which is worse than the behavior this item removes. Note this is not a
+///   common path: `Session::create` populates `working_dir` from the process
+///   cwd, so a real caller almost always has one.
+///
+/// In every ordinary case both sides carry a directory, and the comparison is
+/// strict: project B never matches a caller in project A.
+fn working_dir_in_scope(session_dir: Option<&str>, caller_dir: Option<&str>) -> bool {
+    match (session_dir, caller_dir) {
+        (Some(session), Some(caller)) => canonical_dir(session) == canonical_dir(caller),
+        _ => true,
+    }
+}
+
+/// Canonicalize a directory path, falling back to the literal path when it
+/// cannot be canonicalized (a session's directory can be deleted while the
+/// session stays alive).
+fn canonical_dir(path: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(path);
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 pub(super) fn handle_compact(
