@@ -201,6 +201,34 @@ pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Opti
     }
     split.dynamic_part.push_str(directive);
 }
+
+/// Append per-turn harness reminders to the dynamic (uncached) prompt part.
+///
+/// Two callers assemble reminder text: the embedded TUI client in `jcode-tui`
+/// and the server-side agent in `jcode-app-core`. Each used to carry its own
+/// copy of the `# System Reminder` framing, so a fix applied to one of them
+/// silently did nothing in the other and read as covered. Keep the framing here
+/// so there is exactly one copy of it.
+pub fn append_system_reminder_sections(split: &mut SplitSystemPrompt, sections: &[Option<String>]) {
+    let joined: Vec<&str> = sections
+        .iter()
+        .filter_map(|section| {
+            section
+                .as_deref()
+                .map(str::trim)
+                .filter(|section| !section.is_empty())
+        })
+        .collect();
+    if joined.is_empty() {
+        return;
+    }
+    if !split.dynamic_part.is_empty() {
+        split.dynamic_part.push_str("\n\n");
+    }
+    split.dynamic_part.push_str("# System Reminder\n\n");
+    split.dynamic_part.push_str(&joined.join("\n\n"));
+}
+
 /// Mission-continuation template (embedded at compile time). Consumed by the
 /// `mission` module in the upper `jcode-app-core` layer; the asset lives here
 /// alongside the other prompt templates.

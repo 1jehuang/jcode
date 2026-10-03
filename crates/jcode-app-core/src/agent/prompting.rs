@@ -123,27 +123,13 @@ impl Agent {
     }
 
     fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {
-        let mut sections: Vec<String> = Vec::new();
-        if let Some(budget) = self.context_budget_section() {
-            sections.push(budget);
-        }
-        if let Some(reminder) = self
-            .current_turn_system_reminder
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        {
-            sections.push(reminder.to_string());
-        }
-        if sections.is_empty() {
-            return;
-        }
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(&sections.join("\n\n"));
+        crate::prompt::append_system_reminder_sections(
+            split,
+            &[
+                self.context_budget_section(),
+                self.current_turn_system_reminder.clone(),
+            ],
+        );
     }
 
     /// Build split system prompt for better caching
