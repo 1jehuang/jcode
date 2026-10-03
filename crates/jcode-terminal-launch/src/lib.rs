@@ -266,11 +266,11 @@ fn detected_resume_terminal_with_client_env(
 
     #[cfg(target_os = "macos")]
     {
-        return match term_program.as_deref() {
+        match term_program.as_deref() {
             Some("iterm.app") | Some("iterm2") => Some("iterm2".to_string()),
             Some("apple_terminal") | Some("terminal") => Some("terminal".to_string()),
             _ => None,
-        };
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
