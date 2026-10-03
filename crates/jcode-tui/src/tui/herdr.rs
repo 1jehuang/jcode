@@ -555,11 +555,12 @@ mod tests {
             ));
             std::fs::create_dir_all(&dir).unwrap();
             let bin = dir.join("herdr");
+            // The script logs next to itself via `$0` rather than embedding
+            // the temp path, so any `TMPDIR` (spaces, quotes) works.
             std::fs::write(
                 &bin,
                 format!(
-                    "#!/bin/sh\necho \"$*\" >> '{}'\nfor a in \"$@\"; do [ \"$a\" = -- ] && exit {resume_exit_code}; done\nexit 0\n",
-                    dir.join("calls.log").display()
+                    "#!/bin/sh\necho \"$*\" >> \"$(dirname \"$0\")/calls.log\"\nfor a in \"$@\"; do [ \"$a\" = -- ] && exit {resume_exit_code}; done\nexit 0\n"
                 ),
             )
             .unwrap();
