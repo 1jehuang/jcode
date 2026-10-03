@@ -2555,3 +2555,108 @@ fn recall_count_untouched_on_keyword_fallback() {
     result.expect("r4 fallback test body panicked");
 }
 
+
+#[test]
+fn r5_profile_leg_holds_stable_categories_and_ignores_recall_counters() {
+    with_temp_home(|_| {
+        let manager = MemoryManager::new().with_project_dir("/r5-profile");
+        let pref_id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Preference,
+                "prefer tabs over spaces",
+            ))
+            .expect("remember preference");
+        let corr_id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Correction,
+                "never force-push to main",
+            ))
+            .expect("remember correction");
+        let fact_id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "repo uses limine bootloader",
+            ))
+            .expect("remember fact");
+        let entity_id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Entity,
+                "acme deploy pipeline",
+            ))
+            .expect("remember entity");
+
+        // Profile block holds pref + correction, never the fact or entity.
+        let profile = manager
+            .get_profile_memories_scoped(5, MemoryScope::Project)
+            .expect("profile block renders");
+        assert!(profile.starts_with("# Memory Profile"), "profile header:\n{profile}");
+        assert!(profile.contains("prefer tabs over spaces"));
+        assert!(profile.contains("never force-push to main"));
+        assert!(!profile.contains("limine bootloader"), "facts stay situational");
+        assert!(!profile.contains("acme deploy pipeline"), "entities stay situational");
+
+        // Corrections render before preferences (standing-instruction order).
+        let corr_pos = profile.find("never force-push").expect("correction present");
+        let pref_pos = profile.find("prefer tabs").expect("preference present");
+        assert!(corr_pos < pref_pos, "corrections first:\n{profile}");
+
+        // byte size: always-on block stays tiny.
+        let bytes = profile.len();
+        assert!(bytes < 2048, "profile block small by construction: {bytes} bytes");
+
+        // R4 counters never leak into the render: bump them on the seeded
+        // rows, rebuild, and require byte-identical output with no digits
+        // from counts or timestamps in the block.
+        {
+            let mut graph = manager.load_project_graph().expect("load graph");
+            for id in [&pref_id, &corr_id, &fact_id, &entity_id] {
+                let stored = graph.get_memory_mut(id).expect("seeded row");
+                stored.mark_recalled();
+                stored.mark_recalled();
+            }
+            manager.save_project_graph(&graph).expect("persist bumps");
+        }
+        let rebuilt = manager
+            .get_profile_memories_scoped(5, MemoryScope::Project)
+            .expect("profile rebuilds");
+        assert_eq!(profile, rebuilt, "profile byte-stable across recall bumps");
+        assert!(!rebuilt.contains("recall_count"));
+        assert!(!rebuilt.contains("last_recalled_at"));
+
+        // Stability across turns: remembering a new FACT leaves the profile
+        // bytes identical (situational writes never perturb the static leg).
+        manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "kernel 6.14 in use",
+            ))
+            .expect("remember second fact");
+        let after_fact = manager
+            .get_profile_memories_scoped(5, MemoryScope::Project)
+            .expect("profile after fact remember");
+        assert_eq!(profile, after_fact, "fact writes leave profile untouched");
+
+        // Situational leg still retrieves the fact via the scoped tool path.
+        let recent = manager
+            .get_prompt_memories_scoped(10, MemoryScope::Project)
+            .expect("recent tool leg renders");
+        assert!(recent.contains("limine bootloader"), "recent leg keeps facts");
+
+        // Tombstoned profile entries drop out of the block.
+        manager.forget(&pref_id).expect("forget preference");
+        let after_forget = manager
+            .get_profile_memories_scoped(5, MemoryScope::Project)
+            .expect("profile after forget");
+        assert!(!after_forget.contains("prefer tabs over spaces"));
+        assert!(after_forget.contains("never force-push to main"));
+
+        // Empty profile (no pref/correction left after forgetting both).
+        manager.forget(&corr_id).expect("forget correction");
+        assert!(
+            manager
+                .get_profile_memories_scoped(5, MemoryScope::Project)
+                .is_none(),
+            "no stable entries means no block (fail-open, not empty header)"
+        );
+    });
+}

@@ -152,6 +152,28 @@ impl Agent {
             self.agents_md_snapshot.clone(),
         );
 
+        // R5 stable-vs-situational split: the always-on profile leg docks at
+        // the END of the static part (after the skills list, S6 in R2's
+        // map). End-of-static is the cache-optimal slot: everything above
+        // keeps its prefix on profile edits, and profile edits are rare vs
+        // per-turn episodic volatility. The session-override early return
+        // above keeps overrides absolute (no profile appended), matching
+        // existing memory behavior. Fail-open: any load error yields no
+        // block, never a broken prompt.
+        if self.memory_enabled {
+            let manager = working_dir
+                .as_deref()
+                .map(|dir| crate::memory::MemoryManager::new().with_project_dir(dir))
+                .unwrap_or_default();
+            if let Some(profile) = manager.get_profile_memories_scoped(
+                crate::memory::MEMORY_PROFILE_MAX_ENTRIES,
+                crate::memory::MemoryScope::All,
+            ) {
+                split.static_part.push_str("\n\n");
+                split.static_part.push_str(&profile);
+            }
+        }
+
         self.append_current_turn_system_reminder(&mut split);
         crate::prompt::append_swarm_effort_directive(
             &mut split,

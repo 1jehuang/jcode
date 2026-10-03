@@ -32,8 +32,8 @@ mod prompt_support;
 
 pub use crate::memory_types::{
     CitationStatus, MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement,
-    SourceCitation, TrustLevel, citation_stale_mark, format_relevant_display_prompt,
-    format_relevant_prompt, format_relevant_prompt_verified,
+    SourceCitation, TrustLevel, citation_stale_mark, format_profile_prompt,
+    format_relevant_display_prompt, format_relevant_prompt, format_relevant_prompt_verified,
 };
 use crate::memory_types::{
     bm25_token_stream, collect_skill_query_terms, format_entries_for_prompt,
@@ -65,6 +65,11 @@ pub use prompt_support::{
 const LEGACY_NOTE_CATEGORY: &str = "note";
 const MEMORY_RELEVANCE_MAX_CANDIDATES: usize = 30;
 const MEMORY_RELEVANCE_MAX_RESULTS: usize = 10;
+
+/// R5: cap on always-on profile entries (Corrections + Preferences). The
+/// always-on block stays tiny by construction: 5 short standing
+/// instructions render at ~0.3-1.5 KB.
+pub const MEMORY_PROFILE_MAX_ENTRIES: usize = 5;
 
 /// Producer of synthetic [`MemoryEntry`] values contributed by a higher layer.
 ///
@@ -2050,8 +2055,20 @@ impl MemoryManager {
         Ok((generated, failed))
     }
 
-    pub fn get_prompt_memories(&self, limit: usize) -> Option<String> {
-        self.get_prompt_memories_scoped(limit, MemoryScope::All)
+    /// R5 stable-vs-situational split: the always-on profile leg. Loads
+    /// active, non-superseded Preference + Correction entries (the stable
+    /// standing instructions) and renders them via `format_profile_prompt`.
+    /// Fail-open: any load error yields `None` (no block, never a broken
+    /// prompt). The renderer ignores R4's `recall_count` / `last_recalled_at`
+    /// (record-only surfacing counters, never instruction content).
+    pub fn get_profile_memories_scoped(&self, limit: usize, scope: MemoryScope) -> Option<String> {
+        let entries: Vec<MemoryEntry> = self
+            .collect_memories_scoped(scope)
+            .ok()?
+            .into_iter()
+            .filter(|entry| entry.active && entry.superseded_by.is_none())
+            .collect();
+        format_profile_prompt(&entries, limit)
     }
 
     pub fn get_prompt_memories_scoped(&self, limit: usize, scope: MemoryScope) -> Option<String> {
@@ -2526,14 +2543,33 @@ impl MemoryManager {
                     .unwrap_or_default()
             }
         };
-        let count = relevant.len();
+        // R5 stable-vs-situational split: the Jev/keyword-selected `relevant`
+        // list is partitioned here. Preference/Correction entries are elided
+        // from the volatile-leg payload — they ride always-on in the static
+        // profile block (see `get_profile_memories_scoped`), so repeating
+        // them per-turn would burn cache and tokens for standing
+        // instructions. Candidates, judging, fallback, and order above this
+        // point are bit-for-bit unchanged: this is an injection-layout
+        // change, not ranking. If every selected entry is profile-category,
+        // the episodic prompt is `None` (nothing new to say that turn).
+        let situational: Vec<MemoryEntry> = relevant
+            .iter()
+            .filter(|entry| {
+                !matches!(
+                    entry.category,
+                    MemoryCategory::Preference | MemoryCategory::Correction
+                )
+            })
+            .cloned()
+            .collect();
+        let situational_count = situational.len();
         pipeline_update(|p| {
             p.verify = StepStatus::Done;
             p.verify_result = Some(StepResult {
-                summary: format!("Jev: {count} relevant"),
+                summary: format!("Jev: {situational_count} relevant"),
                 latency_ms: started.elapsed().as_millis() as u64,
             });
-            p.inject = if count == 0 {
+            p.inject = if situational_count == 0 {
                 StepStatus::Skipped
             } else {
                 StepStatus::Pending
@@ -2545,21 +2581,30 @@ impl MemoryManager {
         // (no root, legacy) fall back to the unverified prompt — recall
         // never withholds a memory.
         let prompt = match self.get_project_dir() {
-            Some(root) => format_relevant_prompt_verified(&relevant, 5, &root)
-                .or_else(|| format_relevant_prompt(&relevant, 5)),
-            None => format_relevant_prompt(&relevant, 5),
+            Some(root) => format_relevant_prompt_verified(&situational, 5, &root)
+                .or_else(|| format_relevant_prompt(&situational, 5)),
+            None => format_relevant_prompt(&situational, 5),
         };
-        let display = format_relevant_display_prompt(&relevant, 5);
-        set_state(if count == 0 {
+        let display = format_relevant_display_prompt(&situational, 5);
+        set_state(if situational_count == 0 {
             MemoryState::Idle
         } else {
-            MemoryState::FoundRelevant { count }
+            MemoryState::FoundRelevant {
+                count: situational_count,
+            }
         });
         emit_memory_activity(event_tx.as_ref());
+        // R5: the relevance result carries the SITUATIONAL list (profile
+        // entries already elided). Downstream publish-validation re-renders
+        // from `selected_entries`, so the partitioned list — not the raw
+        // judge output — must flow through; otherwise validation discards
+        // every payload that contained a profile entry. `FoundRelevant`
+        // likewise counts situational entries ("Jev: N relevant" semantics),
+        // matching the pipeline summary above.
         Ok(MemoryRelevanceResult {
             prompt,
             display_prompt: display,
-            selected_entries: relevant,
+            selected_entries: situational,
         })
     }
 

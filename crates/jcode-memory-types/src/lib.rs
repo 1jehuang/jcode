@@ -1085,6 +1085,50 @@ pub fn format_relevant_display_prompt(entries: &[MemoryEntry], limit: usize) -> 
     format_entries_for_prompt_with_header(entries, limit, true, true, None)
 }
 
+/// R5 stable-vs-situational split: the always-on profile leg. Renders ONLY
+/// stable standing instructions (Corrections, then Preferences) as plain
+/// numbered lines under a `# Memory Profile` header.
+///
+/// Cache-stability contract: given an unchanged store the output is
+/// byte-identical — no timestamps, no counts, no stale-age marks, total
+/// id-order within each category. Deliberately ignores `recall_count` /
+/// `last_recalled_at` (R4 record-only fields): surfacing frequency is never
+/// standing-instruction content. Facts, entities, and custom categories are
+/// situational and stay on the retrieved (episodic) leg.
+pub fn format_profile_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
+    let mut corrections: Vec<&MemoryEntry> = Vec::new();
+    let mut preferences: Vec<&MemoryEntry> = Vec::new();
+    for entry in entries {
+        match entry.category {
+            MemoryCategory::Correction => corrections.push(entry),
+            MemoryCategory::Preference => preferences.push(entry),
+            _ => {}
+        }
+    }
+    corrections.sort_by(|a, b| a.id.cmp(&b.id));
+    preferences.sort_by(|a, b| a.id.cmp(&b.id));
+    corrections.truncate(limit);
+    preferences.truncate(limit.saturating_sub(corrections.len()));
+
+    if corrections.is_empty() && preferences.is_empty() {
+        return None;
+    }
+
+    let mut output = String::from("# Memory Profile\n");
+    let mut write_section = |title: &str, items: &[&MemoryEntry]| {
+        if items.is_empty() {
+            return;
+        }
+        output.push_str(&format!("\n## {title}\n"));
+        for (idx, item) in items.iter().enumerate() {
+            output.push_str(&format!("{}. {}\n", idx + 1, item.content.trim()));
+        }
+    };
+    write_section("Corrections", &corrections);
+    write_section("Preferences", &preferences);
+    Some(output.trim_end().to_string())
+}
+
 /// True when the citation verifies under matching history but the checkout
 /// is foreign: same root commit, different upstream remote (a clone, a fork
 /// checkout, a re-pointed remote). The bytes back the fact, but the project

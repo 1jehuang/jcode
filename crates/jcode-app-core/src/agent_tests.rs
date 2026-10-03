@@ -4621,3 +4621,82 @@ fn pruner_wire_unknown_tool_bypasses_when_mode_on() {
     }
     crate::config::Config::invalidate_cache();
 }
+
+#[test]
+fn r5_profile_block_docks_at_end_of_static_and_survives_fact_writes() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+    let project = tempfile::tempdir().unwrap();
+    let project_str = project.path().to_str().unwrap().to_string();
+
+    // Seed one preference + one correction + one fact in project scope.
+    let manager =
+        crate::memory::MemoryManager::new().with_project_dir(project.path().to_path_buf());
+    manager
+        .remember_project(crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Preference,
+            "r5 prompt-level preference marker",
+        ))
+        .unwrap();
+    manager
+        .remember_project(crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Correction,
+            "r5 prompt-level correction marker",
+        ))
+        .unwrap();
+    manager
+        .remember_project(crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "r5 prompt-level fact marker",
+        ))
+        .unwrap();
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let agent = Agent::new_with_initial_working_dir(
+        provider,
+        Registry::empty(),
+        Some(project_str.as_str()),
+    );
+    let first = agent.build_system_prompt_split(None).static_part;
+    assert!(first.contains("# Memory Profile"), "profile docked:\n{first}");
+    assert!(first.contains("r5 prompt-level preference marker"));
+    assert!(first.contains("r5 prompt-level correction marker"));
+    assert!(
+        !first.contains("r5 prompt-level fact marker"),
+        "facts stay off the static leg"
+    );
+
+    // Rebuild twice with an intervening FACT remember: profile bytes identical.
+    manager
+        .remember_project(crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "r5 second fact marker",
+        ))
+        .unwrap();
+    let second = agent.build_system_prompt_split(None).static_part;
+    let profile_of = |s: &str| {
+        let idx = s.find("# Memory Profile").expect("profile present");
+        s[idx..].to_string()
+    };
+    assert_eq!(profile_of(&first), profile_of(&second));
+    assert!(second.len() - first.len() < 64, "static grows only by separators, if at all");
+
+    // Session override stays absolute: no profile appended.
+    let mut overridden = Agent::new_with_initial_working_dir(
+        Arc::new(NativeAutoCompactionProvider),
+        Registry::empty(),
+        Some(project_str.as_str()),
+    );
+    overridden.set_system_prompt("custom override");
+    let split = overridden.build_system_prompt_split(None);
+    assert_eq!(split.static_part, "custom override");
+    assert!(!split.static_part.contains("# Memory Profile"));
+
+    match prev_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::Config::invalidate_cache();
+}
