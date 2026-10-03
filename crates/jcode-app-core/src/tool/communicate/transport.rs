@@ -154,9 +154,12 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("missing.sock");
 
-        let err = connect_swarm_socket(&socket_path)
-            .await
-            .expect_err("missing socket should fail");
+        // Not `expect_err`: that needs `Stream: Debug`, which it deliberately is
+        // not, and implementing Debug there would not help the assertion. This
+        // is why `cargo test -p jcode-app-core` did not compile at all.
+        let Err(err) = connect_swarm_socket(&socket_path).await else {
+            panic!("missing socket should fail");
+        };
 
         assert_eq!(err.to_string(), SERVER_NOT_RUNNING);
     }
