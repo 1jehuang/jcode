@@ -406,3 +406,602 @@ fn stale_anchor_above_shifted_area_is_rehomed_not_drawn_out_of_bounds() {
     );
     assert_placements_sane("shifted area", area1, &second.visible);
 }
+
+/// A small two-section Overview (runtime + KV cache). The status line owns
+/// model identity and context fullness, so these are the detail sections a
+/// typical session merges into the combined box.
+fn model_and_context_data() -> InfoWidgetData {
+    InfoWidgetData {
+        model: Some("GLM-5.3".to_string()),
+        provider_name: Some("e2e-mock".to_string()),
+        upstream_provider: Some("Fireworks".to_string()),
+        connection_type: Some("websocket".to_string()),
+        cache_hit_info: Some(crate::tui::info_widget::CacheHitInfo {
+            reported_input_tokens: 20_000,
+            read_tokens: 15_000,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Ragged chat: a full-width line every `period` rows, so the tallest free
+/// pocket is `period - 1` rows.
+fn ragged_margins(period: usize, scroll_top: usize) -> Margins {
+    let free: Vec<u16> = (0..40)
+        .map(|r| {
+            if (scroll_top + r) % period == period - 1 {
+                4
+            } else {
+                60
+            }
+        })
+        .collect();
+    Margins {
+        right_widths: free.clone(),
+        right_reliable: free,
+        scroll_top,
+        ..Default::default()
+    }
+}
+
+fn right_kinds(placements: &[WidgetPlacement]) -> Vec<WidgetKind> {
+    placements
+        .iter()
+        .filter(|p| p.side == Side::Right)
+        .map(|p| p.kind)
+        .collect()
+}
+
+/// A pocket tall enough for the combined box must get the combined box, not
+/// its parts scattered as separate boxes. Previously Overview required a fixed
+/// 10-row pocket even though it renders ~5 rows, so a ragged chat split it.
+#[test]
+fn overview_stays_whole_when_pocket_fits_its_real_height() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let overview_h = calculate_widget_height(WidgetKind::Overview, &data, 40, 40);
+    assert!(
+        overview_h > 2 && overview_h < 10,
+        "overview height {overview_h}"
+    );
+    // Pockets of 8 free rows: taller than the box, shorter than the old fixed 10.
+    let out = calculate_placements_anchored(area, &ragged_margins(9, 0), &data, true, &[]);
+    assert_placements_sane("ragged 9", area, &out.visible);
+    assert_eq!(right_kinds(&out.visible), vec![WidgetKind::Overview]);
+}
+
+/// Split parts anchored while space was scarce must merge back into the
+/// combined box once a pocket that fits it appears, instead of riding the
+/// transcript as separate boxes until they scroll off.
+#[test]
+fn split_widgets_merge_back_into_overview_when_space_returns() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 0, 140, 40);
+    // Anchors as a previous frame left them: model and context placed as two
+    // separate right-side boxes, still on screen.
+    let split = |kind: WidgetKind, y: u16, h: u16| WidgetAnchor {
+        placement: WidgetPlacement {
+            kind,
+            rect: Rect::new(100, y, 40, h),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        content_top: y as usize,
+    };
+    let anchors = vec![
+        split(WidgetKind::ModelInfo, 2, 4),
+        split(WidgetKind::KvCache, 20, 3),
+    ];
+    let roomy = Margins {
+        right_widths: vec![60; 40],
+        right_reliable: vec![60; 40],
+        scroll_top: 0,
+        ..Default::default()
+    };
+    let out = calculate_placements_anchored(area, &roomy, &data, true, &anchors);
+    assert_placements_sane("merge back", area, &out.visible);
+    assert_eq!(right_kinds(&out.visible), vec![WidgetKind::Overview]);
+    assert!(
+        out.anchors
+            .iter()
+            .all(|a| !is_overview_mergeable(a.placement.kind)),
+        "split anchors must be retired once overview is placed: {:?}",
+        out.anchors
+            .iter()
+            .map(|a| a.placement.kind)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Over a long ragged chat that scrolls one line per frame, the right side
+/// never shows the combined box and one of its parts at the same time, and
+/// shows at most one box whenever the combined box fits.
+#[test]
+fn growing_ragged_chat_never_shows_overview_parts_alongside_overview() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let mut anchors: Vec<WidgetAnchor> = Vec::new();
+    for frame in 0..300usize {
+        let out =
+            calculate_placements_anchored(area, &ragged_margins(9, frame), &data, true, &anchors);
+        assert_placements_sane("growing chat", area, &out.visible);
+        let kinds = right_kinds(&out.visible);
+        assert!(
+            kinds.len() <= 1,
+            "frame {frame}: right side fragmented into {kinds:?}"
+        );
+        anchors = out.anchors;
+    }
+}
+
+/// Re-merging must not oscillate: in a ragged chat where the combined box only
+/// fits some of the time, the right side must not flip between one merged box
+/// and scattered parts frame after frame.
+#[test]
+fn remerge_does_not_flicker_between_merged_and_split() {
+    let data = contended_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let mut anchors: Vec<WidgetAnchor> = Vec::new();
+    let mut flips = 0usize;
+    let mut last_had_overview: Option<bool> = None;
+    for frame in 0..300usize {
+        // Alternate dense and sparse stretches of transcript.
+        let period = if (frame / 40) % 2 == 0 { 5 } else { 12 };
+        let out = calculate_placements_anchored(
+            area,
+            &ragged_margins(period, frame),
+            &data,
+            true,
+            &anchors,
+        );
+        assert_placements_sane("remerge flicker", area, &out.visible);
+        let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
+        if kinds.contains(&WidgetKind::Overview) {
+            for k in &kinds {
+                assert!(
+                    !is_overview_mergeable(*k),
+                    "frame {frame}: {k:?} shown alongside overview {kinds:?}"
+                );
+            }
+        }
+        let has = kinds.contains(&WidgetKind::Overview);
+        if last_had_overview.is_some_and(|l| l != has) {
+            flips += 1;
+        }
+        last_had_overview = Some(has);
+        anchors = out.anchors;
+    }
+    // Seven dense/sparse transitions over the run: allow a switch per
+    // transition, not per frame.
+    assert!(flips <= 14, "merged/split state flipped {flips} times");
+}
+
+/// A widget that is not part of Overview (memory) keeps its own anchor when
+/// the split parts are merged back.
+#[test]
+fn remerge_keeps_non_mergeable_anchors() {
+    let data = contended_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let anchor = |kind: WidgetKind, y: u16, h: u16| WidgetAnchor {
+        placement: WidgetPlacement {
+            kind,
+            rect: Rect::new(100, y, 40, h),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        content_top: y as usize,
+    };
+    let anchors = vec![
+        anchor(WidgetKind::KvCache, 1, 4),
+        anchor(WidgetKind::MemoryActivity, 30, 6),
+    ];
+    let roomy = Margins {
+        right_widths: vec![60; 40],
+        right_reliable: vec![60; 40],
+        scroll_top: 0,
+        ..Default::default()
+    };
+    let out = calculate_placements_anchored(area, &roomy, &data, true, &anchors);
+    assert_placements_sane("keep memory", area, &out.visible);
+    let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
+    assert!(kinds.contains(&WidgetKind::Overview), "{kinds:?}");
+    let memory = out
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::MemoryActivity)
+        .expect("memory widget kept");
+    assert_eq!(memory.rect.y, 30, "memory must hold its anchored slot");
+}
+
+fn right_anchor(kind: WidgetKind, y: u16, h: u16) -> WidgetAnchor {
+    WidgetAnchor {
+        placement: WidgetPlacement {
+            kind,
+            rect: Rect::new(100, y, 40, h),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        content_top: y as usize,
+    }
+}
+
+fn roomy_margins() -> Margins {
+    Margins {
+        right_widths: vec![60; 40],
+        right_reliable: vec![60; 40],
+        scroll_top: 0,
+        ..Default::default()
+    }
+}
+
+/// Review #1456 (1): an Overview seated in a slot sized for model + context
+/// must not stay in that slot once todos make it taller - holding it would
+/// suppress the parts and render nothing (the content no longer fits).
+#[test]
+fn overview_that_outgrows_its_slot_rehomes_instead_of_going_blank() {
+    let mut data = model_and_context_data();
+    let small = calculate_widget_height(WidgetKind::Overview, &data, 40, 40);
+    let anchors = vec![right_anchor(WidgetKind::Overview, 3, small)];
+    data.todos = vec![
+        todo("a", "in_progress"),
+        todo("b", "pending"),
+        todo("c", "pending"),
+    ];
+    let grown = calculate_widget_height(WidgetKind::Overview, &data, 40, 40);
+    assert!(
+        grown > small,
+        "precondition: todos grow overview ({small} -> {grown})"
+    );
+    let area = Rect::new(0, 0, 140, 40);
+    let out = calculate_placements_anchored(area, &roomy_margins(), &data, true, &anchors);
+    assert_placements_sane("outgrown", area, &out.visible);
+    let overview = out
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("overview still shown");
+    assert!(
+        overview.rect.height >= grown,
+        "overview kept a {}-row slot for {grown}-row content",
+        overview.rect.height
+    );
+}
+
+/// Review #1456 (2): the re-merge fit test must use space left after other
+/// anchored widgets reserve their rows. If memory holds the only pocket tall
+/// enough for Overview, the split context box must stay visible.
+#[test]
+fn remerge_keeps_split_part_when_other_anchor_holds_the_only_pocket() {
+    let data = contended_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let overview_need = super::phase2_min_height(WidgetKind::Overview, &data);
+    // One tall pocket (rows 0..=17), then dense lines, then a 4-row pocket
+    // (rows 30..=33) that only fits the small context box.
+    let free: Vec<u16> = (0..40)
+        .map(|r| {
+            if r <= 17 || (30..=33).contains(&r) {
+                60
+            } else {
+                4
+            }
+        })
+        .collect();
+    assert!(
+        18 >= overview_need,
+        "precondition: tall pocket fits overview"
+    );
+    let margins = Margins {
+        right_widths: free.clone(),
+        right_reliable: free,
+        scroll_top: 0,
+        ..Default::default()
+    };
+    // Memory occupies the tall pocket; context sits split in the small one.
+    let anchors = vec![
+        right_anchor(WidgetKind::MemoryActivity, 0, 18),
+        right_anchor(WidgetKind::KvCache, 30, 4),
+    ];
+    let out = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+    assert_placements_sane("reserved pocket", area, &out.visible);
+    let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
+    assert!(
+        kinds.contains(&WidgetKind::KvCache) || kinds.contains(&WidgetKind::Overview),
+        "context information vanished: {kinds:?}"
+    );
+}
+
+/// Review #1456 (3): swarm and compaction are Overview-suppressed but Overview
+/// does not render them, so re-merging must keep their boxes.
+#[test]
+fn remerge_keeps_swarm_and_compaction_boxes() {
+    let data = contended_data();
+    let area = Rect::new(0, 0, 140, 40);
+    for kind in [WidgetKind::SwarmStatus, WidgetKind::Compaction] {
+        assert!(data.has_data_for(kind), "precondition: {kind:?} has data");
+        let anchors = vec![
+            right_anchor(WidgetKind::KvCache, 1, 4),
+            right_anchor(kind, 30, 6),
+        ];
+        let out = calculate_placements_anchored(area, &roomy_margins(), &data, true, &anchors);
+        assert_placements_sane("keep swarm/compaction", area, &out.visible);
+        let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
+        assert!(kinds.contains(&WidgetKind::Overview), "{kinds:?}");
+        assert!(
+            kinds.contains(&kind),
+            "{kind:?} box dropped by re-merge: {kinds:?}"
+        );
+    }
+}
+
+/// Review #1456 (4): re-merge must not retire a split part and then lose the
+/// only Overview-sized pocket to a higher-priority widget (Diagrams). The
+/// retirement is only committed if Overview is actually placed.
+#[test]
+fn remerge_keeps_split_part_when_higher_priority_widget_takes_the_pocket() {
+    let mut data = model_and_context_data();
+    data.diagrams = vec![crate::tui::info_widget::DiagramInfo {
+        hash: 70,
+        width: 800,
+        height: 400,
+        label: None,
+    }];
+    assert!(data.available_widgets().first() == Some(&WidgetKind::Diagrams));
+    let area = Rect::new(0, 0, 140, 40);
+    // A single 12-row pocket (rows 0..=11) that Diagrams fills, dense lines,
+    // then a 4-row pocket (rows 17..=20) holding the split context box.
+    let free: Vec<u16> = (0..40)
+        .map(|r| {
+            if r <= 11 || (17..=20).contains(&r) {
+                60
+            } else {
+                4
+            }
+        })
+        .collect();
+    let margins = Margins {
+        right_widths: free.clone(),
+        right_reliable: free,
+        scroll_top: 0,
+        ..Default::default()
+    };
+    let anchors = vec![right_anchor(WidgetKind::KvCache, 17, 4)];
+    let out = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+    assert_placements_sane("diagram takes pocket", area, &out.visible);
+    let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
+    assert!(
+        kinds.contains(&WidgetKind::KvCache) || kinds.contains(&WidgetKind::Overview),
+        "context information vanished: {kinds:?}"
+    );
+}
+
+/// Scroll the viewport over a ragged transcript like a mouse wheel does (a few
+/// lines per step) and record what the right-hand box looks like each frame.
+fn scroll_frames(
+    data: &InfoWidgetData,
+    area: Rect,
+    margins_at: impl Fn(usize) -> Margins,
+    scroll_tops: impl Iterator<Item = usize>,
+) -> Vec<Vec<WidgetPlacement>> {
+    let mut anchors: Vec<WidgetAnchor> = Vec::new();
+    let mut frames = Vec::new();
+    for scroll_top in scroll_tops {
+        let out =
+            calculate_placements_anchored(area, &margins_at(scroll_top), data, true, &anchors);
+        assert_placements_sane(&format!("scroll {scroll_top}"), area, &out.visible);
+        anchors = out.anchors;
+        frames.push(out.visible);
+    }
+    frames
+}
+
+/// Reported bug: scrolling the chat broke the right-hand box apart. The box
+/// rode its transcript line until that line scrolled past the viewport edge,
+/// was dropped, and was re-homed from scratch into whatever pocket had settled
+/// that frame, which usually only fit its parts. It came back as separate
+/// Context / KV cache / Model boxes. Residents now stop at the viewport edge.
+#[test]
+fn scrolling_up_keeps_overview_whole_instead_of_splitting_it() {
+    let data = contended_overview_data();
+    let area = Rect::new(0, 0, 140, 40);
+    // What the live trace showed: the text leaves room for the whole box
+    // (long lines every 13 rows), but the settled space a *new* widget may be
+    // placed in is scarce (pockets of 5 rows), which fits only the parts.
+    let margins_at = |scroll_top: usize| {
+        let wall = |r: usize, period: usize| (scroll_top + r).is_multiple_of(period);
+        Margins {
+            right_widths: (0..40).map(|r| if wall(r, 13) { 4 } else { 60 }).collect(),
+            right_reliable: (0..40).map(|r| if wall(r, 6) { 4 } else { 60 }).collect(),
+            scroll_top,
+            ..Default::default()
+        }
+    };
+    // Settle the box in a roomy frame at the bottom, then wheel up 3 lines at a time.
+    let mut anchors = Vec::new();
+    let roomy = calculate_placements_anchored(area, &roomy_margins_at(600), &data, true, &anchors);
+    anchors = roomy.anchors;
+    assert_eq!(right_kinds(&roomy.visible), vec![WidgetKind::Overview]);
+    let mut scattered = 0;
+    let mut shown = 0;
+    for step in 1..=60 {
+        let scroll_top = 600 - step * 3;
+        let out =
+            calculate_placements_anchored(area, &margins_at(scroll_top), &data, true, &anchors);
+        assert_placements_sane(&format!("wheel {step}"), area, &out.visible);
+        anchors = out.anchors;
+        let kinds = right_kinds(&out.visible);
+        if kinds == vec![WidgetKind::Overview] {
+            shown += 1;
+        } else if !kinds.is_empty() {
+            scattered += 1;
+        }
+    }
+    assert_eq!(
+        scattered, 0,
+        "Overview split into its parts while scrolling"
+    );
+    assert!(
+        shown >= 50,
+        "Overview visible on only {shown}/60 wheel steps"
+    );
+}
+
+/// Guard for edge sticking: scrolling down (toward newer messages) pushes the
+/// box past the bottom edge, and it must stay whole there.
+#[test]
+fn scrolling_down_keeps_overview_whole_at_bottom_edge() {
+    let data = contended_overview_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let frames = scroll_frames(&data, area, roomy_margins_at, (0..40).map(|s| 100 + s * 3));
+    for (i, frame) in frames.iter().enumerate() {
+        assert_eq!(
+            right_kinds(frame),
+            vec![WidgetKind::Overview],
+            "frame {i}: {frame:?}"
+        );
+    }
+}
+
+/// Guard for edge sticking: a resident stuck at an edge must not bounce. An
+/// earlier version of the fix re-bound it to the line it was pushed onto, so
+/// it rode away from the edge and snapped back every frame.
+#[test]
+fn edge_stuck_overview_does_not_saw_tooth() {
+    let data = contended_overview_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let frames = scroll_frames(&data, area, roomy_margins_at, (0..30).map(|s| 900 - s * 3));
+    let ys: Vec<u16> = frames
+        .iter()
+        .skip(15)
+        .map(|f| {
+            f.iter()
+                .find(|p| p.kind == WidgetKind::Overview)
+                .unwrap()
+                .rect
+                .y
+        })
+        .collect();
+    assert!(
+        ys.windows(2).all(|w| w[0] == w[1]),
+        "edge-stuck overview moved: {ys:?}"
+    );
+}
+
+/// Guard for edge sticking: two residents pushed toward the same edge must not
+/// be drawn on top of each other (seen live while developing the fix).
+#[test]
+fn edge_stuck_residents_never_overlap() {
+    let data = model_and_context_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let anchors = vec![
+        right_anchor(WidgetKind::KvCache, 30, 5),
+        right_anchor(WidgetKind::ModelInfo, 34, 3),
+    ];
+    let mut prev = anchors;
+    for step in 0..20 {
+        let out =
+            calculate_placements_anchored(area, &roomy_margins_at(step * 3), &data, true, &prev);
+        assert_placements_sane(&format!("step {step}"), area, &out.visible);
+        prev = out.anchors;
+    }
+}
+
+fn roomy_margins_at(scroll_top: usize) -> Margins {
+    Margins {
+        scroll_top,
+        ..roomy_margins()
+    }
+}
+
+/// Model + context + KV cache + git: the Overview is ~8 rows, taller than the
+/// pockets a ragged chat usually leaves, while each part fits on its own.
+fn contended_overview_data() -> InfoWidgetData {
+    InfoWidgetData {
+        todos: vec![todo("t1", "in_progress"), todo("t2", "pending")],
+        ..model_and_context_data()
+    }
+}
+
+/// Review #1456: a widget hidden while stuck below the top band has its content
+/// line above the viewport. Re-merge used to reserve rows from that line (row 0
+/// after saturating), not the slot the widget will return to, so Overview could
+/// take the slot and the widget stayed hidden after the text cleared.
+#[test]
+fn remerge_keeps_slot_of_widget_hidden_below_top_band() {
+    let data = contended_data();
+    let scroll_top = 200usize;
+    // Pockets exactly as tall as Overview really draws at full width, so the
+    // re-merge trial can seat it.
+    let ov = calculate_widget_height(WidgetKind::Overview, &data, 40, u16::MAX) as usize;
+    assert!(ov > 2, "precondition: overview has content");
+    let mem_h = (ov + 2) as u16;
+    // The band is taller than the memory box, so the old reservation (rows
+    // from 0, the off-screen line clamped to the top) falls inside the band
+    // and leaves the real slot below it unprotected.
+    let band = mem_h as usize + 2;
+    let rows = band + 5 * (ov + 1);
+    let area = Rect::new(0, 0, 140, rows as u16);
+    // This frame, text leaves gaps of exactly `ov` free rows below the band:
+    // Overview fits, the taller Memory box fits nowhere and hides in place.
+    let widths_with = |covered: bool| -> Vec<u16> {
+        (0..rows)
+            .map(|r| {
+                if r < band || (covered && (r - band) % (ov + 1) == ov) {
+                    0
+                } else {
+                    60
+                }
+            })
+            .collect()
+    };
+    let margins = |covered: bool| Margins {
+        right_widths: widths_with(covered),
+        right_reliable: widths_with(covered),
+        scroll_top,
+        content_start_row: band,
+        ..Default::default()
+    };
+    let memory = WidgetAnchor {
+        placement: WidgetPlacement {
+            kind: WidgetKind::MemoryActivity,
+            rect: Rect::new(100, band as u16, 40, mem_h),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        // Stuck below the band: its own line scrolled above the viewport.
+        content_top: scroll_top - 30,
+    };
+    // A split part further down triggers the Overview re-merge trial.
+    let part_row = band + 3 * (ov + 1);
+    let parts = right_anchor(WidgetKind::KvCache, part_row as u16, 3);
+    let hidden = calculate_placements_anchored(area, &margins(true), &data, true, &[memory, parts]);
+    assert_placements_sane("hidden frame", area, &hidden.visible);
+    assert!(
+        !hidden
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::MemoryActivity),
+        "precondition: memory is hidden this frame: {:?}",
+        hidden.visible
+    );
+    let slot = (band, band + mem_h as usize);
+    for p in &hidden.visible {
+        let (start, end) = (p.rect.y as usize, (p.rect.y + p.rect.height) as usize);
+        assert!(
+            end <= slot.0 || start >= slot.1,
+            "{:?} took the hidden memory slot {slot:?}: {:?}",
+            p.kind,
+            p.rect
+        );
+    }
+    // Next frame the text has passed: memory returns to the slot it kept.
+    let cleared =
+        calculate_placements_anchored(area, &margins(false), &data, true, &hidden.anchors);
+    assert_placements_sane("cleared frame", area, &cleared.visible);
+    let back = cleared
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::MemoryActivity)
+        .unwrap_or_else(|| panic!("memory stayed hidden: {:?}", cleared.visible));
+    assert_eq!(back.rect.y as usize, band, "memory came back elsewhere");
+}
