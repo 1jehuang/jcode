@@ -190,7 +190,7 @@ Do not block on a long `bg wait` for workers. Your job while a plan runs is to c
 
 Deep mode has no fixed depth and no per-node fan-out limit: growth is bounded only by the live-worker budget and the total member cap. How far to expand is the owner's call at expansion time, on the node's own terms; there is no prescribed number, because the right breadth depends on what the node contains.
 
-The one control a node's brief can carry is `do not expand this node`, which switches its assignment to atomic execution.
+A node's brief can also request atomic execution instead of decomposition. **Handle this carefully:** the server detects it by an ASCII-case-insensitive substring match anywhere in the brief, with no word boundary, no line anchoring and no position, so a node whose brief merely discusses the mechanism, quotes it, or contains it inside a code block is silently switched to atomic execution with no other signal. Decide per node whether it is genuinely atomic, and describe the intent in your own words rather than pasting the marker text into a brief.
 
 ## Workflow
 
