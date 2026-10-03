@@ -333,6 +333,8 @@ pub struct ScrollKeys {
     pub prompt_up: KeyBinding,
     pub prompt_down: KeyBinding,
     pub bookmark: KeyBinding,
+    /// Jump to the bottom of the chat (`scroll_to_bottom`). Empty = disabled.
+    pub to_bottom: Vec<KeyBinding>,
 }
 
 impl ScrollKeys {
@@ -433,6 +435,17 @@ impl ScrollKeys {
     /// Check if a key matches the scroll bookmark toggle
     pub fn is_bookmark(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
         self.bookmark.matches(code, modifiers)
+    }
+
+    /// Check if a key matches the jump-to-bottom binding.
+    pub fn is_to_bottom(&self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        binding_list_matches(&self.to_bottom, code, modifiers)
+    }
+
+    /// Display label for the primary jump-to-bottom chord, or `None` when
+    /// the action is unbound.
+    pub fn to_bottom_label(&self) -> Option<String> {
+        self.to_bottom.first().map(format_binding)
     }
 }
 
@@ -670,6 +683,10 @@ mod tests {
                 code: KeyCode::Char('g'),
                 modifiers: KeyModifiers::CONTROL,
             },
+            to_bottom: vec![KeyBinding {
+                code: KeyCode::End,
+                modifiers: KeyModifiers::CONTROL,
+            }],
         }
     }
 

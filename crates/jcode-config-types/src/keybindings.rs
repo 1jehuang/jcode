@@ -277,6 +277,17 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
         other: PlatformDefault::dev("ctrl+g"),
     },
     KeybindingDefault {
+        id: "scroll_to_bottom",
+        description: "Jump to the bottom of the chat and resume auto-follow",
+        // Ctrl+End arrives as the xterm sequence CSI 1;5F in iTerm2, Kitty,
+        // Ghostty and Terminal.app, which crossterm decodes as End+Ctrl.
+        // Alt+Q is the alias for keyboards without End (laptops) and for
+        // terminals that eat Ctrl+End. Alt+Shift+<letter> is reserved for the
+        // copy badges, and every other free Alt+letter is taken.
+        macos: PlatformDefault::dev("ctrl+end, alt+q"),
+        other: PlatformDefault::dev("ctrl+end, alt+q"),
+    },
+    KeybindingDefault {
         id: "auto_poke_toggle",
         description: "Toggle auto-poke",
         macos: PlatformDefault::dev("ctrl+p"),
@@ -638,6 +649,10 @@ mod tests {
         assert_eq!(
             default_binding("scroll_up_fallback", KeybindingPlatform::Other),
             Some("")
+        );
+        assert_eq!(
+            default_binding("scroll_to_bottom", KeybindingPlatform::MacOs),
+            Some("ctrl+end, alt+q")
         );
         assert_eq!(
             default_binding("does_not_exist", KeybindingPlatform::Other),

@@ -1026,6 +1026,10 @@ impl crate::tui::TuiState for App {
         self.dictation_key_label().map(|s| s.to_string())
     }
 
+    fn jump_to_bottom_key_label(&self) -> Option<String> {
+        self.scroll_keys.to_bottom_label()
+    }
+
     fn animation_elapsed(&self) -> f32 {
         self.app_started.elapsed().as_secs_f32()
     }
