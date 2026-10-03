@@ -1,7 +1,7 @@
 # Project Isolation Hardening Plan
 
-Status: **proposed** (not started)
-Last reviewed: 2026-10-02 (commit `2df1f77e9`)
+Status: **in_progress** (P0.1 done)
+Last reviewed: 2026-10-03 (commit `af821fd63`)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -29,6 +29,23 @@ See `AGENTS.md` "Project Isolation Invariants" for the rules that apply to every
 Each task lists the exact files, the acceptance criterion that proves the fix, and the
 regression test that must exist before it is marked `done`.
 
+### Known blocker: `cargo test -p jcode-app-core --lib` does not finish
+
+Not an isolation bug, but it blocks whole-suite verification of every task here.
+
+`server::comm_control` tests take the process-global env lock
+(`crates/jcode-base/src/storage.rs::lock_test_env`) and hold it across an `.await`. A test
+that wins the lock and then blocks on something else wedges the run: every later
+lock-waiter queues behind it and the suite stops making progress with no error. Which test
+is reported as hung varies between runs (`assign_next_prefers_worker_with_matching_subsystem_metadata`,
+then `assign_task_allows_taking_over_stale_assignment`, then
+`approve_plan_rejects_proposal_that_forms_cycle_with_existing_plan`), which is the
+signature of the *waiters* being reported, not the blocker. Each passes in isolation.
+
+Workaround used for now: verify each touched module in its own process, for example
+`cargo test -p jcode-app-core --lib comm_ownership`. A real fix belongs in the test
+harness, not in any isolation task.
+
 ---
 
 ## P0: Session ownership (HIGH)
@@ -38,22 +55,33 @@ They are also the cheapest to fix, so do them first.
 
 ### P0.1 - `Comm*` requests trust the client-supplied `session_id`
 
-- [ ] **Status:** pending
-- **Where:** `crates/jcode-app-core/src/server/client_lifecycle.rs:2385-2436` (dispatch
-  passes `req_session_id` from the wire into `handle_comm_share`),
-  `crates/jcode-app-core/src/server/client_comm_context.rs:34-48` (resolves the swarm
-  from that id alone).
+- [x] **Status:** done
+- **Where:** `crates/jcode-app-core/src/server/comm_auth.rs` (new; ownership proof for both
+  transport paths), called from
+  `crates/jcode-app-core/src/server/client_lifecycle.rs` (subscribed path) and
+  `crates/jcode-app-core/src/server/client_lightweight_control.rs` (one-shot control path).
+  `crates/jcode-app-core/src/tool/communicate/transport.rs` now attaches the capability
+  the one-shot path requires.
 - **Evidence:** `client_session_id` appears ~60 times in `client_lifecycle.rs` as a
   handler argument but is never compared against a request-supplied id.
-- **Fix:** at dispatch, overwrite `req_session_id` with `client_session_id`, or reject
-  when they differ. Apply to `CommShare`, `CommRead`, `CommMessage`, `CommList`,
-  `CommListSwarms`, `CommListChannels`, `CommListModels`, and every other `Comm*`
-  variant that carries a `session_id`.
+- **Fix:** every `Comm*` request must prove ownership of the session it names before
+  dispatch. Subscribed connections compare against the `client_session_id` the daemon
+  minted for that connection. One-shot control connections (`tool/communicate.rs` opens
+  one per request, before any `Subscribe`, so there is no session id to compare) carry a
+  capability minted in-process from a per-daemon secret; `jcode-transport` exposes no
+  portable peer-credential API on either Unix sockets or Windows named pipes, so process
+  identity cannot be checked directly. The capability is verified against the id the
+  request *claims*, not against a known session, which is what blocks replay of a token
+  for session A against session B.
+- **Also fixed:** a rejected one-shot request used to close the connection silently, which
+  is indistinguishable from a daemon crash. It now emits `ServerEvent::Error` on the
+  request's own id.
 - **Acceptance:** a client attached to session A that sends `CommShare` with session B's
-  id gets an error (or is silently rebased to A). No state in B changes.
-- **Test:** `crates/jcode-app-core/src/server/client_target_attach_tests.rs` (or a new
-  `comm_ownership` module): two sessions in different temp dirs, A sends B's id,
-  assert B's shared context is unchanged.
+  id gets an error. No state in B changes.
+- **Test:** `crates/jcode-app-core/src/server/comm_ownership_tests.rs` (4 socket-level
+  tests) and `comm_auth_tests.rs` (22 tests, including one that scans
+  `crates/jcode-protocol/src/wire.rs` for the `Comm*` variant list so a new variant cannot
+  bypass the check).
 
 ### P0.2 - `ResumeAllSessions` ignores the subscriber's working directory
 
