@@ -1366,6 +1366,19 @@ pub struct ProviderConfig {
     /// "openai-compatible:myprofile", ...), or openai-compatible profile ids
     /// ("myprofile"). The active model's routes always stay visible.
     pub model_picker_providers: Option<Vec<String>>,
+    /// Optional model-picker keep-list (allowlist), the inverse of pruning:
+    /// when non-empty, /model only renders rows matching these entries and
+    /// everything else disappears. Entry forms: "model" (any lane),
+    /// "lane:model", or "lane:model:effort". A lane is a provider label
+    /// ("openai"), an api method ("openai-api-key", "openai-oauth",
+    /// "openrouter", "openai-compatible:myprofile"), or a bare profile id;
+    /// the same vocabulary as `model_picker_providers`. A pinned effort
+    /// renders exactly that one effort row for the matched routes; without
+    /// it, each matched route collapses to its family's configured default
+    /// effort row (falling back to "high"). The active model's routes
+    /// always stay visible, and a keep-list that matches nothing falls
+    /// back to the full list so a typo cannot empty the picker.
+    pub model_picker_keep: Option<Vec<String>>,
     /// Max seconds to wait for streaming data before timing out a request with
     /// no data received. Base budget only: high reasoning efforts scale it up
     /// automatically (see `jcode_base::provider::stream_idle_timeout_for_effort`).
@@ -1398,6 +1411,7 @@ impl Default for ProviderConfig {
             gemini_force_oauth: false,
             gemini_project: None,
             model_picker_providers: None,
+            model_picker_keep: None,
             stream_idle_timeout_secs: 180,
             max_retries: 8,
             retry_backoff_cap_secs: 30,

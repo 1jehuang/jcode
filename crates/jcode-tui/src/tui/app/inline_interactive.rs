@@ -170,6 +170,102 @@ fn filter_routes_by_provider_allowlist(
     }
 }
 
+/// Build the known-lane vocabulary for `model_picker_keep` parsing: the
+/// configured openai-compatible provider ids, the openai-compatible profile
+/// catalog, and the login provider ids/aliases. Fixed lanes (openai-api,
+/// openai-oauth, ...) are recognized by the parser itself.
+fn picker_keep_known_lanes() -> Vec<String> {
+    use jcode_provider_core::picker_keep::normalize_keep_lane;
+    let mut lanes: Vec<String> = crate::config::config()
+        .providers
+        .keys()
+        .map(|id| normalize_keep_lane(id))
+        .collect();
+    for profile in crate::provider_catalog::openai_compatible_profiles() {
+        lanes.push(normalize_keep_lane(profile.id));
+        lanes.push(normalize_keep_lane(profile.display_name));
+    }
+    for provider in crate::provider_catalog::login_providers() {
+        lanes.push(normalize_keep_lane(provider.id));
+        for alias in provider.aliases {
+            lanes.push(normalize_keep_lane(alias));
+        }
+    }
+    lanes.sort();
+    lanes.dedup();
+    lanes
+}
+
+/// Apply the `provider.model_picker_keep` allowlist: only routes matching a
+/// keep entry (lane + model) survive. The active model's routes always stay
+/// visible with their full effort ladder, and a keep-list that matches
+/// nothing falls back to the unfiltered list so a typo cannot empty the
+/// picker — the same invariants as the provider allowlist above.
+fn filter_routes_by_keep_list(
+    routes: Vec<crate::provider::ModelRoute>,
+    keep_rules: &[jcode_provider_core::picker_keep::PickerKeepRule],
+    current_model: &str,
+    current_provider: &str,
+    current_api_method: Option<&str>,
+) -> Vec<crate::provider::ModelRoute> {
+    if keep_rules.is_empty() {
+        return routes;
+    }
+    let route_matches = |route: &crate::provider::ModelRoute| {
+        keep_rules.iter().any(|rule| {
+            jcode_provider_core::picker_keep::picker_keep_rule_matches_route(
+                rule,
+                &route.model,
+                &route.provider,
+                &route.api_method,
+            )
+        })
+    };
+    let route_is_current = |route: &crate::provider::ModelRoute| {
+        route.model == current_model
+            && crate::provider::model_route_provider_labels_match(&route.provider, current_provider)
+            && current_api_method.is_none_or(|api_method| {
+                crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+                    == crate::provider::ModelRouteApiMethod::parse(api_method)
+            })
+    };
+    let filtered: Vec<crate::provider::ModelRoute> = routes
+        .iter()
+        .filter(|route| route_is_current(route) || route_matches(route))
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        routes
+    } else {
+        filtered
+    }
+}
+
+/// The single effort row a keep-matched route renders when the entry pins
+/// no explicit effort: the route family's configured default effort
+/// (anthropic/openai), canonicalized, falling back to "high".
+fn picker_keep_default_effort(
+    model: &str,
+    route: &PickerOption,
+    config_anthropic_effort: Option<&str>,
+    config_openai_effort: Option<&str>,
+) -> String {
+    let selection = crate::provider::MultiProvider::default_model_selection_from_route(
+        model,
+        &route.api_method,
+        &route.provider,
+    );
+    let stored = match selection.provider_key.as_deref() {
+        Some("claude-oauth") | Some("claude-api") => config_anthropic_effort,
+        Some("openai-oauth") | Some("openai-api") => config_openai_effort,
+        _ => None,
+    };
+    stored
+        .and_then(jcode_provider_core::canonical_reasoning_effort)
+        .unwrap_or("high")
+        .to_string()
+}
+
 fn model_picker_usage_key(model_name: &str, route: &PickerOption, effort: Option<&str>) -> String {
     format!(
         "{}\u{1f}{}\u{1f}{}\u{1f}{}",
@@ -1603,6 +1699,22 @@ impl App {
             &current_provider,
             current_api_method.as_deref(),
         );
+        let keep_rules = jcode_provider_core::picker_keep::parse_picker_keep_rules(
+            config
+                .provider
+                .model_picker_keep
+                .as_deref()
+                .unwrap_or_default()
+                .iter(),
+            &picker_keep_known_lanes(),
+        );
+        let routes = filter_routes_by_keep_list(
+            routes,
+            &keep_rules,
+            &current_model,
+            &current_provider,
+            current_api_method.as_deref(),
+        );
 
         if routes.is_empty() {
             self.inline_interactive_state = None;
@@ -1766,6 +1878,46 @@ impl App {
                     for (route, route_efforts) in &effort_routes {
                         if !route_efforts.contains(effort) {
                             continue;
+                        }
+                        // `model_picker_keep`: routes the keep-list selected
+                        // render exactly one effort row — the pinned effort,
+                        // or the family's default when the entry pins none.
+                        // The active model's routes always render their full
+                        // ladder so the current selection never disappears.
+                        if !keep_rules.is_empty()
+                            && !model_picker_route_is_current(
+                                name,
+                                route,
+                                &current_model,
+                                &current_provider,
+                                current_api_method.as_deref(),
+                            )
+                        {
+                            let pinned = keep_rules
+                                .iter()
+                                .find(|rule| {
+                                    jcode_provider_core::picker_keep::picker_keep_rule_matches_route(
+                                        rule,
+                                        name,
+                                        &route.provider,
+                                        &route.api_method,
+                                    )
+                                })
+                                .map(|rule| {
+                                    rule.effort.clone().unwrap_or_else(|| {
+                                        picker_keep_default_effort(
+                                            name,
+                                            route,
+                                            config_anthropic_effort.as_deref(),
+                                            config_openai_effort.as_deref(),
+                                        )
+                                    })
+                                });
+                            if let Some(wanted) = pinned
+                                && *effort != wanted.as_str()
+                            {
+                                continue;
+                            }
                         }
                         let is_this_current = effort_matches_current
                             && model_picker_route_is_current(
@@ -3998,13 +4150,14 @@ mod tests {
 
     use super::{
         REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
-        REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
+        REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache, filter_routes_by_keep_list,
         filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
         model_picker_effort_matches_default, model_picker_route_is_current,
         model_picker_route_is_default, model_picker_route_is_recommended,
         next_model_favorite_after_current, picker_is_runtime_model_picker,
-        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
-        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
+        picker_keep_default_effort, remote_model_catalog_cache_is_fresh,
+        remote_model_catalog_cache_origin, remote_model_catalog_snapshot_is_safe,
+        route_supports_reasoning_effort,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -4748,6 +4901,130 @@ mod tests {
                 ("gpt-5.5", "OpenAI", "openai-oauth"),
                 ("qwen3-coder", "llama.cpp", "openai-compatible:llamacpp"),
             ]
+        );
+    }
+
+    fn keep_rules(entries: &[&str]) -> Vec<jcode_provider_core::picker_keep::PickerKeepRule> {
+        let known: Vec<String> = ["kimi", "glm", "deepseek-vision", "mimo", "qwencloud"]
+            .iter()
+            .map(|lane| jcode_provider_core::picker_keep::normalize_keep_lane(lane))
+            .collect();
+        jcode_provider_core::picker_keep::parse_picker_keep_rules(entries, &known)
+    }
+
+    #[test]
+    fn keep_list_filters_routes_by_lane_and_model() {
+        let routes = vec![
+            model_route("kimi-for-coding", "Kimi", "openai-compatible:kimi"),
+            model_route("glm-5.3-flash", "GLM", "openai-compatible:glm"),
+            model_route("gpt-6-luna", "OpenAI", "openai-oauth"),
+            model_route("gpt-6-luna", "OpenAI", "openai-api-key"),
+            model_route("gpt-6-astra", "OpenAI", "openai-api-key"),
+        ];
+        let rules = keep_rules(&[
+            "kimi:kimi-for-coding",
+            "glm:glm-5.3-flash",
+            "openai-oauth:gpt-6-luna:med",
+            "openai-api-key:gpt-6-astra:high",
+        ]);
+
+        let filtered = filter_routes_by_keep_list(
+            routes,
+            &rules,
+            "unrelated-current",
+            "OpenAI",
+            Some("openai-oauth"),
+        );
+        let routes: Vec<(&str, &str)> = filtered
+            .iter()
+            .map(|route| (route.model.as_str(), route.api_method.as_str()))
+            .collect();
+        // The api-key luna route is not in the keep list and must drop out.
+        assert_eq!(
+            routes,
+            [
+                ("kimi-for-coding", "openai-compatible:kimi"),
+                ("glm-5.3-flash", "openai-compatible:glm"),
+                ("gpt-6-luna", "openai-oauth"),
+                ("gpt-6-astra", "openai-api-key"),
+            ]
+        );
+    }
+
+    #[test]
+    fn keep_list_keeps_current_model_routes() {
+        let routes = vec![
+            model_route("gpt-6-sol", "OpenAI", "openai-oauth"),
+            model_route("kimi-for-coding", "Kimi", "openai-compatible:kimi"),
+        ];
+        let rules = keep_rules(&["kimi:kimi-for-coding"]);
+
+        let filtered =
+            filter_routes_by_keep_list(routes, &rules, "gpt-6-sol", "OpenAI", Some("openai-oauth"));
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn keep_list_matching_nothing_falls_back_to_unfiltered() {
+        let routes = vec![
+            model_route("gpt-6-luna", "OpenAI", "openai-oauth"),
+            model_route("gpt-6-astra", "OpenAI", "openai-api-key"),
+        ];
+        let rules = keep_rules(&["openai-oauth:typo-model:med"]);
+
+        let filtered =
+            filter_routes_by_keep_list(routes.clone(), &rules, "unrelated", "OpenAI", None);
+        assert_eq!(filtered.len(), routes.len());
+    }
+
+    #[test]
+    fn keep_list_empty_is_noop() {
+        let routes = vec![model_route("gpt-6-luna", "OpenAI", "openai-oauth")];
+        let filtered = filter_routes_by_keep_list(routes.clone(), &[], "unrelated", "OpenAI", None);
+        assert_eq!(filtered.len(), routes.len());
+    }
+
+    #[test]
+    fn keep_default_effort_prefers_family_config_then_falls_back_to_high() {
+        // OpenAI native lanes resolve the configured family effort.
+        assert_eq!(
+            picker_keep_default_effort(
+                "gpt-6-astra",
+                &picker_option_with_method("OpenAI", "openai-api-key"),
+                None,
+                Some("medium"),
+            ),
+            "medium"
+        );
+        // Anthropic OAuth lanes resolve the anthropic family effort.
+        assert_eq!(
+            picker_keep_default_effort(
+                "claude-opus",
+                &picker_option_with_method("Anthropic", "claude-oauth"),
+                Some("high"),
+                None,
+            ),
+            "high"
+        );
+        // Families without a configured effort fall back to "high"...
+        assert_eq!(
+            picker_keep_default_effort(
+                "gpt-6-astra",
+                &picker_option_with_method("OpenAI", "openai-api-key"),
+                None,
+                None,
+            ),
+            "high"
+        );
+        // ...including openai-compatible profile lanes (kimi, glm, ...).
+        assert_eq!(
+            picker_keep_default_effort(
+                "kimi-for-coding",
+                &picker_option_with_method("Kimi", "openai-compatible:kimi"),
+                None,
+                Some("medium"),
+            ),
+            "high"
         );
     }
 }
