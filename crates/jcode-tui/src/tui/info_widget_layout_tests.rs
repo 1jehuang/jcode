@@ -407,14 +407,18 @@ fn stale_anchor_above_shifted_area_is_rehomed_not_drawn_out_of_bounds() {
     assert_placements_sane("shifted area", area1, &second.visible);
 }
 
-/// Model + context only: the typical session data behind the right-hand box.
+/// A small two-section Overview (runtime + KV cache). The status line owns
+/// model identity and context fullness, so these are the detail sections a
+/// typical session merges into the combined box.
 fn model_and_context_data() -> InfoWidgetData {
     InfoWidgetData {
         model: Some("GLM-5.3".to_string()),
         provider_name: Some("e2e-mock".to_string()),
-        context_info: Some(crate::prompt::ContextInfo {
-            system_prompt_chars: 20_000,
-            total_chars: 200_000,
+        upstream_provider: Some("Fireworks".to_string()),
+        connection_type: Some("websocket".to_string()),
+        cache_hit_info: Some(crate::tui::info_widget::CacheHitInfo {
+            reported_input_tokens: 20_000,
+            read_tokens: 15_000,
             ..Default::default()
         }),
         ..Default::default()
@@ -487,7 +491,7 @@ fn split_widgets_merge_back_into_overview_when_space_returns() {
     };
     let anchors = vec![
         split(WidgetKind::ModelInfo, 2, 4),
-        split(WidgetKind::ContextUsage, 20, 3),
+        split(WidgetKind::KvCache, 20, 3),
     ];
     let roomy = Margins {
         right_widths: vec![60; 40],
@@ -589,7 +593,7 @@ fn remerge_keeps_non_mergeable_anchors() {
         content_top: y as usize,
     };
     let anchors = vec![
-        anchor(WidgetKind::ContextUsage, 1, 4),
+        anchor(WidgetKind::KvCache, 1, 4),
         anchor(WidgetKind::MemoryActivity, 30, 6),
     ];
     let roomy = Margins {
@@ -696,13 +700,13 @@ fn remerge_keeps_split_part_when_other_anchor_holds_the_only_pocket() {
     // Memory occupies the tall pocket; context sits split in the small one.
     let anchors = vec![
         right_anchor(WidgetKind::MemoryActivity, 0, 18),
-        right_anchor(WidgetKind::ContextUsage, 30, 4),
+        right_anchor(WidgetKind::KvCache, 30, 4),
     ];
     let out = calculate_placements_anchored(area, &margins, &data, true, &anchors);
     assert_placements_sane("reserved pocket", area, &out.visible);
     let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
     assert!(
-        kinds.contains(&WidgetKind::ContextUsage) || kinds.contains(&WidgetKind::Overview),
+        kinds.contains(&WidgetKind::KvCache) || kinds.contains(&WidgetKind::Overview),
         "context information vanished: {kinds:?}"
     );
 }
@@ -716,7 +720,7 @@ fn remerge_keeps_swarm_and_compaction_boxes() {
     for kind in [WidgetKind::SwarmStatus, WidgetKind::Compaction] {
         assert!(data.has_data_for(kind), "precondition: {kind:?} has data");
         let anchors = vec![
-            right_anchor(WidgetKind::ContextUsage, 1, 4),
+            right_anchor(WidgetKind::KvCache, 1, 4),
             right_anchor(kind, 30, 6),
         ];
         let out = calculate_placements_anchored(area, &roomy_margins(), &data, true, &anchors);
@@ -761,12 +765,12 @@ fn remerge_keeps_split_part_when_higher_priority_widget_takes_the_pocket() {
         scroll_top: 0,
         ..Default::default()
     };
-    let anchors = vec![right_anchor(WidgetKind::ContextUsage, 17, 4)];
+    let anchors = vec![right_anchor(WidgetKind::KvCache, 17, 4)];
     let out = calculate_placements_anchored(area, &margins, &data, true, &anchors);
     assert_placements_sane("diagram takes pocket", area, &out.visible);
     let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
     assert!(
-        kinds.contains(&WidgetKind::ContextUsage) || kinds.contains(&WidgetKind::Overview),
+        kinds.contains(&WidgetKind::KvCache) || kinds.contains(&WidgetKind::Overview),
         "context information vanished: {kinds:?}"
     );
 }
@@ -891,7 +895,7 @@ fn edge_stuck_residents_never_overlap() {
     let area = Rect::new(0, 0, 140, 40);
     let anchors = vec![
         right_anchor(WidgetKind::KvCache, 30, 5),
-        right_anchor(WidgetKind::ContextUsage, 34, 3),
+        right_anchor(WidgetKind::ModelInfo, 34, 3),
     ];
     let mut prev = anchors;
     for step in 0..20 {
@@ -969,7 +973,7 @@ fn remerge_keeps_slot_of_widget_hidden_below_top_band() {
     };
     // A split part further down triggers the Overview re-merge trial.
     let part_row = band + 3 * (ov + 1);
-    let parts = right_anchor(WidgetKind::ContextUsage, part_row as u16, 3);
+    let parts = right_anchor(WidgetKind::KvCache, part_row as u16, 3);
     let hidden = calculate_placements_anchored(area, &margins(true), &data, true, &[memory, parts]);
     assert_placements_sane("hidden frame", area, &hidden.visible);
     assert!(
