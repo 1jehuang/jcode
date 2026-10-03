@@ -806,7 +806,14 @@ fn format_dropped_path(path: &std::path::Path, quote_for_batch: bool) -> String 
             .chars()
             .any(|ch| ch.is_whitespace() || matches!(ch, '\\' | '\'' | '"'))
     {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        // On Windows the backslash is a path separator, not an escape, so
+        // doubling it there corrupts the path when it is parsed back.
+        let escaped = if cfg!(windows) {
+            value.replace('"', "\\\"")
+        } else {
+            value.replace('\\', "\\\\").replace('"', "\\\"")
+        };
+        format!("\"{escaped}\"")
     } else {
         value.into_owned()
     }
@@ -884,12 +891,30 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
     let mut token = String::new();
     let mut quote = None;
     let mut escaped = false;
-    for ch in trimmed.chars() {
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
         if escaped {
             token.push(ch);
             escaped = false;
         } else if ch == '\\' && quote != Some('\'') {
-            escaped = true;
+            // A backslash only escapes when something escapable follows it. On
+            // Windows it is the path separator, and treating every one as an
+            // escape turns  + "C:\Users\me\my file.txt" +  into  + "C:Usersmemy file.txt" + , so a
+            // terminal file drop silently fails to resolve its path.
+            match chars.get(index + 1) {
+                // Inside double quotes the text came from format_dropped_path,
+                // which escapes every separator, so a doubled backslash there
+                // is an escaped one and must collapse back.
+                Some(&next) if quote == Some('"') && matches!(next, '\\' | '"') => {
+                    escaped = true;
+                }
+                Some(&next) if next.is_whitespace() || matches!(next, '\'' | '"') => {
+                    escaped = true;
+                }
+                _ => token.push(ch),
+            }
         } else if matches!(ch, '\'' | '"') {
             if quote == Some(ch) {
                 quote = None;
@@ -905,6 +930,7 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
         } else {
             token.push(ch);
         }
+        index += 1;
     }
     if escaped || quote.is_some() {
         return None;
