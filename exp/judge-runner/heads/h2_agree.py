@@ -88,12 +88,18 @@ def main():
         if r.get("abstained") is True:
             abstained = True
         else:
-            # []-as-abstain rule (decided 2026-10-03, REMAINING.md Tier-2 b):
-            # an empty verdict list IS the judge abstaining (it surfaced
-            # nothing). No emitter needed on the listwise path; transport
-            # errors are excluded above (counted as NEEDS-WORK, never here).
+            # []-as-abstain rule (decided 2026-10-03, REMAINING.md Tier-2 b;
+            # scoped 2026-10-03 per tier2-quiet diagnosis): an empty verdict
+            # list counts as abstention ONLY on fixture rows, which carry
+            # abstention semantics. Bench replays are gold-empty by
+            # construction (correct rejection, not abstention) — counting
+            # them contaminated precision to a 0.097 structural ceiling.
+            # Transport errors are excluded above (NEEDS-WORK, never here).
+            # Fixture rows are ledger qids containing "-" (C1-R-001-G style);
+            # bench rows are bare qNNNNN. Shape-based: no extra key file.
             judge_ids = ((r.get("judge") or {}).get("verdict") or {}).get("relevant_ids")
-            abstained = isinstance(judge_ids, list) and len(judge_ids) == 0
+            is_fixture = "-" in qid
+            abstained = is_fixture and isinstance(judge_ids, list) and len(judge_ids) == 0
         if abstained:
             abst_n += 1
             if qid in abst_gold:
