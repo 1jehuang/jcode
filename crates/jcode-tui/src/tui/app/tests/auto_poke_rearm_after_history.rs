@@ -365,3 +365,144 @@ fn local_rearm_debt_survives_a_user_turn_with_no_visible_plan() {
         );
     });
 }
+
+/// The third state neither of the two original tests covers: a poke is IN FLIGHT,
+/// the user interrupts it, and then sends a NEW message. The other two tests stop
+/// at the flag (`auto_poke_incomplete_todos`), which is necessary but not
+/// sufficient - a session can be armed and still never poke.
+///
+/// This drives the whole chain, including the parts that can silently swallow it:
+/// the unchanged-todo fingerprint guard (`last_auto_poke_fingerprint`), which
+/// would decline a re-poke against an unchanged plan unless the episode stop
+/// cleared it, and the `has_queued_followups` guard, which would decline while
+/// the interrupted turn's leftovers are still queued.
+///
+/// Discriminates: if `stop_auto_poke_episode` stopped clearing the fingerprint,
+/// step 3 fires and step 6 returns false, because the plan has not changed since
+/// the poke that the interrupt cancelled. Armed-but-silent is exactly the bug
+/// class this file exists to catch.
+#[test]
+fn interrupted_poke_is_replaced_by_a_real_new_poke_on_the_next_user_turn() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        assert!(!app.is_remote, "fixture precondition: a local session");
+
+        crate::todo::save_todos(&app.session.id, &[pending_todo("todo-in-flight")])
+            .expect("save todos");
+
+        // A poke cycle is running: armed, and a turn end that actually fires one.
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+        app.pending_turn = false;
+        app.pending_queued_dispatch = false;
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "fixture precondition: the first poke fires"
+        );
+        assert!(
+            app.last_auto_poke_fingerprint.is_some(),
+            "fixture precondition: a fired poke records a fingerprint, which is \
+             what a stale one would make the next turn end decline"
+        );
+
+        // The poke is dispatched and in flight; the user interrupts it.
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        app.is_processing = true;
+        crate::tui::app::commands::stop_auto_poke_episode(&mut app);
+        assert!(
+            app.last_auto_poke_fingerprint.is_none(),
+            "fixture precondition: the interrupted poke left no fingerprint to \
+             re-trigger the unchanged-todo guard"
+        );
+
+        // The user then sends a NEW message - the re-arm point under audit.
+        app.input = "keep going".to_string();
+        app.cursor_pos = app.input.len();
+        app.submit_input();
+
+        // That turn ends. Nothing is in flight any more.
+        app.is_processing = false;
+        app.pending_turn = false;
+        app.pending_queued_dispatch = false;
+
+        // The user-visible outcome, not the internal flag: a fresh poke fires.
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "after an interrupt a new user message must produce a REAL poke, not \
+             leave the session armed and silent"
+        );
+        assert!(
+            app.queued_messages
+                .iter()
+                .any(|message| message.contains("incomplete todo")),
+            "the queued follow-up must be an actual poke, got: {:?}",
+            app.queued_messages
+        );
+        assert!(
+            app.auto_poke_default_on,
+            "the session default must survive the whole interrupt-then-continue cycle"
+        );
+    });
+}
+
+/// The re-arm is wired into exactly one place: `submit_input`
+/// (`input.rs:4220` and `input.rs:4240`). A message the user sends while a turn
+/// is still running goes down `queue_message` (`input.rs:1594`) or
+/// `stage_local_interleave`, and NEITHER calls `rearm_auto_poke_on_user_turn`.
+///
+/// That is reachable right after an interrupt, because `Esc` sets
+/// `cancel_requested` but leaves `is_processing` true until the cancelled turn
+/// actually unwinds. A user who types their next message in that window - the
+/// normal thing to do after interrupting - is on the queue path, so the re-arm
+/// never runs for that turn.
+///
+/// This test pins the CURRENT behaviour rather than asserting a fix: it records
+/// that the queue path leaves auto-poke disarmed and owes nothing, which is the
+/// silent-stall shape (default still on, nothing armed, no debt to settle). It
+/// fails loudly if someone later wires the re-arm into `queue_message`, at which
+/// point the assertion should be inverted deliberately rather than by accident.
+#[test]
+fn queueing_a_message_while_processing_does_not_rearm_auto_poke() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        assert!(!app.is_remote, "fixture precondition: a local session");
+
+        crate::todo::save_todos(&app.session.id, &[pending_todo("todo-queued-rearm")])
+            .expect("save todos");
+
+        // What Esc leaves: the episode stopped, the session default still on.
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = true;
+
+        // The cancelled turn has not unwound yet, so the next message queues.
+        app.is_processing = true;
+        app.queue_mode = true;
+        assert_eq!(
+            super::input::send_action(&app, false),
+            crate::tui::app::SendAction::Queue,
+            "fixture precondition: a message sent mid-turn takes the queue path"
+        );
+
+        app.input = "keep going".to_string();
+        app.cursor_pos = app.input.len();
+        crate::tui::app::input::queue_message(&mut app);
+
+        // The gap: no re-arm, and no owed debt, so the end-of-turn scheduler has
+        // nothing to settle. If this ever starts re-arming, invert this test.
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "the queue path currently does NOT re-arm; see the doc comment - \
+             if this now passes the other way, the re-arm was wired here and \
+             this test needs inverting on purpose"
+        );
+        assert!(
+            !app.auto_poke_rearm_owed,
+            "and it latches no owed re-arm either, so this turn is a silent stall"
+        );
+        assert!(
+            app.auto_poke_default_on,
+            "while the session default still reads as enabled - the confusing part"
+        );
+    });
+}

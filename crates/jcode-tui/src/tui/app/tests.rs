@@ -28,6 +28,7 @@ include!("tests/remote_events_reload_03/part_01.rs");
 include!("tests/remote_events_reload_03/part_02.rs");
 include!("tests/remote_events_reload_04.rs");
 include!("tests/remote_events_reload_05.rs");
+include!("tests/remote_context_window_from_subscribe.rs");
 include!("tests/swarm_plan_no_inline_graph.rs");
 include!("tests/subscribe_model_changed_startup_notice.rs");
 include!("tests/remote_model_picker_hotkeys.rs");
