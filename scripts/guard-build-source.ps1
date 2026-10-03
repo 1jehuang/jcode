@@ -42,7 +42,13 @@ if (-not (Test-Path $exe)) {
     } else {
         $meta = Get-Content $sidecar -Raw | ConvertFrom-Json
         if ($meta.short_hash -ne $shortHead) {
-            [void]$failures.Add("selfdev binary was built from $($meta.short_hash) but HEAD is $shortHead; rebuild or the reload ships stale code")
+            $built = $meta.short_hash
+            $rustDiff = @(& git diff --name-only "$built..$shortHead" -- '*.rs' 2>$null)
+            if ($rustDiff.Count -gt 0) {
+                [void]$failures.Add("selfdev binary was built from $built but HEAD is $shortHead and $($rustDiff.Count) Rust file(s) differ; rebuild or the reload ships stale code")
+            } else {
+                Write-Output "note: binary was built from $built, HEAD is $shortHead, but no Rust differs"
+            }
         }
         if ($meta.dirty) {
             [void]$failures.Add("selfdev binary was built from a dirty tree ($($meta.source_fingerprint)); its code is in no commit")
@@ -61,7 +67,15 @@ $socketHash = "$sock.hash"
 if (Test-Path $socketHash) {
     $running = (Get-Content $socketHash -Raw).Trim()
     if ($running -ne $shortHead) {
-        [void]$failures.Add("the running server reports $running but HEAD is $shortHead; a reload is needed or the session keeps the old code")
+        # A commit that touches no Rust changes no binary, so the running server
+        # is not stale just because HEAD moved. Only demand a rebuild when the
+        # code that goes into the binary actually differs.
+        $rustChanges = @(& git diff --name-only "$running..$shortHead" -- '*.rs' 2>$null)
+        if ($rustChanges.Count -gt 0) {
+            [void]$failures.Add("the running server reports $running but HEAD is $shortHead and $($rustChanges.Count) Rust file(s) differ; reload or the session keeps the old code")
+        } else {
+            Write-Output "note: server is on $running, HEAD is $shortHead, but no Rust differs - binary is current"
+        }
     }
 } else {
     [void]$failures.Add("no running-server hash at $socketHash; cannot confirm what is actually executing")
