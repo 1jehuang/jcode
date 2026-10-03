@@ -1,3 +1,4 @@
+use super::response_recovery::MalformedToolCallInfo;
 use super::*;
 
 /// Largest byte index `<= index` that is a UTF-8 char boundary in `text`.
@@ -146,6 +147,7 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        let mut consecutive_malformed_tool_rounds = 0u32;
 
         loop {
             // Never open a new provider request after a cancel. Several paths
@@ -1544,6 +1546,8 @@ impl Agent {
 
             // Execute tools and add results
             let tool_count = tool_calls.len();
+            let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
+            let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
             for tool_index in 0..tool_count {
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
@@ -1590,6 +1594,10 @@ impl Agent {
                     .unwrap_or_else(|| self.session.id.clone());
 
                 if let Some(error_msg) = tc.validation_error() {
+                    malformed_calls.push(MalformedToolCallInfo {
+                        name: tc.name.clone(),
+                        error: error_msg.clone(),
+                    });
                     logging::warn(&error_msg);
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),
@@ -1609,6 +1617,10 @@ impl Agent {
                     continue;
                 }
 
+                // A call that passed validation is genuinely valid even if
+                // the tool itself later fails: it resets the malformed-round
+                // bound in handle_malformed_tool_round below.
+                executed_valid_call = true;
                 self.validate_tool_allowed(&tc.name)?;
 
                 let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
@@ -1889,6 +1901,18 @@ impl Agent {
                 }
                 self.session.save()?;
             }
+
+            // Bounded recovery for repeated malformed tool calls (e.g. a
+            // model emitting null arguments): correct with the expected
+            // schema, then end the turn with an actionable error instead of
+            // retrying the same malformed round forever. Mirrors the blocking
+            // loop (turn_loops.rs) via the shared helper.
+            self.handle_malformed_tool_round(
+                &malformed_calls,
+                executed_valid_call,
+                &mut consecutive_malformed_tool_rounds,
+                &tools,
+            )?;
 
             // === INJECTION POINT D: All tools done, before next API call ===
             // This is the safest point for non-urgent injection since all tool_results
