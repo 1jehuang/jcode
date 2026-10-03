@@ -1111,6 +1111,7 @@ fn test_save_and_restore_reload_state_preserves_interleave_and_pending_retry() {
         auto_retry: true,
         retry_attempts: 2,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
     app.save_input_for_reload(&session_id);
@@ -1158,6 +1159,7 @@ fn test_save_and_restore_reload_state_promotes_inflight_prompt_to_startup_submis
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.rate_limit_reset = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
     app.save_input_for_reload(&session_id);

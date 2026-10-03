@@ -137,6 +137,7 @@ fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.rate_limit_reset = None;
 
@@ -170,6 +171,7 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
         auto_retry: true,
         retry_attempts: u8::MAX,
         retry_at: None,
+        overload_attempts: 0,
     });
 
     let mut state = remote::RemoteRunState::default();
@@ -179,6 +181,36 @@ fn test_disconnect_still_clears_pending_for_non_queued_shapes() {
         app.queued_messages().is_empty(),
         "non-continuation pending shapes must not be converted into queued messages"
     );
+}
+
+#[test]
+fn test_reload_keeps_overload_resend_budget() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let session_id = format!("test-overload-budget-reload-{}", std::process::id());
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "explain the bug".to_string(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: 0,
+            retry_at: None,
+            overload_attempts: 2,
+        });
+        app.rate_limit_reset = Some(Instant::now() + Duration::from_secs(60));
+
+        app.save_input_for_reload(&session_id);
+        let restored =
+            App::restore_input_for_reload(&session_id).expect("reload state should exist");
+        let pending = restored
+            .rate_limit_pending_message
+            .expect("held turn must survive reload");
+        assert_eq!(
+            pending.overload_attempts, 2,
+            "reload must not reset the overload resend budget"
+        );
+    });
 }
 
 #[test]
@@ -197,6 +229,7 @@ fn test_save_input_for_reload_persists_inflight_queued_continuation() {
         auto_retry: false,
         retry_attempts: 0,
         retry_at: None,
+        overload_attempts: 0,
     });
     app.rate_limit_reset = None;
 
