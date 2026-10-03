@@ -9,7 +9,8 @@ use crate::provider_catalog::{
     OpenAiCompatibleProfile, resolve_openai_compatible_profile,
 };
 
-use super::provider_init::{ProviderChoice, login_provider_for_choice, save_named_api_key};
+use super::provider_init::{ProviderChoice, login_provider_for_choice};
+use crate::provider_catalog::save_named_api_key;
 
 mod existing_key_notice;
 mod jcode_device;

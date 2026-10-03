@@ -86,10 +86,11 @@ pub(crate) fn openai_effective_auth_mode() -> &'static str {
         Ok(creds) if !creds.refresh_token.is_empty() || creds.id_token.is_some() => "oauth",
         Ok(_) => "api-key",
         Err(_) => {
-            if std::env::var("OPENAI_API_KEY")
-                .ok()
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
+            if crate::provider_catalog::load_api_key_from_env_or_config(
+                "OPENAI_API_KEY",
+                "openai.env",
+            )
+            .is_some()
             {
                 "api-key"
             } else {
