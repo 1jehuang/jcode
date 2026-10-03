@@ -989,6 +989,7 @@ impl App {
         match retry_result {
             Ok(()) => {
                 self.last_stream_error = None;
+                self.local_usage_limit_resume_attempts = 0;
                 true
             }
             Err(e) => {

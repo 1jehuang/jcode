@@ -4003,6 +4003,7 @@ impl App {
         // A new prompt supersedes a local turn held on a usage limit; that
         // held turn's context is sent with this one.
         self.rate_limit_reset = None;
+        self.local_usage_limit_resume_attempts = 0;
         self.account_change_resend_at = None;
 
         self.push_display_message(DisplayMessage {
@@ -4168,6 +4169,7 @@ impl App {
             {
                 Ok(()) => {
                     self.last_stream_error = None;
+                    self.local_usage_limit_resume_attempts = 0;
                     self.last_submitted_input = None;
                 }
                 Err(e) => {
@@ -4194,6 +4196,9 @@ impl App {
                 }
             }
             self.current_turn_system_reminder = None;
+            if self.local_usage_limit_resume_attempts > 0 {
+                break;
+            }
             // Loop will check if more messages were queued during this turn
         }
     }

@@ -315,6 +315,7 @@ impl App {
         }
         let now = Instant::now();
         self.credentials_changed_at = Some(now);
+        self.local_usage_limit_resume_attempts = 0;
         if self.is_processing
             || (self.is_remote && self.rate_limit_pending_message.is_none())
             || matches!(self.status, ProcessingStatus::WaitingForNetwork { .. })
@@ -816,6 +817,7 @@ impl App {
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
+            local_usage_limit_resume_attempts: 0,
             credentials_changed_at: None,
             account_change_resend_at: None,
             rate_limit_pending_message: None,
@@ -1277,6 +1279,7 @@ impl App {
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
+            local_usage_limit_resume_attempts: 0,
             credentials_changed_at: None,
             account_change_resend_at: None,
             rate_limit_pending_message: None,

@@ -1644,6 +1644,8 @@ pub struct App {
     client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)
     rate_limit_reset: Option<Instant>,
+    // Automatic quota resumes reserved for the current local logical turn.
+    local_usage_limit_resume_attempts: u8,
     // When the server last reported a credential change (login, account
     // switch, credential file edit). A limit error for a turn sent before this
     // belongs to the previous account and must not hold the turn.
