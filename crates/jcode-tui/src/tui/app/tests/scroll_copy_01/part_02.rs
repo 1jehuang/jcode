@@ -613,3 +613,109 @@ fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
         "scrolling up reveals the pre-clear transcript:\n{scrolled}"
     );
 }
+
+/// New behavior: typing a second prompt while a turn runs and then pressing
+/// Esc stops only the current turn and runs the new prompt next. Previously
+/// local Esc threw the second prompt away and turned auto-poke off.
+#[test]
+fn test_local_escape_with_pending_prompt_redirects_to_it() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.auto_poke_incomplete_todos = true;
+    app.interleave_message = Some("do this instead".to_string());
+    app.interleave_images = vec![("image/png".to_string(), "aGk=".to_string())];
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+
+    assert!(app.cancel_requested, "the current turn must stop");
+    assert!(
+        app.auto_poke_incomplete_todos,
+        "a redirect keeps auto-poke on"
+    );
+    assert_eq!(app.queued_messages(), &["do this instead"]);
+    assert!(app.interleave_message.is_none());
+    assert_eq!(app.pending_images.len(), 1, "staged images are not dropped");
+    assert_eq!(
+        app.status_notice(),
+        Some("Interrupting... sending your next prompt".to_string())
+    );
+
+    // The turn loop's cancel path then schedules queued dispatch.
+    app.schedule_queued_dispatch_after_interrupt();
+    assert!(app.pending_queued_dispatch);
+}
+
+/// Esc with nothing pending still means "stop everything".
+#[test]
+fn test_local_escape_without_pending_prompt_still_stops_everything() {
+    let mut app = create_test_app();
+    app.is_processing = true;
+    app.auto_poke_incomplete_todos = true;
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+
+    assert!(app.cancel_requested);
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(app.queued_messages().is_empty());
+    assert_eq!(
+        app.status_notice(),
+        Some("Interrupting... Auto-poke OFF".to_string())
+    );
+}
+
+/// Remote: replays the event order seen in a real session. Second prompt is
+/// sent as a soft interrupt, Esc cancels, the server sends Done and only then
+/// Interrupted. The prompt must survive and be dispatched as the next turn,
+/// only after Interrupted (so the late Interrupted cannot end the new turn).
+#[test]
+fn test_remote_escape_with_pending_prompt_runs_it_after_interrupt() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(42);
+    app.auto_poke_incomplete_todos = true;
+    app.pending_soft_interrupts = vec!["do this instead".to_string()];
+
+    rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::empty(), &mut remote))
+        .unwrap();
+    assert!(
+        app.auto_poke_incomplete_todos,
+        "a redirect keeps auto-poke on"
+    );
+    assert_eq!(
+        app.status_notice(),
+        Some("Interrupting... sending your next prompt".to_string())
+    );
+
+    // Done arrives first. Nothing may be sent yet.
+    app.handle_server_event(crate::protocol::ServerEvent::Done { id: 42 }, &mut remote);
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    assert!(!app.is_processing, "held until Interrupted");
+    assert_eq!(app.pending_soft_interrupts, vec!["do this instead"]);
+
+    // Interrupted arrives: the prompt is recovered and sent as the next turn.
+    app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
+    assert!(app.pending_queued_dispatch);
+    app.pending_queued_dispatch = false;
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    if !app.is_processing {
+        app.pending_queued_dispatch = false;
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    }
+
+    assert!(app.is_processing, "the new prompt is now the running turn");
+    assert!(app.pending_soft_interrupts.is_empty());
+    assert!(app.queued_messages().is_empty());
+    let users: Vec<&str> = app
+        .display_messages()
+        .iter()
+        .filter(|message| message.role == "user")
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(users, vec!["do this instead"]);
+}

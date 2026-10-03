@@ -1679,6 +1679,43 @@ impl App {
             || !self.hidden_queued_system_messages.is_empty()
     }
 
+    /// True when the user typed a follow-up prompt while this turn ran, and
+    /// it has not reached the model yet. Esc then means "stop this and run my
+    /// new prompt" rather than "stop everything", so the follow-up is kept
+    /// and auto-continuation stays on. Automatic pokes do not count.
+    pub(super) fn has_pending_user_followup(&self) -> bool {
+        self.interleave_message
+            .as_deref()
+            .is_some_and(|message| !message.trim().is_empty())
+            || self
+                .pending_soft_interrupts
+                .iter()
+                .any(|message| !message.trim().is_empty())
+            || self.queued_messages.iter().any(|message| {
+                !message.trim().is_empty() && !super::commands::is_poke_message(message)
+            })
+    }
+
+    /// While an Esc redirect waits for the server's Interrupted event, hold
+    /// queued dispatch. On timeout (Interrupted never came), release the hold
+    /// and arm dispatch so the follow-up is never stranded.
+    pub(super) fn awaiting_remote_interrupt_ack(&mut self) -> bool {
+        match self.remote_interrupt_ack_deadline {
+            Some(deadline) if Instant::now() < deadline => true,
+            Some(_) => {
+                self.remote_interrupt_ack_deadline = None;
+                crate::logging::warn(
+                    "ESC_REDIRECT_INTERRUPT_ACK_TIMEOUT releasing held follow-up dispatch",
+                );
+                if self.has_pending_user_followup() {
+                    self.pending_queued_dispatch = true;
+                }
+                false
+            }
+            None => false,
+        }
+    }
+
     /// True when a startup submission is staged and ready to auto-send.
     ///
     /// Headed spawns (and reloads with a resume prompt) stage their initial
@@ -1733,6 +1770,11 @@ impl App {
     pub(super) fn schedule_turn_end_followups(&mut self) -> bool {
         if self.guardrail_stops_exhausted_at_turn_end() {
             self.stop_auto_continuation_after_guardrail();
+            return false;
+        }
+        // The user's own next prompt goes first. A poke queued now would be
+        // merged into it (or sent ahead of it) after an Esc redirect.
+        if self.has_pending_user_followup() {
             return false;
         }
         self.schedule_auto_poke_followup_if_needed()
@@ -3029,6 +3071,27 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             } else if app.inline_view_state.is_some() {
                 app.inline_view_state = None;
                 clear_input_for_escape(app);
+            } else if app.is_processing && app.has_pending_user_followup() {
+                // The user typed a new prompt while this turn ran, then hit
+                // Esc: stop this turn and run the new prompt next. Keep it in
+                // the queue (the interleave slot is cleared by the cancel
+                // path) and leave auto-poke alone, since this is a redirect,
+                // not "stop everything".
+                app.cancel_requested = true;
+                let mut followups = std::mem::take(&mut app.pending_soft_interrupts);
+                app.pending_soft_interrupt_requests.clear();
+                if let Some(interleave) = app.interleave_message.take()
+                    && !interleave.trim().is_empty()
+                {
+                    followups.push(interleave);
+                    // Queued follow-ups are text-only, so carry staged images
+                    // back to the composer instead of dropping them silently.
+                    app.pending_images.append(&mut app.interleave_images);
+                }
+                app.interleave_images.clear();
+                followups.append(&mut app.queued_messages);
+                app.queued_messages = followups;
+                app.set_status_notice("Interrupting... sending your next prompt");
             } else if app.is_processing {
                 let disabled_auto_poke = app.auto_poke_incomplete_todos
                     || app
