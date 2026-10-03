@@ -638,19 +638,26 @@ impl App {
         // default. Measured: `stealth/space-bunny-alpha@Stealth` has a catalog
         // entry with context_length 1000000, and the panel showed 200000 because
         // the number never crossed the wire.
-        let limit = server_context_window
-            .map(|w| w as usize)
-            .unwrap_or_else(|| {
-                if self.is_remote {
-                    crate::provider::context_limit_for_model_with_provider(
-                        model,
-                        self.remote_provider_name.as_deref(),
-                    )
-                    .unwrap_or(self.provider.context_window())
-                } else {
-                    self.provider.context_window()
-                }
-            });
+        let limit = match server_context_window {
+            Some(window) => window as usize,
+            None if self.is_remote => {
+                // The static catalog resolves the models it knows, so keep using
+                // it. What must not happen is the final fallback: for a model
+                // chosen server-side it is not in the catalog, and the client's
+                // own provider is an inert placeholder whose context_window()
+                // is the generic 200_000 default. Substituting that over a value
+                // the server already reported correctly is how a 1M route went
+                // back to displaying 200000. The server is the source of truth
+                // for an unknown model, so leave the last reported value alone
+                // instead of overwriting it with the default.
+                crate::provider::context_limit_for_model_with_provider(
+                    model,
+                    self.remote_provider_name.as_deref(),
+                )
+                .unwrap_or(self.context_limit as usize)
+            }
+            None => self.provider.context_window(),
+        };
         self.context_limit = limit as u64;
         self.context_warning_shown = false;
 
