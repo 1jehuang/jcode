@@ -75,15 +75,6 @@ fn mission_turn_reminder(session_id: &str) -> Option<String> {
         .flatten()
 }
 
-fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(format!("{}\n\n{}", a, b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    }
-}
-
 /// Merge any number of optional reminder sections, preserving order.
 fn merge_reminder_sections(parts: [Option<String>; 4]) -> Option<String> {
     let joined: Vec<String> = parts.into_iter().flatten().collect();
