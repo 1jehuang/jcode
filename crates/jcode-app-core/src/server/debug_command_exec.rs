@@ -162,7 +162,7 @@ pub(super) async fn execute_debug_command(
             content.to_string(),
             Vec::new(),
             false,
-            SoftInterruptSource::User,
+            SoftInterruptSource::UserExternal,
         );
         return Ok("queued".to_string());
     }
@@ -180,7 +180,7 @@ pub(super) async fn execute_debug_command(
             content.to_string(),
             Vec::new(),
             true,
-            SoftInterruptSource::User,
+            SoftInterruptSource::UserExternal,
         );
         return Ok("queued (urgent)".to_string());
     }
