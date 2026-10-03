@@ -1781,14 +1781,11 @@ impl App {
         // Checking auto_poke_default_on keeps an explicit /poke off
         // authoritative, and incomplete_poke_todos keeps a fully completed
         // plan from re-arming. See issue #1666.
-        if !self.auto_poke_incomplete_todos && self.auto_poke_default_on {
-            if !super::commands::incomplete_poke_todos(self).is_empty() {
-                self.auto_poke_incomplete_todos = true;
-                self.todo_completion_gate_attempts = 0;
-            }
-        }
-
-        if !self.auto_poke_incomplete_todos
+        // Settle a re-arm owed by a user turn BEFORE the guard below. Settling
+        // is what arms auto-poke, so running it after the guard would be dead
+        // code on exactly the session that owes the debt - the session that
+        // needs the poke most.
+        super::commands::settle_deferred_auto_poke_rearm(self);        if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
             || self.pending_turn
             || self.has_queued_followups()
@@ -4215,6 +4212,12 @@ impl App {
             ));
         }
         if images.is_empty() {
+            // Every user turn re-arms auto-poke when the plan still has open
+            // items. If the plan is not visible yet the decision is latched as
+            // owed and settled by the end-of-turn scheduler instead of being
+            // dropped, which is how one interrupt used to leave auto-poke
+            // looking enabled while never firing again.
+            super::commands::rearm_auto_poke_on_user_turn(self);
             self.current_turn_system_reminder = merge_reminder_sections([
                 self_dev_turn_reminder(self),
                 None,
@@ -4229,6 +4232,12 @@ impl App {
                 }],
             );
         } else {
+            // Every user turn re-arms auto-poke when the plan still has open
+            // items. If the plan is not visible yet the decision is latched as
+            // owed and settled by the end-of-turn scheduler instead of being
+            // dropped, which is how one interrupt used to leave auto-poke
+            // looking enabled while never firing again.
+            super::commands::rearm_auto_poke_on_user_turn(self);
             self.current_turn_system_reminder = merge_reminder_sections([
                 self_dev_turn_reminder(self),
                 None,

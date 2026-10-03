@@ -994,6 +994,11 @@ pub struct App {
     pending_turn: bool,
     // When armed by /poke, automatically continue prompting until todos are complete.
     auto_poke_incomplete_todos: bool,
+    /// A user turn asked for auto-poke to be re-armed but the plan was not yet
+    /// visible (remote bootstrap sends the user turn before History lands), so
+    /// the decision is owed rather than taken. Latched instead of attempted,
+    /// because an empty plan at that instant says nothing about the plan.
+    auto_poke_rearm_owed: bool,
     /// Whether auto-poke is on by default for this session (`features.auto_poke`).
     /// When true, finishing a poke cycle (all todos complete, or a turn with no
     /// todo list at all) must leave auto-poke armed for the next batch of work;

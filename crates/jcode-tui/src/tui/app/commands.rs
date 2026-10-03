@@ -262,6 +262,78 @@ pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String 
     )
 }
 
+/// Arm auto-poke if the plan still has open items.
+///
+/// Unlike [`activate_auto_poke`] this is the automatic path: it says nothing in
+/// the status line and does not hand the guardrail circuit breaker a fresh
+/// budget, because no user decision was made here.
+pub(super) fn rearm_auto_poke_if_plan_unfinished(app: &mut App) -> bool {
+    if !app.auto_poke_default_on {
+        return false;
+    }
+    if incomplete_poke_todos(app).is_empty() {
+        return false;
+    }
+    app.auto_poke_incomplete_todos = true;
+    app.todo_completion_gate_attempts = 0;
+    app.last_auto_poke_fingerprint = None;
+    app.auto_poke_unchanged_idle_count = 0;
+    app.auto_poke_refine_prompt_count = 0;
+    app.auto_poke_refine_exhausted = false;
+    app.last_todo_ownership_fingerprint = None;
+    app.todo_gate_digest_delivered = false;
+    true
+}
+
+/// The turn after a user message is the harness's own chance to verify
+/// completion: if the plan still has open items the agent should keep going
+/// instead of stopping half-done. This is what makes the feature automatic
+/// rather than something re-armed by hand after every interrupt, failed
+/// request or provider refusal.
+pub(super) fn rearm_auto_poke_on_user_turn(app: &mut App) -> bool {
+    if rearm_auto_poke_if_plan_unfinished(app) {
+        app.auto_poke_rearm_owed = false;
+        return true;
+    }
+    // The decline may be premature rather than final. An empty plan at the
+    // instant a user turn starts does not mean there is nothing to do: the agent
+    // can create todos later in this same turn. Dropping the decline here is how
+    // one Esc left auto-poke looking enabled while never firing again.
+    defer_auto_poke_rearm(app);
+    false
+}
+
+/// Record that the re-arm decision is owed because it was taken while the plan
+/// was not yet in view.
+///
+/// Latched rather than attempted so the decision can be retried the moment the
+/// plan is actually visible. Only latched when the feature is on, so an explicit
+/// `/poke off` is never undone.
+pub(super) fn defer_auto_poke_rearm(app: &mut App) {
+    if app.auto_poke_default_on {
+        app.auto_poke_rearm_owed = true;
+    }
+}
+
+/// Settle a deferred re-arm once the plan is in view.
+pub(super) fn settle_deferred_auto_poke_rearm(app: &mut App) -> bool {
+    if !app.auto_poke_rearm_owed {
+        return false;
+    }
+    if app.auto_poke_incomplete_todos || !app.auto_poke_default_on {
+        // Already armed, or the user turned the feature off for the session:
+        // nothing is owed, and an explicit off must never be undone.
+        app.auto_poke_rearm_owed = false;
+        return false;
+    }
+    if !rearm_auto_poke_if_plan_unfinished(app) {
+        // The plan is still not visible. Keep the debt so the next pass retries.
+        return false;
+    }
+    app.auto_poke_rearm_owed = false;
+    true
+}
+
 pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     let incomplete = incomplete_poke_todos(app);
     app.auto_poke_incomplete_todos = true;

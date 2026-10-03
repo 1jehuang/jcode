@@ -188,11 +188,13 @@ impl Drop for StreamingGuard {
 /// connected to a client or focused in a window.
 pub fn find_active_session_id_by_pid(pid: u32) -> Option<String> {
     let dir = active_pids_dir()?;
-    for entry in std::fs::read_dir(dir).ok()? {
-        let entry = entry.ok()?;
+    for entry in std::fs::read_dir(dir).ok()?.filter_map(|entry| entry.ok()) {
         let session_id = entry.file_name().to_string_lossy().to_string();
-        let stored = std::fs::read_to_string(entry.path()).ok()?;
-        if stored.trim().parse::<u32>().ok()? == pid {
+        // Skip unreadable or non-numeric markers instead of aborting the whole scan.
+        let Some(stored) = std::fs::read_to_string(entry.path()).ok() else {
+            continue;
+        };
+        if stored.trim().parse::<u32>().ok() == Some(pid) {
             return Some(session_id);
         }
     }
@@ -226,10 +228,12 @@ fn process_is_running(pid: u32) -> bool {
 
 #[cfg(not(unix))]
 fn process_is_running(pid: u32) -> bool {
-    // Best-effort fallback for platforms where this low-level storage crate does
-    // not have a process API. The active PID file is still useful, and stale
-    // entries are cleaned up by higher-level session lifecycle code.
-    pid != 0
+    // Real liveness check via OpenProcess/GetExitCodeProcess (see
+    // jcode_core::util::is_process_running). This is required for correctness,
+    // not just tidiness: without it every PID file ever written stays "running"
+    // forever, and the presence counts derived from it (session_presence,
+    // streaming_session_ids, session_counts) accumulate stale sessions.
+    jcode_core::util::is_process_running(pid)
 }
 
 /// Live snapshot of how many jcode sessions are running, and how many of those
@@ -418,6 +422,38 @@ mod tests {
         assert_eq!(session_counts().streaming, 1);
         unregister_active_pid("session_epsilon");
         assert_eq!(session_counts().streaming, 0);
+
+        jcode_core::env::remove_var("JCODE_HOME");
+    }
+
+    /// Regression: a bad marker (non-numeric contents, or an entry that cannot
+    /// be read at all) must be skipped, not abort the whole directory scan and
+    /// hide every other registered session.
+    #[test]
+    fn find_active_session_id_by_pid_skips_bad_entries() {
+        let _guard = lock_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let live = std::process::id();
+        register_active_pid("session_good", live);
+
+        let dir = active_pids_dir().expect("active_pids dir");
+        // Non-numeric marker contents.
+        std::fs::write(dir.join("session_not_a_pid"), "not-a-pid").expect("write bad marker");
+        // Entry that cannot be read as a file at all (a directory).
+        std::fs::create_dir(dir.join("session_unreadable")).expect("write unreadable entry");
+
+        assert_eq!(
+            find_active_session_id_by_pid(live),
+            Some("session_good".to_string()),
+            "a bad entry must not abort the scan"
+        );
+        assert_eq!(find_active_session_id_by_pid(999_999), None);
+
+        // With only bad entries, no match is reported.
+        std::fs::remove_file(dir.join("session_good")).expect("remove good marker");
+        assert_eq!(find_active_session_id_by_pid(live), None);
 
         jcode_core::env::remove_var("JCODE_HOME");
     }

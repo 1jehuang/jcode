@@ -20,11 +20,13 @@ pub(super) fn unregister_active_pid(session_id: &str) {
 /// Find the active session ID currently owned by the given process ID.
 pub fn find_active_session_id_by_pid(pid: u32) -> Option<String> {
     let dir = active_pids_dir()?;
-    for entry in std::fs::read_dir(dir).ok()? {
-        let entry = entry.ok()?;
+    for entry in std::fs::read_dir(dir).ok()?.filter_map(|entry| entry.ok()) {
         let session_id = entry.file_name().to_string_lossy().to_string();
-        let stored = std::fs::read_to_string(entry.path()).ok()?;
-        if stored.trim().parse::<u32>().ok()? == pid {
+        // Skip unreadable or non-numeric markers instead of aborting the whole scan.
+        let Some(stored) = std::fs::read_to_string(entry.path()).ok() else {
+            continue;
+        };
+        if stored.trim().parse::<u32>().ok() == Some(pid) {
             return Some(session_id);
         }
     }

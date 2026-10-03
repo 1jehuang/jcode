@@ -1092,11 +1092,82 @@ fn auto_poke_rearms_when_new_open_work_appears_after_the_breaker_disarmed_it() {
 
         app.auto_poke_incomplete_todos = false;
         app.todo_completion_gate_attempts = 0;
+        assert!(!app.auto_poke_incomplete_todos, "the breaker disarmed auto-poke");
 
         assert!(
-            app.schedule_auto_poke_followup_if_needed(),
-            "new open work must re-arm auto-poke after the breaker disarmed it"
+            super::commands::rearm_auto_poke_on_user_turn(&mut app),
+            "a user turn must re-arm auto-poke while open work remains"
         );
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(!app.auto_poke_rearm_owed, "a settled debt leaves nothing owed");
+    });
+}
+
+#[test]
+fn auto_poke_rearm_is_latched_when_the_plan_is_not_yet_visible() {
+    // Remote bootstrap sends the user turn before the History payload lands, so
+    // the plan reads empty at that instant. Dropping the decision there is how
+    // one interrupt left auto-poke looking enabled while never firing again, so
+    // the decline is latched and retried instead.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        // Disarmed, and the plan is not visible yet - the state a user turn
+        // finds right after an interrupt on a session that has not loaded.
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = true;
+
+        assert!(
+            !super::commands::rearm_auto_poke_on_user_turn(&mut app),
+            "an invisible plan cannot arm auto-poke yet"
+        );
+        assert!(
+            app.auto_poke_rearm_owed,
+            "the decline must be latched as owed, not dropped"
+        );
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the workflow".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save open work once the plan is visible");
+
+        assert!(
+            super::commands::settle_deferred_auto_poke_rearm(&mut app),
+            "the scheduler settles the owed re-arm once the plan is visible"
+        );
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(!app.auto_poke_rearm_owed);
+    });
+}
+
+#[test]
+fn auto_poke_rearm_never_overrides_an_explicit_poke_off() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_default_on = false;
+        super::commands::disable_auto_poke(&mut app);
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the workflow".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save open work");
+
+        assert!(!super::commands::rearm_auto_poke_on_user_turn(&mut app));
+        assert!(!app.auto_poke_rearm_owed, "an explicit /poke off owes nothing");
+        assert!(!app.auto_poke_incomplete_todos);
     });
 }
 
