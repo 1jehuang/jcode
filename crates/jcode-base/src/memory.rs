@@ -2386,18 +2386,13 @@ impl MemoryManager {
             .into_iter()
             .filter(|entry| entry.active && !is_memory_injected(session_id, &entry.id))
             .collect();
-        // Slot-B R3 composition (rebase onto upstream 72-cap): our
-        // Option-take stage runs when engaged; upstream's BM25 top-72
-        // `prefilter_for_jev` is the disengaged/fail-open floor (kept
-        // verbatim for next-rebase merging). The two stages never act on
-        // the same query (no double-narrow); the floor only changes
-        // behavior where raw exhaustive is dangerous (large stores).
-        let mut entries_opt = Some(entries);
-        Self::prefilter_for_jev_take(&mut entries_opt, &query);
-        let entries = entries_opt.expect("prefilter stage always leaves a set");
-        // Floor queries (mode-off / fail-open) arrive here as the raw set;
-        // cap them at 72 via the upstream floor fn so the disengaged path
-        // never reproduces the 107-call outage.
+        // Upstream 72-cap `prefilter_for_jev` is the disengaged/fail-open
+        // floor (kept verbatim for next-rebase merging): floor queries
+        // (mode-off / fail-open) arrive here as the raw set, capped at 72
+        // so the disengaged path never reproduces the 107-call outage.
+        // NOTE: the engaged Option-take stage runs ONCE below on the
+        // capped set (B1 fix 2026-10-03: a duplicate take call here ran
+        // embed twice and bumped shadow counters twice per query).
         let entries = prefilter_for_jev(entries, &query);
         pipeline_update(|p| {
             p.search = StepStatus::Done;

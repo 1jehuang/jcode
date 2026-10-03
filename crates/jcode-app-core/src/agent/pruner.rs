@@ -50,7 +50,7 @@ const STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "have", "has",
     "had", "not", "but", "you", "your", "all", "any", "can", "will", "would", "should", "there",
     "their", "they", "them", "then", "than", "into", "over", "under", "when", "where", "which",
-    "while", "about", "after", "before", "between", "withs",
+    "while", "about", "after", "before", "between", "with",
 ];
 
 /// Per-item scoring outcome (PLAN section 6 record shape).
@@ -75,16 +75,24 @@ pub enum PrunerFamily {
 
 /// Classify a tool name into a prunable family; `None` bypasses.
 pub fn classify_tool(tool_name: &str) -> Option<PrunerFamily> {
+    // B2 fix 2026-10-03: match on word-boundary tokens, not substrings.
+    // Substring `contains` over-matched ("duplicate"→Read via "cat",
+    // "execution"→TestBash via "exec", "bread"→Read via "read").
     let lower = tool_name.to_lowercase();
-    if lower.contains("read") || lower.contains("cat") {
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has = |w: &str| tokens.iter().any(|t| *t == w);
+    if has("read") || has("cat") {
         Some(PrunerFamily::Read)
-    } else if lower.contains("grep") || lower.contains("search") {
+    } else if has("grep") || has("search") {
         Some(PrunerFamily::Grep)
     } else if lower == "bash"
-        || lower.contains("test")
-        || lower.contains("cargo")
-        || lower.contains("exec")
-        || lower.contains("shell")
+        || has("test")
+        || has("cargo")
+        || has("exec")
+        || has("shell")
     {
         Some(PrunerFamily::TestBash)
     } else {

@@ -11,10 +11,10 @@
 //! system-reminder/tool noise stripped) and all candidates in one call, lifts
 //! benchmark recall@5 0.53 -> 0.75 and precision@5 0.23 -> 0.35.
 //!
-//! This module is the single source of truth for that reranking, shared by the
-//! offline benchmark (`memory_recall_bench`) and the live memory agent so the
-//! shipped behavior matches what was measured. It is pure with respect to the
-//! memory agent (depends only on `Sidecar` + `MemoryEntry`).
+//! This module is bench-only: its callers are `memory_recall_bench` and
+//! tests (B3 fix 2026-10-03: no live agent path calls it). It is pure
+//! with respect to the memory agent (depends only on `Sidecar` +
+//! `MemoryEntry`).
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
