@@ -1946,7 +1946,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if handle_disabled_mission_command(app, trimmed) {
+    if handle_mission_command(app, trimmed) {
         return true;
     }
 
@@ -2567,9 +2567,13 @@ fn handle_selfdev_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
+    // `/goal` singular used to be swallowed by the disabled-mission stub, and
+    // `/initiatives` is checked first so the plural form still matches `/goals`
+    // rather than being read as `/goal` + "s".
     let Some(trimmed) = trimmed
         .strip_prefix("/initiatives")
         .or_else(|| trimmed.strip_prefix("/goals"))
+        .or_else(|| trimmed.strip_prefix("/goal"))
     else {
         return false;
     };
@@ -2671,16 +2675,102 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-pub(super) fn handle_disabled_mission_command(app: &mut App, trimmed: &str) -> bool {
-    if slash_command_rest(trimmed, "/mission").is_none()
-        && slash_command_rest(trimmed, "/goal").is_none()
-    {
+/// Create and steer this session's mission.
+///
+/// `/mission <objective>` sets it, `/mission status` renders it, `/mission
+/// checkpoint <text>` records progress, `/mission resume|pause|blocked|
+/// complete|abandon` moves the status, `/mission clear` removes it. The mission
+/// is injected into every turn by `mission_turn_reminder`, so the objective
+/// stays visible for the whole session instead of only when it is typed.
+///
+/// The writer side of mission had no reachable caller at all: `mission::set`
+/// was unreferenced and this dispatcher answered with "disabled in this build".
+pub(super) fn handle_mission_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/mission") else {
         return false;
+    };
+    let session_id = active_session_id(app);
+    let rest = rest.trim();
+
+    if rest.is_empty() || rest == "status" || rest == "show" {
+        match crate::mission::load(&session_id) {
+            Ok(Some(mission)) => {
+                app.push_display_message(DisplayMessage::system(
+                    crate::mission::render_status(&mission),
+                ));
+            }
+            Ok(None) => app.push_display_message(DisplayMessage::system(
+                "No mission is set for this session. Set one with `/mission <objective>`."
+                    .to_string(),
+            )),
+            Err(err) => app.push_display_message(DisplayMessage::error(format!(
+                "Could not read the mission: {err}"
+            ))),
+        }
+        return true;
     }
 
-    app.push_display_message(DisplayMessage::system(
-        "The /mission and /goal commands are disabled in this build.".to_string(),
-    ));
+    if let Some(summary) = rest.strip_prefix("checkpoint") {
+        match crate::mission::checkpoint(&session_id, summary) {
+            Ok(Some(_)) => app.push_display_message(DisplayMessage::system(
+                "Recorded a mission checkpoint.".to_string(),
+            )),
+            Ok(None) => app.push_display_message(DisplayMessage::system(
+                "No mission is set for this session.".to_string(),
+            )),
+            Err(err) => app.push_display_message(DisplayMessage::error(format!(
+                "Could not record the checkpoint: {err}"
+            ))),
+        }
+        return true;
+    }
+
+    if rest == "clear" {
+        match crate::mission::clear(&session_id) {
+            Ok(true) => {
+                app.push_display_message(DisplayMessage::system("Mission cleared.".to_string()))
+            }
+            Ok(false) => app.push_display_message(DisplayMessage::system(
+                "No mission is set for this session.".to_string(),
+            )),
+            Err(err) => app.push_display_message(DisplayMessage::error(format!(
+                "Could not clear the mission: {err}"
+            ))),
+        }
+        return true;
+    }
+
+    let status = match rest {
+        "resume" => Some(crate::mission::MissionStatus::Active),
+        "pause" => Some(crate::mission::MissionStatus::Paused),
+        "blocked" => Some(crate::mission::MissionStatus::Blocked),
+        "complete" => Some(crate::mission::MissionStatus::Complete),
+        "abandon" => Some(crate::mission::MissionStatus::Abandoned),
+        _ => None,
+    };
+    if let Some(status) = status {
+        match crate::mission::update_status(&session_id, status) {
+            Ok(Some(_)) => app.push_display_message(DisplayMessage::system(
+                "Mission status updated.".to_string(),
+            )),
+            Ok(None) => app.push_display_message(DisplayMessage::system(
+                "No mission is set for this session.".to_string(),
+            )),
+            Err(err) => app.push_display_message(DisplayMessage::error(format!(
+                "Could not update the mission status: {err}"
+            ))),
+        }
+        return true;
+    }
+
+    match crate::mission::set(&session_id, rest) {
+        Ok(mission) => app.push_display_message(DisplayMessage::system(
+            crate::mission::render_status(&mission),
+        )),
+        Err(err) => app.push_display_message(DisplayMessage::error(format!(
+            "Could not set the mission: {err}"
+        ))),
+    }
     true
 }
 
