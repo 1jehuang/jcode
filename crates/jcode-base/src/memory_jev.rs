@@ -19,6 +19,7 @@ const MODEL: &str = "typesafe/jev-1.13";
 
 /// Injectable decision transport. Errors abort the entire selection, including
 /// already-scored batches. Implementations must return the full response object.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RelevanceTransport: Send + Sync {
     async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value>;
