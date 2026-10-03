@@ -301,6 +301,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "Resume the last saved refactor loop/plan",
     ));
     lines.push(help_entry(
+        "/side [on|off]",
+        "Show or hide the selected side-panel page",
+    ));
+    lines.push(help_entry(
         "/splitview [on|off|status]",
         "Mirror the current chat in the side panel",
     ));

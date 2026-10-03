@@ -52,6 +52,9 @@ impl App {
             "todos" | "todo" => {
                 "/todos\nShow the current session's todo list as an inline card in the chat (press again, or the todo-card hotkey, to dismiss the trailing card). The card live-updates as the todo list changes.\n\n/todos panel\nToggle the legacy dedicated todo screen in the side panel.\n\n/todos pin\nToggle pinning the full todo list to the top of the chat transcript while it scrolls (saved to config as display.pin_todos, off by default).\n\n/todos on\nEnable the side-panel todo screen and focus it.\n\n/todos off\nDisable the side-panel todo screen.\n\n/todos status\nShow todo card/panel/pin status."
             }
+            "side" => {
+                "/side\nShow or hide the current side-panel page without deleting it. Reopening restores the last selected page.\n\n/side on\nReopen the side panel.\n\n/side off\nClose the side panel. File diffs and the separate diagram pane keep their own display settings."
+            }
             "splitview" | "split-view" => {
                 "/splitview\nToggle a transient split view that mirrors the current chat in the side panel.\n\n/splitview on\nEnable split view and focus the mirrored chat page.\n\n/splitview off\nDisable split view.\n\n/splitview status\nShow whether split view is enabled.\n\nThis gives the side panel its own scroll position for the same conversation so you can read older context while keeping the main composer active."
             }

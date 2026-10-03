@@ -485,7 +485,9 @@ impl App {
     }
 
     pub(super) fn diff_pane_visible(&self) -> bool {
-        self.diff_mode.has_side_pane() || self.side_panel.focused_page().is_some()
+        !self.swarm_panel_full_page
+            && (self.side_panel.focused_page().is_some()
+                || (self.diff_mode.is_file() && self.display_edit_tool_message_count > 0))
     }
 
     pub(super) fn set_diff_pane_focus(&mut self, focus: bool) {
@@ -1164,18 +1166,37 @@ impl App {
         self.set_status_notice(status);
     }
 
+    pub(super) fn handle_side_command(&mut self, input: &str) -> bool {
+        let mut words = input.split_whitespace();
+        if words.next() != Some("/side") {
+            return false;
+        }
+        let arg = words.next().unwrap_or_default();
+        if words.next().is_some() {
+            self.set_status_notice("Usage: /side [on|off]");
+            return true;
+        }
+        match arg {
+            "off" => self.hide_side_panel(),
+            "on" if self.side_panel.focused_page().is_some() => {}
+            "" if self.side_panel.focused_page().is_some() => self.hide_side_panel(),
+            "" | "on" => self.toggle_side_panel(),
+            _ => self.set_status_notice("Usage: /side [on|off]"),
+        }
+        true
+    }
+
     fn hide_side_panel(&mut self) {
         self.side_panel_fullscreen = false;
         crate::tui::clear_side_panel_render_caches();
-        self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
+        if let Some(id) = self.side_panel.focused_page_id.clone() {
+            self.last_side_panel_focus_id = Some(id);
+        }
         self.side_panel.focused_page_id = None;
         self.side_panel_user_hidden = true;
         self.side_panel_explicit_hidden = true;
-        // Keep focus only when the File diff pane stays on screen. It is drawn
-        // only in File mode with at least one edit message to show.
-        let file_diff_stays_visible =
-            self.diff_mode.is_file() && self.display_edit_tool_message_count > 0;
-        if !file_diff_stays_visible {
+        // Keep focus only when the File diff pane stays on screen.
+        if !self.diff_pane_visible() {
             self.set_diff_pane_focus(false);
         }
         self.sync_diagram_fit_context();
