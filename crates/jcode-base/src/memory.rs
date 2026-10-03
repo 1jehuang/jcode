@@ -2305,6 +2305,48 @@ impl MemoryManager {
         Ok(matches)
     }
 
+    /// R4 recall-count reinforcement: strengthen the judge-verified
+    /// kept-set. Called ONLY from the `Ok` arm of `get_relevant_parallel`
+    /// (kept-set from Jev select) — never from the keyword fallback or
+    /// bench paths. Record-only: no ranking consumer reads these fields
+    /// yet. Fail-open: persistence errors are swallowed (recall degrades
+    /// to unrecorded, never dies).
+    fn strengthen_kept_set(&self, kept: &mut [MemoryEntry]) {
+        if kept.is_empty() {
+            return;
+        }
+        for entry in kept.iter_mut() {
+            entry.mark_recalled();
+        }
+        let ids: Vec<&str> = kept.iter().map(|entry| entry.id.as_str()).collect();
+        // Project graph write-back (best-effort).
+        if let Ok(mut graph) = self.load_project_graph() {
+            let mut touched = false;
+            for id in &ids {
+                if let Some(stored) = graph.memories.get_mut(*id) {
+                    stored.mark_recalled();
+                    touched = true;
+                }
+            }
+            if touched {
+                let _ = self.save_project_graph(&graph);
+            }
+        }
+        // Global graph write-back (best-effort; ids live in one scope).
+        if let Ok(mut graph) = self.load_global_graph() {
+            let mut touched = false;
+            for id in &ids {
+                if let Some(stored) = graph.memories.get_mut(*id) {
+                    stored.mark_recalled();
+                    touched = true;
+                }
+            }
+            if touched {
+                let _ = self.save_global_graph(&graph);
+            }
+        }
+    }
+
     // === Async Memory Checking ===
 
     /// Spawn a background task to check memory relevance for a specific session.
@@ -2452,7 +2494,16 @@ impl MemoryManager {
         }
         .await;
         let relevant: Vec<MemoryEntry> = match result {
-            Ok(results) => results.into_iter().map(|(entry, _)| entry).collect(),
+            Ok(results) => {
+                // R4 anchor: judge-verified surfacing. The kept-set from Jev
+                // select is strengthened here — and ONLY here. The keyword
+                // fallback arm below and all bench paths never touch
+                // recall_count / last_recalled_at.
+                let mut kept: Vec<MemoryEntry> =
+                    results.into_iter().map(|(entry, _)| entry).collect();
+                self.strengthen_kept_set(&mut kept);
+                kept
+            }
             Err(error) => {
                 // R1/B6 fix 2026-10-03: no-brain fallback. Jev transport
                 // failure (or client construction failure) no longer kills

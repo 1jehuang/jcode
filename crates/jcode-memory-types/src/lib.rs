@@ -277,6 +277,17 @@ pub struct MemoryEntry {
     /// recall ignores uncited memories for verification.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub citation: Option<SourceCitation>,
+    /// Recall reinforcement count: strengthened ONLY on judge-verified
+    /// surfacing (kept-set from Jev select in `get_relevant_parallel`).
+    /// Keyword fallback and bench paths never touch this. Serde-defaulted:
+    /// old rows load as zero (never recalled under this scheme).
+    /// Record-only: no ranking consumer reads this yet (R4).
+    #[serde(default)]
+    pub recall_count: u32,
+    /// Last judge-verified recall timestamp. Serde-defaulted: old rows
+    /// load as never. Record-only (R4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_recalled_at: Option<DateTime<Utc>>,
 }
 
 /// Model id used for memories embedded before model tagging existed. These were
@@ -335,6 +346,8 @@ impl MemoryEntry {
             embedding_model: None,
             confidence: 1.0,
             citation: None,
+            recall_count: 0,
+            last_recalled_at: None,
         }
     }
 
@@ -434,6 +447,16 @@ impl MemoryEntry {
             message_index,
             timestamp: Utc::now(),
         });
+    }
+
+    /// Record one judge-verified surfacing (R4 recall-count reinforcement).
+    /// Call ONLY for the kept-set from Jev select — never for keyword
+    /// fallback or bench-path surfacing. Record-only: no ranking consumer
+    /// reads these fields yet. `updated_at` is deliberately untouched:
+    /// recall is not a content modification.
+    pub fn mark_recalled(&mut self) {
+        self.recall_count = self.recall_count.saturating_add(1);
+        self.last_recalled_at = Some(Utc::now());
     }
 
     /// Mark this memory as superseded by another

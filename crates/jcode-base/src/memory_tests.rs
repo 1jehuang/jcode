@@ -2444,3 +2444,114 @@ fn prefilter_tail_hit_snapshot_rates_and_bounds() {
     // the gate filters offline on `split_tag` before counting.
     assert!(value.get("split_tag").is_none());
 }
+
+/// Serializes tests that mutate the process-global Jev provider selector
+/// env var (`JCODE_MEMORY_JEV_PROVIDER`). Rust runs tests in parallel
+/// threads; without this, forcing the no-brain path here could break a
+/// concurrent test that needs the real selector.
+static R4_JEV_SELECTOR_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// R4 gate (kept-set): recall counters strengthen on judge-verified
+/// surfacing. Pins the exact `strengthen_kept_set` helper called at the
+/// kept-set anchor in `get_relevant_parallel`: in-memory copies and the
+/// durable graph row both bump, and repeated surfacing accumulates.
+#[test]
+fn recall_count_strengthens_on_kept_set_surfacing() {
+    with_temp_home(|_| {
+        let manager = MemoryManager::new().with_project_dir("/r4-kept-set");
+        let id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "r4 kept-set probe quokka",
+            ))
+            .expect("seed project memory");
+        let stored = || {
+            manager
+                .load_project_graph()
+                .expect("reload project graph")
+                .get_memory(&id)
+                .expect("seeded row survives")
+                .clone()
+        };
+        assert_eq!(stored().recall_count, 0);
+        assert!(stored().last_recalled_at.is_none());
+
+        let mut kept = vec![stored()];
+        manager.strengthen_kept_set(&mut kept);
+        assert_eq!(kept[0].recall_count, 1);
+        assert!(kept[0].last_recalled_at.is_some());
+        assert_eq!(stored().recall_count, 1);
+        assert!(stored().last_recalled_at.is_some());
+
+        manager.strengthen_kept_set(&mut kept);
+        assert_eq!(kept[0].recall_count, 2);
+        assert_eq!(stored().recall_count, 2);
+    });
+}
+
+/// R4 gate (fallback): keyword-fallback surfacing leaves recall counters
+/// untouched. Forces the no-brain path by pointing the Jev provider
+/// selector at a bogus value (`JevClient::new` bails), then drives the
+/// full `get_relevant_parallel` recall and checks both the returned
+/// entries and the stored rows. Sync test with an explicit runtime:
+/// `get_relevant_parallel` is async but the temp-home guard needs a
+/// plain closure scope.
+#[test]
+fn recall_count_untouched_on_keyword_fallback() {
+    let _selector_guard = R4_JEV_SELECTOR_TEST_LOCK
+        .lock()
+        .expect("r4 jev selector lock poisoned");
+    let old_selector = std::env::var("JCODE_MEMORY_JEV_PROVIDER").ok();
+    // SAFETY: serialized by R4_JEV_SELECTOR_TEST_LOCK; restored below.
+    unsafe { std::env::set_var("JCODE_MEMORY_JEV_PROVIDER", "bogus-provider-r4") };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_temp_home(|_| {
+            let manager = MemoryManager::new().with_project_dir("/r4-fallback");
+            let id = manager
+                .remember_project(MemoryEntry::new(
+                    MemoryCategory::Fact,
+                    "r4 fallback probe quokka",
+                ))
+                .expect("seed project memory");
+            // NOTE: no trailing punctuation — the keyword fallback matches
+            // normalized keywords by substring and `?` is not stripped.
+            let messages = vec![Message::user("what do we know about quokka")];
+            let relevant = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime")
+                .block_on(manager.get_relevant_parallel("r4-fallback-session", &messages, None))
+                .expect("fallback recall never errors")
+                .selected_entries;
+            assert!(
+                relevant.iter().any(|entry| entry.id == id),
+                "fallback should surface the seeded memory: {:?}",
+                relevant.iter().map(|e| &e.id).collect::<Vec<_>>()
+            );
+            for entry in &relevant {
+                assert_eq!(entry.recall_count, 0, "fallback must not bump recall_count");
+                assert!(
+                    entry.last_recalled_at.is_none(),
+                    "fallback must not stamp last_recalled_at"
+                );
+            }
+            let stored = manager
+                .load_project_graph()
+                .expect("reload project graph")
+                .get_memory(&id)
+                .expect("seeded row survives")
+                .clone();
+            assert_eq!(stored.recall_count, 0, "fallback must not persist bumps");
+            assert!(stored.last_recalled_at.is_none());
+        })
+    }));
+    // SAFETY: same serialization guard as the set above.
+    unsafe {
+        match old_selector {
+            Some(value) => std::env::set_var("JCODE_MEMORY_JEV_PROVIDER", value),
+            None => std::env::remove_var("JCODE_MEMORY_JEV_PROVIDER"),
+        }
+    }
+    result.expect("r4 fallback test body panicked");
+}
+
