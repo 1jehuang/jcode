@@ -449,16 +449,6 @@ impl Config {
                 }
             }
         }
-        if let Ok(v) = std::env::var("JCODE_MEMORY_CONVEX_ALPHA") {
-            // Finite and non-negative only; garbage leaves file value.
-            // 0.0 = off (shipped default: RRF path). Values above 1.0
-            // clamp to 1.0 at use.
-            if let Ok(parsed) = v.trim().parse::<f32>() {
-                if parsed.is_finite() && parsed >= 0.0 {
-                    self.agents.memory_convex_alpha = parsed;
-                }
-            }
-        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_RECENCY_W") {
             // Finite and non-negative only; garbage leaves file value.
             // 0.0 = off (explicit opt-out; shipped default is 0.05).

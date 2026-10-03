@@ -1802,41 +1802,6 @@ fn recency_bonus_for_is_bounded_by_weight() {
 }
 
 #[test]
-fn minmax_normalize_maps_pool_to_unit_interval() {
-    // C3 convex port: basic min-max over a retrieved pool.
-    let got = minmax_normalize(&[(0, 1.0), (1, 3.0), (2, 2.0)]);
-    assert_eq!(got, vec![(0, 0.0), (1, 1.0), (2, 0.5)]);
-}
-
-#[test]
-fn minmax_normalize_degenerate_pool_maps_to_one() {
-    // Empty pool -> empty; single-item and constant pools -> 1.0 per
-    // retrieved doc (scaffold rule: retrieved docs stay neutral, never
-    // zero their side of the convex sum).
-    assert!(minmax_normalize(&[]).is_empty());
-    assert_eq!(minmax_normalize(&[(7, 2.5)]), vec![(7, 1.0)]);
-    assert_eq!(
-        minmax_normalize(&[(0, 1.0), (1, 1.0)]),
-        vec![(0, 1.0), (1, 1.0)]
-    );
-}
-
-#[test]
-fn minmax_normalize_nonfinite_scores_cannot_poison_pool() {
-    // A NaN leg score degrades to the pool minimum instead of
-    // propagating NaN through the convex sum. (A pool with a single
-    // finite value is degenerate and maps everything to 1.0, NaN
-    // included — so this case needs two distinct finite scores.)
-    let got = minmax_normalize(&[(0, f32::NAN), (1, 1.0), (2, 3.0)]);
-    assert_eq!(got[0], (0, 0.0));
-    assert_eq!(got[1], (1, 0.0));
-    assert_eq!(got[2], (2, 1.0));
-    for (_, v) in minmax_normalize(&[(0, f32::NAN), (1, f32::NAN)]) {
-        assert!(v.is_finite());
-    }
-}
-
-#[test]
 fn bm25_plural_fold_makes_tied_pair_score_equal() {
     // c2b mechanism: a tied pair differing only in plurality must score
     // equal at the bm25_rank level (symmetric folding on query AND docs).

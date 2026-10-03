@@ -667,15 +667,6 @@ pub struct AgentsConfig {
     /// Env override: `JCODE_MEMORY_RRF_DENSE_W` (wins over file).
     #[serde(default = "default_memory_rrf_dense_weight")]
     pub memory_rrf_dense_weight: f32,
-    /// Convex-combination weight for hybrid fusion (C3 port, default OFF).
-    /// 0.0 selects the shipped RRF path; (0, 1] selects convex fusion
-    /// `alpha * dense_norm + (1 - alpha) * sparse_norm` with each leg
-    /// min-max normalized over its own retrieved pool (trio BM25 leg +
-    /// prefilter pool + G-R recency unchanged). Non-finite or negative
-    /// falls back to 0.0 at use; above 1.0 clamps to 1.0.
-    /// Env override: `JCODE_MEMORY_CONVEX_ALPHA` (wins over file).
-    #[serde(default = "default_memory_convex_alpha")]
-    pub memory_convex_alpha: f32,
     /// Recency-prior weight for hybrid RRF fusion (G-R, shipped 2026-09-30).
     /// Bounded additive bonus `w_r * 0.5^(age_days / half_life)` added
     /// post-fusion. Default 0.05 (tuning grid + blind no-regression confirm).
@@ -790,9 +781,6 @@ fn default_memory_rrf_k() -> f32 {
 fn default_memory_rrf_dense_weight() -> f32 {
     3.0
 }
-fn default_memory_convex_alpha() -> f32 {
-    0.0
-}
 fn default_memory_recency_weight() -> f32 {
     0.05
 }
@@ -839,7 +827,6 @@ impl Default for AgentsConfig {
             memory_rerank_min_agree: default_memory_rerank_min_agree(),
             memory_rrf_k: default_memory_rrf_k(),
             memory_rrf_dense_weight: default_memory_rrf_dense_weight(),
-            memory_convex_alpha: default_memory_convex_alpha(),
             memory_recency_weight: default_memory_recency_weight(),
             memory_recency_tau_days: default_memory_recency_tau_days(),
             memory_prefilter_mode: default_memory_prefilter_mode(),

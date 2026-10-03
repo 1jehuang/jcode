@@ -532,11 +532,6 @@ swarm_max_concurrent_agents = 32
 # 1.0 = equal weights; > 1.0 prioritizes dense (paraphrase-heavy queries).
 # Default 3.0 (L1 grid winner). Env override: JCODE_MEMORY_RRF_DENSE_W (wins over file).
 # memory_rrf_dense_weight = 3.0
-# Convex-combination weight for hybrid fusion (C3 port, default OFF):
-# 0.0 = shipped RRF path; (0, 1] = convex fusion alpha*dense_norm +
-# (1-alpha)*sparse_norm (trio BM25 leg + prefilter pool + G-R unchanged).
-# Env override: JCODE_MEMORY_CONVEX_ALPHA (wins over file).
-# memory_convex_alpha = 0.0
 # Recency prior for hybrid RRF fusion (G-R, shipped 2026-09-30): bounded
 # additive bonus w_r * 0.5^(age_days / half_life) applied post-fusion.
 # Default w=0.05, tau=90 (tuning grid safe cell + blind no-regression).
