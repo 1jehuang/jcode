@@ -1,6 +1,238 @@
 use super::*;
 
 #[test]
+fn claude_code_choice_ignores_ambient_browser_suppression() {
+    let _guard = crate::storage::lock_test_env();
+    let old_no_browser = std::env::var_os("NO_BROWSER");
+    crate::env::set_var("NO_BROWSER", "1");
+    let claude = login_provider_for_choice(&ProviderChoice::Claude).unwrap();
+    assert_eq!(
+        auto_scriptable_flow_reason(claude, &LoginOptions::default(), true),
+        Some("no_browser_requested")
+    );
+    assert_eq!(
+        auto_scriptable_flow_reason(
+            claude,
+            &LoginOptions {
+                claude_code: true,
+                ..LoginOptions::default()
+            },
+            true,
+        ),
+        None
+    );
+    set_or_clear_env("NO_BROWSER", old_no_browser);
+}
+
+#[test]
+fn unchanged_configured_file_with_native_credentials_cannot_claim_new_login() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let file = temp.path().join(".credentials.json");
+    std::fs::write(&file, "old synthetic credentials").unwrap();
+    let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+
+    let error =
+        configured_claude_file_is_unambiguous(&file, true, Some(modified), true).unwrap_err();
+    assert!(error.to_string().contains("cannot tell which account"));
+    assert!(configured_claude_file_is_unambiguous(&file, true, Some(modified), false).is_ok());
+    assert!(configured_claude_file_is_unambiguous(&file, false, None, true).is_ok());
+    assert!(
+        configured_claude_file_is_unambiguous(
+            &file,
+            true,
+            Some(std::time::SystemTime::UNIX_EPOCH),
+            true,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn claude_code_method_rejects_other_provider_account_and_noninteractive_options() {
+    let claude = login_provider_for_choice(&ProviderChoice::Claude).unwrap();
+    let openai = login_provider_for_choice(&ProviderChoice::Openai).unwrap();
+    let selected = LoginOptions {
+        claude_code: true,
+        ..LoginOptions::default()
+    };
+    assert!(
+        validate_claude_code_method(openai, None, &selected)
+            .unwrap_err()
+            .to_string()
+            .contains("only available with --provider claude")
+    );
+    assert!(
+        validate_claude_code_method(claude, Some("work"), &selected)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot select a Jcode account label")
+    );
+
+    for incompatible in [
+        LoginOptions {
+            no_browser: true,
+            ..selected.clone()
+        },
+        LoginOptions {
+            json: true,
+            ..selected.clone()
+        },
+        LoginOptions {
+            print_auth_url: true,
+            ..selected.clone()
+        },
+        LoginOptions {
+            callback_url: Some("test-callback".into()),
+            ..selected.clone()
+        },
+        LoginOptions {
+            auth_code: Some("test-code".into()),
+            ..selected.clone()
+        },
+        LoginOptions {
+            complete: true,
+            ..selected.clone()
+        },
+        LoginOptions {
+            flow_id: Some("test-flow".into()),
+            ..selected.clone()
+        },
+        LoginOptions {
+            cancel: true,
+            ..selected
+        },
+    ] {
+        assert!(
+            validate_claude_code_method(claude, None, &incompatible)
+                .unwrap_err()
+                .to_string()
+                .contains("requires an interactive terminal")
+        );
+    }
+}
+
+#[test]
+fn claude_code_native_import_refuses_previously_trusted_file_shadow() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    let old_native = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let config_dir = temp.path().join("claude-config");
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    crate::env::set_var(
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        r#"{"claudeAiOauth":{"accessToken":"native-token","refreshToken":"native-refresh","expiresAt":4102444800000}}"#,
+    );
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let file = config_dir.join(".credentials.json");
+    std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"file-token","refreshToken":"file-refresh","expiresAt":4102444800000}}"#).unwrap();
+    crate::config::Config::allow_external_auth_source_for_path(
+        auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
+        &file,
+    )
+    .unwrap();
+    crate::config::Config::allow_external_auth_source(
+        auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+    )
+    .unwrap();
+
+    let error = reuse_claude_code_native(&file).unwrap_err();
+    assert!(error.to_string().contains("takes precedence"));
+    assert!(auth::claude::list_accounts().unwrap().is_empty());
+    assert_eq!(
+        auth::claude::load_credentials().unwrap().access_token,
+        "file-token"
+    );
+
+    set_or_clear_env("CLAUDE_CODE_OAUTH_TOKEN", old_native);
+    set_or_clear_env("CLAUDE_CONFIG_DIR", old_config);
+    set_or_clear_env("JCODE_HOME", old_home);
+}
+
+#[test]
+fn expired_claude_code_file_does_not_shadow_fresh_native_login() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    let old_native = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let config_dir = temp.path().join("claude-config");
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    crate::env::set_var(
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        r#"{"claudeAiOauth":{"accessToken":"native-token","refreshToken":"native-refresh","expiresAt":4102444800000}}"#,
+    );
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let file = config_dir.join(".credentials.json");
+    std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"old-file-token","refreshToken":"old-file-refresh","expiresAt":1}}"#).unwrap();
+    crate::config::Config::allow_external_auth_source_for_path(
+        auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
+        &file,
+    )
+    .unwrap();
+    crate::config::Config::allow_external_auth_source(
+        auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+    )
+    .unwrap();
+
+    assert!(reuse_claude_code_native(&file).unwrap());
+    assert_eq!(
+        auth::claude::load_credentials().unwrap().access_token,
+        "native-token"
+    );
+
+    set_or_clear_env("CLAUDE_CODE_OAUTH_TOKEN", old_native);
+    set_or_clear_env("CLAUDE_CONFIG_DIR", old_config);
+    set_or_clear_env("JCODE_HOME", old_home);
+}
+
+#[test]
+fn unusable_claude_code_file_falls_back_to_native_snapshot() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    let old_native = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let config_dir = temp.path().join("claude-config");
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    crate::env::set_var(
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        r#"{"claudeAiOauth":{"accessToken":"native-token","refreshToken":"native-refresh","expiresAt":4102444800000}}"#,
+    );
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let file = config_dir.join(".credentials.json");
+    std::fs::write(&file, "not an OAuth credential").unwrap();
+    crate::config::Config::allow_external_auth_source_for_path(
+        auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
+        &file,
+    )
+    .unwrap();
+    crate::config::Config::allow_external_auth_source(
+        auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+    )
+    .unwrap();
+
+    assert!(
+        !reuse_claude_code_file(auth::claude::ExternalClaudeAuthSource::ClaudeCode, &file).unwrap()
+    );
+    assert!(reuse_claude_code_native(&file).unwrap());
+    crate::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+    auth::claude::set_active_account_override(None);
+    assert_eq!(
+        auth::claude::load_credentials().unwrap().access_token,
+        "native-token"
+    );
+
+    set_or_clear_env("CLAUDE_CODE_OAUTH_TOKEN", old_native);
+    set_or_clear_env("CLAUDE_CONFIG_DIR", old_config);
+    set_or_clear_env("JCODE_HOME", old_home);
+}
+
+#[test]
 fn novita_login_saves_private_key_and_rejects_empty_replacement() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();

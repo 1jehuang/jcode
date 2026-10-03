@@ -282,6 +282,16 @@ struct OpenCodeAnthropicAuth {
 }
 
 fn claude_code_path() -> Result<PathBuf> {
+    if let Some(config_dir) =
+        std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
+    {
+        let config_dir = PathBuf::from(config_dir);
+        anyhow::ensure!(
+            config_dir.is_absolute(),
+            "CLAUDE_CONFIG_DIR must be absolute to reuse Claude Code credentials across Jcode processes."
+        );
+        return Ok(config_dir.join(".credentials.json"));
+    }
     crate::storage::user_home_path(".claude/.credentials.json")
 }
 
@@ -656,7 +666,7 @@ fn load_jcode_credentials() -> Result<ClaudeCredentials> {
     })
 }
 
-fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
+pub fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
     let path = crate::storage::validate_external_auth_file(&claude_code_path()?)?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
@@ -887,7 +897,11 @@ pub fn trust_native_source() -> Result<()> {
 pub fn import_native_credentials_into_account() -> Result<String> {
     let creds = load_native_credentials()
         .context("Could not read Claude Code native credentials to import")?;
+    import_native_credentials_into_account_from(creds)
+}
 
+/// Store the credential snapshot read after the user approved native import.
+pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> Result<String> {
     if creds.refresh_token.trim().is_empty() {
         // Without a refresh token we cannot keep the account alive past the
         // current access token, so we do not persist a dead-end account.

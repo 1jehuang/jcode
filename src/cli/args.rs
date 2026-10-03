@@ -211,6 +211,11 @@ pub(crate) enum Command {
         #[arg(long, alias = "headless")]
         no_browser: bool,
 
+        /// Sign in with the installed Claude Code CLI instead of Jcode's OAuth flow.
+        /// Jcode asks before reusing the CLI's credentials.
+        #[arg(long, conflicts_with_all = ["no_browser", "account"])]
+        claude_code: bool,
+
         /// Print a script-friendly auth URL and persist temporary login state for later completion.
         #[arg(long, conflicts_with_all = ["callback_url", "auth_code"])]
         print_auth_url: bool,
