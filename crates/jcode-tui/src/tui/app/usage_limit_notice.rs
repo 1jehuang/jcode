@@ -30,6 +30,22 @@ impl App {
         .and_then(|hint| hint.reset_in) else {
             return false;
         };
+        if self.local_usage_limit_resume_attempts >= 3 {
+            // Exhaustion is terminal for this logical turn, including default
+            // and overnight pokes. Keep the transcript and draft input intact.
+            self.rate_limit_reset = None;
+            self.account_change_resend_at = None;
+            self.pending_turn = false;
+            super::commands::disable_auto_poke(self);
+            self.overnight_auto_poke = None;
+            self.push_display_message(DisplayMessage::error(error.to_string()));
+            self.push_display_message(DisplayMessage::system(
+                "Usage limit still reached after 3 automatic resumes. Paused. Submit a new prompt or change credentials to retry.".to_string(),
+            ));
+            self.set_status_notice("Paused: usage-limit retry budget exhausted");
+            return true;
+        }
+        self.local_usage_limit_resume_attempts += 1;
         // Never retry immediately: a reset that already passed waits the
         // same minimum as the server-side resume.
         let wait = jcode_provider_core::usage_limit_resume::usage_limit_resume_delay(
