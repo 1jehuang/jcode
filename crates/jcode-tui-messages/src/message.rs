@@ -53,6 +53,23 @@ impl DisplayMessage {
         }
     }
 
+    /// Create a user message that arrived through an out-of-band channel
+    /// (email, Telegram, CLI relay) rather than being typed into this window.
+    /// It is a real user request, so it is shown and stays in context, but it
+    /// must not render as an ordinary typed prompt: the agent used to replay
+    /// its own injected history back as fresh requests because the two were
+    /// indistinguishable.
+    pub fn user_external(content: impl Into<String>) -> Self {
+        Self {
+            role: "user_external".to_string(),
+            content: content.into(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: None,
+        }
+    }
+
     /// Create a display-only usage card. This is shown in the transcript UI but
     /// is not part of provider/model context.
     pub fn usage(content: impl Into<String>) -> Self {

@@ -23,6 +23,9 @@ fn display_message_from_stored_message(
     match message.display_role {
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
         Some(crate::session::StoredDisplayRole::BackgroundTask) => None,
+        Some(crate::session::StoredDisplayRole::UserExternal) => {
+            Some(DisplayMessage::user_external(text))
+        }
         None => match message.role {
             Role::User => {
                 if crate::session::is_scheduled_task_message(message) {

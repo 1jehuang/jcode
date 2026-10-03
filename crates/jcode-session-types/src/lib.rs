@@ -284,6 +284,11 @@ pub struct StoredMessage {
 pub enum StoredDisplayRole {
     System,
     BackgroundTask,
+    /// A user request that arrived through an out-of-band channel rather than
+    /// being typed into this window. Kept distinct from "no role" so the
+    /// transcript can name the real channel instead of rendering it as plain
+    /// typed user input.
+    UserExternal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
