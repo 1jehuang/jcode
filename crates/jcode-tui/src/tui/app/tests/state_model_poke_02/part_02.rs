@@ -28,15 +28,7 @@ fn test_agents_review_picker_saves_config_override() {
         let expected = {
             let picker = app.inline_interactive_state.as_ref().unwrap();
             let entry = &picker.entries[picker.filtered[selected]];
-            let base = if entry.effort.is_some() {
-                entry
-                    .name
-                    .rsplit_once(" (")
-                    .map(|(base, _)| base.to_string())
-                    .unwrap_or_else(|| entry.name.clone())
-            } else {
-                entry.name.clone()
-            };
+            let base = entry.name.clone();
             let route = &entry.options[entry.selected_option];
             if route.api_method == "copilot" {
                 format!("copilot:{}", base)
@@ -230,7 +222,7 @@ fn test_model_picker_preview_stays_open_and_updates_filter() {
         picker
             .filtered
             .iter()
-            .any(|&i| picker.entries[i].name.starts_with("gpt-5.2-codex ("))
+            .any(|&i| picker.entries[i].name == "gpt-5.2-codex")
     );
     assert_eq!(app.input(), "/model g52c");
 }
@@ -244,8 +236,8 @@ fn test_model_picker_preview_enter_selects_model() {
         app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
             .unwrap();
     }
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
-        .unwrap();
+    // A route with a reasoning ladder asks for the level first.
+    enter_and_confirm_level(&mut app);
 
     // Enter from preview mode selects the model and closes the picker
     assert!(app.inline_interactive_state.is_none());
