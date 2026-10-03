@@ -415,15 +415,24 @@ impl OpenRouterStream {
                             for tc in tool_calls {
                                 let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
                                 let function = tc.get("function");
+                                // Compatible APIs may send a complete JSON value
+                                // instead of the usual string fragment. Preserve
+                                // it, including invalid null/array arguments, so
+                                // validation sees what the provider actually sent.
+                                let arguments =
+                                    function.and_then(|f| f.get("arguments")).map(|value| {
+                                        match value.as_str() {
+                                            Some(fragment) => std::borrow::Cow::Borrowed(fragment),
+                                            None => std::borrow::Cow::Owned(value.to_string()),
+                                        }
+                                    });
                                 self.apply_tool_call_delta(
                                     index,
                                     tc.get("id").and_then(|i| i.as_str()),
                                     function
                                         .and_then(|f| f.get("name"))
                                         .and_then(|n| n.as_str()),
-                                    function
-                                        .and_then(|f| f.get("arguments"))
-                                        .and_then(|a| a.as_str()),
+                                    arguments.as_deref(),
                                     tc.get("extra_content")
                                         .and_then(|value| value.get("google"))
                                         .and_then(|value| value.get("thought_signature"))
@@ -684,6 +693,33 @@ mod tests {
             serde_json::from_str(&args).expect("tool arguments should be complete JSON");
         assert_eq!(parsed["path"], "a.txt");
         assert_eq!(parsed["content"], "hi");
+    }
+
+    #[test]
+    fn non_string_tool_arguments_are_preserved_for_validation() {
+        for arguments in [
+            serde_json::json!({"file_path": "server.py", "content": "print('hi')"}),
+            serde_json::json!(null),
+            serde_json::json!(["not", "an", "object"]),
+            serde_json::json!(42),
+            serde_json::json!(false),
+        ] {
+            let mut stream = test_stream();
+            let event = serde_json::json!({"choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_1", "type": "function",
+                "function": {"name": "write", "arguments": arguments}
+            }]}}]});
+            stream.buffer = format!("data: {event}\n\ndata: [DONE]\n\n");
+            let mut received = String::new();
+            while let Some(event) = stream.parse_next_event() {
+                if let StreamEvent::ToolInputDeltaFor { delta, .. } = event {
+                    received.push_str(&delta);
+                }
+            }
+            let parsed: Value = serde_json::from_str(&received)
+                .expect("non-string arguments must not be silently dropped");
+            assert_eq!(parsed, arguments);
+        }
     }
 
     #[test]
