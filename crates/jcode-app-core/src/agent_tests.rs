@@ -4243,6 +4243,299 @@ fn pruner_wire_mode_off_leaves_bytes_byte_identical() {
     crate::config::Config::invalidate_cache();
 }
 
+/// SWE-Pruner slim composition: a read-heavy result whose pruned display
+/// copy is shorter than the full substitution sends FEWER bytes than the
+/// OFF (substitution-only) view — the per-view guarantee behind the slim
+/// wire. Offload bytes stay byte-identical to the OFF run's.
+#[test]
+fn pruner_wire_slim_sends_fewer_bytes_than_off_on_read_heavy_fixture() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_window = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "1");
+    let prev_pruner = std::env::var_os("JCODE_PRUNER_MODE");
+    crate::config::Config::invalidate_cache();
+
+    // Read-heavy fixture: distinct short lines mentioning the read target,
+    // with one verbatim error line. The scorer's zero-overlap drop keeps
+    // the hint-matching lines and the error line, collapsing a long tail
+    // of unrelated lines into a handful of `(filtered N lines)` markers —
+    // far shorter than the full substitution (cue + two abspath refs).
+    let mut lines = vec![
+        "// crates/jcode-app-core/src/agent/turn_loops.rs - turn loop".to_string(),
+        "fn run_turn(agent: &mut Agent, turn_loops: &TurnLoops) {".to_string(),
+        "ERROR: turn_loops dispatch failed on agent retry".to_string(),
+    ];
+    for i in 0..25 {
+        lines.push(format!(
+            "unrelated filler prose line {i} about nothing in particular quilts"
+        ));
+    }
+    let original = lines.join("\n");
+    assert!(
+        original.chars().count() > 200,
+        "fixture must clear the stub floor"
+    );
+
+    let run_clearing = |session: &str, mode: Option<&str>| -> String {
+        match mode {
+            Some(value) => crate::env::set_var("JCODE_PRUNER_MODE", value),
+            None => crate::env::remove_var("JCODE_PRUNER_MODE"),
+        }
+        crate::config::Config::invalidate_cache();
+        let tool_use = ContentBlock::ToolUse {
+            id: "call_slim".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"file_path": "crates/jcode-app-core/src/agent/turn_loops.rs"}),
+            thought_signature: None,
+        };
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![tool_use],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_slim".to_string(),
+                    content: original.clone(),
+                    is_error: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "next".to_string(),
+                    cache_control: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+        let out = Agent::apply_tool_result_clearing(messages, session);
+        match &out[1].content[0] {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            other => panic!("result block must survive, got: {other:?}"),
+        }
+    };
+
+    let slim_view = run_clearing("session_pruner_slim", Some("slim"));
+    let off_view = run_clearing("session_pruner_slim_off", None);
+
+    // OFF baseline: substitution only.
+    assert!(
+        off_view.starts_with("[jcode-retention:offloaded"),
+        "off view is substitution-only, got:\n{off_view}"
+    );
+    // Slim guarantee: strictly fewer send bytes than OFF, error line kept.
+    assert!(
+        slim_view.chars().count() < off_view.chars().count(),
+        "slim ({} chars) must send fewer bytes than off ({} chars)",
+        slim_view.chars().count(),
+        off_view.chars().count()
+    );
+    assert!(
+        slim_view.contains("ERROR: turn_loops dispatch failed on agent retry"),
+        "error line kept verbatim, got:\n{slim_view}"
+    );
+    // On this fixture the pruned copy wins the byte-min, so the view is
+    // the pruned text with markers — NOT the full substitution.
+    assert!(
+        slim_view.contains("(filtered "),
+        "pruned head carries filter markers, got:\n{slim_view}"
+    );
+    assert!(
+        !slim_view.contains("[jcode-retention:offloaded"),
+        "substitution dropped when pruned copy is shorter, got:\n{slim_view}"
+    );
+
+    // Offload bytes byte-identical across modes (invariant never changes).
+    for session in ["session_pruner_slim", "session_pruner_slim_off"] {
+        let offload_dir = temp
+            .path()
+            .join("sessions")
+            .join("offloaded")
+            .join(Agent::sanitize_offload_component(session));
+        let entries: Vec<_> = std::fs::read_dir(&offload_dir)
+            .expect("offload dir")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("entries");
+        assert_eq!(entries.len(), 1, "single-chunk fixture writes one file");
+        let body = std::fs::read_to_string(entries[0].path()).expect("read offload");
+        let stored = body
+            .split_once("--- result ---\n")
+            .expect("offload header")
+            .1
+            .trim_end_matches('\n');
+        assert_eq!(stored, original, "stored bytes byte-identical in {session}");
+    }
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev_window {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    match prev_pruner {
+        Some(value) => crate::env::set_var("JCODE_PRUNER_MODE", value),
+        None => crate::env::remove_var("JCODE_PRUNER_MODE"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+/// SWE-Pruner slim composition: when the pruned copy is LONGER than the
+/// full substitution (dense output the scorer barely trims), slim falls back
+/// to the substitution alone — never exceeding OFF bytes. And an unknown
+/// tool bypasses the scorer entirely (substitution-only, marker-free).
+#[test]
+fn pruner_wire_slim_falls_back_to_substitution_when_pruned_longer() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let prev_window = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "1");
+    let prev_pruner = std::env::var_os("JCODE_PRUNER_MODE");
+    crate::env::set_var("JCODE_PRUNER_MODE", "slim");
+    crate::config::Config::invalidate_cache();
+
+    // Dense output: every line overlaps the grep hint, so zero-overlap drops
+    // nothing; only blank-line filtering fires, leaving the pruned copy
+    // near-original length — longer than the compact substitution.
+    let mut dense_lines = vec!["alpha beta gamma".to_string()];
+    for i in 0..30 {
+        dense_lines.push(format!("alpha result {i} beta gamma delta epsilon outcome"));
+    }
+    let original = dense_lines.join("\n");
+    assert!(
+        original.chars().count() > 200,
+        "fixture must clear the stub floor"
+    );
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_dense".to_string(),
+        name: "agentgrep".to_string(),
+        input: serde_json::json!({"mode": "grep", "query": "alpha beta gamma delta epsilon", "path": "src"}),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_dense".to_string(),
+                content: original.clone(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "next".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, "session_pruner_dense");
+    match &out[1].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            // Fallback: substitution alone (bounded by OFF bytes).
+            assert!(
+                content.starts_with("[jcode-retention:offloaded"),
+                "dense pruned copy loses the byte-min, got:\n{content}"
+            );
+            assert!(
+                !content.contains("(filtered "),
+                "no pruner markers on the fallback view, got:\n{content}"
+            );
+        }
+        other => panic!("result block must survive, got: {other:?}"),
+    }
+
+    // Unknown tool under slim: substitution-only, marker-free (bypass).
+    crate::env::set_var("JCODE_PRUNER_MODE", "slim");
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_todo".to_string(),
+        name: "todo".to_string(),
+        input: serde_json::json!({"todos": []}),
+        thought_signature: None,
+    };
+    let filler = "todo output line ".repeat(30);
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_todo".to_string(),
+                content: filler.clone(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "next".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages, "session_pruner_todo");
+    match &out[1].content[0] {
+        ContentBlock::ToolResult { content, .. } => {
+            assert!(
+                content.starts_with("[jcode-retention:offloaded"),
+                "unknown tool bypasses scorer, got:\n{content}"
+            );
+            assert!(
+                !content.contains("(filtered "),
+                "no pruner markers, got:\n{content}"
+            );
+        }
+        other => panic!("result block must survive, got: {other:?}"),
+    }
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    match prev_window {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    match prev_pruner {
+        Some(value) => crate::env::set_var("JCODE_PRUNER_MODE", value),
+        None => crate::env::remove_var("JCODE_PRUNER_MODE"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
 /// SWE-Pruner Stage 1 wiring: unknown tools bypass even with mode ON
 /// (same backward-compat rule as the paper's missing-hint bypass).
 #[test]

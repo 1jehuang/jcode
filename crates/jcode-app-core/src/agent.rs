@@ -978,14 +978,24 @@ impl Agent {
         }
     }
 
-    /// SWE-Pruner Stage 1 mode knob: `JCODE_PRUNER_MODE=on` filters the
-    /// display copy, anything else (including unset) bypasses. Default OFF,
-    /// so masking behavior is byte-identical unless explicitly enabled. Read
+    /// SWE-Pruner Stage 1 mode knob: `JCODE_PRUNER_MODE=on` (current
+    /// composition) or `slim` (byte-min composition) filters the display
+    /// copy; anything else (including unset) bypasses. Default OFF, so
+    /// masking behavior is byte-identical unless explicitly enabled. Read
     /// live (no cache) so tests can flip it under the test-env lock.
     fn pruner_enabled() -> bool {
+        matches!(Self::pruner_mode().as_str(), "on" | "slim")
+    }
+
+    /// Raw pruner mode, lowercased and trimmed: `"on"` (current pruned +
+    /// full-substitution composition), `"slim"` (byte-min composition: the
+    /// shorter of the pruned display copy and the substitution wins, so the
+    /// send view never exceeds substitution-only), anything else (including
+    /// unset) bypasses. Default OFF.
+    fn pruner_mode() -> String {
         std::env::var("JCODE_PRUNER_MODE")
-            .map(|v| v.trim().eq_ignore_ascii_case("on"))
-            .unwrap_or(false)
+            .map(|v| v.trim().to_ascii_lowercase())
+            .unwrap_or_default()
     }
 
     /// Pre-offload line filter on a DISPLAY copy (phase3/13-swe-pruner PLAN
@@ -1208,6 +1218,25 @@ impl Agent {
                     ) {
                         Some((_path, substitution, nchunks)) => {
                             *content = match pruned_display {
+                                Some(pruned) if Self::pruner_mode() == "slim" => {
+                                    // Slim composition: send the SHORTER of
+                                    // the pruned display copy and the
+                                    // full substitution, so the send view
+                                    // never exceeds substitution-only sends.
+                                    // Recoverability is unchanged: the full
+                                    // original bytes stay on disk and the
+                                    // session history keeps the full text,
+                                    // so a later request rebuilds either
+                                    // view from the same source (the
+                                    // `starts_with("[jcode-retention:")`
+                                    // guard above keeps these pruned-alone
+                                    // views out of the scorer forever).
+                                    if pruned.chars().count() < substitution.chars().count() {
+                                        pruned
+                                    } else {
+                                        substitution
+                                    }
+                                }
                                 Some(pruned) => format!("{pruned}\n{substitution}"),
                                 None => substitution,
                             };
