@@ -24,7 +24,16 @@ impl Agent {
     /// turn entries so `jcode run`, ambient cycles, debug exec and swarm
     /// workers see hook-emitted context (e.g. alert banners) exactly like the
     /// streaming entry point. Hook failure never blocks the turn.
+    ///
+    /// Skipped in test builds: unit tests drive turn entries directly and
+    /// must not execute the developer's real configured hooks, whose output
+    /// would leak into prompt/reminder assertions (proven: the fable
+    /// guardrail and retention scorecard tests failed on machines with a
+    /// real turn_start hook installed).
     fn fire_turn_start_hook_into_reminder(&mut self) {
+        if cfg!(test) {
+            return;
+        }
         if let Some(text) = crate::hooks::run_turn_start_collecting(
             Some(self.session.id.as_str()),
             self.working_dir(),
@@ -161,12 +170,17 @@ impl Agent {
         // Fire the turn_start hook first (synchronous so its stdout can be
         // collected), then fold any hook stdout into this turn's system
         // reminder so hook-emitted context (e.g. alert markers) is visible to
-        // the model. Hook failure never blocks the turn.
-        let hook_output = crate::hooks::run_turn_start_collecting(
-            Some(self.session.id.as_str()),
-            self.working_dir(),
-            "chat",
-        );
+        // the model. Hook failure never blocks the turn. Skipped in test
+        // builds (see fire_turn_start_hook_into_reminder).
+        let hook_output = if cfg!(test) {
+            None
+        } else {
+            crate::hooks::run_turn_start_collecting(
+                Some(self.session.id.as_str()),
+                self.working_dir(),
+                "chat",
+            )
+        };
         if let Some(text) = hook_output {
             let banner = format!("[HOOK TURN_START]\n{}", text);
             reminder = Some(match reminder {

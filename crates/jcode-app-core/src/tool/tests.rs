@@ -225,7 +225,15 @@ async fn fuzzy_resolve_handles_camelcase_and_separator_drift() {
     // the call succeeds instead of burning a round-trip on the error.
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
-    let tools = registry.tools.read().await.clone();
+    let mut tools = registry.tools.read().await.clone();
+    // mcp_call / mcp_search / skill_manage register lazily (MCP activation /
+    // session tools), not in the bare base registry a unit test builds, so
+    // seed them explicitly; the pure mapping logic itself is covered by the
+    // jcode-tool-types suite.
+    for name in ["mcp_call", "mcp_search", "skill_manage"] {
+        let seed = tools.get("agentgrep").expect("agentgrep registered").clone();
+        tools.insert(name.to_string(), seed);
+    }
     for (mangled, canonical) in [
         ("Agentgrep", "agentgrep"),
         ("McpCall", "mcp_call"),

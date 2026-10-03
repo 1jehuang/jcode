@@ -375,6 +375,12 @@ pub fn run_turn_start_collecting(
     cwd: Option<&str>,
     source: &str,
 ) -> Option<String> {
+    // Honor the global suppression switch (used by tests and embedders): unit
+    // tests drive turn entries directly and must never execute the user's
+    // real configured hooks, whose output would leak into prompt assertions.
+    if hooks_suppressed() {
+        return None;
+    }
     let command_lines = hook_commands("turn_start");
     if command_lines.is_empty() {
         return None;
