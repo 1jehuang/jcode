@@ -941,3 +941,12 @@ fn render_side_panel_linked_file_missing_file_falls_back_to_snapshot_content() {
         text
     );
 }
+#[test]
+fn close_target_only_exists_when_side_panel_header_can_render() {
+    assert!(side_panel_close_area(Rect::new(0, 0, 9, 4)).is_none());
+    assert!(side_panel_close_area(Rect::new(0, 0, 10, 2)).is_none());
+    assert_eq!(
+        side_panel_close_area(Rect::new(20, 4, 10, 3)),
+        Some(Rect::new(27, 4, 3, 1))
+    );
+}

@@ -1661,7 +1661,8 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 }
 
 pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
-    if handle_subagent_model_command(app, trimmed)
+    if app.handle_side_command(trimmed)
+        || handle_subagent_model_command(app, trimmed)
         || app.handle_hotkeys_command(trimmed)
         || app.handle_terminal_setup_command(trimmed)
         || handle_subagent_command(app, trimmed)

@@ -1244,7 +1244,7 @@ fn test_workspace_info_widget_appears_in_visual_debug_frame_when_enabled() {
 #[test]
 fn test_mouse_scroll_over_diff_pane_scrolls_side_panel_without_changing_focus() {
     let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
+    let (mut app, _) = make_edit_badge_test_app(30);
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.diff_pane_scroll = 5;
     app.diff_pane_focus = false;
@@ -1272,7 +1272,7 @@ fn test_mouse_scroll_over_diff_pane_scrolls_side_panel_without_changing_focus() 
 #[test]
 fn test_mouse_scroll_animation_preserves_side_pane_scroll_sensitivity() {
     let _render_lock = scroll_render_test_lock();
-    let mut app = create_test_app();
+    let (mut app, _) = make_edit_badge_test_app(30);
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.diff_pane_scroll = 5;
     app.diff_pane_auto_scroll = true;

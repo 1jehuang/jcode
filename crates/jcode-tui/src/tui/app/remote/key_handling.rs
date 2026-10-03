@@ -1807,6 +1807,10 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if app.handle_side_command(trimmed) {
+                    return Ok(());
+                }
+
                 if trimmed == "/observe"
                     || trimmed == "/observe on"
                     || trimmed == "/observe off"
