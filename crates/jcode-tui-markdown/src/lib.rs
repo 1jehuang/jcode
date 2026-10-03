@@ -1045,6 +1045,10 @@ fn latex_image_lines(
     display: bool,
     max_width: Option<usize>,
 ) -> Option<Vec<Line<'static>>> {
+    // Empty math has nothing to render; the text fallback shows it as-is.
+    if math.trim().is_empty() {
+        return None;
+    }
     if let Some(lines) = latex_image::render_handterm_native_latex(math, display, max_width) {
         return Some(lines);
     }
