@@ -2339,6 +2339,29 @@ pub(crate) fn input_pane_line_count() -> Option<usize> {
     copy_pane_line_count(crate::tui::CopySelectionPane::Input)
 }
 
+/// Convert a composer (`Input` pane) selection point into a byte offset into
+/// `input`, on a char boundary. Uses the last rendered composer snapshot to
+/// undo soft wrapping and the prompt prefix, so it is exact for wrapped and
+/// multi-line drafts as long as `input` is what was last drawn.
+pub(crate) fn input_byte_offset_for_copy_point(
+    input: &str,
+    point: crate::tui::CopySelectionPoint,
+) -> Option<usize> {
+    if point.pane != crate::tui::CopySelectionPane::Input {
+        return None;
+    }
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Input)?;
+    let (raw_line, column) = copy_selection::raw_line_column_from_snapshot(&snapshot, point)?;
+    let mut offset = 0usize;
+    for (index, line) in input.split('\n').enumerate() {
+        if index == raw_line {
+            return Some(offset + display_width::display_col_to_byte_offset(line, column));
+        }
+        offset += line.len() + 1;
+    }
+    Some(input.len())
+}
+
 pub(crate) fn copy_viewport_visible_range() -> Option<(usize, usize)> {
     let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Chat)?;
     Some((snapshot.scroll, snapshot.visible_end))
