@@ -467,13 +467,20 @@ fn test_swarm_prompt_prefers_project_then_global_then_default() {
 
     let project_dir = tempfile::TempDir::new().unwrap();
 
-    // No override files: built-in default.
-    let prompt = load_swarm_prompt(Some(project_dir.path()));
+    // The machine profile is pinned too. These assertions are about resolution
+    // ORDER; if the real ~/.jcode is consulted then whether they hold depends on
+    // whether this particular machine happens to have a policy, and that is the
+    // environment-dependence under which the shadowing bug hid undetected.
+    let machine_home = tempfile::TempDir::new().unwrap();
+    let project = project_dir.path();
+
+    // No override files anywhere: built-in default, and no shadowing notice.
+    let prompt = load_swarm_prompt_with_homes(Some(project), machine_home.path());
     assert_eq!(prompt, DEFAULT_SWARM_PROMPT.trim());
 
     // Global override wins over the default.
     std::fs::write(temp.path().join("swarm-prompt.md"), "global swarm routing").unwrap();
-    let prompt = load_swarm_prompt(Some(project_dir.path()));
+    let prompt = load_swarm_prompt_with_homes(Some(project), machine_home.path());
     assert_eq!(prompt, "global swarm routing");
 
     // Project override wins over global.
@@ -483,16 +490,96 @@ fn test_swarm_prompt_prefers_project_then_global_then_default() {
         "project swarm routing",
     )
     .unwrap();
-    let prompt = load_swarm_prompt(Some(project_dir.path()));
+    let prompt = load_swarm_prompt_with_homes(Some(project), machine_home.path());
     assert_eq!(prompt, "project swarm routing");
 
     // A blank project file falls through to global instead of going empty.
     std::fs::write(project_dir.path().join(".jcode/swarm-prompt.md"), "   \n").unwrap();
-    let prompt = load_swarm_prompt(Some(project_dir.path()));
+    let prompt = load_swarm_prompt_with_homes(Some(project), machine_home.path());
     assert_eq!(prompt, "global swarm routing");
+
+    // A resolved global policy suppresses the shadowing notice even when the
+    // machine profile also holds one, so a working setup stays quiet.
+    std::fs::write(machine_home.path().join("swarm-prompt.md"), "machine routing").unwrap();
+    let prompt = load_swarm_prompt_with_homes(Some(project), machine_home.path());
+    assert_eq!(
+        prompt, "global swarm routing",
+        "a policy that is actually in effect must not be announced as shadowed"
+    );
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+/// Regression for a failure observed live on 2026-10-03. A self-dev run with
+/// `JCODE_HOME=E:\selfdev-home` resolved `jcode_dir()` to the sandbox, found no
+/// `swarm-prompt.md` there, and fell through to the 1945-byte built-in prompt
+/// while the user's 19176-byte `~/.jcode/swarm-prompt.md` sat untouched in the
+/// real profile. Nothing said so, so the coordinator behaved as if no seeding
+/// policy existed: it seeded seven root-level nodes and then lost the ability
+/// to `inject_gap`.
+///
+/// The sandbox boundary exists to hide secrets and machine identity, not the
+/// user's own orchestration policy: `auth/claude.rs` and `lid_override.rs` are
+/// what gate on `running_with_sandboxed_home()`. A prompt file is neither, so
+/// the shadowing must at least be announced instead of silent.
+#[test]
+fn test_swarm_prompt_announces_a_machine_policy_shadowed_by_jcode_home() {
+    let _guard = crate::storage::lock_test_env();
+
+    // The sandbox home that actually gets consulted, with no policy in it.
+    let sandbox_home = tempfile::TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", sandbox_home.path());
+
+    // The real machine profile, which does hold a policy.
+    let machine_home = tempfile::TempDir::new().unwrap();
+    std::fs::write(machine_home.path().join("swarm-prompt.md"), "machine policy").unwrap();
+
+    let project = tempfile::TempDir::new().unwrap();
+    let text = load_swarm_prompt_with_homes(Some(project.path()), machine_home.path());
+
+    assert!(
+        text.contains(DEFAULT_SWARM_PROMPT.trim()),
+        "the built-in prompt is still the base, since the sandbox home has no policy"
+    );
+    assert!(
+        text.contains("shadowed") && text.contains("swarm-prompt.md"),
+        "the fallback must name the shadowing and the file that was skipped, got: {text}"
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+/// The same shadowing must NOT be announced when the machine profile genuinely
+/// has no policy: that would train the coordinator to ignore a warning that
+/// fires on every default install.
+#[test]
+fn test_swarm_prompt_silent_when_no_machine_policy_exists() {
+    let _guard = crate::storage::lock_test_env();
+
+    let sandbox_home = tempfile::TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", sandbox_home.path());
+
+    let machine_home = tempfile::TempDir::new().unwrap();
+    let project = tempfile::TempDir::new().unwrap();
+    let text = load_swarm_prompt_with_homes(Some(project.path()), machine_home.path());
+
+    assert!(
+        !text.contains("shadowed"),
+        "no machine policy exists, so nothing was shadowed; got: {text}"
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
     } else {
         crate::env::remove_var("JCODE_HOME");
     }

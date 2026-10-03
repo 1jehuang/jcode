@@ -75,6 +75,27 @@ pub const DEFAULT_SWARM_PROMPT: &str = include_str!("prompt/swarm_prompt.md");
 /// project `./.jcode/swarm-prompt.md`, then global `~/.jcode/swarm-prompt.md`,
 /// then the built-in [`DEFAULT_SWARM_PROMPT`].
 pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
+    let machine_home = dirs::home_dir()
+        .map(|home| home.join(".jcode"))
+        .unwrap_or_default();
+    load_swarm_prompt_with_homes(working_dir, &machine_home)
+}
+
+/// Same resolution as [`load_swarm_prompt`], with the machine profile passed in
+/// explicitly so the shadowing case is reachable from a test.
+///
+/// The fallback to [`DEFAULT_SWARM_PROMPT`] is the dangerous step. It is
+/// indistinguishable from "the user configured no policy", which is exactly how
+/// a 2026-10-03 run lost a 19176-byte machine policy without any signal and then
+/// seeded seven root-level task-graph nodes as if none existed. When the resolved
+/// `jcode_dir()` holds nothing but the real profile does, that file is named in
+/// the returned prompt so the coordinator can see the policy is shadowed rather
+/// than absent.
+///
+/// Reaching this branch already implies the resolved dir differs from the
+/// machine profile: if they were the same path, the loop above would have
+/// returned the machine file.
+pub fn load_swarm_prompt_with_homes(working_dir: Option<&Path>, machine_home: &Path) -> String {
     let project_dir = working_dir.unwrap_or(Path::new("."));
     let candidates = [
         Some(project_dir.join(".jcode").join("swarm-prompt.md")),
@@ -90,7 +111,24 @@ pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
             }
         }
     }
-    DEFAULT_SWARM_PROMPT.trim().to_string()
+
+    let base = DEFAULT_SWARM_PROMPT.trim();
+    let machine_policy = machine_home.join("swarm-prompt.md");
+    let shadowed = std::fs::read_to_string(&machine_policy)
+        .is_ok_and(|content| !content.trim().is_empty());
+
+    if !shadowed {
+        return base.to_string();
+    }
+
+    format!(
+        "{base}\n\n> SANDBOX SHADOWING: this run resolved its jcode home to a sandbox \
+         with no swarm-prompt.md, so your machine policy at {} is shadowed and is \
+         NOT in effect. The text above is the built-in default only. Copy that file \
+         into the sandbox home to restore it, and do not conclude that no \
+         orchestration policy is configured.\n",
+        machine_policy.display()
+    )
 }
 
 /// Reasoning-effort sentinel that enables swarm orchestration. Providers
