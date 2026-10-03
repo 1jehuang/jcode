@@ -1,6 +1,72 @@
 use super::*;
 use jcode_provider_openrouter::stream::OpenRouterStream;
 
+/// Loopback transport is direct, but is never exempt from the PAN check.
+fn is_loopback_base(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn attempt_transport_client(client: &Client, api_base: &str, attempt: u32) -> Result<Client> {
+    if is_loopback_base(api_base) {
+        return Client::builder()
+            .user_agent(jcode_provider_core::JCODE_USER_AGENT)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    attempt.error("too many loopback redirects")
+                } else if is_loopback_base(attempt.url().as_str()) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
+            .no_proxy()
+            .build()
+            .context("Failed to build direct loopback client");
+    }
+    Ok(if attempt == 0 {
+        client.clone()
+    } else {
+        jcode_provider_core::fresh_transport_client()
+    })
+}
+
+/// Only the documented `=1` opts out; `0` or any other value keeps the check.
+fn pan_check_opted_out(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "1")
+}
+
+/// Check every endpoint, including loopback services which may forward remotely.
+/// `JCODE_DISABLE_PAN_CHECK=1` is the explicit escape hatch for false positives.
+/// The error identifies the message, never the value, and stops TUI auto-retry.
+fn pan_pre_send_block(request: &Value) -> Option<anyhow::Error> {
+    if std::env::var("JCODE_DISABLE_PAN_CHECK").is_ok_and(|value| pan_check_opted_out(Some(&value)))
+    {
+        return None;
+    }
+    let finding =
+        jcode_provider_core::failover::pan_check::find_pan_in_messages(request.get("messages")?)?;
+    Some(anyhow::anyhow!(
+        "Local pre-send check: request blocked by content filter: [PAN]\n  \
+         a payment card number (issuer prefix + Luhn) is in message #{} (role: {}); nothing was sent.\n  \
+         Remove it from the conversation (compact or start a new session), or set \
+         JCODE_DISABLE_PAN_CHECK=1 if this is a false positive.",
+        finding.message_index,
+        finding.role
+    ))
+}
+
 fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static str {
     let lower = api_base.to_ascii_lowercase();
     if lower.contains("localhost:11434") || lower.contains("127.0.0.1:11434") {
@@ -38,6 +104,12 @@ pub(super) async fn run_stream_with_retries(
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
 ) {
+    if let Some(blocked) = pan_pre_send_block(&request) {
+        if tx.send(Err(blocked)).await.is_err() {
+            jcode_base::logging::info("card-number block not delivered: stream receiver dropped");
+        }
+        return;
+    }
     let mut last_error = None;
     let mut next_retry_delay = None;
     let config = jcode_base::config::config();
@@ -82,10 +154,16 @@ pub(super) async fn run_stream_with_retries(
         // poisoned other idle pooled connections opened through the same path,
         // so reusing the shared pool can fail identically. A fresh client
         // guarantees a brand-new TCP+TLS connection.
-        let attempt_client = if attempt == 0 {
-            client.clone()
-        } else {
-            jcode_provider_core::fresh_transport_client()
+        let attempt_client = match attempt_transport_client(&client, &api_base, attempt) {
+            Ok(client) => client,
+            Err(error) => {
+                if tx.send(Err(error)).await.is_err() {
+                    jcode_base::logging::info(
+                        "transport error not delivered: stream receiver dropped",
+                    );
+                }
+                return;
+            }
         };
 
         match stream_response(
@@ -110,7 +188,7 @@ pub(super) async fn run_stream_with_retries(
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
                 let error_str = format!("{e:#}").to_lowercase();
-                if is_retryable_error(&error_str) && attempt + 1 < max_retries {
+                if should_retry(&error_str, attempt, max_retries) {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
                         // to discard the partial attempt so the retried
@@ -306,6 +384,23 @@ fn parsed_http_status(error_str: &str) -> Option<u16> {
     }
 }
 
+/// Retries allowed for a 429 that OpenRouter attributes to the upstream
+/// provider's shared key pool (`limit_source: upstream_provider_shared_pool`).
+/// OpenRouter has already tried every provider it could route to before
+/// answering, so a full backoff ladder mostly waits; measured 2026-09-24: 394
+/// such 429s against `openrouter/auto`, each held for the whole budget.
+const SHARED_POOL_429_MAX_RETRIES: u32 = 2;
+
+/// Whether a failed zero-based `attempt` should be retried.
+fn should_retry(error_str: &str, attempt: u32, max_retries: u32) -> bool {
+    if !is_retryable_error(error_str) || attempt + 1 >= max_retries {
+        return false;
+    }
+    let shared_pool_429 = parsed_http_status(error_str) == Some(429)
+        && error_str.contains("upstream_provider_shared_pool");
+    !(shared_pool_429 && attempt >= SHARED_POOL_429_MAX_RETRIES)
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
     // Explicit non-retryable HTTP statuses take precedence over the loose
     // substring heuristics below. These are deterministic client-side failures
@@ -348,6 +443,170 @@ mod tests {
         assert!(hint.contains("LM Studio"));
         assert!(hint.contains("Local Server"));
         assert!(hint.contains("/v1/models"));
+    }
+
+    #[test]
+    fn shared_pool_429_retries_at_most_twice() {
+        let pool = "status: 429 too many requests\n  response: {\"error\":{\"code\":429,\"metadata\":{\"limit_source\":\"upstream_provider_shared_pool\"}}}";
+        assert!(should_retry(pool, 0, 8));
+        assert!(should_retry(pool, 1, 8));
+        assert!(!should_retry(pool, 2, 8), "three sends is the cap");
+        // An ordinary rate limit keeps the configured ladder.
+        assert!(should_retry("status: 429 too many requests", 5, 8));
+        assert!(!should_retry("status: 429 too many requests", 7, 8));
+        // The cap is for 429s only: a 503 naming the pool keeps its budget.
+        let pool_503 = "status: 503 service unavailable\n  response: {\"error\":{\"metadata\":{\"limit_source\":\"upstream_provider_shared_pool\"}}}";
+        assert!(should_retry(pool_503, 5, 8));
+    }
+
+    #[test]
+    fn content_filter_block_is_never_retried() {
+        let blocked = "status: 403 forbidden\n  response: {\"error\":{\"message\":\"request blocked by content filter: [credit_card]\",\"code\":403}}";
+        assert!(!should_retry(blocked, 0, 8));
+    }
+
+    #[test]
+    fn pan_pre_send_blocks_a_card_number_without_echoing_it() {
+        let _env = jcode_base::storage::lock_test_env();
+        let _opt_out = crate::tests::EnvVarGuard::remove("JCODE_DISABLE_PAN_CHECK");
+        let pan = "4242".repeat(4);
+        let request = serde_json::json!({"messages": [
+            {"role": "user", "content": "issues 1113 1114 1115 1116"},
+            {"role": "assistant", "content": format!("card {pan}")},
+        ]});
+        let blocked = pan_pre_send_block(&request).expect("a PAN must block");
+        let text = format!("{blocked:#}");
+        assert!(text.contains("message #1 (role: assistant)"), "{text}");
+        assert!(!text.contains(&pan), "the value must never be echoed");
+        assert_eq!(
+            jcode_provider_core::failover::content_filter_block_label(&text).as_deref(),
+            Some("[PAN]"),
+            "the TUI fail-fast path must recognise the local block"
+        );
+        let clean = serde_json::json!({"messages": [
+            {"role": "user", "content": "for n in 1113 1114 1115 1116; do gh issue view $n; done"},
+        ]});
+        assert!(pan_pre_send_block(&clean).is_none());
+    }
+
+    #[test]
+    fn loopback_pan_is_blocked_before_a_forwarder_can_receive_it() {
+        let _env = jcode_base::storage::lock_test_env();
+        let _opt_out = crate::tests::EnvVarGuard::remove("JCODE_DISABLE_PAN_CHECK");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind endpoint");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking endpoint");
+        let address = listener.local_addr().expect("endpoint address");
+        let request = serde_json::json!({"model": "m", "stream": true, "messages": [
+            {"role": "user", "content": "4242".repeat(4)},
+        ]});
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let (tx, mut events) = mpsc::channel::<Result<StreamEvent>>(64);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                run_stream_with_retries(
+                    Client::new(),
+                    format!("http://{address}/v1"),
+                    ProviderAuth::None { label: "test".to_string() },
+                    false,
+                    "conv-pan-forwarder".to_string(),
+                    request,
+                    tx,
+                    Arc::new(Mutex::new(None)),
+                    "m".to_string(),
+                ),
+            ).await;
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "PAN request must be blocked before any connection to a possible forwarder"
+            );
+            result.expect("pre-send block must not wait for HTTP");
+            let error = events.recv().await.expect("block event").expect_err("PAN must block");
+            assert!(error.to_string().contains("[PAN]"));
+            assert!(events.recv().await.is_none());
+        });
+    }
+
+    #[test]
+    fn loopback_base_is_parsed_not_prefix_matched() {
+        assert!(is_loopback_base("http://127.0.0.1:1234/v1"));
+        assert!(is_loopback_base("http://localhost:11434/v1"));
+        assert!(is_loopback_base("http://[::1]:8080/v1"));
+        assert!(!is_loopback_base("https://localhost.example.com/v1"));
+        assert!(!is_loopback_base("https://openrouter.ai/api/v1"));
+    }
+
+    #[test]
+    fn loopback_clean_request_bypasses_proxy_and_follows_local_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _env = jcode_base::storage::lock_test_env();
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").expect("proxy");
+        proxy.set_nonblocking(true).expect("nonblocking proxy");
+        let client = Client::builder()
+            .proxy(
+                reqwest::Proxy::all(format!(
+                    "http://{}",
+                    proxy.local_addr().expect("proxy address")
+                ))
+                .expect("proxy config"),
+            )
+            .build()
+            .expect("client");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let local = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("local endpoint");
+            let address = local.local_addr().expect("local address");
+            let server = tokio::spawn(async move {
+                for (index, path) in ["/v1/chat/completions", "/redirect307", "/redirect308"].iter().enumerate() {
+                    let (mut stream, _) = local.accept().await.expect("local connection");
+                    let mut bytes = vec![0; 8192];
+                    let size = stream.read(&mut bytes).await.expect("request");
+                    assert!(String::from_utf8_lossy(&bytes[..size]).starts_with(&format!("POST {path} ")));
+                    let response = match index {
+                        0 => "HTTP/1.1 307 Temporary Redirect\r\nLocation: /redirect307\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                        1 => "HTTP/1.1 308 Permanent Redirect\r\nLocation: /redirect308\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+                        _ => { let body = "data: [DONE]\n\n"; format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()) },
+                    };
+                    stream.write_all(response.as_bytes()).await.expect("response");
+                }
+            });
+            let (tx, mut events) = mpsc::channel::<Result<StreamEvent>>(64);
+            let sent = tokio::time::timeout(std::time::Duration::from_secs(2), run_stream_with_retries(
+                client, format!("http://{address}/v1"),
+                ProviderAuth::None { label: "test".to_string() }, false,
+                "conv-direct-loopback".to_string(),
+                serde_json::json!({"model":"m","stream":true,"messages":[{"role":"user","content":"hello"}]}),
+                tx, Arc::new(Mutex::new(None)), "m".to_string(),
+            )).await;
+            server.abort();
+            assert!(matches!(proxy.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock), "loopback traffic reached the proxy");
+            sent.expect("local request must complete");
+            while let Some(event) = events.recv().await { assert!(event.is_ok(), "local request failed"); }
+        });
+    }
+
+    #[test]
+    fn explicit_opt_out_allows_local_card_test_data() {
+        let _env = jcode_base::storage::lock_test_env();
+        let _opt_out = crate::tests::EnvVarGuard::set("JCODE_DISABLE_PAN_CHECK", "1");
+        let request = serde_json::json!({"messages":[{"role":"user","content":"4242".repeat(4)}]});
+        assert!(pan_pre_send_block(&request).is_none());
+    }
+
+    #[test]
+    fn only_one_opts_out_of_the_pan_check() {
+        assert!(pan_check_opted_out(Some("1")));
+        assert!(!pan_check_opted_out(Some("0")));
+        assert!(!pan_check_opted_out(Some("")));
+        assert!(!pan_check_opted_out(None));
     }
 
     #[test]

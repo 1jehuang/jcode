@@ -6,6 +6,9 @@ use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 
+#[path = "terminal_errors.rs"]
+mod terminal_errors;
+
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
@@ -1378,29 +1381,14 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return false;
             }
-            // Deterministic model/endpoint-capability failures (e.g. Volcengine
-            // Ark's coding-plan endpoint returning 404 UnsupportedModel, or a
-            // model-not-found) can never succeed by resending the identical
-            // request. Fail fast with an actionable hint instead of burning the
-            // auto-retry budget on guaranteed 4xx responses (#387).
-            if crate::tui::app::commands::is_fatal_model_endpoint_error(&message) {
-                app.clear_pending_remote_retry();
-                if app.auto_poke_incomplete_todos {
-                    crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(
-                        app, &message,
-                    );
-                }
-                app.push_display_message(DisplayMessage::system(
-                    "🛑 Not retrying: the model is not valid for the configured endpoint (e.g. an Ark coding-plan endpoint rejecting a model without the coding plan feature, or a model-not-found). Check the model name and base URL (the coding endpoint `/api/coding/v3` only accepts coding-plan models; use `/api/v3` otherwise), then send again.".to_string(),
-                ));
-                app.set_status_notice("Stopped: model/endpoint mismatch");
-                app.restore_failed_input_to_box();
-                // Switching models is exactly the right fix for a
-                // model/endpoint mismatch: offer the next best route.
-                app.offer_fallback_after_error_with_payload(
-                    &message,
-                    failed_fallback_payload.clone(),
-                );
+            // Deterministic failures (content-filter blocks, model/endpoint
+            // mismatches #387) can never succeed on resend: fail fast instead
+            // of burning the auto-retry budget on guaranteed 4xx responses.
+            if terminal_errors::fail_fast_on_deterministic_error(
+                app,
+                &message,
+                failed_fallback_payload.clone(),
+            ) {
                 return false;
             }
             if app.auto_poke_incomplete_todos
