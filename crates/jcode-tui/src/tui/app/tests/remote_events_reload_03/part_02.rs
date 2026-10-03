@@ -391,4 +391,3 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert_eq!(last.role, "system");
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
-

@@ -2028,7 +2028,7 @@ pub(super) async fn handle_client(
                 ).await;
                 let event = match result {
                     Ok(overrides) => ServerEvent::AgentModelsChanged { id, session_id: client_session_id.clone(), overrides },
-                    Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None, server_resumes: false },
+                    Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None },
                 };
                 let _ = client_event_tx.send(event);
             }
