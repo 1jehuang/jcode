@@ -1025,6 +1025,10 @@ pub struct App {
     /// list must not trigger another automatic turn: the agent may be parked on
     /// a worker, wake, or human decision, and repeated pokes cannot help.
     last_auto_poke_fingerprint: Option<String>,
+    /// Consecutive turn ends that declined to re-nudge because the
+    /// incomplete-todo set was byte-identical to the previous poke. Reset
+    /// whenever the poke actually fires or the feature is toggled.
+    auto_poke_unchanged_idle_count: u8,
     /// Set when the current turn ended with a provider guardrail/refusal stop
     /// (ServerEvent::ProviderGuardrail). Consumed by the Done handler to
     /// update `consecutive_guardrail_stops`.
@@ -1788,6 +1792,14 @@ impl App {
     /// full API call per nudge. The counter resets whenever a nudge actually
     /// changes the stored todos (progress) or auto-poke is re-armed.
     const TODO_COMPLETION_GATE_MAX_ATTEMPTS: u8 = 5;
+    /// Consecutive turn ends tolerated where auto-poke declines to re-nudge
+    /// because the incomplete-todo set is byte-identical to the previous poke.
+    /// Idling there is correct loop protection: the model has not touched the
+    /// plan, so repeating the same hidden continuation buys nothing. But the
+    /// stall is currently silent and unbounded - no breaker, no message - so the
+    /// poke just stops working with no explanation. After this many repeats we
+    /// tell the user the poke gave up and why, instead of idling indefinitely.
+    const AUTO_POKE_UNCHANGED_IDLE_LIMIT: u8 = 2;
     /// Consecutive guardrail/refusal-stopped turns tolerated before automatic
     /// continuation paths (auto-poke, overnight poke) are stopped. Guardrail
     /// refusals are deterministic for the same request, so re-poking the same

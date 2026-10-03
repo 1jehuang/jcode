@@ -1876,8 +1876,27 @@ impl App {
                 "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
                 incomplete.len()
             ));
+            // Idling here is loop protection, but an unbounded silent one. The
+            // agent stopped without touching the plan, so every later turn end
+            // declined the same way and the poke looked broken from the outside
+            // with no breaker to explain it. Once the stall is a pattern rather
+            // than one skipped turn, say so instead of idling indefinitely.
+            self.auto_poke_unchanged_idle_count =
+                self.auto_poke_unchanged_idle_count.saturating_add(1);
+            if self.auto_poke_unchanged_idle_count == Self::AUTO_POKE_UNCHANGED_IDLE_LIMIT {
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=surface reason=unchanged_todos_persistent incomplete={}",
+                    incomplete.len()
+                ));
+                self.push_display_message(DisplayMessage::system(format!(
+                    "The todo list stayed unchanged across {} nudges, so auto-poke stopped pushing. /poke re-enables it.",
+                    Self::AUTO_POKE_UNCHANGED_IDLE_LIMIT
+                )));
+            }
             return false;
         }
+        // The poke is firing, so any previous unchanged-todo stall is over.
+        self.auto_poke_unchanged_idle_count = 0;
 
         self.push_display_message(DisplayMessage::system(format!(
             "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",

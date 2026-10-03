@@ -343,6 +343,68 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
     });
 }
 
+/// The stall this guards is silent and unbounded.
+///
+/// When the agent stops without touching the todo list, the incomplete set is
+/// byte-identical to the previous poke, so `schedule_auto_poke_followup_if_needed`
+/// returns false with `reason=unchanged_todos` - forever. There is no bound on
+/// consecutive idles and nothing is surfaced, so from the user's side the poke
+/// simply stopped working with no explanation and no circuit breaker.
+///
+/// Idling itself is right as loop protection. Silence is not: once it has
+/// happened more than once, the user has to be told the poke gave up and why.
+#[test]
+fn test_unchanged_todo_idling_becomes_visible_after_a_repeat() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish the report".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save an open todo");
+
+        // First poke goes out and records the todo fingerprint.
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "the first poke should be queued"
+        );
+        let queued = app.queued_messages.len();
+        assert_eq!(queued, 1);
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+
+        // The agent stops without touching the todos. Idling is correct here,
+        // and must stay silent for the first repeat.
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(
+            !app
+                .display_messages()
+                .iter()
+                .any(|msg| msg.content.to_lowercase().contains("unchanged")),
+            "a single idle must not raise an alarm"
+        );
+
+        // A second consecutive idle with the same todo set means the agent has
+        // stopped responding, not that it is briefly busy. That has to surface.
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.to_lowercase().contains("unchanged")),
+            "repeated idling with an unchanged todo list must tell the user the poke stopped and why"
+        );
+    });
+}
+
 #[test]
 fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
     with_temp_jcode_home(|| {
