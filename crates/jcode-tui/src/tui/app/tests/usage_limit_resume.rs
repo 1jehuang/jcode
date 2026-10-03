@@ -5,6 +5,99 @@
 const ANTHROPIC_FAIL_FAST_USAGE_LIMIT: &str = "Anthropic API error (429 Too Many Requests): {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"}} Usage limit reached for this Claude account; resets in 40m (2026-09-30 13:30 UTC).";
 
 #[test]
+fn test_local_usage_limit_stale_reset_stops_after_three_resumes() {
+    let mut app = create_test_app();
+    let error =
+        "API error (402 Payment Required): Usage limit reached [account-usage-limit resets_at=1]";
+    app.input = "draft stays here".to_string();
+    app.auto_poke_incomplete_todos = true;
+    app.auto_poke_default_on = true;
+    app.overnight_auto_poke = Some(super::OvernightAutoPokeState {
+        run_id: "local-quota-test".to_string(),
+        last_fingerprint: super::OvernightAutoPokeFingerprint {
+            run_id: "local-quota-test".to_string(),
+            status: String::new(),
+            last_activity_at: String::new(),
+            events_len: 0,
+            task_total: 0,
+            task_completed: 0,
+            task_active: 0,
+            task_blocked: 0,
+            task_validated: 0,
+            session_message_count: 0,
+            review_notes_mtime: None,
+            validation_files: 0,
+        },
+        stalled_turns: 0,
+        error_turns: 0,
+        total_pokes_sent: 0,
+        diagnostic_sent: false,
+        morning_report_poked: false,
+        final_wrap_poked: false,
+    });
+    app.queued_messages.push("user followup".to_string());
+    let transcript_len = app.messages.len();
+
+    for attempt in 1..=3 {
+        app.handle_turn_error(error);
+        assert_eq!(app.local_usage_limit_resume_attempts, attempt);
+        assert!(app.rate_limit_reset.unwrap() > Instant::now());
+        super::local::finish_turn(&mut app);
+        assert_eq!(app.local_usage_limit_resume_attempts, attempt);
+        app.rate_limit_reset = Some(Instant::now());
+        super::local::handle_tick(&mut app);
+        assert!(app.pending_turn);
+        app.pending_turn = false;
+    }
+    app.handle_turn_error(error);
+    super::local::finish_turn(&mut app);
+    assert!(app.rate_limit_reset.is_none());
+    assert!(!app.pending_turn);
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(!app.auto_poke_default_on);
+    assert!(app.overnight_auto_poke.is_none());
+    assert_eq!(app.input, "draft stays here");
+    assert_eq!(app.messages.len(), transcript_len);
+    assert_eq!(app.queued_messages, vec!["user followup"]);
+    for _ in 0..3 {
+        super::local::handle_tick(&mut app);
+        assert!(!app.pending_turn);
+        assert!(app.rate_limit_reset.is_none());
+    }
+    // Another limit error cannot silently rearm the exhausted turn.
+    app.handle_turn_error(error);
+    assert!(app.rate_limit_reset.is_none());
+}
+
+#[test]
+fn test_local_usage_limit_fresh_prompt_resets_resume_budget() {
+    let mut app = create_test_app();
+    app.local_usage_limit_resume_attempts = 3;
+    app.input = "a fresh task".to_string();
+    app.submit_input();
+    assert_eq!(app.local_usage_limit_resume_attempts, 0);
+    assert!(app.pending_turn);
+    app.handle_turn_error(ANTHROPIC_FAIL_FAST_USAGE_LIMIT);
+    assert_eq!(app.local_usage_limit_resume_attempts, 1);
+    assert!(app.rate_limit_reset.is_some());
+}
+
+#[test]
+fn test_local_usage_limit_credentials_reset_only_for_held_provider() {
+    let mut app = create_test_app();
+    app.remote_provider_name = Some("openai-api".to_string());
+    app.local_usage_limit_resume_attempts = 3;
+    assert!(!app.release_rate_limit_hold_after_credentials_changed(Some("claude")));
+    assert_eq!(app.local_usage_limit_resume_attempts, 3);
+    // Even an exhausted turn without a timer gets a fresh credential budget.
+    assert!(!app.release_rate_limit_hold_after_credentials_changed(Some("openai-api")));
+    assert_eq!(app.local_usage_limit_resume_attempts, 0);
+    app.handle_turn_error(ANTHROPIC_FAIL_FAST_USAGE_LIMIT);
+    assert_eq!(app.local_usage_limit_resume_attempts, 1);
+    assert!(app.rate_limit_reset.is_some());
+}
+
+#[test]
 fn test_server_initiated_usage_limit_shows_server_resume_time_without_client_resend() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -39,7 +132,8 @@ fn test_server_initiated_usage_limit_shows_server_resume_time_without_client_res
     let last = app.display_messages().last().expect("a notice");
     assert_eq!(last.role, "system");
     assert!(
-        last.content.starts_with("⏳ Usage limit hit. The server will resume this at "),
+        last.content
+            .starts_with("⏳ Usage limit hit. The server will resume this at "),
         "{}",
         last.content
     );

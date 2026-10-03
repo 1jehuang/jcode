@@ -30,6 +30,7 @@ pub(super) async fn process_turn_with_input(
     {
         Ok(()) => {
             app.last_stream_error = None;
+            app.local_usage_limit_resume_attempts = 0;
             app.last_submitted_input = None;
         }
         Err(error) => {
@@ -52,6 +53,13 @@ pub(super) async fn process_turn_with_input(
     }
 
     if app.pending_queued_dispatch {
+        finish_turn(app);
+        return;
+    }
+
+    // A quota hold remains the same logical turn. Do not queue pokes or
+    // drain user followups while waiting, or after its resume budget trips.
+    if app.local_usage_limit_resume_attempts > 0 {
         finish_turn(app);
         return;
     }
@@ -649,7 +657,8 @@ pub(super) fn finish_turn(app: &mut App) {
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
     app.note_runtime_memory_event_force("turn_completed", "local_turn_finished");
-    let followup_scheduled = app.schedule_turn_end_followups();
+    let followup_scheduled =
+        app.local_usage_limit_resume_attempts == 0 && app.schedule_turn_end_followups();
     if !followup_scheduled {
         app.clear_visible_turn_started();
         if !app.pending_queued_dispatch && app.queued_messages.is_empty() {
