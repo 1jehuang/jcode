@@ -160,6 +160,119 @@ async fn explicit_anthropic_api_choice_pins_api_key_over_available_oauth() {
     clippy::await_holding_lock,
     reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
 )]
+async fn explicit_anthropic_api_choice_preserves_named_profile_credentials() {
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().expect("temp dir");
+    let keys = [
+        "JCODE_HOME",
+        "ANTHROPIC_API_KEY",
+        "CUSTOM_CLAUDE_TOKEN",
+        "JCODE_PROVIDER_PROFILE_NAME",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_ANTHROPIC_API_BASE",
+        "JCODE_ANTHROPIC_API_KEY_NAME",
+        "JCODE_ANTHROPIC_ENV_FILE",
+        "JCODE_ANTHROPIC_AUTH",
+        "JCODE_ANTHROPIC_AUTH_HEADER",
+        "JCODE_ANTHROPIC_HEADERS",
+        "JCODE_ANTHROPIC_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+        "JCODE_ACTIVE_PROVIDER",
+        "JCODE_INITIAL_PROVIDER_EXPLICIT",
+    ];
+    let saved: Vec<(&str, Option<String>)> = keys
+        .iter()
+        .map(|key| (*key, std::env::var(key).ok()))
+        .collect();
+
+    crate::env::set_var("JCODE_HOME", dir.path());
+    for key in keys.iter().skip(1) {
+        crate::env::remove_var(key);
+    }
+
+    let config_path = dir.path().join("config.toml");
+    for (profile_name, auth, key_env, key_value) in [
+        (
+            "corporate-claude",
+            "bearer",
+            Some("CUSTOM_CLAUDE_TOKEN"),
+            Some("profile-test-key"),
+        ),
+        ("unauthenticated-claude", "none", None, None),
+    ] {
+        for key in keys.iter().skip(1) {
+            crate::env::remove_var(key);
+        }
+        if let (Some(key_env), Some(key_value)) = (key_env, key_value) {
+            crate::env::set_var(key_env, key_value);
+        }
+        crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", profile_name);
+        let key_env_config = key_env
+            .map(|key_env| format!("api_key_env = \"{key_env}\"\n"))
+            .unwrap_or_default();
+        std::fs::write(
+            &config_path,
+            format!(
+                "[providers.{profile_name}]\ntype = \"anthropic-compatible\"\nbase_url = \"https://gateway.example.com/anthropic/v1\"\nauth = \"{auth}\"\n{key_env_config}default_model = \"claude-custom\"\n"
+            ),
+        )
+        .expect("write named Anthropic profile");
+        crate::config::invalidate_config_cache();
+        crate::auth::AuthStatus::invalidate_cache();
+
+        let provider = init_provider_for_serve(&ProviderChoice::AnthropicApi, None)
+            .await
+            .expect("explicit Anthropic API serve should use named profile credentials");
+
+        assert_eq!(
+            std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
+            Some("claude-api"),
+            "profile {profile_name} should preserve the API-key runtime route"
+        );
+        assert_eq!(
+            provider.credential_mode(),
+            jcode_provider_core::CredentialMode::ApiKey,
+            "profile {profile_name} should pin the provider to its configured credential"
+        );
+        assert_eq!(
+            provider.active_auth_method_label(),
+            Some("API key"),
+            "profile {profile_name} should report its configured API-key route"
+        );
+        assert_eq!(provider.model(), "claude-custom");
+        assert!(std::env::var("ANTHROPIC_API_KEY").is_err());
+
+        let new_session_provider = provider.fork_for_new_session();
+        assert_eq!(
+            new_session_provider.credential_mode(),
+            jcode_provider_core::CredentialMode::ApiKey,
+            "new sessions should keep the API-key route for profile {profile_name}"
+        );
+        assert_eq!(
+            new_session_provider.model(),
+            "claude-custom",
+            "new sessions should keep the configured model for profile {profile_name}"
+        );
+    }
+
+    for (key, value) in saved {
+        if let Some(value) = value {
+            crate::env::set_var(key, value);
+        } else {
+            crate::env::remove_var(key);
+        }
+    }
+    crate::config::invalidate_config_cache();
+    crate::auth::AuthStatus::invalidate_cache();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test env locks intentionally stay held across provider init to isolate process-global auth env"
+)]
 async fn explicit_openai_api_choice_overrides_configured_compatible_default() {
     let _guard = lock_env();
     let _env_guard = crate::storage::lock_test_env();

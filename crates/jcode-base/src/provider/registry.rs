@@ -46,26 +46,72 @@ impl<'a> ProviderRegistry<'a> {
 
     pub(super) fn active_compatible_profile_id(&self) -> Option<String> {
         self.provider
-            .active_openai_compatible_profile
+            .active_named_provider_profiles
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()?
+            .openai_compatible
+            .clone()
+    }
+
+    pub(super) fn active_anthropic_profile_id(&self) -> Option<String> {
+        self.provider
+            .active_named_provider_profiles
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()?
+            .anthropic_compatible
             .clone()
     }
 
     pub(super) fn set_active_compatible_profile(&self, profile_id: impl Into<String>) {
-        *self
+        let mut profiles = self
             .provider
-            .active_openai_compatible_profile
+            .active_named_provider_profiles
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(profile_id.into());
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        profiles
+            .get_or_insert_with(ActiveNamedProviderProfiles::default)
+            .openai_compatible = Some(profile_id.into());
+    }
+
+    pub(super) fn set_active_anthropic_profile(&self, profile_id: impl Into<String>) {
+        let mut profiles = self
+            .provider
+            .active_named_provider_profiles
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let profiles = profiles.get_or_insert_with(ActiveNamedProviderProfiles::default);
+        profiles.openai_compatible = None;
+        profiles.anthropic_compatible = Some(profile_id.into());
     }
 
     pub(super) fn clear_active_compatible_profile(&self) {
-        *self
+        let mut profiles = self
             .provider
-            .active_openai_compatible_profile
+            .active_named_provider_profiles
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(active) = profiles.as_mut() {
+            active.openai_compatible = None;
+            if active.anthropic_compatible.is_none() {
+                *profiles = None;
+            }
+        }
+    }
+
+    pub(super) fn clear_active_anthropic_profile(&self) {
+        let mut profiles = self
+            .provider
+            .active_named_provider_profiles
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(active) = profiles.as_mut() {
+            active.anthropic_compatible = None;
+            if active.openai_compatible.is_none() {
+                *profiles = None;
+            }
+        }
     }
 
     pub(super) fn active_compatible_profile(&self) -> Option<Arc<dyn Provider>> {
