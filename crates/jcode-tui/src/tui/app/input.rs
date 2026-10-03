@@ -3126,11 +3126,13 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 app.pending_soft_interrupt_requests.clear();
                 let cancelled_overnight = app.cancel_overnight_for_interrupt();
                 if disabled_auto_poke {
-                    super::commands::disable_auto_poke(app);
+                    // Interrupt, not `/poke off`: stop the in-flight poke but keep
+                    // auto-poke armed so the next turn end can schedule another.
+                    super::commands::stop_poke_for_interrupt(app);
                     if cancelled_overnight {
-                        app.set_status_notice("Interrupting... Auto-poke OFF, overnight cancelled");
+                        app.set_status_notice("Interrupting... poke stopped, overnight cancelled");
                     } else {
-                        app.set_status_notice("Interrupting... Auto-poke OFF");
+                        app.set_status_notice("Interrupting... poke stopped");
                     }
                 } else if cancelled_overnight {
                     app.set_status_notice("Interrupting... Overnight cancelled");

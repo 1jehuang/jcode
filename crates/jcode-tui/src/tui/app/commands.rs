@@ -103,6 +103,27 @@ pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
     removed
 }
 
+/// Stop the poke that is currently in flight, without disarming auto-poke.
+///
+/// `disable_auto_poke` is right for an explicit `/poke off` and for the
+/// circuit breaker: both are decisions to stop, and both must stick. An
+/// interrupt is not that decision - it means "stop this turn". Routing it
+/// through `disable_auto_poke` also cleared `auto_poke_default_on`, so one Esc
+/// silently disabled auto-poke for the rest of the session and the default-on
+/// re-arm in `schedule_auto_poke_followup_if_needed` could not undo it.
+pub(super) fn stop_poke_for_interrupt(app: &mut App) -> usize {
+    let cleared = clear_queued_poke_messages(app);
+    // Keep whatever the user actually armed: `/poke off` still sticks because
+    // it cleared `auto_poke_default_on`, an interrupt no longer does.
+    app.auto_poke_incomplete_todos = app.auto_poke_default_on;
+    app.todo_confidence_spike_challenged = false;
+    app.todo_completion_gate_attempts = 0;
+    app.last_auto_poke_fingerprint = None;
+    app.last_todo_ownership_fingerprint = None;
+    app.todo_gate_digest_delivered = false;
+    cleared
+}
+
 pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     let cleared = clear_queued_poke_messages(app);
     app.auto_poke_incomplete_todos = false;
