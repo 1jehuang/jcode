@@ -1311,8 +1311,6 @@ pub(in crate::tui::app) fn handle_server_event(
                     return false;
                 }
             }
-            let is_failover_prompt =
-                crate::provider::parse_failover_prompt_message(&message).is_some();
             // Snapshot the failed turn's payload before the cleanup below (and
             // the retry-budget bookkeeping) clears it, so a fallback offer
             // armed at a terminal no-retry point can resend it after the user
@@ -1327,14 +1325,17 @@ pub(in crate::tui::app) fn handle_server_event(
                     raw_input: app.last_submitted_input.clone(),
                 }
             });
-            app.push_display_message(DisplayMessage {
-                role: "error".to_string(),
-                content: message.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            let failover_prompt = crate::provider::parse_failover_prompt_message(&message);
+            if failover_prompt.is_none() {
+                app.push_display_message(DisplayMessage {
+                    role: "error".to_string(),
+                    content: message.clone(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
@@ -1351,6 +1352,15 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            // The provider offers another route instead of resending on its
+            // own. Run the same cancelable countdown (or manual hint) as a
+            // local session; the countdown resends this payload through the
+            // server after the switch, and Esc cancels with nothing sent.
+            if let Some(prompt) = failover_prompt {
+                app.clear_pending_remote_retry();
+                app.handle_provider_failover_prompt_with_resend(prompt, failed_fallback_payload);
+                return true;
+            }
             // Connectivity failures (DNS, connection reset, no route, transient
             // TLS, timeouts) are always transient: the request never reached the
             // provider. Hold the turn and resume when the network recovers,
@@ -1429,8 +1439,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return false;
             }
-            if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
-            {
+            if !app.schedule_pending_remote_retry("⚠ Remote request failed.") {
                 app.clear_pending_remote_retry();
                 // No automatic retry will resend this turn, so restore the prompt the
                 // user typed back into the input box instead of dropping it.

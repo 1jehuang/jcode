@@ -831,3 +831,131 @@ fn test_fallback_remote_without_credential_preserves_route_metadata() {
         assert_eq!(app.current_route_api_method(), None);
     });
 }
+
+fn remote_profile_failover_prompt() -> crate::provider::ProviderFailoverPrompt {
+    crate::provider::ProviderFailoverPrompt {
+        from_provider: "prof-a:glm-5.3".to_string(),
+        from_label: "prof-a".to_string(),
+        to_provider: "prof-b:glm-5.3".to_string(),
+        to_label: "prof-b (glm-5.3)".to_string(),
+        reason: "out of credit (HTTP 402: Insufficient credits)".to_string(),
+        estimated_input_chars: 400,
+        estimated_input_tokens: 100,
+    }
+}
+
+fn remote_app_with_failed_turn() -> App {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.last_submitted_input = Some("say hi".to_string());
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "say hi".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app
+}
+
+#[test]
+fn remote_out_of_credit_prompt_runs_countdown_then_switches_and_resends() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_app_with_failed_turn();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 1,
+                message: failover_error_message(&remote_profile_failover_prompt()),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        let pending = app
+            .pending_provider_failover
+            .as_ref()
+            .expect("remote session must arm the countdown");
+        assert_eq!(pending.prompt.to_provider, "prof-b:glm-5.3");
+        assert!(app.pending_model_switch.is_none(), "nothing sent before the deadline");
+        assert!(app.pending_fallback_resend.is_none());
+        assert!(
+            app.rate_limit_pending_message.is_none(),
+            "no blind retry to the out-of-credit profile"
+        );
+
+        if let Some(pending) = app.pending_provider_failover.as_mut() {
+            pending.deadline = Instant::now() - Duration::from_secs(1);
+        }
+        app.maybe_progress_provider_failover_countdown();
+        assert!(app.pending_provider_failover.is_none());
+        assert_eq!(app.pending_model_switch.as_deref(), Some("prof-b:glm-5.3"));
+        let resend = app
+            .pending_fallback_resend
+            .as_ref()
+            .expect("failed turn staged for resend after the switch");
+        assert_eq!(resend.content, "say hi");
+    });
+}
+
+#[test]
+fn remote_out_of_credit_countdown_esc_cancels_without_sending() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"countdown\"\n");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_app_with_failed_turn();
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 1,
+                message: failover_error_message(&remote_profile_failover_prompt()),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert!(app.pending_provider_failover.is_some());
+        rt.block_on(app.handle_remote_key(KeyCode::Esc, KeyModifiers::NONE, &mut remote))
+            .expect("esc");
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_model_switch.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        assert_eq!(app.input, "say hi", "the prompt goes back to the input box");
+        let last = app.display_messages.last().expect("message");
+        assert!(last.content.contains("Canceled provider auto-switch"), "{}", last.content);
+
+        // The deadline passing later must not switch anything.
+        app.maybe_progress_provider_failover_countdown();
+        assert!(app.pending_model_switch.is_none());
+    });
+}
+
+#[test]
+fn remote_out_of_credit_prompt_in_manual_mode_only_explains() {
+    with_temp_jcode_home(|| {
+        write_test_config("[provider]\ncross_provider_failover = \"manual\"\n");
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        let mut app = remote_app_with_failed_turn();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 1,
+                message: failover_error_message(&remote_profile_failover_prompt()),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        assert!(app.pending_provider_failover.is_none());
+        assert!(app.pending_model_switch.is_none());
+        assert!(app.pending_fallback_resend.is_none());
+        let last = app.display_messages.last().expect("message");
+        assert!(last.content.contains("did not resend"), "{}", last.content);
+    });
+}
