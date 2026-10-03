@@ -16,6 +16,38 @@ $failures = New-Object System.Collections.ArrayList
 
 Set-Location $repo
 
+# Files that change the compiled binary WITHOUT being .rs.
+#
+# The original version of this guard asked git for `*.rs` only, which is wrong:
+# DEFAULT_SYSTEM_PROMPT and DEFAULT_SWARM_PROMPT are include_str! of
+# prompt/*.md (prompt.rs:7,72), three more prompt assets are include_str! at
+# prompt.rs:273-276, and crates/jcode-app-core/build.rs embeds README.md plus
+# every docs/*.md into the binary. Editing any of those changes the binary while
+# the guard reported "no Rust differs - binary is current" and waved a stale
+# build through. That is the exact failure this script exists to prevent, so the
+# staleness test has to see what actually gets compiled in.
+#
+# Test-only fixtures (testdata/*.html, fuzz corpora) are deliberately absent:
+# they sit behind #[cfg(test)] and cannot change runtime behaviour, so they do
+# not justify a reload.
+function Get-BinaryRelevantDiff {
+    param([string]$From, [string]$To)
+
+    $pathspecs = @(
+        '*.rs'
+        'README.md'
+        'docs/*.md'
+        'crates/jcode-base/src/prompt/*.md'
+        'crates/jcode-base/src/prompt/*.txt'
+    )
+
+    $found = @()
+    foreach ($spec in $pathspecs) {
+        $found += @(& git diff --name-only "$From..$To" -- $spec 2>$null)
+    }
+    return @($found | Where-Object { $_ } | Sort-Object -Unique)
+}
+
 $branch = (& git rev-parse --abbrev-ref HEAD | Out-String).Trim()
 $shortHead = (& git rev-parse --short=9 HEAD | Out-String).Trim()
 
@@ -43,11 +75,12 @@ if (-not (Test-Path $exe)) {
         $meta = Get-Content $sidecar -Raw | ConvertFrom-Json
         if ($meta.short_hash -ne $shortHead) {
             $built = $meta.short_hash
-            $rustDiff = @(& git diff --name-only "$built..$shortHead" -- '*.rs' 2>$null)
-            if ($rustDiff.Count -gt 0) {
-                [void]$failures.Add("selfdev binary was built from $built but HEAD is $shortHead and $($rustDiff.Count) Rust file(s) differ; rebuild or the reload ships stale code")
+            $relevant = Get-BinaryRelevantDiff -From $built -To $shortHead
+            if ($relevant.Count -gt 0) {
+                [void]$failures.Add("selfdev binary was built from $built but HEAD is $shortHead and $($relevant.Count) compiled file(s) differ; rebuild or the reload ships stale code:")
+                foreach ($f in ($relevant | Select-Object -First 10)) { [void]$failures.Add("    $f") }
             } else {
-                Write-Output "note: binary was built from $built, HEAD is $shortHead, but no Rust differs"
+                Write-Output "note: binary was built from $built, HEAD is $shortHead, but nothing compiled into the binary differs"
             }
         }
         if ($meta.dirty) {
@@ -70,11 +103,12 @@ if (Test-Path $socketHash) {
         # A commit that touches no Rust changes no binary, so the running server
         # is not stale just because HEAD moved. Only demand a rebuild when the
         # code that goes into the binary actually differs.
-        $rustChanges = @(& git diff --name-only "$running..$shortHead" -- '*.rs' 2>$null)
-        if ($rustChanges.Count -gt 0) {
-            [void]$failures.Add("the running server reports $running but HEAD is $shortHead and $($rustChanges.Count) Rust file(s) differ; reload or the session keeps the old code")
+        $relevant = Get-BinaryRelevantDiff -From $running -To $shortHead
+        if ($relevant.Count -gt 0) {
+            [void]$failures.Add("the running server reports $running but HEAD is $shortHead and $($relevant.Count) compiled file(s) differ; reload or the session keeps the old code:")
+            foreach ($f in ($relevant | Select-Object -First 10)) { [void]$failures.Add("    $f") }
         } else {
-            Write-Output "note: server is on $running, HEAD is $shortHead, but no Rust differs - binary is current"
+            Write-Output "note: server is on $running, HEAD is $shortHead, but nothing compiled into the binary differs - binary is current"
         }
     }
 } else {
