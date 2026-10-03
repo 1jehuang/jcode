@@ -532,7 +532,7 @@ fn test_model_picker_preserves_recommendation_priority_order() {
         .entries
         .iter()
         .position(|model| {
-            model.name == "gpt-5.5 (high)"
+            model.name == "gpt-5.5"
                 && model
                     .active_option()
                     .map(|route| route.api_method == "openai-oauth" && route.provider == "OpenAI")
@@ -542,18 +542,18 @@ fn test_model_picker_preserves_recommendation_priority_order() {
     let gpt54 = picker
         .entries
         .iter()
-        .position(|model| model.name.starts_with("gpt-5.4 "))
+        .position(|model| model.name == "gpt-5.4")
         .expect("gpt-5.4 should be present");
     let gpt54_pro = picker
         .entries
         .iter()
-        .position(|model| model.name.starts_with("gpt-5.4-pro "))
+        .position(|model| model.name == "gpt-5.4-pro")
         .expect("gpt-5.4-pro should be present");
     let claude_oauth = picker
         .entries
         .iter()
         .position(|model| {
-            model.name == "claude-opus-4-8 (high)"
+            model.name == "claude-opus-4-8"
                 && model
                     .active_option()
                     .map(|route| route.api_method == "claude-oauth")
@@ -564,7 +564,7 @@ fn test_model_picker_preserves_recommendation_priority_order() {
         .entries
         .iter()
         .position(|model| {
-            model.name == "claude-opus-4-8 (high)"
+            model.name == "claude-opus-4-8"
                 && model
                     .active_option()
                     .map(|route| route.api_method == "claude-api")
@@ -574,12 +574,12 @@ fn test_model_picker_preserves_recommendation_priority_order() {
     let spark = picker
         .entries
         .iter()
-        .position(|model| model.name.starts_with("gpt-5.3-codex-spark "))
+        .position(|model| model.name == "gpt-5.3-codex-spark")
         .expect("gpt-5.3-codex-spark should be present");
     let codex = picker
         .entries
         .iter()
-        .position(|model| model.name.starts_with("gpt-5.3-codex "))
+        .position(|model| model.name == "gpt-5.3-codex")
         .expect("gpt-5.3-codex should be present");
 
     assert!(
@@ -599,7 +599,7 @@ fn test_model_picker_preserves_recommendation_priority_order() {
     );
     assert!(
         picker.entries[gpt55].recommended,
-        "gpt-5.5 high over OpenAI OAuth should be recommended"
+        "gpt-5.5 over OpenAI OAuth should be recommended"
     );
     assert!(
         picker.entries[claude_oauth].recommended,
@@ -641,9 +641,9 @@ fn test_model_picker_preserves_recommendation_priority_order() {
     assert_eq!(
         recommended_routes,
         vec![
-            ("gpt-5.5 (high)", "OpenAI", "openai-oauth"),
-            ("claude-opus-4-8 (high)", "Anthropic", "claude-api"),
-            ("claude-opus-4-8 (high)", "Anthropic", "claude-oauth"),
+            ("gpt-5.5", "OpenAI", "openai-oauth"),
+            ("claude-opus-4-8", "Anthropic", "claude-api"),
+            ("claude-opus-4-8", "Anthropic", "claude-oauth"),
         ],
         "only the exact requested routes should be recommended; got {:?}",
         recommended_routes

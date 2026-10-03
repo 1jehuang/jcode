@@ -557,7 +557,56 @@ pub(super) fn inferred_reasoning_efforts(
     provider_name: Option<&str>,
     model_name: Option<&str>,
 ) -> Vec<&'static str> {
+    // The remote client only knows the provider/model names, not the runtime's
+    // available_efforts(). On a local connection its named profiles are the
+    // same config the server uses, including explicit capability overrides.
+    if !crate::tui::is_ssh_remote()
+        && let Some(efforts) =
+            named_profile_reasoning_efforts(crate::config::config(), provider_name, model_name)
+    {
+        return efforts;
+    }
     jcode_provider_core::inferred_reasoning_efforts(provider_name, model_name)
+}
+
+/// Return the named OpenAI-compatible profile's actual effort ladder, or None
+/// when `provider_name` is not a configured named profile. `Some(vec![])`
+/// means the profile explicitly disables effort for this model.
+pub(super) fn named_profile_reasoning_efforts(
+    config: &crate::config::Config,
+    provider_name: Option<&str>,
+    model_name: Option<&str>,
+) -> Option<Vec<&'static str>> {
+    let provider_name = provider_name?;
+    let profile_id = provider_name
+        .strip_prefix("openai-compatible:")
+        .unwrap_or(provider_name);
+    let (_, profile) = config
+        .providers
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(profile_id))?;
+    if profile.provider_type != crate::config::NamedProviderType::OpenAiCompatible {
+        return None;
+    }
+
+    let model_reasoning = profile
+        .models
+        .iter()
+        .find(|model| model_name.is_some_and(|id| model.id.eq_ignore_ascii_case(id)))
+        .and_then(|model| model.reasoning);
+    if model_reasoning == Some(false) || profile.supports_reasoning_effort == Some(false) {
+        return Some(Vec::new());
+    }
+    if profile.supports_reasoning_effort == Some(true) {
+        return Some(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec());
+    }
+    if model_reasoning == Some(true) {
+        return Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec());
+    }
+    if profile.disable_reasoning_heuristics {
+        return Some(Vec::new());
+    }
+    None
 }
 
 pub(super) fn effort_bar(index: usize, total: usize) -> String {
