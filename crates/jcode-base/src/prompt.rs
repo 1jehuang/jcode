@@ -158,31 +158,47 @@ pub const SWARM_DEEP_EFFORT_DIRECTIVE: &str = r##"# Deep Task Graph
 
 The deep task-graph swarm workflow is enabled. Your root reasoning effort is configured independently from worker effort. Treat the task DAG as the primary object, not ad hoc agent chat.
 
-## Seed one node, then expand it yourself
+## Where the parallelism comes from
 
-The fan-out comes from the children of your root node, not from the number of roots. The canonical shape is three steps and the second one is the one that gets forgotten:
+The fan-out is the children of ONE expanded root node, not the number of roots. docs/SWARM_TASK_GRAPH.md section 9 is the worked example: T0 seeds `explore, gate, synthesize` - one node; T1 the root expands explore into six facets; T2 the scheduler fans those facets out to parallel workers.
 
-1. **Seed one root node** with `swarm task_graph` using `mode: "deep"`. One `explore`-style node; the engine auto-inserts the critique/verify gate over it, and you can add a `synthesize` node the gate feeds. Every `task_graph` call is a re-seed, and re-seeding re-opens and re-widens that plan-wide gate, which belongs to a worker once dispatched - measured cost of ignoring this: 31 root nodes spread across 14 separate calls left the coordinator closing zero nodes, unable to `inject_gap`, with the root gate owned by another session.
+A node nobody expands runs on exactly one worker no matter how large the budget. Measured: a single-node seed peaked at 1 of 32 concurrent worker slots.
 
-2. **Immediately `expand_node` that node into the facets you can already name.** This is the whole parallelism mechanism and it is your job, not the assigned worker's. While the node is still queued and unowned you own it, so you can expand it; the moment it is dispatched it is delegated and you no longer can. A node nobody expands runs on exactly one worker, however large the budget - measured on 2026-10-03, a single-node seed peaked at 1 of 32 concurrent worker slots. Expand to the facets you can already see; you are not enumerating everything, you are making the ready set wide enough that `run_plan` dispatches several workers at once.
+So: seed ONE root node in a single `swarm task_graph` call, then get it expanded. Every `task_graph` call is a re-seed, and re-seeding re-opens and re-widens the plan-wide root gate, which belongs to a worker once dispatched - measured cost of ignoring this: 31 root nodes spread across 14 calls left the coordinator closing zero nodes, unable to `inject_gap`, with the gate owned by another session.
 
-3. `run_plan` fans the ready facets out to parallel workers, and any facet whose owner finds it deep can self-decompose further.
+## Two ways to get the expansion, and the race between them
 
-Do not confuse this with `spawn`. `spawn` is the agent-first path: one worker receives one prompt, owns its whole scope, and finishes all of it itself, so launching N workers gives N scopes and never decomposition of one scope. Only a `swarm-deep` root may spawn recursively, and a spawned worker has no plan node to expand. Parallelism inside one scope comes from the plan.
+**Preferred: write the root node as expandable and let its assignee expand it.** Say so in the node's own `content` - name the facets and state that the node is to be decomposed rather than executed serially. This does not depend on winning a race, and it is what produced eight genuinely concurrent workers in measurement. The injected node directive already tells the assignee to decompose a node containing more than one independently checkable concern, so an explicit marker needs no inference.
+
+**Alternatively: expand it yourself, but only while no driver is running.** A live `run_plan` driver dispatches a queued node and takes ownership before the coordinator can act; `expand_node` then fails with the actor not owning the node. Observed live. If you intend to expand yourself, do not start `run_plan` first.
+
+## spawn is not the plan
+
+`spawn` is the agent-first path: one worker receives one prompt, owns its whole scope, and finishes all of it. Launching N workers gives N scopes, never decomposition of one scope. Only a `swarm-deep` root may spawn recursively, and a spawned worker has no plan node to expand. Parallelism inside one scope comes from the task graph, not from spawning more agents.
+
+## Supervise, do not wait
+
+Do not block on a long `bg wait` for workers. Your job while a plan runs is to check whether they are progressing and to act on the ones that are not.
+
+- Poll with `swarm list` and `swarm plan_status`, not with a long wait.
+- A worker is suspect when its status line is stuck, its last activity is far in the past, or its node has been re-queued. A turn ending without `complete_node` re-queues a node once and then fails it, so a repeated re-queue means the assignee is not closing its node.
+- `peak N of 32` with `active 0` means the driver has nothing running, not that work is progressing.
+- When a worker is looping or ignoring messages, stop it with a direct DM that cuts scope and tells it to report what it already has and close the node. A negative result with evidence beats an unfinished positive one.
+- `plan_status` reaching a terminal state with nodes still Blocked is a signal to intervene, not to wait again.
 
 ## Bounding the growth
 
-Deep mode has no fixed depth and no per-node fan-out limit: growth is bounded only by the live-worker budget and the total member cap. How far to expand is the owner's call at expansion time, on the node's own terms - there is no prescribed number here, because the right breadth depends on what the node actually contains.
+Deep mode has no fixed depth and no per-node fan-out limit: growth is bounded only by the live-worker budget and the total member cap. How far to expand is the owner's call at expansion time, on the node's own terms; there is no prescribed number, because the right breadth depends on what the node contains.
 
-The one control a node's brief can carry is `do not expand this node`, which switches its assignment to atomic execution for an owner that should do the work as one unit rather than decompose it.
+The one control a node's brief can carry is `do not expand this node`, which switches its assignment to atomic execution.
 
 ## Workflow
 
-1. Seed one root node in a single `task_graph` call with `mode: "deep"`.
-2. Expand that node into independently checkable facets before it is dispatched. Add `depends_on` edges only for real data dependencies, so the ready set stays wide.
-3. Finish each node with `swarm complete_node` and a typed artifact: `findings`, `evidence` (file:line / commit refs), `validation`, `open_questions`, a required `confidence` (low|medium|high; report low honestly, it routes follow-up work to shore up that scope), and an honest `what_i_did_not_check`. Downstream nodes are hydrated with these artifacts automatically. There is no other way to close a deep node: a turn ending without expand_node/complete_node re-queues the node to a fresh worker and fails it on repeat.
-4. When a critique/verify gate finds gaps or failures, use `swarm inject_gap` to add new nodes; the parent cannot close until they drain. A passing gate artifact must account for EVERY node it audited by id (the server rejects rubber stamps), and cannot pass over a low-confidence sibling without addressing it explicitly, so treat low-confidence siblings as priority probe targets.
-5. Use `swarm run_plan` to drive the graph to completion. It returns immediately and drives the plan as a background task (progress card plus wake on completion), so keep working or answer the user while it runs. Watch peak concurrent slots: a deep plan using one worker out of the budget means the root node was never expanded, not that the engine is slow."##;
+1. Seed one root node in a single `task_graph` call with `mode: "deep"`, written so its assignee will expand it.
+2. `run_plan` fans the ready facets out to parallel workers; any facet whose owner finds it deep can self-decompose further.
+3. Finish each node with `swarm complete_node` and a typed artifact: `findings` (string), `evidence`, `edge_cases_considered`, `open_questions` and `what_i_did_not_check` (arrays of strings), `validation` and `confidence` (strings). Downstream nodes are hydrated with these artifacts automatically. There is no other way to close a deep node.
+4. When a critique/verify gate finds gaps or failures, use `swarm inject_gap` to add new nodes; the parent cannot close until they drain. A passing gate artifact must account for EVERY node it audited by id (the server rejects rubber stamps), and cannot pass over a low-confidence sibling without addressing it explicitly.
+5. Supervise while it runs rather than waiting on it."##;
 
 /// Returns true when `effort` is either swarm sentinel (light or deep),
 /// case-insensitive. Providers resolve their configured root reasoning level.

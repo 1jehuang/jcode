@@ -2205,7 +2205,40 @@ impl Tool for CommunicateTool {
                 "artifact".to_string(),
                 json!({
                     "type": "object",
-                    "description": "Handoff artifact for complete_node: findings, evidence[], validation, open_questions[], confidence.",
+                    "description": "Handoff artifact for complete_node. Field types are fixed by the server and were previously undeclared, so a worker had no way to know that `validation` is a string rather than a list of checks - it cost a round-trip and a raw serde rejection with no field path. `findings`, `validation` and `confidence` are strings; `evidence`, `edge_cases_considered`, `open_questions` and `what_i_did_not_check` are arrays of strings.",
+                    "properties": {
+                        "findings": {
+                            "type": "string",
+                            "description": "The deliverable summary."
+                        },
+                        "evidence": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "References, not claims: file:line, commit refs, paths."
+                        },
+                        "edge_cases_considered": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "validation": {
+                            "type": "string",
+                            "description": "Verify results for code-style nodes. A single string, NOT an array - send multiple checks joined inside one string."
+                        },
+                        "open_questions": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "confidence": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high"],
+                            "description": "Report honestly; low routes follow-up work to shore up that scope."
+                        },
+                        "what_i_did_not_check": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Explicit unexplored surface. Gates convert these into new nodes."
+                        }
+                    },
                     "additionalProperties": true
                 }),
             );
