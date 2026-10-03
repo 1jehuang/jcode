@@ -76,7 +76,7 @@ fn mission_turn_reminder(session_id: &str) -> Option<String> {
 }
 
 /// Merge any number of optional reminder sections, preserving order.
-fn merge_reminder_sections(parts: [Option<String>; 4]) -> Option<String> {
+fn merge_reminder_sections(parts: [Option<String>; 3]) -> Option<String> {
     let joined: Vec<String> = parts.into_iter().flatten().collect();
     if joined.is_empty() {
         None
@@ -92,7 +92,7 @@ fn merge_reminder_sections(parts: [Option<String>; 4]) -> Option<String> {
 /// resets it: it keeps reporting a full window while actually sitting at a
 /// fraction of one. Report the same value the status bar shows so the two can
 /// never disagree.
-fn context_budget_turn_reminder(app: &App) -> Option<String> {
+pub(super) fn context_budget_turn_reminder(app: &App) -> Option<String> {
     let limit = app.context_limit;
     if limit == 0 {
         return None;
@@ -4168,7 +4168,6 @@ impl App {
         if images.is_empty() {
             self.current_turn_system_reminder = merge_reminder_sections([
                 self_dev_turn_reminder(self),
-                context_budget_turn_reminder(self),
                 None,
                 mission_turn_reminder(&self.session.id),
             ]);
@@ -4183,7 +4182,6 @@ impl App {
         } else {
             self.current_turn_system_reminder = merge_reminder_sections([
                 self_dev_turn_reminder(self),
-                context_budget_turn_reminder(self),
                 None,
                 mission_turn_reminder(&self.session.id),
             ]);
@@ -4270,7 +4268,6 @@ impl App {
             self.current_turn_system_reminder =
                 merge_reminder_sections([
                     self_dev_turn_reminder(self),
-                    context_budget_turn_reminder(self),
                     reminder,
                     mission_turn_reminder(&self.session.id),
                 ]);

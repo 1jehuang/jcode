@@ -35,6 +35,18 @@ impl App {
             None,
         );
         self.append_current_turn_system_reminder(&mut split);
+        // The context figure belongs here, next to the memory reminder, rather
+        // than in a field populated during input handling. That ordering was
+        // never verified: the reminder was set on submit but never observed in
+        // any request, and a fix nobody can see is worse than none because it
+        // reads as covered.
+        if let Some(budget) = super::input::context_budget_turn_reminder(self) {
+            if !split.dynamic_part.is_empty() {
+                split.dynamic_part.push_str("\n\n");
+            }
+            split.dynamic_part.push_str("# System Reminder\n\n");
+            split.dynamic_part.push_str(&budget);
+        }
         crate::prompt::append_swarm_effort_directive(
             &mut split,
             self.provider.reasoning_effort().as_deref(),
