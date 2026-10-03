@@ -1,7 +1,7 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1 done)
-Last reviewed: 2026-10-03 (commit `af821fd63`)
+Status: **in_progress** (P0.1, P0.2 done)
+Last reviewed: 2026-10-03 (commit `153ac7eb0`)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -85,15 +85,41 @@ They are also the cheapest to fix, so do them first.
 
 ### P0.2 - `ResumeAllSessions` ignores the subscriber's working directory
 
-- [ ] **Status:** pending
-- **Where:** `crates/jcode-app-core/src/server/client_actions.rs:1086-1093` collects
-  every session with a live attachment and `client_lifecycle.rs:1991-2003` dispatches
-  it. The loop never consults a working directory.
-- **Fix:** thread the subscriber's `working_dir` into
-  `handle_resume_all_sessions` and skip sessions whose stored cwd does not match.
+- [x] **Status:** done (commit `153ac7eb0`)
+- **Where:** `crates/jcode-app-core/src/server/client_actions.rs` `handle_resume_all_sessions`
+  collected every session with a live attachment and `client_lifecycle.rs:2014-2025`
+  dispatched it. The loop never consulted a working directory.
+- **Fix:** `handle_resume_all_sessions` takes a `caller_working_dir: Option<&str>` and skips
+  sessions whose stored directory canonicalizes to something else
+  (`working_dir_in_scope`). The dispatch reads the caller's directory from the
+  connection's own agent (`agent.lock().await -> working_dir()`), never the daemon's cwd.
+  The check runs on the already-reserved `try_lock_owned` guard: a second `agent.lock().await`
+  there would race and report an idle session as busy, silently dropping sessions the user
+  asked to continue. An `out_of_scope` count is added to the log line so a suspicious skip is
+  visible rather than silent.
+- Two deliberate non-filtering cases, documented at the function:
+  - When only the caller has a directory, or only the session does, the session stays in
+    scope. A directory-less session is attributable to no project, and a caller with no
+    directory means the request could not be attributed to one at all, where filtering
+    would report "no interrupted sessions" while real sessions sit interrupted.
+    This is not a common caller path: `Session::create` populates `working_dir` from the
+    process cwd, so a real caller almost always has one.
+  - Both sides are canonicalized before comparing, so a symlinked checkout or a `..`
+    segment does not read as a different project.
+- `recover_headless_sessions_on_startup` is deliberately left daemon-wide. No client asked
+  for it, it is the daemon tidying up after its own restart, and narrowing it would strand
+  projects with no attached client.
 - **Acceptance:** resuming from project A does not deliver a continuation into any live
   session belonging to project B.
-- **Test:** two live sessions in different temp dirs; resume-all from A resumes only A's.
+- **Test:** `resume_all_skips_sessions_from_other_projects` in
+  `crates/jcode-app-core/src/server/client_actions_tests.rs`. Two identically-interrupted
+  live sessions rooted in `project-a` and `project-b`, resume-all dispatched with project A
+  as the caller. Asserts `resumed == 1`, asserts project B's attachment received nothing
+  (`try_recv`, not `recv`: B's attachment stays open for the daemon lifetime so `recv` would
+  hang rather than report silence), then sanity-checks A really received its `TextDelta` so
+  the test cannot pass by skipping both. With the scope filter disabled the test fails with
+  `got ["kikazaru", "iwazaru"]`, confirming it guards the fix rather than the build.
+  The two pre-existing resume-all tests pass unchanged.
 
 ### P0.3 - Attaching to a live session re-pins that session's working directory
 
