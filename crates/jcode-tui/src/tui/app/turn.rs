@@ -83,6 +83,22 @@ impl App {
         &mut self,
         terminal: &mut DefaultTerminal,
         event_stream: &mut EventStream,
+        bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
+    ) -> Result<()> {
+        // Same account bookkeeping as the server agent's turn: return home at
+        // turn start, save a failover move on every exit path.
+        let observed = self.local_account_turn_start();
+        let result = self
+            .run_turn_interactive_inner(terminal, event_stream, bus_receiver)
+            .await;
+        self.local_account_turn_end(observed);
+        result
+    }
+
+    async fn run_turn_interactive_inner(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        event_stream: &mut EventStream,
         mut bus_receiver: Option<&mut tokio::sync::broadcast::Receiver<crate::bus::BusEvent>>,
     ) -> Result<()> {
         let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;

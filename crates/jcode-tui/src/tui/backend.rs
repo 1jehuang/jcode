@@ -303,6 +303,28 @@ pub(crate) struct ReplayRemoteState {
     call_output_tokens_seen: u64,
 }
 
+/// `--account` pins for this TUI's first Subscribe, as (provider, label).
+static STARTUP_ACCOUNT_PINS: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Record `jcode --account` pins. They are sent once, with the first
+/// Subscribe, so a reconnect does not undo a later `/account switch`.
+pub fn set_startup_account_pins(pins: Vec<(String, String)>) {
+    *STARTUP_ACCOUNT_PINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = pins;
+}
+
+/// Subscribe's `account_pins` (taken once) and `supports_session_accounts`.
+pub(crate) fn take_subscribe_account_fields() -> (Vec<(String, String)>, bool) {
+    let pins = std::mem::take(
+        &mut *STARTUP_ACCOUNT_PINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    (pins, true)
+}
+
 impl RemoteConnection {
     /// Connect to the server
     pub async fn connect() -> Result<Self> {
@@ -354,6 +376,7 @@ impl RemoteConnection {
                 super::is_ssh_remote() || crate::session::session_exists(session_id)
             })
             .map(|session_id| session_id.to_string());
+        let (account_pins, supports_session_accounts) = take_subscribe_account_fields();
         conn.send_request(Request::Subscribe {
             system_prompt: None,
             supports_pdf_panels: false,
@@ -371,6 +394,10 @@ impl RemoteConnection {
             } else {
                 crate::terminal_launch::snapshot_client_terminal_env()
             },
+            // Filled once from `--account`; the TUI handles
+            // `session_account_changed`.
+            account_pins,
+            supports_session_accounts,
         })
         .await?;
         let subscribe_ms = subscribe_start.elapsed().as_millis();
@@ -1109,6 +1136,46 @@ impl RemoteConnection {
             .await
     }
 
+    /// Pin this session (window) to `label`, or unpin it with `None`.
+    /// Returns the request id; the server answers it with Done or Error.
+    pub async fn set_session_account(
+        &mut self,
+        provider: &str,
+        label: Option<&str>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetSessionAccount {
+            id,
+            provider: provider.to_string(),
+            label: label.map(str::to_string),
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Change the default account for new and unpinned sessions.
+    pub async fn set_default_account(&mut self, provider: &str, label: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetDefaultAccount {
+            id,
+            provider: provider.to_string(),
+            label: label.to_string(),
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Per-session same-provider account failover (`None` = config default).
+    pub async fn set_account_failover(&mut self, enabled: Option<bool>) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetAccountFailover { id, enabled })
+            .await?;
+        Ok(id)
+    }
+
     /// Read the next event from the server.
     ///
     /// This is **cancellation safe** and may be used directly as a branch in a
@@ -1523,6 +1590,19 @@ impl RemoteEventState for ReplayRemoteState {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn cli_account_pins_fill_first_subscribe_only() {
+        let _guard = crate::storage::lock_test_env();
+        set_startup_account_pins(vec![("claude".to_string(), "claude-fox".to_string())]);
+        let (pins, supports) = take_subscribe_account_fields();
+        assert_eq!(pins, vec![("claude".to_string(), "claude-fox".to_string())]);
+        assert!(supports, "the TUI handles session_account_changed");
+        // A reconnect must not re-pin a window the user has since switched.
+        let (pins, supports) = take_subscribe_account_fields();
+        assert!(pins.is_empty());
+        assert!(supports);
+    }
 
     #[tokio::test]
     async fn detached_auth_changed_notification_does_not_wait_for_writer_lock() {

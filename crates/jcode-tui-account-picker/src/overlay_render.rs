@@ -46,6 +46,10 @@ pub(super) fn action_section(item: &AccountPickerItem) -> ActionSection {
         AccountPickerCommand::OpenAccountCenter { .. } => ActionSection::Overview,
         AccountPickerCommand::OpenAddReplaceFlow { .. } => ActionSection::Add,
         AccountPickerCommand::Switch { .. } => ActionSection::Switch,
+        AccountPickerCommand::SetDefault { .. } => ActionSection::Setting,
+        AccountPickerCommand::Unpin { .. } | AccountPickerCommand::ToggleFailover => {
+            ActionSection::Setting
+        }
         AccountPickerCommand::Login { .. } => ActionSection::Login,
         AccountPickerCommand::Remove { .. } => ActionSection::Remove,
         AccountPickerCommand::PromptNew { .. } => ActionSection::Add,
@@ -68,9 +72,28 @@ pub(super) fn action_section(item: &AccountPickerItem) -> ActionSection {
 }
 
 pub(super) fn account_is_active(item: &AccountPickerItem) -> bool {
-    item.subtitle
+    item.subtitle.split(['·', '-']).any(|part| {
+        let part = part.trim();
+        part.eq_ignore_ascii_case("active") || part.eq_ignore_ascii_case("this window")
+    })
+}
+
+/// Scope badges for a saved-account row, read from its subtitle segments:
+/// `this window` (the account this window uses), `pinned` (this window is
+/// pinned to it), and `default` (the default for new windows).
+pub(super) fn account_badges(item: &AccountPickerItem) -> Vec<&'static str> {
+    if action_section(item) != ActionSection::Switch {
+        return Vec::new();
+    }
+    let parts: Vec<String> = item
+        .subtitle
         .split(['·', '-'])
-        .any(|part| part.trim().eq_ignore_ascii_case("active"))
+        .map(|part| part.trim().to_ascii_lowercase())
+        .collect();
+    ["this window", "pinned", "default"]
+        .into_iter()
+        .filter(|badge| parts.iter().any(|part| part == badge))
+        .collect()
 }
 
 fn extract_account_label(title: &str) -> Option<String> {
@@ -174,7 +197,16 @@ pub(super) fn action_kind_help(command: &AccountPickerCommand) -> &'static str {
             "Prompts for a new value, then saves the matching provider or global setting."
         }
         AccountPickerCommand::Switch { .. } => {
-            "Switches the active saved account for this provider."
+            "Uses this account in this window only. Other windows keep their account. Press d to make it the default for new windows."
+        }
+        AccountPickerCommand::SetDefault { .. } => {
+            "Makes this account the default for new and unpinned windows. This window's pin is unchanged."
+        }
+        AccountPickerCommand::Unpin { .. } => {
+            "Unpins this window so it follows the default account again."
+        }
+        AccountPickerCommand::ToggleFailover => {
+            "Turns automatic same-provider account failover on or off for this window."
         }
         AccountPickerCommand::Login { .. } => {
             "Refreshes the selected account by starting the provider login flow again."
@@ -214,6 +246,12 @@ pub(super) fn command_preview(command: &AccountPickerCommand) -> String {
             AccountProviderKind::Anthropic => format!("/account switch {}", label),
             AccountProviderKind::OpenAi => format!("/account openai switch {}", label),
         },
+        AccountPickerCommand::SetDefault { label, .. } => format!("/account default {}", label),
+        AccountPickerCommand::Unpin { provider } => match provider {
+            AccountProviderKind::Anthropic => "/account unpin claude".to_string(),
+            AccountProviderKind::OpenAi => "/account unpin openai".to_string(),
+        },
+        AccountPickerCommand::ToggleFailover => "/account failover on|off".to_string(),
         AccountPickerCommand::Login { provider, label } => match provider {
             AccountProviderKind::Anthropic => format!("/account claude add {}", label),
             AccountProviderKind::OpenAi => format!("/account openai add {}", label),

@@ -560,6 +560,18 @@ pub(in crate::tui::app) fn handle_server_event(
         return true;
     }
 
+    // Replies to this window's account requests (/account switch, default,
+    // unpin, failover). Only these settle the change the user asked for.
+    match &event {
+        ServerEvent::Done { id } if app.settle_account_request(*id, Ok(())) => return true,
+        ServerEvent::Error { id, message, .. }
+            if app.settle_account_request(*id, Err(message.as_str())) =>
+        {
+            return true;
+        }
+        _ => {}
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -1286,19 +1298,27 @@ pub(in crate::tui::app) fn handle_server_event(
                 .map(Duration::from_secs)
                 .or_else(|| parse_rate_limit_error(&message));
             if let Some(reset_duration) = reset_duration {
+                // The limit was hit by a turn sent before the account changed,
+                // so it reports the previous account's reset time (possibly
+                // hours away). Resend now on the new credentials instead.
+                let previous_account_limit = app.turn_predates_credentials_change();
                 app.rate_limit_reset = Some(Instant::now() + reset_duration);
                 if let Some(is_system) = app
                     .rate_limit_pending_message
                     .as_ref()
                     .map(|pending| pending.is_system)
                 {
-                    let rate_limit_line =
-                        app.rate_limit_notice_with_nudge(reset_duration.as_secs());
-                    app.push_display_message(DisplayMessage::system(rate_limit_line));
-                    if is_system {
-                        app.set_status_notice("Rate limited; queued system retry");
+                    if previous_account_limit {
+                        app.arm_account_change_resend(Instant::now());
                     } else {
-                        app.set_status_notice("Rate limited; queued retry");
+                        let rate_limit_line =
+                            app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                        app.push_display_message(DisplayMessage::system(rate_limit_line));
+                        if is_system {
+                            app.set_status_notice("Rate limited; queued system retry");
+                        } else {
+                            app.set_status_notice("Rate limited; queued retry");
+                        }
                     }
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;
@@ -1311,8 +1331,6 @@ pub(in crate::tui::app) fn handle_server_event(
                     return false;
                 }
             }
-            let is_failover_prompt =
-                crate::provider::parse_failover_prompt_message(&message).is_some();
             // Snapshot the failed turn's payload before the cleanup below (and
             // the retry-budget bookkeeping) clears it, so a fallback offer
             // armed at a terminal no-retry point can resend it after the user
@@ -1327,14 +1345,17 @@ pub(in crate::tui::app) fn handle_server_event(
                     raw_input: app.last_submitted_input.clone(),
                 }
             });
-            app.push_display_message(DisplayMessage {
-                role: "error".to_string(),
-                content: message.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            let failover_prompt = crate::provider::parse_failover_prompt_message(&message);
+            if failover_prompt.is_none() {
+                app.push_display_message(DisplayMessage {
+                    role: "error".to_string(),
+                    content: message.clone(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
             app.stream_message_ended = false;
@@ -1351,6 +1372,15 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            // The provider offers another route instead of resending on its
+            // own. Run the same cancelable countdown (or manual hint) as a
+            // local session; the countdown resends this payload through the
+            // server after the switch, and Esc cancels with nothing sent.
+            if let Some(prompt) = failover_prompt {
+                app.clear_pending_remote_retry();
+                app.handle_provider_failover_prompt_with_resend(prompt, failed_fallback_payload);
+                return true;
+            }
             // Connectivity failures (DNS, connection reset, no route, transient
             // TLS, timeouts) are always transient: the request never reached the
             // provider. Hold the turn and resume when the network recovers,
@@ -1429,8 +1459,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return false;
             }
-            if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
-            {
+            if !app.schedule_pending_remote_retry("⚠ Remote request failed.") {
                 app.clear_pending_remote_retry();
                 // No automatic retry will resend this turn, so restore the prompt the
                 // user typed back into the input box instead of dropping it.
@@ -1573,8 +1602,10 @@ pub(in crate::tui::app) fn handle_server_event(
             activity,
             token_usage_totals,
             side_panel,
+            account_labels,
             ..
         } => {
+            app.replace_window_accounts(account_labels);
             let prev_session_id = app.remote_session_id.clone();
             let history_message_count = messages.len();
             let history_mcp_count = mcp_servers.len();
@@ -2358,6 +2389,35 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
             }
             app.invalidate_model_picker_cache();
+            true
+        }
+        ServerEvent::CredentialsChanged {
+            provider,
+            account_label,
+        } => {
+            if !app
+                .credential_change_is_for_this_window(provider.as_deref(), account_label.as_deref())
+            {
+                crate::logging::info(&format!(
+                    "Credentials changed for {:?} ({:?}), not this window's account; keeping hold",
+                    provider, account_label
+                ));
+                return false;
+            }
+            crate::logging::info(&format!(
+                "Credentials changed on server (provider={:?}); releasing any rate-limit hold",
+                provider
+            ));
+            app.release_rate_limit_hold_after_credentials_changed(provider.as_deref())
+        }
+        ServerEvent::SessionAccountChanged {
+            provider,
+            label,
+            pinned,
+            is_default,
+            reason,
+        } => {
+            app.handle_session_account_changed(provider, label, pinned, is_default, reason);
             true
         }
         ServerEvent::AvailableModelsUpdated {

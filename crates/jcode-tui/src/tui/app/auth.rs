@@ -5,11 +5,13 @@ mod auth_account_picker;
 #[path = "auth_types.rs"]
 mod auth_types;
 pub(crate) use self::auth_account_commands::{
-    account_command_from_picker, execute_account_command_local, execute_account_command_remote,
-    handle_account_command_remote, handle_auth_command, resolve_account_provider_descriptor,
-    save_openai_fast_setting_local,
+    account_command_from_inline_action, account_command_from_picker, execute_account_command_local,
+    execute_account_command_remote, handle_account_command_remote, handle_auth_command,
+    resolve_account_provider_descriptor, same_account_command, save_openai_fast_setting_local,
 };
-pub(super) use self::auth_types::{AccountCommand, PendingAccountInput, PendingLogin};
+pub(super) use self::auth_types::{
+    AccountCommand, AccountFailoverMode, PendingAccountInput, PendingLogin,
+};
 
 use super::*;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -1006,62 +1008,6 @@ impl App {
         Self::claude_token_exchange(verifier, code, &label, Some(redirect_uri)).await
     }
 
-    pub(super) fn switch_account(&mut self, label: &str) {
-        match crate::auth::claude::set_active_account(label) {
-            Ok(()) => {
-                {
-                    let provider = self.provider.clone();
-                    let label_owned = label.to_string();
-                    tokio::spawn(async move {
-                        provider.invalidate_credentials().await;
-                        crate::logging::info(&format!(
-                            "Switched to Anthropic account '{}'",
-                            label_owned
-                        ));
-                    });
-                }
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Switched to Anthropic account {}.",
-                    label
-                )));
-                // Keep account-sensitive UI state in sync immediately.
-                crate::auth::AuthStatus::invalidate_cache();
-                self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
-            }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to switch account: {}",
-                    e
-                )));
-            }
-        }
-    }
-
-    pub(super) fn switch_account_by_label(&mut self, label: &str) {
-        let has_anthropic = crate::auth::claude::list_accounts()
-            .unwrap_or_default()
-            .iter()
-            .any(|account| account.label == label);
-        let has_openai = crate::auth::codex::list_accounts()
-            .unwrap_or_default()
-            .iter()
-            .any(|account| account.label == label);
-
-        match (has_anthropic, has_openai) {
-            (true, false) => self.switch_account(label),
-            (false, true) => self.switch_openai_account(label),
-            (true, true) => self.push_display_message(DisplayMessage::error(format!(
-                "Account label {} exists for both Anthropic and OpenAI. Use /account switch {} or /account openai switch {} explicitly.",
-                label, label, label
-            ))),
-            (false, false) => self.push_display_message(DisplayMessage::error(format!(
-                "No Anthropic or OpenAI account with label {} found.",
-                label
-            ))),
-        }
-    }
-
     pub(super) fn remove_account(&mut self, label: &str) {
         match crate::auth::claude::remove_account(label) {
             Ok(()) => {
@@ -1073,37 +1019,6 @@ impl App {
             Err(e) => {
                 self.push_display_message(DisplayMessage::error(format!(
                     "Failed to remove account: {}",
-                    e
-                )));
-            }
-        }
-    }
-
-    pub(super) fn switch_openai_account(&mut self, label: &str) {
-        match crate::auth::codex::set_active_account(label) {
-            Ok(()) => {
-                {
-                    let provider = self.provider.clone();
-                    let label_owned = label.to_string();
-                    tokio::spawn(async move {
-                        provider.invalidate_credentials().await;
-                        crate::logging::info(&format!(
-                            "Switched to OpenAI account '{}'",
-                            label_owned
-                        ));
-                    });
-                }
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Switched to OpenAI account {}.",
-                    label
-                )));
-                crate::auth::AuthStatus::invalidate_cache();
-                self.context_limit = self.provider.context_window() as u64;
-                self.context_warning_shown = false;
-            }
-            Err(e) => {
-                self.push_display_message(DisplayMessage::error(format!(
-                    "Failed to switch OpenAI account: {}",
                     e
                 )));
             }

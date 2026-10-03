@@ -62,14 +62,17 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
             .filter(|label| !label.is_empty())
         {
             Some(label) => {
-                map.remove(&format!("label:{label}"));
-                let key = format!("label:{label}");
-                super::disk_cache::invalidate(|candidate| candidate == key);
+                let prefix = anthropic_label_key_prefix(label);
+                map.retain(|key, _| !key.starts_with(&prefix));
+                super::disk_cache::invalidate(|key| key.starts_with(&prefix));
             }
             None => {
-                map.retain(|key, _| !key.starts_with("token:") && key != "label:default");
+                let default_prefix = anthropic_label_key_prefix("default");
+                map.retain(|key, _| {
+                    !key.starts_with("token:") && !key.starts_with(&default_prefix)
+                });
                 super::disk_cache::invalidate(|key| {
-                    key.starts_with("token:") || key == "label:default"
+                    key.starts_with("token:") || key.starts_with(&default_prefix)
                 });
             }
         }
@@ -82,20 +85,31 @@ pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>
     }
 }
 
+/// Key prefix shared by every credential stored under one Claude label.
+fn anthropic_label_key_prefix(label: &str) -> String {
+    format!("label:{label}:")
+}
+
+/// Short, non-reversible fingerprint of an access token.
+fn anthropic_token_fingerprint(access_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(access_token.trim().as_bytes());
+    format!("{:x}", digest)[..16].to_string()
+}
+
+/// Usage is keyed by the label *and* the credential. A relogin that reuses a
+/// label (often "default") for a different Claude account must not inherit
+/// the old account's exhausted limits or its shared 429 backoff, while the
+/// same credential keeps one key so the cross-process backoff still applies.
 pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
-    if let Some(label) = account_label
+    let fingerprint = anthropic_token_fingerprint(access_token);
+    match account_label
         .map(str::trim)
         .filter(|label| !label.is_empty())
     {
-        return format!("label:{}", label);
+        Some(label) => format!("{}{fingerprint}", anthropic_label_key_prefix(label)),
+        None => format!("token:{fingerprint}"),
     }
-
-    let prefix = access_token
-        .get(..20)
-        .unwrap_or(access_token)
-        .trim()
-        .to_string();
-    format!("token:{}", prefix)
 }
 
 pub(super) fn openai_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
@@ -121,6 +135,28 @@ pub(super) fn cached_anthropic_usage(cache_key: &str) -> Option<UsageData> {
     (!cached.is_stale()).then_some(cached)
 }
 
+/// Fresh cached usage for a Claude account label (any credential under it).
+pub(super) fn cached_anthropic_usage_for_label(label: &str) -> Option<UsageData> {
+    let prefix = anthropic_label_key_prefix(label);
+    let map = anthropic_usage_cache().lock().ok()?;
+    map.iter()
+        .filter(|(key, data)| key.starts_with(&prefix) && !data.is_stale())
+        .max_by_key(|(_, data)| data.fetched_at)
+        .map(|(_, data)| data.clone())
+}
+
+/// Fresh cached usage for an OpenAI account label.
+pub(super) fn cached_openai_usage_for_label(label: &str) -> Option<OpenAIUsageData> {
+    cached_openai_usage(&openai_usage_cache_key("", Some(label)))
+}
+
+/// Forget one OpenAI label's cached usage so the next read refetches it.
+pub(super) fn forget_openai_usage_for_label(label: &str) {
+    if let Ok(mut map) = openai_usage_cache().lock() {
+        map.remove(&openai_usage_cache_key("", Some(label)));
+    }
+}
+
 pub(super) fn store_anthropic_usage(cache_key: String, data: UsageData) {
     if let Ok(mut map) = anthropic_usage_cache().lock() {
         map.insert(cache_key, data);
@@ -144,10 +180,18 @@ pub(super) fn store_openai_usage_for_generation(
     cache_key: String,
     data: OpenAIUsageData,
 ) {
+    // A label whose fresh usage confirms the limit is open again. Cleared
+    // after the cache lock is released to keep lock order flat.
+    let mut reset_label: Option<String> = None;
     if let Ok(mut map) = openai_usage_cache().lock() {
         // A request begun before a reset must not reinstate the old exhausted quota.
         if generation != openai_usage_generation() {
             return;
+        }
+        if data.confirms_usage_available()
+            && let Some(label) = cache_key.strip_prefix("label:")
+        {
+            reset_label = Some(label.to_string());
         }
         let previous = map.get(&cache_key).cloned();
         let previous_exhausted = previous
@@ -174,6 +218,12 @@ pub(super) fn store_openai_usage_for_generation(
             ));
         }
         map.insert(cache_key, data);
+    }
+    if let Some(label) = reset_label {
+        // Fresh usage says this account is open again (an early or banked
+        // reset, or the window rolled over). Drop the usage-limit mark and
+        // the provider cooldown so the next resume is actually sent.
+        crate::provider::clear_openai_provider_unavailability_for_account_label(Some(&label));
     }
 }
 

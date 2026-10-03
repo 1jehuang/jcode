@@ -101,6 +101,7 @@ mod state_ui_input_helpers;
 mod update_sim;
 mod usage_reset;
 mod voice_input;
+pub(crate) mod window_account;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -341,6 +342,9 @@ struct PreparedTransferSession {
 struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
+    /// Remote sessions only: the failed turn's payload, resent through the
+    /// server once it confirms the switch to `prompt.to_provider`.
+    remote_resend: Option<FallbackResendPayload>,
 }
 
 /// An interactive "switch to the next best model/method and resend" offer shown
@@ -1503,6 +1507,14 @@ pub struct App {
     pending_startup_prompt_echo: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
+    /// Account this window uses per provider family ("claude" | "openai"),
+    /// from History / SessionAccountChanged (remote) or the local pin.
+    window_accounts: Vec<crate::protocol::SessionAccountInfo>,
+    /// Per-window same-provider failover override (`None` = config default).
+    window_account_failover: Option<bool>,
+    /// Account requests sent to the server, applied only once the server
+    /// answers that request id with Done (an Error leaves the window as is).
+    pending_account_requests: std::collections::HashMap<u64, window_account::PendingAccountRequest>,
     // Keybindings for model switching
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching
@@ -1643,6 +1655,13 @@ pub struct App {
     client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)
     rate_limit_reset: Option<Instant>,
+    // When the server last reported a credential change (login, account
+    // switch, credential file edit). A limit error for a turn sent before this
+    // belongs to the previous account and must not hold the turn.
+    credentials_changed_at: Option<Instant>,
+    // `rate_limit_reset` value that an account change pulled forward, so the
+    // resend tick does not also claim "Rate limit reset".
+    account_change_resend_at: Option<Instant>,
     // Message being sent when rate limit hit (to auto-retry in remote mode)
     rate_limit_pending_message: Option<PendingRemoteMessage>,
     // Consecutive turn errors that classify as credential/auth failures.

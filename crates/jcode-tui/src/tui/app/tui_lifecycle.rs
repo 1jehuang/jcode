@@ -283,6 +283,88 @@ impl App {
         }
     }
 
+    /// Notice shown when a held turn is resent because credentials changed.
+    pub(super) const ACCOUNT_CHANGED_RESEND_NOTICE: &'static str =
+        "🔑 Account changed. Resending your message";
+
+    /// Credentials changed (login, account switch, credential file edit).
+    ///
+    /// A turn held on a rate/usage limit (or an overload/connection backoff)
+    /// is waiting for the previous account's reset time, which can be hours
+    /// away. Pull that hold forward so the next tick resends the turn on the
+    /// new credentials. Returns true when a hold was released.
+    ///
+    /// Idempotent: once released the hold is due now (or already resent), so
+    /// repeated auth broadcasts neither add notices nor resend twice. Offline
+    /// holds are left alone because the network, not the account, blocks them.
+    ///
+    /// `changed_provider` scopes the change: an OpenAI login must not resend a
+    /// turn held on an exhausted Claude account (or the reverse). `None` means
+    /// the change may affect any provider.
+    pub(super) fn release_rate_limit_hold_after_credentials_changed(
+        &mut self,
+        changed_provider: Option<&str>,
+    ) -> bool {
+        let held_provider = self.held_turn_provider_name();
+        if !credential_change_applies_to(changed_provider, held_provider.as_deref()) {
+            crate::logging::info(&format!(
+                "Credentials changed for {:?}; keeping hold on {:?}",
+                changed_provider, held_provider
+            ));
+            return false;
+        }
+        let now = Instant::now();
+        self.credentials_changed_at = Some(now);
+        if self.is_processing
+            || (self.is_remote && self.rate_limit_pending_message.is_none())
+            || matches!(self.status, ProcessingStatus::WaitingForNetwork { .. })
+        {
+            return false;
+        }
+        let Some(reset) = self.rate_limit_reset else {
+            return false;
+        };
+        if reset <= now {
+            return false;
+        }
+        self.arm_account_change_resend(now);
+        true
+    }
+
+    /// Provider the current (possibly held) turn runs on.
+    fn held_turn_provider_name(&self) -> Option<String> {
+        if let Some(name) = self.remote_provider_name.clone() {
+            return Some(name);
+        }
+        if self.is_remote || self.uses_server_or_replay_metadata() {
+            return self.remote_effort_identity().0;
+        }
+        Some(self.provider.name().to_string())
+    }
+
+    /// Hold the pending turn for an immediate resend on the new account.
+    pub(super) fn arm_account_change_resend(&mut self, at: Instant) {
+        if let Some(pending) = self.rate_limit_pending_message.as_mut() {
+            pending.retry_at = Some(at);
+        }
+        self.rate_limit_reset = Some(at);
+        self.account_change_resend_at = Some(at);
+        self.consecutive_credential_failures = 0;
+        self.push_display_message(DisplayMessage::system(
+            Self::ACCOUNT_CHANGED_RESEND_NOTICE.to_string(),
+        ));
+        self.set_status_notice("Account changed; resending");
+    }
+
+    /// True when a limit error belongs to a turn that was sent before the
+    /// latest credential change, i.e. it reports the previous account's limit.
+    pub(super) fn turn_predates_credentials_change(&self) -> bool {
+        match (self.credentials_changed_at, self.processing_started) {
+            (Some(changed), Some(started)) => started <= changed,
+            _ => false,
+        }
+    }
+
     pub(super) fn clear_pending_remote_retry(&mut self) {
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
@@ -668,6 +750,9 @@ impl App {
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
+            window_accounts: Vec::new(),
+            window_account_failover: None,
+            pending_account_requests: Default::default(),
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
@@ -734,6 +819,8 @@ impl App {
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
+            credentials_changed_at: None,
+            account_change_resend_at: None,
             rate_limit_pending_message: None,
             consecutive_credential_failures: 0,
             last_stream_error: None,
@@ -1127,6 +1214,9 @@ impl App {
             pending_prompt_before_history: None,
             pending_startup_prompt_echo: None,
             pending_account_picker_action: None,
+            window_accounts: Vec::new(),
+            window_account_failover: None,
+            pending_account_requests: Default::default(),
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
@@ -1193,6 +1283,8 @@ impl App {
                 .and_then(|p| std::fs::metadata(&p).ok())
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
+            credentials_changed_at: None,
+            account_change_resend_at: None,
             rate_limit_pending_message: None,
             consecutive_credential_failures: 0,
             last_stream_error: None,
@@ -1423,5 +1515,64 @@ impl App {
         self.server_spawning = true;
         self.remote_startup_phase = Some(super::RemoteStartupPhase::StartingServer);
         self.remote_startup_phase_started = Some(Instant::now());
+    }
+}
+
+/// Credential family a provider id or display name belongs to. Claude login,
+/// Claude API keys, and the Anthropic provider share one account; the same
+/// holds for OpenAI OAuth (Codex) and API keys.
+fn credential_family(provider: &str) -> String {
+    let normalized = provider.trim().to_ascii_lowercase();
+    // Login labels vary ("claude", "claude-api", "Anthropic API").
+    if normalized.starts_with("anthropic") || normalized.starts_with("claude") {
+        return "anthropic".to_string();
+    }
+    match normalized.as_str() {
+        "openai" | "openai-api" | "openai-oauth" | "openai api" | "codex" | "chatgpt" => {
+            "openai".to_string()
+        }
+        _ => normalized,
+    }
+}
+
+/// Whether a credential change for `changed` can unblock a turn held on
+/// `held`. An unscoped change (`None` or a catch-all such as an auto-import)
+/// applies to every provider, as does a change when the held provider is
+/// unknown.
+fn credential_change_applies_to(changed: Option<&str>, held: Option<&str>) -> bool {
+    let (Some(changed), Some(held)) = (changed, held) else {
+        return true;
+    };
+    let changed = credential_family(changed);
+    if changed.is_empty() || matches!(changed.as_str(), "all" | "auth" | "auto-import") {
+        return true;
+    }
+    let held = credential_family(held);
+    // Only Claude and OpenAI names are reliably comparable. Other ids (e.g. an
+    // OpenAI-compatible profile id vs its "OpenRouter" slot name) may not
+    // match textually, so keep releasing for them rather than strand a hold.
+    let known = |family: &str| matches!(family, "anthropic" | "openai");
+    changed == held || (!known(&changed) && !known(&held))
+}
+
+#[cfg(test)]
+mod credential_scope_tests {
+    use super::credential_change_applies_to as applies;
+
+    #[test]
+    fn credentials_changed_scope_matches_provider_families() {
+        assert!(applies(None, Some("Claude")));
+        assert!(applies(Some("anthropic"), None));
+        assert!(applies(Some("anthropic"), Some("Claude")));
+        assert!(applies(Some("Anthropic API"), Some("claude")));
+        assert!(applies(Some("claude-api"), Some("anthropic")));
+        assert!(applies(Some("openai-api"), Some("OpenAI")));
+        assert!(applies(Some("auto-import"), Some("Claude")));
+        assert!(!applies(Some("openai"), Some("Claude")));
+        assert!(!applies(Some("claude"), Some("OpenAI")));
+        assert!(!applies(Some("gemini"), Some("Claude")));
+        assert!(!applies(Some("anthropic"), Some("OpenRouter")));
+        // Unknown ids are not reliably comparable, so they still release.
+        assert!(applies(Some("deepseek"), Some("OpenRouter")));
     }
 }

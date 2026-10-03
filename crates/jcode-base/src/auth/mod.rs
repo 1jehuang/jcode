@@ -7,6 +7,7 @@ pub mod claude;
 pub mod codex;
 mod commands;
 pub mod copilot;
+pub mod credential_signal;
 pub mod cursor;
 pub mod doctor;
 pub mod env_facts;
@@ -41,6 +42,7 @@ pub use status_types::{
 };
 
 pub use active_method::{ActiveCredential, ResolvedProviderAuth, resolve_dual_credential_auth};
+pub use jcode_provider_core::{AccountPin, AccountProviderKind, AccountScope};
 
 use crate::provider_catalog::LoginProviderAuthStateKey;
 use crate::provider_catalog::LoginProviderDescriptor;
@@ -941,6 +943,8 @@ impl AuthStatus {
     /// Invalidate all auth-derived state after credentials actually change.
     pub fn invalidate_cache() {
         Self::invalidate_cached_status();
+        // Wake provider retry loops sleeping on the previous account's limit.
+        crate::auth::credential_signal::bump();
         crate::auth::copilot::invalidate_github_token_cache();
         crate::provider::pricing::invalidate_auth_pricing_memos();
         crate::memory_rerank::clear_failure_backoff();
@@ -1691,3 +1695,7 @@ fn api_key_available(env_key: &str, file_name: &str) -> bool {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "account_pin_tests.rs"]
+mod account_pin_tests;

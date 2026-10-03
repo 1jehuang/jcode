@@ -576,10 +576,34 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
             app.input = format!("/account switch {second}");
             app.submit_input();
 
+            // Per-window accounts: the switch pins THIS window only. The
+            // stored default (used by new windows) stays on the first account.
+            assert_eq!(
+                crate::auth::codex::active_account_label().as_deref(),
+                Some(first.as_str()),
+                "/account switch must not change the default for other windows"
+            );
+            let window = app.window_account("openai").expect("window account");
+            assert_eq!(window.label.as_deref(), Some(second.as_str()));
+            assert!(window.pinned);
+            assert_eq!(
+                app.session.account_pins.get("openai").map(|pin| pin.label.as_str()),
+                Some(second.as_str()),
+                "the pin is persisted on the session"
+            );
+            let last = &app.display_messages().last().unwrap().content;
+            assert!(
+                last.contains(&format!("This window now uses {second}"))
+                    && last.contains(&format!("still {first}")),
+                "{last}"
+            );
+
+            app.input = format!("/account default {second}");
+            app.submit_input();
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
                 Some(second.as_str()),
-                "the shorthand must move the active account to the requested label"
+                "/account default changes the stored default"
             );
         });
     });
@@ -938,9 +962,8 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
         let mut items = Vec::new();
         app.append_openai_account_picker_items(&mut items, provider);
         for label in ["openai-otter", "openai-fox"] {
-            let command = format!("/account openai switch {label}");
             let item = items.iter().find(|item| matches!(&item.command,
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) if input == &command)).unwrap();
+                crate::tui::account_picker::AccountPickerCommand::Switch { label: actual, .. } if actual == label)).unwrap();
             assert!(
                 item.details
                     .iter()
@@ -954,5 +977,43 @@ fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
                 "full usage is not a truncated subtitle"
             );
         }
+    });
+}
+
+#[test]
+fn test_account_switch_short_form_runs_on_one_enter() {
+    with_temp_jcode_home(|| {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let claude_account = |email: &str| crate::auth::claude::AnthropicAccount {
+            label: String::new(),
+            access: "acc".to_string(),
+            refresh: "ref".to_string(),
+            expires: now_ms + 60_000,
+            email: Some(email.to_string()),
+            subscription_type: Some("max".to_string()),
+            scopes: Vec::new(),
+        };
+        let first = crate::auth::claude::upsert_account(claude_account("a@example.com")).unwrap();
+        let second = crate::auth::claude::upsert_account(claude_account("b@example.com")).unwrap();
+        assert_ne!(first, second);
+
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        // The suggestion list offers `/account claude switch <label>`, a
+        // different spelling of the same command. One Enter must run it.
+        app.set_input_for_test(&format!("/account switch {second}"));
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        assert!(app.input.is_empty(), "command ran, input: {:?}", app.input);
+        let window = app.window_account("claude").expect("window account");
+        assert_eq!(window.label.as_deref(), Some(second.as_str()));
+        assert!(window.pinned);
+
+        // A partial command still completes on Enter instead of running.
+        app.set_input_for_test("/acc");
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+        assert!(app.input.starts_with("/account"), "{:?}", app.input);
+        assert_ne!(app.input, "/acc");
     });
 }

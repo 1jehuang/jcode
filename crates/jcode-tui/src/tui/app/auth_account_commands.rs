@@ -141,9 +141,23 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             if remainder.is_empty() {
                 return Some(Err("Usage: /account switch <label>".to_string()));
             }
-            return Some(Ok(AccountCommand::SwitchShorthand {
-                label: remainder.to_string(),
-            }));
+            return Some(use_in_window_for_label(remainder));
+        }
+        // Must match before the provider-descriptor fallthrough below.
+        "default" => {
+            if remainder.is_empty() {
+                return Some(Err(
+                    "Usage: /account default <label>  (sets the default account for new windows)"
+                        .to_string(),
+                ));
+            }
+            return Some(set_default_for_label(remainder));
+        }
+        "unpin" => {
+            return Some(parse_unpin(remainder));
+        }
+        "failover" => {
+            return Some(parse_failover(remainder));
         }
         "add" | "login" => {
             return Some(Ok(AccountCommand::Add {
@@ -224,11 +238,26 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                         provider.id
                     )));
                 }
-                AccountCommand::Switch {
+                AccountCommand::UseInWindow {
                     provider_id: provider.id.to_string(),
                     label: value.to_string(),
                 }
             }
+            "default" if matches!(provider.id, "claude" | "openai") => {
+                if value.is_empty() {
+                    return Some(Err(format!(
+                        "Usage: /account {} default <label>",
+                        provider.id
+                    )));
+                }
+                AccountCommand::SetDefault {
+                    provider_id: provider.id.to_string(),
+                    label: value.to_string(),
+                }
+            }
+            "unpin" if matches!(provider.id, "claude" | "openai") => AccountCommand::Unpin {
+                provider_id: Some(provider.id.to_string()),
+            },
             "remove" | "rm" | "delete" => {
                 if value.is_empty() {
                     return Some(Err(format!(
@@ -308,7 +337,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
             }
             other => {
                 if matches!(provider.id, "claude" | "openai") {
-                    return Some(Ok(AccountCommand::Switch {
+                    return Some(Ok(AccountCommand::UseInWindow {
                         provider_id: provider.id.to_string(),
                         label: other.to_string(),
                     }));
@@ -323,9 +352,104 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
         return Some(Ok(parsed));
     }
 
-    Some(Ok(AccountCommand::SwitchShorthand {
-        label: first.to_string(),
-    }))
+    Some(use_in_window_for_label(first))
+}
+
+/// Provider family for a stored label: the label prefix first, then the
+/// stored account lists (labels and emails), so `/account fox@example.com`
+/// and custom labels still work.
+pub(crate) fn infer_account_provider(label: &str) -> Result<(String, String), String> {
+    if let Some(kind) = jcode_provider_core::AccountProviderKind::from_label(label) {
+        return Ok((kind.key().to_string(), label.to_string()));
+    }
+    let claude = crate::auth::claude::list_accounts()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|account| account.label == label || account.email.as_deref() == Some(label))
+        .map(|account| account.label);
+    let openai = crate::auth::codex::list_accounts()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|account| account.label == label || account.email.as_deref() == Some(label))
+        .map(|account| account.label);
+    match (claude, openai) {
+        (Some(found), None) => Ok(("claude".to_string(), found)),
+        (None, Some(found)) => Ok(("openai".to_string(), found)),
+        (Some(_), Some(_)) => Err(format!(
+            "{label} matches both a Claude and an OpenAI account. Use /account claude switch {label} or /account openai switch {label}."
+        )),
+        (None, None) => Err(format!(
+            "No Claude or OpenAI account named {label}. Use /account to list saved accounts."
+        )),
+    }
+}
+
+fn use_in_window_for_label(label: &str) -> Result<AccountCommand, String> {
+    infer_account_provider(label.trim())
+        .map(|(provider_id, label)| AccountCommand::UseInWindow { provider_id, label })
+}
+
+fn set_default_for_label(label: &str) -> Result<AccountCommand, String> {
+    infer_account_provider(label.trim())
+        .map(|(provider_id, label)| AccountCommand::SetDefault { provider_id, label })
+}
+
+fn parse_unpin(value: &str) -> Result<AccountCommand, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "all" => Ok(AccountCommand::Unpin { provider_id: None }),
+        other => match jcode_provider_core::AccountProviderKind::from_key(other) {
+            Some(kind) => Ok(AccountCommand::Unpin {
+                provider_id: Some(kind.key().to_string()),
+            }),
+            None => Err("Usage: /account unpin [claude|openai]".to_string()),
+        },
+    }
+}
+
+fn parse_failover(value: &str) -> Result<AccountCommand, String> {
+    use super::auth_types::AccountFailoverMode;
+    Ok(AccountCommand::Failover(
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "status" => AccountFailoverMode::Status,
+            "on" | "enable" | "true" => AccountFailoverMode::On,
+            "off" | "disable" | "false" => AccountFailoverMode::Off,
+            "default" | "auto" | "clear" => AccountFailoverMode::Default,
+            _ => return Err("Usage: /account failover [on|off|default|status]".to_string()),
+        },
+    ))
+}
+
+/// True when both inputs are valid `/account` commands with the same action,
+/// so a differently spelled suggestion need not replace what was typed.
+pub(crate) fn same_account_command(input: &str, suggestion: &str) -> bool {
+    match (
+        parse_account_command(input),
+        parse_account_command(suggestion),
+    ) {
+        (Some(Ok(typed)), Some(Ok(suggested))) => format!("{typed:?}") == format!("{suggested:?}"),
+        _ => false,
+    }
+}
+
+/// Inline `/account` picker rows that change which account a window uses.
+pub(crate) fn account_command_from_inline_action(
+    action: &crate::tui::AccountPickerAction,
+) -> Option<AccountCommand> {
+    match action {
+        crate::tui::AccountPickerAction::Switch { provider_id, label } => {
+            Some(AccountCommand::UseInWindow {
+                provider_id: provider_id.clone(),
+                label: label.clone(),
+            })
+        }
+        crate::tui::AccountPickerAction::SetDefault { provider_id, label } => {
+            Some(AccountCommand::SetDefault {
+                provider_id: provider_id.clone(),
+                label: label.clone(),
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Translate typed account-picker commands directly into [`AccountCommand`]s.
@@ -348,10 +472,18 @@ pub(crate) fn account_command_from_picker(
     }
 
     match command {
-        AccountPickerCommand::Switch { provider, label } => Some(AccountCommand::Switch {
+        AccountPickerCommand::Switch { provider, label } => Some(AccountCommand::UseInWindow {
             provider_id: provider_id(provider),
             label: label.clone(),
         }),
+        AccountPickerCommand::SetDefault { provider, label } => Some(AccountCommand::SetDefault {
+            provider_id: provider_id(provider),
+            label: label.clone(),
+        }),
+        AccountPickerCommand::Unpin { provider } => Some(AccountCommand::Unpin {
+            provider_id: Some(provider_id(provider)),
+        }),
+        AccountPickerCommand::ToggleFailover => None,
         AccountPickerCommand::Login { provider, label } => Some(AccountCommand::Add {
             provider_id: provider_id(provider),
             label: Some(label.clone()),
@@ -398,15 +530,10 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
         AccountCommand::Add { provider_id, label } => {
             execute_account_add_local(app, &provider_id, label.as_deref())
         }
-        AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
-            "claude" => app.switch_account(&label),
-            "openai" => app.switch_openai_account(&label),
-            _ => app.push_display_message(DisplayMessage::error(format!(
-                "Provider {} does not support account switching.",
-                provider_id
-            ))),
-        },
-        AccountCommand::SwitchShorthand { label } => app.switch_account_by_label(&label),
+        command @ (AccountCommand::UseInWindow { .. }
+        | AccountCommand::SetDefault { .. }
+        | AccountCommand::Unpin { .. }
+        | AccountCommand::Failover(_)) => app.execute_window_account_command_local(command),
         AccountCommand::Remove { provider_id, label } => match provider_id.as_str() {
             "claude" => app.remove_account(&label),
             "openai" => app.remove_openai_account(&label),
@@ -460,93 +587,12 @@ pub(crate) async fn execute_account_command_remote(
         AccountCommand::Doctor { provider_id } => {
             execute_account_command_local(app, AccountCommand::Doctor { provider_id })
         }
-        AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
-            "claude" => {
-                if let Err(e) = crate::auth::claude::set_active_account(&label) {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to switch account: {}",
-                        e
-                    )));
-                    return Ok(());
-                }
-                crate::auth::AuthStatus::invalidate_cache();
-                app.context_limit = app.provider.context_window() as u64;
-                app.context_warning_shown = false;
-                remote.switch_anthropic_account(&label).await?;
-                app.push_display_message(DisplayMessage::system(format!(
-                    "Switched to Anthropic account {}.",
-                    label
-                )));
-                app.set_status_notice(format!("Account: switched to {}", label));
-            }
-            "openai" => {
-                if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                    app.push_display_message(DisplayMessage::error(format!(
-                        "Failed to switch OpenAI account: {}",
-                        e
-                    )));
-                    return Ok(());
-                }
-                crate::auth::AuthStatus::invalidate_cache();
-                app.context_limit = app.provider.context_window() as u64;
-                app.context_warning_shown = false;
-                remote.switch_openai_account(&label).await?;
-                app.push_display_message(DisplayMessage::system(format!(
-                    "Switched to OpenAI account {}.",
-                    label
-                )));
-                app.set_status_notice(format!("OpenAI account: switched to {}", label));
-            }
-            _ => execute_account_command_local(app, AccountCommand::Switch { provider_id, label }),
-        },
-        AccountCommand::SwitchShorthand { label } => {
-            let has_anthropic = crate::auth::claude::list_accounts()
-                .unwrap_or_default()
-                .iter()
-                .any(|account| account.label == label);
-            let has_openai = crate::auth::codex::list_accounts()
-                .unwrap_or_default()
-                .iter()
-                .any(|account| account.label == label);
-            match (has_anthropic, has_openai) {
-                (true, false) => {
-                    if let Err(e) = crate::auth::claude::set_active_account(&label) {
-                        app.push_display_message(DisplayMessage::error(format!(
-                            "Failed to switch account: {}",
-                            e
-                        )));
-                        return Ok(());
-                    }
-                    crate::auth::AuthStatus::invalidate_cache();
-                    app.context_limit = app.provider.context_window() as u64;
-                    app.context_warning_shown = false;
-                    remote.switch_anthropic_account(&label).await?;
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "Switched to Anthropic account {}.",
-                        label
-                    )));
-                    app.set_status_notice(format!("Account: switched to {}", label));
-                }
-                (false, true) => {
-                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                        app.push_display_message(DisplayMessage::error(format!(
-                            "Failed to switch OpenAI account: {}",
-                            e
-                        )));
-                        return Ok(());
-                    }
-                    crate::auth::AuthStatus::invalidate_cache();
-                    app.context_limit = app.provider.context_window() as u64;
-                    app.context_warning_shown = false;
-                    remote.switch_openai_account(&label).await?;
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "Switched to OpenAI account {}.",
-                        label
-                    )));
-                    app.set_status_notice(format!("OpenAI account: switched to {}", label));
-                }
-                _ => execute_account_command_local(app, AccountCommand::SwitchShorthand { label }),
-            }
+        command @ (AccountCommand::UseInWindow { .. }
+        | AccountCommand::SetDefault { .. }
+        | AccountCommand::Unpin { .. }
+        | AccountCommand::Failover(_)) => {
+            app.execute_window_account_command_remote(command, remote)
+                .await?
         }
         AccountCommand::SetOpenAiTransport(value) => {
             save_openai_transport_setting_local(app, value.as_deref());
@@ -1194,6 +1240,73 @@ mod tests {
             parse_account_command("/account jcode logout"),
             Some(Ok(AccountCommand::JcodeLogout))
         ));
+    }
+
+    fn parsed(input: &str) -> String {
+        format!("{:?}", parse_account_command(input))
+    }
+
+    #[test]
+    fn parse_account_switch_pins_this_window() {
+        for input in [
+            "/account switch claude-fox",
+            "/account use claude-fox",
+            "/account claude switch claude-fox",
+            "/account claude claude-fox",
+            "/account claude-fox",
+        ] {
+            let out = parsed(input);
+            assert!(out.contains("UseInWindow"), "{input} -> {out}");
+            assert!(out.contains("claude-fox"), "{input} -> {out}");
+        }
+        let out = parsed("/account openai switch openai-otter");
+        assert!(
+            out.contains("UseInWindow") && out.contains("\"openai\""),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn parse_account_default_label_sets_default_not_provider_fallthrough() {
+        let out = parsed("/account default claude-fox");
+        assert!(out.contains("SetDefault {"), "{out}");
+        assert!(out.contains("claude-fox"), "{out}");
+        assert!(!out.contains("UseInWindow"), "{out}");
+        let out = parsed("/account openai default openai-fox");
+        assert!(
+            out.contains("SetDefault {") && out.contains("openai-fox"),
+            "{out}"
+        );
+        // Existing global-default commands keep their meaning.
+        assert!(parsed("/account default-provider claude").contains("SetDefaultProvider"));
+        assert!(parsed("/account default-model gpt-5").contains("SetDefaultModel"));
+        assert!(parsed("/account default").contains("Err"));
+    }
+
+    #[test]
+    fn parse_account_unpin() {
+        let out = parsed("/account unpin");
+        assert!(out.contains("Unpin { provider_id: None }"), "{out}");
+        let out = parsed("/account unpin openai");
+        assert!(
+            out.contains("Unpin { provider_id: Some(\"openai\") }"),
+            "{out}"
+        );
+        let out = parsed("/account claude unpin");
+        assert!(
+            out.contains("Unpin { provider_id: Some(\"claude\") }"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn parse_account_failover_modes() {
+        assert!(parsed("/account failover on").contains("Failover(On)"));
+        assert!(parsed("/account failover off").contains("Failover(Off)"));
+        assert!(parsed("/account failover default").contains("Failover(Default)"));
+        assert!(parsed("/account failover status").contains("Failover(Status)"));
+        assert!(parsed("/account failover").contains("Failover(Status)"));
+        assert!(parsed("/account failover sideways").contains("Err"));
     }
 
     #[test]

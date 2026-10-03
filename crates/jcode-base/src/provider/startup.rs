@@ -60,25 +60,6 @@ impl MultiProvider {
         });
     }
 
-    pub(super) async fn invalidate_provider_credentials_for_account_switch(
-        &self,
-        provider: ActiveProvider,
-    ) {
-        match provider {
-            ActiveProvider::Claude => {
-                if let Some(anthropic) = self.anthropic_provider() {
-                    anthropic.invalidate_credentials().await;
-                }
-            }
-            ActiveProvider::OpenAI => {
-                if let Some(openai) = self.openai_provider() {
-                    openai.invalidate_credentials().await;
-                }
-            }
-            _ => {}
-        }
-    }
-
     pub(super) fn new_with_auth_status(auth_status: auth::AuthStatus) -> Self {
         let provider_init_start = std::time::Instant::now();
         let cfg = crate::config::config();
@@ -323,6 +304,7 @@ impl MultiProvider {
             initial_provider,
             routes_memo: Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            account_failover: Default::default(),
         };
 
         // An explicit CLI/environment provider selection owns startup routing.
@@ -345,7 +327,6 @@ impl MultiProvider {
 
         result.spawn_anthropic_catalog_refresh_if_needed();
         result.spawn_openai_catalog_refresh_if_needed();
-        result.auto_select_active_multi_account();
         crate::logging::info(&format!(
             "[TIMING] provider_init: anthropic={}, openai={}, copilot={}, antigravity={}, gemini={}, cursor={}, bedrock={}, openrouter={}, total={}ms",
             result
@@ -488,100 +469,10 @@ impl MultiProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    pub fn auto_select_active_multi_account(&self) {
-        self.auto_select_multi_account_for_provider(self.active_provider());
-    }
-
-    /// Backward-compatible wrapper for the Anthropic-specific startup rotation entrypoint.
-    pub fn auto_select_anthropic_account(&self) {
-        self.auto_select_multi_account_for_provider(ActiveProvider::Claude);
-    }
-
-    pub fn auto_select_openai_account(&self) {
-        self.auto_select_multi_account_for_provider(ActiveProvider::OpenAI);
-    }
-
-    pub(super) fn auto_select_multi_account_for_provider(&self, provider: ActiveProvider) {
-        if self.active_provider() != provider {
-            return;
-        }
-        if !self.provider_is_configured(provider) {
-            return;
-        }
-        if provider == ActiveProvider::OpenAI {
-            return;
-        }
-
-        let Some(probe) = account_usage_probe(provider) else {
-            return;
-        };
-        if !probe.has_multiple_accounts() || !probe.current_exhausted() {
-            return;
-        }
-
-        let provider_name = probe.provider.display_name();
-        if let Some(alternative) = probe.best_available_alternative() {
-            crate::logging::info(&format!(
-                "{} account '{}' is exhausted, switching to '{}' ({})",
-                provider_name,
-                probe.current_label,
-                alternative.label,
-                alternative.summary()
-            ));
-
-            match provider {
-                ActiveProvider::Claude => {
-                    crate::auth::claude::set_active_account_override(Some(
-                        alternative.label.clone(),
-                    ));
-                    clear_all_provider_unavailability_for_account();
-                    clear_all_model_unavailability_for_account();
-                    if let Some(anthropic) = self.anthropic_provider() {
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current()
-                                .block_on(anthropic.invalidate_credentials())
-                        });
-                    }
-                }
-                ActiveProvider::OpenAI => {
-                    crate::auth::codex::set_active_account_override(Some(
-                        alternative.label.clone(),
-                    ));
-                    clear_all_provider_unavailability_for_account();
-                    clear_all_model_unavailability_for_account();
-                    if let Some(openai) = self.openai_provider() {
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current()
-                                .block_on(openai.invalidate_credentials())
-                        });
-                    }
-                }
-                _ => return,
-            }
-
-            let notice = format!(
-                "⚡ Auto-switched {} account: **{}** -> **{}** (previous account exhausted)",
-                provider_name, probe.current_label, alternative.label
-            );
-            self.startup_notices
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(notice);
-            return;
-        }
-
-        if probe.all_accounts_exhausted() {
-            crate::logging::info(&format!("All {} accounts are exhausted", provider_name));
-            let notice = format!(
-                "⚠ All {} accounts exhausted - will fall back to other providers if available",
-                provider_name
-            );
-            self.startup_notices
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(notice);
-        }
-    }
+    // Startup no longer auto-selects another account through the process-wide
+    // override: that moved every window. The per-request precheck and
+    // same-provider account failover now move only the session that is out
+    // of usage (see `multi_provider.rs`).
 
     /// Check if Anthropic OAuth usage is exhausted (both 5hr and 7d at 100%)
     pub(super) fn is_claude_usage_exhausted(&self) -> bool {
@@ -589,7 +480,6 @@ impl MultiProvider {
             return false;
         }
 
-        let usage = crate::usage::get_sync();
-        usage.five_hour >= 0.99 && usage.seven_day >= 0.99
+        crate::usage::active_claude_usage_exhausted_sync()
     }
 }

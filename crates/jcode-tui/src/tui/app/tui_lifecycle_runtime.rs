@@ -369,6 +369,9 @@ impl App {
             if restored_model || self.session.model.is_none() {
                 self.session.model = Some(active_model.clone());
             }
+            // Per-window accounts and the failover toggle live on the
+            // session, but only the provider acts on them.
+            self.restore_local_window_accounts();
             self.update_context_limit_for_model(&active_model);
             // Mark session as active now that it's being used again
             self.session.mark_active();
