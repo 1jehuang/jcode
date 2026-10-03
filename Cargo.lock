@@ -4049,6 +4049,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-sleep-buffer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "jcode-storage"
 version = "0.1.0"
 dependencies = [

@@ -198,7 +198,7 @@ EOF
 )"
     local rc=$?
     [ $rc -eq 0 ] || { PARSE_ERR="transport:ledger-encode-failed"; return 1; }
-    printf '%s' "$line" >"$TMPD/line.json"
+    printf '%s\n' "$line" >"$TMPD/line.json"
     PARSE_ERR="$(python3 -c "import json,sys; d=json.load(open('$TMPD/line.json')); print(d['judge']['error'] or '')")"
     [ -z "$PARSE_ERR" ]  # 0 = clean verdict, 1 = parse/transport detail
 }

@@ -33,6 +33,7 @@ members = [
     "crates/jcode-sdk",
     "crates/jcode-memory-types",
     "crates/jcode-message-types",
+    "crates/jcode-sleep-buffer",
     "crates/jcode-overnight-core",
     "crates/jcode-plan",
     "crates/jcode-productivity-core",
