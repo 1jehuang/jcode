@@ -17,8 +17,8 @@ mod preview;
 #[path = "inline_interactive/preview_request.rs"]
 mod preview_request;
 use helpers::{
-    agent_model_default_summary, agent_model_target_label, catchup_candidates,
-    catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
+    agent_model_default_summary, agent_model_target_label, agent_model_target_slug,
+    catchup_candidates, catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
     openrouter_route_model_id, picker_route_model_spec, picker_route_selection,
     save_agent_model_override,
 };
@@ -3612,18 +3612,33 @@ impl App {
                         clear_override,
                     } => {
                         self.inline_interactive_state = None;
-                        let result = if clear_override {
-                            save_agent_model_override(target, None)
+                        let spec = (!clear_override).then(|| model_entry_saved_spec(&entry));
+                        let result = if self.agent_models_global_scope {
+                            save_agent_model_override(target, spec.as_deref())
+                        } else if self.is_remote {
+                            // Only AgentModelsChanged confirms persistence. Generic Ack
+                            // is sent by the server before request dispatch.
+                            self.set_status_notice("Applying agent model [session]…");
+                            return Ok(());
                         } else {
-                            let spec = model_entry_saved_spec(&entry);
-                            save_agent_model_override(target, Some(&spec))
+                            self.session
+                                .set_agent_model_override(agent_model_target_slug(target), spec)
+                                .and_then(|()| self.session.save_prepared())
                         };
                         match result {
                             Ok(()) => {
-                                let label = agent_model_target_label(target);
+                                let label = format!(
+                                    "{} [{}]",
+                                    agent_model_target_label(target),
+                                    if self.agent_models_global_scope {
+                                        "global"
+                                    } else {
+                                        "session"
+                                    }
+                                );
                                 if clear_override {
                                     self.push_display_message(DisplayMessage::system(format!(
-                                        "{} model override cleared. It now inherits `{}`.",
+                                        "{} model override cleared. Using default `{}`.",
                                         label,
                                         agent_model_default_summary(target, self)
                                     )));

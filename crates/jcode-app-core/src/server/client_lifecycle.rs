@@ -2022,6 +2022,17 @@ pub(super) async fn handle_client(
                 handle_set_route(id, selection, &agent, &client_event_tx).await;
             }
 
+            Request::SetAgentModel { id, target, model } => {
+                let result = super::client_actions::set_session_agent_model(
+                    &agent, &client_session_id, &target, model,
+                ).await;
+                let event = match result {
+                    Ok(overrides) => ServerEvent::AgentModelsChanged { id, session_id: client_session_id.clone(), overrides },
+                    Err(error) => ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None, server_resumes: false },
+                };
+                let _ = client_event_tx.send(event);
+            }
+
             Request::SetSubagentModel { id, model } => {
                 if reject_if_agent_busy_for_request(
                     id,

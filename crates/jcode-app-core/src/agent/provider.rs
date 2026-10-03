@@ -239,6 +239,11 @@ impl Agent {
         Ok(current)
     }
 
+    pub fn set_agent_model_override(&mut self, target: &str, model: Option<String>) -> Result<()> {
+        self.session.save_prepared()?;
+        self.session.set_agent_model_override(target, model)
+    }
+
     pub fn subagent_model(&self) -> Option<String> {
         self.session.subagent_model.clone()
     }

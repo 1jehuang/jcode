@@ -366,6 +366,24 @@ fn selection_for_concrete_model(
     }
 }
 
+async fn session_swarm_model(
+    req_session_id: &str,
+    sessions: &SessionAgents,
+    global: Option<String>,
+) -> Option<String> {
+    let agent = sessions.read().await.get(req_session_id).cloned();
+    if let Some(agent) = agent {
+        if let Ok(guard) = agent.try_lock() {
+            return guard
+                .session_for_split()
+                .effective_agent_model("swarm", global);
+        }
+    }
+    Session::load_startup_stub(req_session_id)
+        .map(|session| session.effective_agent_model("swarm", global.clone()))
+        .unwrap_or(global)
+}
+
 fn resolve_swarm_spawn_selection(
     requested_model: Option<String>,
     configured_swarm_model: Option<String>,
@@ -606,8 +624,9 @@ pub(super) async fn spawn_swarm_agent(
     // startup env (#405).
     let client_terminal_env =
         client_terminal_env_for_session(req_session_id, client_connections).await;
-    let agents_config = &crate::config::config().agents;
-    let configured_swarm_model = agents_config.swarm_model.clone();
+    let agents_config = &crate::config::Config::load().agents;
+    let configured_swarm_model =
+        session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
     let resolved_spawn_mode = spawn_mode.unwrap_or(agents_config.swarm_spawn_mode);
     let selection = resolve_swarm_spawn_selection(
         requested_model.clone(),
@@ -998,7 +1017,12 @@ pub(super) async fn handle_comm_list_models(
     send_event(ServerEvent::CommListModelsResponse {
         id,
         current_model: coordinator.model,
-        configured_swarm_model: crate::config::config().agents.swarm_model.clone(),
+        configured_swarm_model: session_swarm_model(
+            req_session_id,
+            sessions,
+            crate::config::Config::load().agents.swarm_model,
+        )
+        .await,
         model_routes,
     });
 }

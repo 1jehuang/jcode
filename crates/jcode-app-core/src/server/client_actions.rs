@@ -288,6 +288,23 @@ pub(super) fn handle_input_shell(
     });
 }
 
+/// Routing for future workers is metadata, so it can be updated during a turn.
+pub(super) async fn set_session_agent_model(
+    agent: &Arc<Mutex<Agent>>,
+    session_id: &str,
+    target: &str,
+    model: Option<String>,
+) -> anyhow::Result<crate::session::AgentModelOverrides> {
+    if let Ok(mut guard) = agent.try_lock() {
+        guard.set_agent_model_override(target, model)?;
+        Ok(guard.session_for_split().agent_model_overrides.clone())
+    } else {
+        let mut session = Session::load_startup_stub(session_id)?;
+        session.set_agent_model_override(target, model)?;
+        Ok(session.agent_model_overrides)
+    }
+}
+
 pub(super) async fn handle_set_subagent_model(
     id: u64,
     model: Option<String>,

@@ -605,7 +605,18 @@ impl App {
                         "/agents memory".into(),
                         "Configure optional memory extraction model",
                     ),
-                    ("/agents ambient".into(), "Configure ambient model"),
+                    (
+                        "/agents ambient".into(),
+                        "Configure ambient model [session]",
+                    ),
+                    (
+                        "/agents default".into(),
+                        "Configure saved global agent defaults",
+                    ),
+                    (
+                        "/agents global".into(),
+                        "Configure saved global agent defaults",
+                    ),
                 ],
             );
         }

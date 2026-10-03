@@ -792,6 +792,14 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
+    pub async fn set_agent_model(&mut self, target: String, model: Option<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        let request = Request::SetAgentModel { id, target, model };
+        self.next_request_id += 1;
+        self.send_request(request).await?;
+        Ok(id)
+    }
+
     /// Launch a subagent immediately on the active remote session.
     pub async fn run_subagent(
         &mut self,

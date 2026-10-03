@@ -442,6 +442,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         connection_type,
         compaction_mode,
         side_panel,
+        agent_model_overrides,
         ..
     } = decoded
     else {
@@ -456,6 +457,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         jcode_config_types::CompactionMode::Reactive
     );
     assert!(!side_panel.has_pages());
+    assert!(agent_model_overrides.is_empty());
     Ok(())
 }
 
@@ -504,6 +506,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: jcode_config_types::CompactionMode::Reactive,
@@ -667,5 +670,31 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     assert_eq!(id, 7);
     assert_eq!(message, "oops");
     assert_eq!(retry_after_secs, None);
+    Ok(())
+}
+
+#[test]
+fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
+    let clear = parse_request_json(r#"{"type":"set_agent_model","id":31,"target":"swarm"}"#)?;
+    assert!(matches!(clear, Request::SetAgentModel { model: None, .. }));
+    let request = Request::SetAgentModel {
+        id: 32,
+        target: "review".into(),
+        model: Some("inherit".into()),
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&request)?)?;
+    assert!(
+        matches!(decoded, Request::SetAgentModel { model: Some(model), .. } if model == "inherit")
+    );
+    let event = ServerEvent::AgentModelsChanged {
+        id: 32,
+        session_id: "session-a".into(),
+        overrides: std::collections::BTreeMap::from([("review".into(), "inherit".into())]),
+    };
+    let decoded = parse_event_json(encode_event(&event).trim())?;
+    assert!(
+        matches!(decoded, ServerEvent::AgentModelsChanged { session_id, overrides, .. }
+        if session_id == "session-a" && overrides.get("review").map(String::as_str) == Some("inherit"))
+    );
     Ok(())
 }

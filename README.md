@@ -385,6 +385,20 @@ switcher shows the configured root level. These settings do not change worker
 `swarm_effort`. Environment overrides are `JCODE_SWARM_ROOT_EFFORT` and
 `JCODE_SWARM_DEEP_ROOT_EFFORT`.
 
+### Agent model scope
+
+`/agents` configures worker models for the current session only. Choices persist
+when that session resumes and do not change other Jcode instances. Target a role
+with `/agents swarm`, `/agents review`, `/agents judge`, `/agents memory`, or
+`/agents ambient`. Session ambient choices apply to scheduled workers spawned
+from that session, not the daemon's independent ambient loop.
+
+Use `/agents default [role]` or `/agents global [role]` to edit saved global
+defaults. **Use global default** removes a session override. **Inherit coordinator**
+explicitly bypasses a global pin. An explicit model on a worker spawn still wins.
+Changing routing affects future workers, not workers already running. Memory
+choices affect extraction only, not Jev recall.
+
 ## OAuth and Providers
 
 jcode works with subscription-backed OAuth flows and many provider integrations, so you can use the models you already pay for and still fall back to direct API providers when needed.
