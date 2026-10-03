@@ -31,13 +31,13 @@ mod pending;
 mod prompt_support;
 
 pub use crate::memory_types::{
-    CitationStatus, MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement,
-    SourceCitation, TrustLevel, citation_stale_mark, format_profile_prompt,
+    CitationStatus, MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Provenance,
+    Reinforcement, SourceCitation, TrustLevel, citation_stale_mark, format_profile_prompt,
     format_relevant_display_prompt, format_relevant_prompt, format_relevant_prompt_verified,
 };
 use crate::memory_types::{
-    bm25_token_stream, collect_skill_query_terms, format_entries_for_prompt,
-    memory_matches_search, normalize_memory_search_text, normalize_search_text,
+    bm25_token_stream, collect_skill_query_terms, format_entries_for_prompt, memory_matches_search,
+    normalize_memory_search_text, normalize_search_text, recall_visible, safety_penalty,
     skill_retrieval_bonus,
 };
 pub use activity::{
@@ -443,16 +443,13 @@ impl MemoryManager {
         // added exactly as before. Scan-generated candidate vectors are
         // transient and never persisted (only the incoming entry's own
         // write-path vector, set above, is stored).
-        if let Some(stale_id) = Self::find_update_candidate(
-            graph,
-            &entry,
-            Self::UPDATE_SIMILARITY_THRESHOLD,
-            &|text| {
+        if let Some(stale_id) =
+            Self::find_update_candidate(graph, &entry, Self::UPDATE_SIMILARITY_THRESHOLD, &|text| {
                 crate::embedding_backend::embed_passage_active(text)
                     .ok()
                     .map(|(vec, _)| vec)
-            },
-        ) {
+            })
+        {
             let id = graph.add_memory(entry);
             graph.supersede(&id, &stale_id);
             return id;
@@ -495,8 +492,8 @@ impl MemoryManager {
 
     /// Stopwords excluded from the shared-anchor extraction in `detect_update`.
     const UPDATE_STOPWORDS: &'static [&'static str] = &[
-        "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "has",
-        "have", "had", "will", "would", "can", "not", "but", "our", "your",
+        "the", "and", "for", "with", "from", "that", "this", "are", "was", "were", "has", "have",
+        "had", "will", "would", "can", "not", "but", "our", "your",
     ];
 
     /// Content tokens of `text`: lowercased alphanumeric runs longer than 2
@@ -551,8 +548,7 @@ impl MemoryManager {
         let new_unique: std::collections::HashSet<&str> =
             new_tokens.iter().map(|tok| tok.as_str()).collect();
         let shared = old_unique.intersection(&new_unique).count();
-        if (shared as f32) / (old_unique.len() as f32) < Self::UPDATE_MIN_ANCHOR_COVERAGE
-        {
+        if (shared as f32) / (old_unique.len() as f32) < Self::UPDATE_MIN_ANCHOR_COVERAGE {
             return false;
         }
         let old_minus_new = old_unique.difference(&new_unique).next().is_some();
@@ -576,9 +572,7 @@ impl MemoryManager {
     ) -> Option<String> {
         let active_model = crate::embedding_backend::active_model_id();
         let incoming_vec: Vec<f32> = match entry.embedding.as_deref() {
-            Some(stored) if entry.effective_embedding_model() == active_model => {
-                stored.to_vec()
-            }
+            Some(stored) if entry.effective_embedding_model() == active_model => stored.to_vec(),
             _ => embed(&entry.content)?,
         };
         let mut best: Option<(String, f32)> = None;
@@ -595,8 +589,7 @@ impl MemoryManager {
                     None => continue,
                 },
             };
-            let similarity =
-                crate::embedding::cosine_similarity(&incoming_vec, &candidate_vec);
+            let similarity = crate::embedding::cosine_similarity(&incoming_vec, &candidate_vec);
             if similarity < threshold {
                 continue;
             }
@@ -1147,10 +1140,8 @@ impl PrefilterStageAccum {
         use std::sync::atomic::Ordering;
         self.count.fetch_add(1, Ordering::Relaxed);
         self.sum_us.fetch_add(elapsed_us, Ordering::Relaxed);
-        self.sum_sq_us.fetch_add(
-            elapsed_us.saturating_mul(elapsed_us),
-            Ordering::Relaxed,
-        );
+        self.sum_sq_us
+            .fetch_add(elapsed_us.saturating_mul(elapsed_us), Ordering::Relaxed);
         self.max_us.fetch_max(elapsed_us, Ordering::Relaxed);
     }
 
@@ -1439,8 +1430,7 @@ impl MemoryManager {
                 return None;
             }
         };
-        let embed_us =
-            u64::try_from(embed_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let embed_us = u64::try_from(embed_start.elapsed().as_micros()).unwrap_or(u64::MAX);
         PREFILTER_STAGE_EMBED.note(embed_us);
         Self::prefilter_rank_guarded(
             entries_opt,
@@ -1759,6 +1749,14 @@ impl MemoryManager {
             return Vec::new();
         }
 
+        // R10: quarantined tool-ingested rows never enter ranking (recall
+        // filter, not collection — callers keep the full set for audit).
+        // Default-off: with quarantine off this retain is a no-op.
+        let entries: Vec<MemoryEntry> = entries.into_iter().filter(recall_visible).collect();
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
         // Dense ranking (no hard threshold; just take the top by cosine).
         // Vector-space gate: only entries embedded by the ACTIVE backend share a
         // comparable space, so dense scores are computed over those only. Other
@@ -1833,6 +1831,15 @@ impl MemoryManager {
                 if let Some(e) = entries.get(*idx) {
                     *score += Self::recency_bonus(e);
                 }
+            }
+        }
+
+        // R11 safety penalty: multiplicative 0.5 on secret-bearing rows,
+        // post-recency, pre-top-k. Lowers rank, never deletes; silent (1.0)
+        // on normal content so default scores are bit-identical.
+        for (idx, score) in fused.iter_mut() {
+            if let Some(e) = entries.get(*idx) {
+                *score *= safety_penalty(e);
             }
         }
 
@@ -1933,6 +1940,10 @@ impl MemoryManager {
         let active_model = crate::embedding_backend::active_model_id();
         let mut skipped_model_mismatch = 0usize;
         for entry in entries {
+            // R10: quarantined tool-ingested rows never enter scoring.
+            if !recall_visible(&entry) {
+                continue;
+            }
             if entry.embedding.is_none() {
                 skipped_missing_embeddings += 1;
             } else if entry.effective_embedding_model() != active_model {
@@ -1969,7 +1980,9 @@ impl MemoryManager {
                 .zip(scores)
                 .map(|(entry, sim)| {
                     let adjusted = sim + skill_retrieval_bonus(&entry, &skill_query_terms);
-                    (entry, adjusted)
+                    // R11 safety penalty: multiplicative, lowers rank only.
+                    let penalty = safety_penalty(&entry);
+                    (entry, adjusted * penalty)
                 })
                 .filter(|(_, sim)| *sim >= threshold),
             limit,
@@ -2137,8 +2150,9 @@ impl MemoryManager {
         let mut results = Vec::new();
 
         for memory in self.collect_memories_scoped(scope)? {
-            // Tombstoned (inactive) memories are invisible to retrieval (R3).
-            if !memory.active {
+            // Tombstoned (inactive) memories are invisible to retrieval (R3);
+            // quarantined tool-ingested rows likewise (R10).
+            if !recall_visible(&memory) {
                 continue;
             }
             if memory_matches_search(&memory, &query_lower) {
@@ -2301,8 +2315,9 @@ impl MemoryManager {
             entries
                 .iter()
                 .cloned()
-                // Tombstoned (inactive) memories are invisible to retrieval (R3).
-                .filter(|entry| entry.active)
+                // Tombstoned (inactive) memories are invisible to retrieval
+                // (R3); quarantined tool-ingested rows likewise (R10).
+                .filter(|entry| recall_visible(entry))
                 .filter(|entry| {
                     let content_lower = normalize_search_text(&entry.content);
                     normalized_keywords
@@ -2459,7 +2474,8 @@ impl MemoryManager {
         };
         let entries: Vec<_> = entries
             .into_iter()
-            .filter(|entry| entry.active && !is_memory_injected(session_id, &entry.id))
+            // R10: quarantined tool-ingested rows never reach the judge.
+            .filter(|entry| recall_visible(entry) && !is_memory_injected(session_id, &entry.id))
             .collect();
         // Upstream 72-cap `prefilter_for_jev` is the disengaged/fail-open
         // floor (kept verbatim for next-rebase merging): floor queries
@@ -2492,12 +2508,13 @@ impl MemoryManager {
         // Downstream fail-closed (JevClient::new Err, select Err) is
         // bit-for-bit unchanged below.
         let mut entries_opt = Some(entries);
-        let prefilter_dropped =
-            match Self::prefilter_for_jev_take(&mut entries_opt, &query) {
-                Some(dropped) => dropped,
-                None => Vec::new(),
-            };
-        let entries = entries_opt.take().expect("prefilter stage always leaves a set");
+        let prefilter_dropped = match Self::prefilter_for_jev_take(&mut entries_opt, &query) {
+            Some(dropped) => dropped,
+            None => Vec::new(),
+        };
+        let entries = entries_opt
+            .take()
+            .expect("prefilter stage always leaves a set");
         let _ = prefilter_dropped;
         // R1/B6: keep a clone for the keyword fallback — the async block
         // below moves `entries` into the Jev select coroutine.
@@ -2929,16 +2946,12 @@ impl MemoryManager {
     }
 }
 
-
 /// Slot-B shadow-audit counters: (queries, engaged, failopen, sampled).
 /// Process-wide atomics; the 7-day live window reads them via
 /// `MemoryManager::prefilter_shadow_stats`.
-static PREFILTER_QUERIES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static PREFILTER_ENGAGED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static PREFILTER_FAILOPEN: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_QUERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_ENGAGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_FAILOPEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PREFILTER_SHADOW_SAMPLED: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -2966,10 +2979,8 @@ static PREFILTER_ENGAGED_SAMPLED: std::sync::atomic::AtomicU64 =
 /// Process-wide, `Relaxed` (monotonic; exact cross-counter consistency
 /// not required). The hook bumps these read-only: no recall counts or
 /// priors are touched (none exist yet; keep it that way).
-static PREFILTER_TAIL_REJUDGED: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static PREFILTER_TAIL_HITS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_TAIL_REJUDGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PREFILTER_TAIL_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Slot-B stage-elapsed accumulators (SHADOW-GATE Metric 3 live half):
 /// embed half (query-embed wall clock) and rank half (hot rank pass).
@@ -3272,11 +3283,7 @@ fn bm25_rank(entries: &[MemoryEntry], query_text: &str, limit: usize) -> Vec<(us
                 std::collections::HashSet::new();
             for stream in [&doc.content, &doc.tags] {
                 if stream.len() >= 2 {
-                    d_bigrams.extend(
-                        stream
-                            .windows(2)
-                            .map(|w| (w[0].as_str(), w[1].as_str())),
-                    );
+                    d_bigrams.extend(stream.windows(2).map(|w| (w[0].as_str(), w[1].as_str())));
                 }
             }
             for (a, b) in q_bigrams.intersection(&d_bigrams) {

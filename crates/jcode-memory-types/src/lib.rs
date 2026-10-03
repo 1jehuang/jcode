@@ -220,6 +220,251 @@ pub enum TrustLevel {
     Low,
 }
 
+/// Provenance tier: WHO produced this memory (R10).
+///
+/// Orthogonal to [`TrustLevel`] (which answers HOW reliable the content is):
+/// a user-stated fact and a bulk tool-imported fact can share `TrustLevel`
+/// but differ in provenance. Drives the tool-ingested quarantine switch
+/// ([`tool_ingested_quarantine_on`] / [`recall_visible`]).
+///
+/// Serde-defaulted to [`Provenance::AgentDistilled`] so every legacy row
+/// (sidecar extraction, memory-tool remember, goals, bench corpora) loads
+/// quarantine-exempt; only explicitly-marked bulk imports ever fall under
+/// quarantine.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum Provenance {
+    /// Directly stated by the user (highest provenance tier).
+    User,
+    /// Distilled by the agent from conversation (sidecar extraction,
+    /// memory-tool remember, goal sync). The default: all legacy rows.
+    #[default]
+    AgentDistilled,
+    /// Bulk-ingested from tool output (imports, scrapes). Subject to
+    /// quarantine when `JCODE_MEMORY_QUARANTINE_TOOL_INGESTED=1`.
+    ToolIngested,
+}
+
+/// Whether tool-ingested quarantine is on (R10).
+///
+/// Exact-match env `JCODE_MEMORY_QUARANTINE_TOOL_INGESTED=1` only, default
+/// off. Lives in memory-types so the manager, the Jev prefilter, and the
+/// bench read one flag.
+pub fn tool_ingested_quarantine_on() -> bool {
+    std::env::var("JCODE_MEMORY_QUARANTINE_TOOL_INGESTED")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Recall visibility (R10): an entry is recall-visible iff it is live
+/// (`active`) and NOT quarantined (quarantine on AND [`Provenance::ToolIngested`]).
+///
+/// Apply at recall points ONLY — never collection: `list_all` must still
+/// show quarantined rows (auditability), and quarantine is a recall filter,
+/// not erasure.
+pub fn recall_visible(entry: &MemoryEntry) -> bool {
+    entry.active && !(tool_ingested_quarantine_on() && entry.provenance == Provenance::ToolIngested)
+}
+
+/// Secret-bearing detector (R11 privacy pass).
+///
+/// Scans entry content + tags (lowercased; no `regex` dep in memory-types)
+/// for three signal classes:
+///
+/// 1. Generic markers (`password`, `passwd`, `pwd`, `secret`, `token`,
+///    `auth`, `credential`, spaced `private key` / `api key`) fire ONLY on
+///    assignment adjacency: the marker, then optional whitespace, then `:`
+///    or `=`, then 3+ value chars. Bare words and `is`-forms ("password is
+///    river-stone-77") NEVER fire — the dev bench corpus holds such golds
+///    and must stay silent (see `detector_silent_on_normal_content`).
+/// 2. Compound markers (`api_key`, `apikey`, `secret_key`, `client_secret`,
+///    `auth_token`, `access_token`, `refresh_token`, `private_key`,
+///    `privatekey`, `session_token`) fire standalone.
+/// 3. Known prefixes (`sk-`, `ghp_`, `gho_`, `akia`, `xox`+letter/`-`,
+///    `-----begin` paired with `private`) and high-entropy runs
+///    (contiguous `[A-Za-z0-9+/=_-]{20,}` with Shannon entropy >= 4.0
+///    bits/char) fire standalone.
+///
+/// Down-ranks via [`safety_penalty`]; never deletes, never hides. A
+/// penalized row is a CANDIDATE for hard removal (see
+/// `docs/MEMORY_FORGET_GUIDANCE.md`), not an automatic one.
+pub fn contains_secret(entry: &MemoryEntry) -> bool {
+    let mut text = entry.content.to_lowercase();
+    text.push('\n');
+    for tag in &entry.tags {
+        text.push_str(&tag.to_lowercase());
+        text.push('\n');
+    }
+    let bytes = text.as_bytes();
+
+    // Class 3a: known prefixes (standalone).
+    for prefix in ["sk-", "ghp_", "gho_", "akia"] {
+        if text.contains(prefix) {
+            return true;
+        }
+    }
+    if text.contains("-----begin") && text.contains("private") {
+        return true;
+    }
+    // Slack-style tokens: xox + letter(s) + dash (xoxb-, xoxp-, ...).
+    let mut rest = text.as_str();
+    while let Some(pos) = rest.find("xox") {
+        let after: Vec<char> = rest[pos + 3..].chars().take(8).collect();
+        let mut letters = 0usize;
+        for c in &after {
+            if c.is_ascii_alphabetic() {
+                letters += 1;
+            } else {
+                break;
+            }
+        }
+        if letters >= 1 && after.get(letters) == Some(&'-') {
+            return true;
+        }
+        rest = &rest[pos + 3..];
+    }
+
+    // Class 2: compound markers (standalone, substring match).
+    for marker in [
+        "api_key",
+        "apikey",
+        "secret_key",
+        "client_secret",
+        "auth_token",
+        "access_token",
+        "refresh_token",
+        "private_key",
+        "privatekey",
+        "session_token",
+    ] {
+        if text.contains(marker) {
+            return true;
+        }
+    }
+
+    // Class 1: generic markers, assignment-adjacency only.
+    for marker in [
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "auth",
+        "credential",
+        "private key",
+        "api key",
+    ] {
+        if marker_adjacent_assignment(bytes, marker.as_bytes()) {
+            return true;
+        }
+    }
+
+    // Class 3b: high-entropy long-token heuristic.
+    if has_high_entropy_run(bytes) {
+        return true;
+    }
+
+    false
+}
+
+/// Generic-marker adjacency: `marker` (already lowercase) preceded by
+/// start/non-alphanumeric, followed by optional spaces/tabs, then `:` or
+/// `=`, then 3+ non-space value chars. `is`-forms never match (only `:`
+/// and `=` count).
+fn marker_adjacent_assignment(haystack: &[u8], marker: &[u8]) -> bool {
+    if marker.is_empty() || haystack.len() < marker.len() {
+        return false;
+    }
+    let mut start = 0;
+    while start + marker.len() <= haystack.len() {
+        let found = haystack[start..]
+            .windows(marker.len())
+            .position(|w| w == marker);
+        let pos = match found {
+            Some(p) => start + p,
+            None => return false,
+        };
+        // Left boundary: start or non-alphanumeric (allows `client_secret`
+        // style compounds to reach the adjacency check too).
+        let left_ok = pos == 0 || !haystack[pos - 1].is_ascii_alphanumeric();
+        if left_ok {
+            let mut i = pos + marker.len();
+            while i < haystack.len() && (haystack[i] == b' ' || haystack[i] == b'\t') {
+                i += 1;
+            }
+            if i < haystack.len() && (haystack[i] == b':' || haystack[i] == b'=') {
+                i += 1;
+                while i < haystack.len() && (haystack[i] == b' ' || haystack[i] == b'\t') {
+                    i += 1;
+                }
+                let value_start = i;
+                while i < haystack.len()
+                    && haystack[i] != b' '
+                    && haystack[i] != b'\t'
+                    && haystack[i] != b'\n'
+                {
+                    i += 1;
+                }
+                if i - value_start >= 3 {
+                    return true;
+                }
+            }
+        }
+        start = pos + 1;
+    }
+    false
+}
+
+/// High-entropy run: a contiguous `[A-Za-z0-9+/=_-]{20,}` run whose
+/// Shannon entropy is >= 4.0 bits/char. The length gate alone silences the
+/// dev corpus (longest run 16 chars); entropy is belt-and-braces.
+fn has_high_entropy_run(bytes: &[u8]) -> bool {
+    fn in_run_class(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b'_' || b == b'-'
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        if !in_run_class(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < bytes.len() && in_run_class(bytes[j]) {
+            j += 1;
+        }
+        if j - i >= 20 {
+            let run = &bytes[i..j];
+            let mut counts = [0u32; 256];
+            for &b in run {
+                counts[b as usize] += 1;
+            }
+            let len = run.len() as f64;
+            let entropy: f64 = counts
+                .iter()
+                .filter(|&&c| c > 0)
+                .map(|&c| {
+                    let p = c as f64 / len;
+                    -p * p.log2()
+                })
+                .sum();
+            if entropy >= 4.0 {
+                return true;
+            }
+        }
+        i = j;
+    }
+    false
+}
+
+/// Multiplicative safety penalty (R11): 0.5 when the entry bears a secret
+/// ([`contains_secret`]), else 1.0. Lowers rank, never deletes. Applied in
+/// [`memory_score`] and at the `score_and_filter` / `hybrid_prefilter_rank`
+/// scoring sites in jcode-base.
+pub fn safety_penalty(entry: &MemoryEntry) -> f32 {
+    if contains_secret(entry) { 0.5 } else { 1.0 }
+}
+
 /// A reinforcement breadcrumb tracking when/where a memory was reinforced
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reinforcement {
@@ -245,6 +490,10 @@ pub struct MemoryEntry {
     /// Trust level for this memory
     #[serde(default)]
     pub trust: TrustLevel,
+    /// Provenance tier: who produced this memory (R10). Serde-defaulted to
+    /// `AgentDistilled` so legacy rows load quarantine-exempt.
+    #[serde(default)]
+    pub provenance: Provenance,
     /// Consolidation strength (how many times this was reinforced)
     #[serde(default)]
     pub strength: u32,
@@ -338,6 +587,7 @@ impl MemoryEntry {
             access_count: 0,
             source: None,
             trust: TrustLevel::default(),
+            provenance: Provenance::default(),
             strength: 1,
             active: true,
             superseded_by: None,
@@ -417,6 +667,15 @@ impl MemoryEntry {
 
     pub fn with_trust(mut self, trust: TrustLevel) -> Self {
         self.trust = trust;
+        self
+    }
+
+    /// Override the provenance tier (R10). Banking assignment: memory-tool
+    /// `remember` and sidecar extraction bank `AgentDistilled` (also the
+    /// default); user-set goals bank `User`; bulk tool imports bank
+    /// `ToolIngested`.
+    pub fn with_provenance(mut self, provenance: Provenance) -> Self {
+        self.provenance = provenance;
         self
     }
 
@@ -619,7 +878,9 @@ impl MemoryStore {
         ranking::top_k_by_score(
             self.entries
                 .iter()
-                .filter(|entry| entry.active)
+                // R10: quarantined tool-ingested rows are invisible to recall
+                // (but still listed by collection paths).
+                .filter(|entry| recall_visible(entry))
                 .map(|entry| (entry, memory_score(entry) as f32)),
             limit,
             |entry| entry.id.as_str(),
@@ -657,6 +918,9 @@ pub fn memory_score(entry: &MemoryEntry) -> f64 {
         TrustLevel::Low => 0.7,
     };
     score += (entry.strength as f64).ln() * 5.0;
+    // R11 safety penalty: multiplicative 0.5 when secret-bearing, else 1.0.
+    // Lowers rank, never deletes; silent (1.0) on all normal content.
+    score *= f64::from(safety_penalty(entry));
     score
 }
 
@@ -1360,10 +1624,7 @@ fn fold_plural_token(tok: &str) -> Option<String> {
     if s.ends_with("ies") && s.len() - 3 >= 4 {
         s.truncate(s.len() - 3);
         s.push('y');
-    } else if s.ends_with("ches")
-        || s.ends_with("shes")
-        || s.ends_with("xes")
-        || s.ends_with("zes")
+    } else if s.ends_with("ches") || s.ends_with("shes") || s.ends_with("xes") || s.ends_with("zes")
     {
         // Unambiguous -es plurals: watches->watch, boxes->box.
         // NOTE: -ses/-ces/-ges take the strip-1 path below (licenses->license,
@@ -1626,10 +1887,11 @@ pub mod ranking {
     mod tests {
         use super::*;
         use crate::{
-            AGE_HEDGE_DAYS, CitationStatus, MemoryCategory, MemoryEntry, SourceCitation,
-            age_hedge_mark, bm25_token_stream, citation_stale_mark, find_repo_root,
-            format_relevant_prompt, format_relevant_prompt_verified, git_head_for,
-            is_foreign_checkout, strip_url_credentials,
+            AGE_HEDGE_DAYS, CitationStatus, MemoryCategory, MemoryEntry, Provenance,
+            SourceCitation, age_hedge_mark, bm25_token_stream, citation_stale_mark,
+            contains_secret, find_repo_root, format_relevant_prompt,
+            format_relevant_prompt_verified, git_head_for, is_foreign_checkout, memory_score,
+            recall_visible, safety_penalty, strip_url_credentials, tool_ingested_quarantine_on,
         };
         use chrono::{Duration, Utc};
 
@@ -1659,8 +1921,15 @@ pub mod ranking {
         fn bm25_token_stream_keeps_guarded_classes() {
             // min-length + -ss/-us/-is guards (fixture-attested no-mangle set).
             for tok in [
-                "glass", "access", "business", "analytics", "does", "ties",
-                "news", "tier", "command",
+                "glass",
+                "access",
+                "business",
+                "analytics",
+                "does",
+                "ties",
+                "news",
+                "tier",
+                "command",
             ] {
                 assert_eq!(
                     bm25_token_stream(tok),
@@ -1672,11 +1941,7 @@ pub mod ranking {
 
         #[test]
         fn top_k_by_score_keeps_highest_scores_in_order() {
-            let ranked = top_k_by_score(
-                [("a", 1.0), ("b", 3.0), ("c", 2.0)],
-                2,
-                |id: &&str| *id,
-            );
+            let ranked = top_k_by_score([("a", 1.0), ("b", 3.0), ("c", 2.0)], 2, |id: &&str| *id);
             assert_eq!(ranked, vec![("b", 3.0), ("c", 2.0)]);
         }
 
@@ -1684,19 +1949,11 @@ pub mod ranking {
         fn top_k_by_score_breaks_bitwise_ties_by_id_ascending() {
             // Equal scores sort by id ascending; the arm fires only on
             // total_cmp == Equal and never touches the scores.
-            let ranked = top_k_by_score(
-                [("b", 1.0), ("a", 1.0), ("c", 1.0)],
-                3,
-                |id: &&str| *id,
-            );
+            let ranked = top_k_by_score([("b", 1.0), ("a", 1.0), ("c", 1.0)], 3, |id: &&str| *id);
             assert_eq!(ranked, vec![("a", 1.0), ("b", 1.0), ("c", 1.0)]);
             // Truncation keeps the smallest ids among ties regardless of
             // arrival order.
-            let ranked = top_k_by_score(
-                [("c", 1.0), ("b", 1.0), ("a", 1.0)],
-                2,
-                |id: &&str| *id,
-            );
+            let ranked = top_k_by_score([("c", 1.0), ("b", 1.0), ("a", 1.0)], 2, |id: &&str| *id);
             assert_eq!(ranked, vec![("a", 1.0), ("b", 1.0)]);
         }
 
@@ -1810,8 +2067,8 @@ pub mod ranking {
             // identical across nearby turns; bucket edges tick weekly.
             let hedge_for_days_ago = |days: i64| {
                 let at = Utc::now() - Duration::days(days);
-                let entry = MemoryEntry::new(MemoryCategory::Fact, "old fact")
-                    .with_timestamps(at, at);
+                let entry =
+                    MemoryEntry::new(MemoryCategory::Fact, "old fact").with_timestamps(at, at);
                 age_hedge_mark(&entry)
             };
             let two_a = hedge_for_days_ago(14).expect("hedge at threshold");
@@ -2383,6 +2640,124 @@ pub mod ranking {
             let out = format_relevant_prompt(std::slice::from_ref(&entry), 10).expect("prompt");
             assert!(out.contains('c'));
             assert!(!out.contains("source changed"));
+        }
+
+        // --- R10 provenance tiers + R11 privacy pass ---
+
+        fn secret_entry(content: &str) -> MemoryEntry {
+            MemoryEntry::new(MemoryCategory::Fact, content)
+        }
+
+        #[test]
+        fn detector_fires_on_secret_shapes() {
+            // Each signal class from the R11 spec fires.
+            for content in [
+                // Generic markers, assignment adjacency.
+                "deploy config: password=river-stone-99",
+                "api auth: secret : hunter2-hunter2",
+                "token=abc123xyz for the staging bot",
+                "credential:AKIAIOSFODNN7EXAMPLE",
+                "note passwd = s3cr3t-value here",
+                "the private key: stored in vault seven",
+                // Compound markers, standalone.
+                "rotate the client_secret quarterly",
+                "auth_token present in the webhook payload",
+                "session_token expired at midnight",
+                // Known prefixes, standalone.
+                "key sk-live-abc123 rest of note",
+                "deploy with ghp_abcdefgh12345678 token",
+                "aws AKIAIOSFODNN7EXAMPLE key in use",
+                "slack xoxb-1234567890-abcdefghij token",
+                "-----BEGIN RSA PRIVATE KEY----- block pasted",
+                // High-entropy long token (mixed-case alnum, ~5 bits/char).
+                "vault blob xK9mQ2vX7pL4nR8wT5yU6bD3fH1jS0aZcE end",
+            ] {
+                let entry = secret_entry(content);
+                assert!(contains_secret(&entry), "must fire: {content}");
+                assert_eq!(safety_penalty(&entry), 0.5, "penalty: {content}");
+            }
+        }
+
+        #[test]
+        fn detector_silent_on_normal_content() {
+            // Bare words, is-forms, and the §4 bare-word traps never fire.
+            // False positives rank normally by design (fail-closed toward
+            // recall); do not "fix" one by forgetting the row.
+            for content in [
+                // C1 corpus golds with bare `password` (R-002 / R-007 shape).
+                "the staging database password is river-stone-77",
+                "the office wifi password is harbor-light-209",
+                // Bare generic words, no adjacency.
+                "rotate personal access tokens quarterly",
+                "credentials need manager signoff",
+                "my library card PIN is 3390",
+                "the public API rate limit is 5000 requests per hour per key",
+                "my passport number ends in ZX-4021",
+                "the staging license server is license-02 internal",
+                "bring the security audit prep notes",
+                // is-forms are forbidden as a trigger.
+                "password is hunter2",
+                "secret is out in the open",
+                // Short values after adjacency do not fire (< 3 chars).
+                "password: ab",
+                // Ordinary prose with dashes stays under the entropy gate.
+                "quarterly business review moved to Thursday 14:00",
+            ] {
+                let entry = secret_entry(content);
+                assert!(!contains_secret(&entry), "must stay silent: {content}");
+                assert_eq!(safety_penalty(&entry), 1.0, "no penalty: {content}");
+            }
+        }
+
+        #[test]
+        fn secret_bearing_entry_ranks_below_identical_clean_entry() {
+            // Same recency/access/category/trust/strength; the ONLY delta is
+            // the secret marker, so the 0.5x penalty decides the order.
+            let clean =
+                MemoryEntry::new(MemoryCategory::Fact, "the deploy freeze lifts Monday 06:00");
+            let mut secret = MemoryEntry::new(
+                MemoryCategory::Fact,
+                "the deploy freeze lifts Monday 06:00 password=hunter2-hunter2",
+            );
+            // Pin the non-secret score inputs equal (ids differ by
+            // construction; score has no id term).
+            secret.created_at = clean.created_at;
+            secret.updated_at = clean.updated_at;
+            let clean_score = memory_score(&clean);
+            let secret_score = memory_score(&secret);
+            assert!(clean_score > 0.0);
+            assert!(
+                (secret_score - clean_score * 0.5).abs() < 1e-6,
+                "secret score {secret_score} must be exactly half of clean {clean_score}"
+            );
+        }
+
+        #[test]
+        fn legacy_json_loads_provenance_default_agent_distilled() {
+            // Rows banked before R10 (no `provenance` key — e.g. the dev
+            // bench import JSON) load as AgentDistilled: quarantine-exempt.
+            let json = r#"{"id":"m1","category":"fact","content":"c","tags":[],"search_text":"","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","access_count":0}"#;
+            let entry: MemoryEntry = serde_json::from_str(json).expect("old json loads");
+            assert_eq!(entry.provenance, Provenance::AgentDistilled);
+            // Round-trips as snake_case.
+            let round: MemoryEntry = serde_json::from_str(
+                &serde_json::to_string(
+                    &MemoryEntry::new(MemoryCategory::Fact, "c")
+                        .with_provenance(Provenance::ToolIngested),
+                )
+                .expect("serialize"),
+            )
+            .expect("round trip");
+            assert_eq!(round.provenance, Provenance::ToolIngested);
+        }
+
+        #[test]
+        fn quarantine_switch_is_exact_match_default_off() {
+            // Default off (absent or any non-"1" value): everything visible.
+            assert!(!tool_ingested_quarantine_on());
+            let tool = MemoryEntry::new(MemoryCategory::Fact, "bulk import row")
+                .with_provenance(Provenance::ToolIngested);
+            assert!(recall_visible(&tool));
         }
     }
 }

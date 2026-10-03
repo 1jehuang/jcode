@@ -1169,7 +1169,9 @@ fn harness_score_ku(
     answerable: bool,
 ) -> (bool, bool) {
     const MARKERS: &[&str] = &["no record", "forgotten", "unknown", "No memories found"];
-    let invalid_reuse = forbidden.iter().any(|fb| !fb.is_empty() && returned.contains(fb));
+    let invalid_reuse = forbidden
+        .iter()
+        .any(|fb| !fb.is_empty() && returned.contains(fb));
     if invalid_reuse {
         return (false, true);
     }
@@ -1194,7 +1196,12 @@ fn harness_ku_current_and_forbidden() {
     );
     // DELETE: abstention marker accepted, forbidden absent.
     assert_eq!(
-        harness_score_ku("No memories found matching 'door code'", "", &["4410"], false),
+        harness_score_ku(
+            "No memories found matching 'door code'",
+            "",
+            &["4410"],
+            false
+        ),
         (true, false)
     );
     // DELETE: deleted value resurfaced -> veto even with marker.
@@ -1223,20 +1230,37 @@ fn harness_check_pin(pin_json: &str, actual_sha: &str) -> Result<(), String> {
     let extra: Vec<&String> = obj
         .keys()
         .filter(|k| {
-            !["embedder", "judge", "judge_version", "query_set_sha256", "seed"].contains(&k.as_str())
+            ![
+                "embedder",
+                "judge",
+                "judge_version",
+                "query_set_sha256",
+                "seed",
+            ]
+            .contains(&k.as_str())
         })
         .collect();
     if !extra.is_empty() {
         return Err(format!("PIN-MISMATCH unknown-keys: {extra:?}"));
     }
-    for key in ["embedder", "judge", "judge_version", "query_set_sha256", "seed"] {
+    for key in [
+        "embedder",
+        "judge",
+        "judge_version",
+        "query_set_sha256",
+        "seed",
+    ] {
         if obj.get(key).is_none() {
-            return Err(format!("PIN-MISMATCH {key}: expected <present> got <missing>"));
+            return Err(format!(
+                "PIN-MISMATCH {key}: expected <present> got <missing>"
+            ));
         }
     }
     let sha = obj["query_set_sha256"].as_str().unwrap_or("");
     if sha != actual_sha {
-        return Err(format!("PIN-MISMATCH query_set_sha256: expected {sha} got {actual_sha}"));
+        return Err(format!(
+            "PIN-MISMATCH query_set_sha256: expected {sha} got {actual_sha}"
+        ));
     }
     let seed = obj["seed"].as_i64().unwrap_or(-1);
     if seed != 42 {
@@ -1256,19 +1280,35 @@ fn harness_pin_five_mismatch_exits() {
     let good = r#"{"embedder":"minilm-l6-v2:LOCAL-384d","judge":"exact-match-plus-span-check","judge_version":"v1","query_set_sha256":"ABC","seed":42}"#;
     assert!(harness_check_pin(good, "ABC").is_ok());
     // Wrong sha.
-    assert!(harness_check_pin(good, "DEF").unwrap_err().contains("query_set_sha256"));
+    assert!(
+        harness_check_pin(good, "DEF")
+            .unwrap_err()
+            .contains("query_set_sha256")
+    );
     // Wrong seed.
     let bad_seed = good.replace("\"seed\":42", "\"seed\":43");
-    assert!(harness_check_pin(&bad_seed, "ABC").unwrap_err().contains("seed"));
+    assert!(
+        harness_check_pin(&bad_seed, "ABC")
+            .unwrap_err()
+            .contains("seed")
+    );
     // Unknown key.
     let extra = good.replace("}", ",\"extra\":1}");
-    assert!(harness_check_pin(&extra, "ABC").unwrap_err().contains("unknown-keys"));
+    assert!(
+        harness_check_pin(&extra, "ABC")
+            .unwrap_err()
+            .contains("unknown-keys")
+    );
     // Missing key.
     let missing: serde_json::Value = serde_json::from_str(good).unwrap();
     let mut map = missing.as_object().unwrap().clone();
     map.remove("judge_version");
     let missing_json = serde_json::Value::Object(map).to_string();
-    assert!(harness_check_pin(&missing_json, "ABC").unwrap_err().contains("judge_version"));
+    assert!(
+        harness_check_pin(&missing_json, "ABC")
+            .unwrap_err()
+            .contains("judge_version")
+    );
 }
 
 // ==================== 08-stale-writer: R2 UPDATE scan ====================
@@ -1456,30 +1496,33 @@ fn stale_writer_find_candidate_rejects_low_similarity_and_missing_vectors() {
             Some(vec![0.0, 1.0])
         }
     };
-    assert!(MemoryManager::find_update_candidate(
-        &graph,
-        &incoming,
-        MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
-        &orthogonal,
-    )
-    .is_none());
+    assert!(
+        MemoryManager::find_update_candidate(
+            &graph,
+            &incoming,
+            MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
+            &orthogonal,
+        )
+        .is_none()
+    );
     // No vectors at all (embedder unavailable): fail-open, plain add.
     let unavailable = |_: &str| None;
-    assert!(MemoryManager::find_update_candidate(
-        &graph,
-        &incoming,
-        MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
-        &unavailable,
-    )
-    .is_none());
+    assert!(
+        MemoryManager::find_update_candidate(
+            &graph,
+            &incoming,
+            MemoryManager::UPDATE_SIMILARITY_THRESHOLD,
+            &unavailable,
+        )
+        .is_none()
+    );
 }
 
 #[test]
 fn stale_writer_find_candidate_scopes_to_same_category_and_picks_best() {
     let mut graph = MemoryGraph::new();
     // Same words, different category: out of scope.
-    let other_category =
-        MemoryEntry::new(MemoryCategory::Preference, "my standup is at 09:00");
+    let other_category = MemoryEntry::new(MemoryCategory::Preference, "my standup is at 09:00");
     graph.add_memory(other_category);
     // Same category anchor with high similarity but no marker: not eligible.
     let same_category_no_signal =
@@ -1535,11 +1578,8 @@ fn stale_writer_remember_project_supersedes_through_real_write_path() {
         assert_eq!(old.superseded_by.as_deref(), Some(new_id.as_str()));
         assert!(new.active);
         assert!(
-            graph
-                .get_edges(&new_id)
-                .iter()
-                .any(|e| e.target == old_id
-                    && matches!(e.kind, crate::memory_graph::EdgeKind::Supersedes)),
+            graph.get_edges(&new_id).iter().any(|e| e.target == old_id
+                && matches!(e.kind, crate::memory_graph::EdgeKind::Supersedes)),
             "Supersedes edge new -> old must exist"
         );
         // Superseded rows stay out of hybrid retrieval (reader contract).
@@ -1547,8 +1587,14 @@ fn stale_writer_remember_project_supersedes_through_real_write_path() {
             .find_similar_hybrid("standup moved to 10:30", &[0.99, 0.01, 0.0], 10)
             .expect("hybrid");
         let ids: Vec<&str> = ranked.iter().map(|(e, _)| e.id.as_str()).collect();
-        assert!(!ids.contains(&old_id.as_str()), "old must not surface; got {ids:?}");
-        assert!(ids.contains(&new_id.as_str()), "new must surface; got {ids:?}");
+        assert!(
+            !ids.contains(&old_id.as_str()),
+            "old must not surface; got {ids:?}"
+        );
+        assert!(
+            ids.contains(&new_id.as_str()),
+            "new must surface; got {ids:?}"
+        );
     });
 }
 
@@ -1563,7 +1609,10 @@ fn stale_writer_remember_project_fails_open_without_vectors() {
         // path is the model-independent assertion here.)
         let manager = MemoryManager::new().with_project_dir("/stale-writer-r2-open");
         let old_id = manager
-            .remember_project(MemoryEntry::new(MemoryCategory::Fact, "my standup is at 09:00"))
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "my standup is at 09:00",
+            ))
             .expect("remember old");
         let new_id = manager
             .remember_project(MemoryEntry::new(
@@ -1668,10 +1717,7 @@ fn stale_writer_forget_with_privacy_hard_deletes() {
 #[test]
 fn stale_writer_invalidate_edge_tombstones_without_replacement() {
     let mut graph = MemoryGraph::new();
-    let invalidator = MemoryEntry::new(
-        MemoryCategory::Fact,
-        "forget my door code completely",
-    );
+    let invalidator = MemoryEntry::new(MemoryCategory::Fact, "forget my door code completely");
     let invalidator_id = invalidator.id.clone();
     graph.add_memory(invalidator);
     let tombstone = MemoryEntry::new(MemoryCategory::Fact, "my door code is 4410");
@@ -1794,9 +1840,7 @@ fn minmax_normalize_nonfinite_scores_cannot_poison_pool() {
 fn bm25_plural_fold_makes_tied_pair_score_equal() {
     // c2b mechanism: a tied pair differing only in plurality must score
     // equal at the bm25_rank level (symmetric folding on query AND docs).
-    let mk = |content: &str| {
-        MemoryEntry::new(MemoryCategory::Fact, content)
-    };
+    let mk = |content: &str| MemoryEntry::new(MemoryCategory::Fact, content);
     // Query "commands", doc A has "command", doc B has "commands",
     // doc C is disjoint (must stay scoreless).
     let entries = vec![
@@ -1922,8 +1966,7 @@ fn bm25_bigram_shared_collocation_beats_separated_unigrams() {
         mk("c2c unrelated weather forecast"),
     ];
     let ranked = bm25_rank(&entries, "deploy freeze", 10);
-    let score =
-        |idx: usize| ranked.iter().find(|(i, _)| *i == idx).map(|(_, s)| *s);
+    let score = |idx: usize| ranked.iter().find(|(i, _)| *i == idx).map(|(_, s)| *s);
     let (adj, sep) = (score(0), score(1));
     assert!(adj.is_some() && sep.is_some(), "both docs share unigrams");
     assert!(
@@ -1944,11 +1987,14 @@ fn bm25_bigram_stopword_bonus_less_than_content_bonus() {
     let gap = |query: &str, adj: &str, sep: &str| {
         let entries = vec![mk(adj), mk(sep), bgs[0].clone(), bgs[1].clone()];
         let ranked = bm25_rank(&entries, query, 10);
-        let score =
-            |idx: usize| ranked.iter().find(|(i, _)| *i == idx).map(|(_, s)| *s);
+        let score = |idx: usize| ranked.iter().find(|(i, _)| *i == idx).map(|(_, s)| *s);
         score(0).unwrap() - score(1).unwrap()
     };
-    let stop_gap = gap("the staging", "c2c the staging xray", "c2c the xray staging");
+    let stop_gap = gap(
+        "the staging",
+        "c2c the staging xray",
+        "c2c the xray staging",
+    );
     let content_gap = gap(
         "staging database",
         "c2c staging database xray",
@@ -2005,10 +2051,7 @@ fn c2a_guard_stopword_tag_keeps_no_alive_without_content_match() {
     gold = gold.with_tags(vec!["buddy".to_string()]);
     // Stopword-content distractor: short content (norm-amplified tf, the
     // FieldDoc failure shape) + query-disjoint tags.
-    let mut stop_only = MemoryEntry::new(
-        MemoryCategory::Fact,
-        "c2aguard replace the hallway",
-    );
+    let mut stop_only = MemoryEntry::new(MemoryCategory::Fact, "c2aguard replace the hallway");
     stop_only = stop_only.with_tags(vec!["c2aguard".to_string()]);
     // Supported (shares unfolded `buddy`), so c2b folding applies; models
     // the legitimate `buddies->buddy`-class lift that compresses the
@@ -2232,7 +2275,10 @@ fn prefilter_rank_guarded_success_records_rank_elapsed() {
     assert_eq!(after.rank_count, before.rank_count + 1);
     assert!(after.rank_sum_us >= before.rank_sum_us);
     assert!(after.rank_max_us >= before.rank_max_us);
-    assert_eq!(after.rank_sum_sq_us, before.rank_sum_sq_us + overshoot_sq_guard(before, after));
+    assert_eq!(
+        after.rank_sum_sq_us,
+        before.rank_sum_sq_us + overshoot_sq_guard(before, after)
+    );
 }
 
 #[test]
@@ -2292,7 +2338,10 @@ fn prefilter_tail_detail_hashes_query_and_bounds_tail() {
         "hash must be hex"
     );
     let c = MemoryManager::prefilter_tail_detail("other query", &kept, &dropped, 96, 0.01);
-    assert_ne!(a.query_hash, c.query_hash, "distinct queries hash distinctly");
+    assert_ne!(
+        a.query_hash, c.query_hash,
+        "distinct queries hash distinctly"
+    );
     let serialized = serde_json::to_string(&a).expect("detail serializes");
     assert!(
         !serialized.contains("my secret query"),
@@ -2555,7 +2604,6 @@ fn recall_count_untouched_on_keyword_fallback() {
     result.expect("r4 fallback test body panicked");
 }
 
-
 #[test]
 fn r5_profile_leg_holds_stable_categories_and_ignores_recall_counters() {
     with_temp_home(|_| {
@@ -2589,20 +2637,34 @@ fn r5_profile_leg_holds_stable_categories_and_ignores_recall_counters() {
         let profile = manager
             .get_profile_memories_scoped(5, MemoryScope::Project)
             .expect("profile block renders");
-        assert!(profile.starts_with("# Memory Profile"), "profile header:\n{profile}");
+        assert!(
+            profile.starts_with("# Memory Profile"),
+            "profile header:\n{profile}"
+        );
         assert!(profile.contains("prefer tabs over spaces"));
         assert!(profile.contains("never force-push to main"));
-        assert!(!profile.contains("limine bootloader"), "facts stay situational");
-        assert!(!profile.contains("acme deploy pipeline"), "entities stay situational");
+        assert!(
+            !profile.contains("limine bootloader"),
+            "facts stay situational"
+        );
+        assert!(
+            !profile.contains("acme deploy pipeline"),
+            "entities stay situational"
+        );
 
         // Corrections render before preferences (standing-instruction order).
-        let corr_pos = profile.find("never force-push").expect("correction present");
+        let corr_pos = profile
+            .find("never force-push")
+            .expect("correction present");
         let pref_pos = profile.find("prefer tabs").expect("preference present");
         assert!(corr_pos < pref_pos, "corrections first:\n{profile}");
 
         // byte size: always-on block stays tiny.
         let bytes = profile.len();
-        assert!(bytes < 2048, "profile block small by construction: {bytes} bytes");
+        assert!(
+            bytes < 2048,
+            "profile block small by construction: {bytes} bytes"
+        );
 
         // R4 counters never leak into the render: bump them on the seeded
         // rows, rebuild, and require byte-identical output with no digits
@@ -2626,10 +2688,7 @@ fn r5_profile_leg_holds_stable_categories_and_ignores_recall_counters() {
         // Stability across turns: remembering a new FACT leaves the profile
         // bytes identical (situational writes never perturb the static leg).
         manager
-            .remember_project(MemoryEntry::new(
-                MemoryCategory::Fact,
-                "kernel 6.14 in use",
-            ))
+            .remember_project(MemoryEntry::new(MemoryCategory::Fact, "kernel 6.14 in use"))
             .expect("remember second fact");
         let after_fact = manager
             .get_profile_memories_scoped(5, MemoryScope::Project)
@@ -2640,7 +2699,10 @@ fn r5_profile_leg_holds_stable_categories_and_ignores_recall_counters() {
         let recent = manager
             .get_prompt_memories_scoped(10, MemoryScope::Project)
             .expect("recent tool leg renders");
-        assert!(recent.contains("limine bootloader"), "recent leg keeps facts");
+        assert!(
+            recent.contains("limine bootloader"),
+            "recent leg keeps facts"
+        );
 
         // Tombstoned profile entries drop out of the block.
         manager.forget(&pref_id).expect("forget preference");
@@ -2659,4 +2721,292 @@ fn r5_profile_leg_holds_stable_categories_and_ignores_recall_counters() {
             "no stable entries means no block (fail-open, not empty header)"
         );
     });
+}
+
+// --- R10 provenance tiers + R11 privacy pass ---
+
+/// RAII guard for the quarantine switch: sets
+/// `JCODE_MEMORY_QUARANTINE_TOOL_INGESTED` for the closure, restores the
+/// prior value on drop (even on panic). Call inside `with_temp_home` so
+/// the process-wide env lock is held for the whole window.
+struct QuarantineGuard {
+    old: Option<String>,
+}
+
+impl QuarantineGuard {
+    fn set(on: bool) -> Self {
+        let key = "JCODE_MEMORY_QUARANTINE_TOOL_INGESTED";
+        let old = std::env::var(key).ok();
+        if on {
+            crate::env::set_var(key, "1");
+        } else {
+            crate::env::remove_var(key);
+        }
+        QuarantineGuard { old }
+    }
+}
+
+impl Drop for QuarantineGuard {
+    fn drop(&mut self) {
+        let key = "JCODE_MEMORY_QUARANTINE_TOOL_INGESTED";
+        match self.old.take() {
+            Some(v) => crate::env::set_var(key, v),
+            None => crate::env::remove_var(key),
+        }
+    }
+}
+
+#[test]
+fn r10_quarantine_hides_tool_ingested_from_recall_not_collection() {
+    with_temp_home(|_| {
+        let manager = MemoryManager::new().with_project_dir("/r10-quarantine");
+        let user_id = manager
+            .remember_project(
+                MemoryEntry::new(MemoryCategory::Fact, "quarantine probe user fact alpha")
+                    .with_provenance(Provenance::User),
+            )
+            .expect("remember user");
+        let distilled_id = manager
+            .remember_project(MemoryEntry::new(
+                MemoryCategory::Fact,
+                "quarantine probe distilled fact alpha",
+            ))
+            .expect("remember distilled");
+        let tool_id = manager
+            .remember_project(
+                MemoryEntry::new(MemoryCategory::Fact, "quarantine probe tool fact alpha")
+                    .with_provenance(Provenance::ToolIngested),
+            )
+            .expect("remember tool");
+        assert_ne!(user_id, distilled_id);
+        assert_ne!(distilled_id, tool_id);
+
+        // Quarantine off (default): recall-identical — all three surface.
+        let off = manager
+            .search_scoped("quarantine probe", MemoryScope::Project)
+            .expect("search off");
+        assert_eq!(off.len(), 3, "quarantine off recalls everything");
+        let kw_off = manager
+            .get_relevant_keywords(&["quarantine"], 10)
+            .expect("keywords off");
+        assert!(
+            kw_off.iter().any(|e| e.id == tool_id),
+            "keyword fallback sees tool row when off"
+        );
+
+        {
+            let _q = QuarantineGuard::set(true);
+            // Quarantine on: tool-ingested hidden from every recall path,
+            // User + AgentDistilled unaffected.
+            let on = manager
+                .search_scoped("quarantine probe", MemoryScope::Project)
+                .expect("search on");
+            assert_eq!(on.len(), 2, "quarantined row hidden: {on:?}");
+            assert!(on.iter().any(|e| e.id == user_id));
+            assert!(on.iter().any(|e| e.id == distilled_id));
+            assert!(on.iter().all(|e| e.id != tool_id));
+            let kw_on = manager
+                .get_relevant_keywords(&["quarantine"], 10)
+                .expect("keywords on");
+            assert!(kw_on.iter().all(|e| e.id != tool_id));
+            // Collection still shows the quarantined row (auditable).
+            let all = manager.list_all().expect("list all");
+            assert!(
+                all.iter().any(|e| e.id == tool_id),
+                "list_all keeps quarantined rows"
+            );
+        }
+
+        // Guard dropped: switch back off, tool row recalls again.
+        let restored = manager
+            .search_scoped("quarantine probe", MemoryScope::Project)
+            .expect("search restored");
+        assert_eq!(restored.len(), 3);
+    });
+}
+
+#[test]
+fn r10_hybrid_prefilter_rank_quarantine_and_penalty() {
+    with_temp_home(|_| {
+        let _q = QuarantineGuard::set(true);
+        let tool = MemoryEntry::new(MemoryCategory::Fact, "zebra xray quarantine marker")
+            .with_embedding(vec![1.0, 0.0])
+            .with_provenance(Provenance::ToolIngested);
+        let tool_id = tool.id.clone();
+        let clean = MemoryEntry::new(MemoryCategory::Fact, "zebra xray clean marker")
+            .with_embedding(vec![1.0, 0.0]);
+        let clean_id = clean.id.clone();
+        let secret = MemoryEntry::new(
+            MemoryCategory::Fact,
+            "zebra xray secret marker password=hunter2-hunter2",
+        )
+        .with_embedding(vec![1.0, 0.0]);
+        let secret_id = secret.id.clone();
+
+        let ranked = MemoryManager::hybrid_prefilter_rank(
+            vec![tool, clean, secret],
+            "zebra xray marker",
+            &[1.0, 0.0],
+            3,
+            50,
+        );
+        // Quarantined tool row never enters ranking; clean + secret do.
+        assert_eq!(ranked.len(), 2, "quarantined row excluded");
+        assert!(ranked.iter().all(|(e, _)| e.id != tool_id));
+        // Penalty halves the secret row's fused score (same dense + BM25
+        // inputs modulo the marker word, so require ordering + ratio band
+        // rather than exact halving: BM25 sees different marker tokens).
+        let clean_score = ranked
+            .iter()
+            .find(|(e, _)| e.id == clean_id)
+            .map(|(_, s)| *s)
+            .expect("clean ranked");
+        let secret_score = ranked
+            .iter()
+            .find(|(e, _)| e.id == secret_id)
+            .map(|(_, s)| *s)
+            .expect("secret still recalled (down-ranked, never deleted)");
+        assert!(
+            secret_score < clean_score,
+            "secret {secret_score} must rank below clean {clean_score}"
+        );
+    });
+}
+
+#[test]
+fn r11_score_and_filter_applies_safety_penalty() {
+    // Single-entry calls (the gap filter early-returns on len <= 1), so
+    // the asserted scores pin the penalty multiplication at this site
+    // exactly. Ordering (secret below clean, both kept) is pinned by
+    // `r10_hybrid_prefilter_rank_quarantine_and_penalty` on the gap-free
+    // fusion path.
+    let clean = MemoryEntry::new(MemoryCategory::Fact, "neutral planning note alpha")
+        .with_embedding(vec![1.0, 0.0]);
+    let secret = MemoryEntry::new(
+        MemoryCategory::Fact,
+        "neutral planning note alpha password=hunter2-hunter2",
+    )
+    .with_embedding(vec![1.0, 0.0]);
+
+    let clean_ranked =
+        MemoryManager::score_and_filter(vec![clean], &[1.0, 0.0], "neutral planning query", 0.0, 2)
+            .expect("score and filter");
+    assert_eq!(clean_ranked.len(), 1);
+    assert!((clean_ranked[0].1 - 1.0).abs() < 1e-6);
+
+    let secret_ranked = MemoryManager::score_and_filter(
+        vec![secret.clone()],
+        &[1.0, 0.0],
+        "neutral planning query",
+        0.0,
+        2,
+    )
+    .expect("score and filter");
+    // Penalized row is KEPT (returned, not dropped) at exactly half score.
+    assert_eq!(secret_ranked.len(), 1, "penalty down-ranks, never deletes");
+    assert_eq!(secret_ranked[0].0.id, secret.id);
+    assert!(
+        (secret_ranked[0].1 - 0.5).abs() < 1e-6,
+        "secret score {} must be exactly half of clean 1.0",
+        secret_ranked[0].1
+    );
+}
+
+#[test]
+fn r11_detector_silent_on_dev_corpus() {
+    // run.sh-identical extraction: 20 R golds (gold_turn text) + 11 K
+    // current/UPDATE values (supersede text, else state text; DELETEs
+    // excluded) + 6 decoys (joined turns) = 37 entries. The detector must
+    // fire on NONE — this is the "penalty must not fire on normal content"
+    // evidence for the C1 re-gate: silent scores are bit-identical.
+    let fixture_dir =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../harness/fixtures");
+    let read_lines = |name: &str| {
+        std::fs::read_to_string(fixture_dir.join(name))
+            .unwrap_or_else(|e| panic!("read fixture {name}: {e}"))
+    };
+
+    let mut entries: Vec<(String, String, String)> = Vec::new();
+    for line in read_lines("recall.jsonl").lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let item: serde_json::Value = serde_json::from_str(line).expect("recall json");
+        let gold_turn = item["gold_turn"].as_str().expect("gold_turn");
+        let mut gold = String::new();
+        for s in item["sessions"].as_array().expect("sessions") {
+            for t in s["turns"].as_array().expect("turns") {
+                if t["turn_id"].as_str() == Some(gold_turn) {
+                    gold = t["text"].as_str().expect("text").to_string();
+                }
+            }
+        }
+        assert!(!gold.is_empty(), "gold found");
+        entries.push((
+            format!("harness-{}", item["id"].as_str().expect("id")),
+            gold,
+            "c1".to_string(),
+        ));
+    }
+    for line in read_lines("temporal-ku.jsonl").lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let item: serde_json::Value = serde_json::from_str(line).expect("temporal json");
+        if item["subtype"].as_str() == Some("DELETE") {
+            continue;
+        }
+        let want_op = if item["subtype"].as_str() == Some("UPDATE") {
+            "supersede"
+        } else {
+            "state"
+        };
+        let mut cur = String::new();
+        for e in item["events"].as_array().expect("events") {
+            if e["op"].as_str() == Some(want_op) {
+                cur = e["text"].as_str().expect("text").to_string();
+            }
+        }
+        assert!(!cur.is_empty(), "current found");
+        entries.push((
+            format!("harness-{}", item["id"].as_str().expect("id")),
+            cur,
+            "c2".to_string(),
+        ));
+    }
+    for line in read_lines("decoys.jsonl").lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let dc: serde_json::Value = serde_json::from_str(line).expect("decoy json");
+        let text: Vec<String> = dc["turns"]
+            .as_array()
+            .expect("turns")
+            .iter()
+            .map(|t| t["text"].as_str().expect("text").to_string())
+            .collect();
+        entries.push((
+            format!("harness-{}", dc["id"].as_str().expect("id")),
+            text.join(" "),
+            "decoy".to_string(),
+        ));
+    }
+    assert_eq!(entries.len(), 37, "run.sh-identical corpus size");
+
+    for (mid, content, tag) in &entries {
+        let entry = MemoryEntry::new(MemoryCategory::Fact, content.clone())
+            .with_tags(vec!["harness".to_string(), tag.clone()]);
+        assert!(
+            !crate::memory_types::contains_secret(&entry),
+            "detector must stay silent on corpus entry {mid}: {content}"
+        );
+        assert_eq!(
+            crate::memory_types::safety_penalty(&entry),
+            1.0,
+            "no penalty on corpus entry {mid}"
+        );
+    }
 }
