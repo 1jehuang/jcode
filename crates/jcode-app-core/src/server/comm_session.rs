@@ -1039,6 +1039,7 @@ pub(super) async fn handle_comm_stop(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -1051,6 +1052,7 @@ pub(super) async fn handle_comm_stop(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -1078,6 +1080,7 @@ pub(super) async fn handle_comm_stop(
                 "Refusing to stop session '{target_session}' because it was not spawned by this coordinator. Pass force=true to stop a non-owned/user-created swarm session explicitly."
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -1343,6 +1346,7 @@ async fn ensure_spawn_coordinator_swarm(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     };
@@ -1362,6 +1366,7 @@ async fn ensure_spawn_coordinator_swarm(
                     "Recursive swarm spawning is disabled for light and ad hoc swarms. Only the root session ({root_session_id}) may spawn agents unless that root is running in swarm-deep mode."
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return None;
         }
@@ -1376,6 +1381,7 @@ async fn ensure_spawn_coordinator_swarm(
                 super::MAX_SWARM_MEMBERS
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     }
@@ -1393,6 +1399,7 @@ async fn ensure_spawn_coordinator_swarm(
                 "Swarm live-agent limit reached (max {limit}, configured by agents.swarm_max_concurrent_agents). This swarm already has {live_spawned_agent_count} active spawned agents. Let existing agents finish or stop them before spawning more."
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     }

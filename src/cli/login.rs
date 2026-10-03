@@ -518,14 +518,23 @@ async fn notify_running_server_auth_changed_best_effort(provider: Option<&str>) 
         );
         return;
     };
-    match client.notify_auth_changed_for_provider(provider).await {
-        Ok(_) => crate::logging::auth_event("auth_changed_notify_sent", "server", &[]),
+    // Wait for the server's verdict. It used to reject this lone request
+    // (no Subscribe) while login still logged it as sent.
+    match client
+        .notify_auth_changed_and_wait(provider, std::time::Duration::from_secs(10))
+        .await
+    {
+        Ok(()) => crate::logging::auth_event("auth_changed_notify_applied", "server", &[]),
         Err(err) => {
             let reason = err.to_string();
             crate::logging::auth_event(
                 "auth_changed_notify_failed",
                 "server",
                 &[("reason", reason.as_str())],
+            );
+            eprintln!(
+                "Warning: the running jcode server did not confirm the new login ({reason}). \
+                 Open sessions may keep the previous account until restarted."
             );
         }
     }

@@ -635,6 +635,7 @@ fn test_error_event_retry_after_roundtrip() -> Result<()> {
         id: 42,
         message: "rate limited".to_string(),
         retry_after_secs: Some(17),
+        server_resumes: false,
     };
     let json = encode_event(&event);
     let decoded = parse_event_json(json.trim())?;
@@ -642,6 +643,7 @@ fn test_error_event_retry_after_roundtrip() -> Result<()> {
         id,
         message,
         retry_after_secs,
+        ..
     } = decoded
     else {
         return Err(anyhow!("wrong event type"));
@@ -660,6 +662,7 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
         id,
         message,
         retry_after_secs,
+        ..
     } = decoded
     else {
         return Err(anyhow!("wrong event type"));

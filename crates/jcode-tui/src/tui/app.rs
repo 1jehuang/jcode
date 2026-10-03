@@ -99,6 +99,7 @@ mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
 mod update_sim;
+mod usage_limit_notice;
 mod usage_reset;
 mod voice_input;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
@@ -1643,6 +1644,13 @@ pub struct App {
     client_binary_mtime: Option<std::time::SystemTime>,
     // Rate limit state: when rate limit resets (if rate limited)
     rate_limit_reset: Option<Instant>,
+    // When the server last reported a credential change (login, account
+    // switch, credential file edit). A limit error for a turn sent before this
+    // belongs to the previous account and must not hold the turn.
+    credentials_changed_at: Option<Instant>,
+    // `rate_limit_reset` value that an account change pulled forward, so the
+    // resend tick does not also claim "Rate limit reset".
+    account_change_resend_at: Option<Instant>,
     // Message being sent when rate limit hit (to auto-retry in remote mode)
     rate_limit_pending_message: Option<PendingRemoteMessage>,
     // Consecutive turn errors that classify as credential/auth failures.

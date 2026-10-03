@@ -50,6 +50,7 @@ pub(super) fn parse_swarm_spawn_mode(
                         "Invalid spawn_mode '{value}'. Expected one of: visible, headless, inline, auto"
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 None
             }
@@ -119,7 +120,12 @@ pub(super) async fn handle_lightweight_control_request(
         return Ok(());
     }
 
-    write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await?;
+    let ack = write_direct_event(&writer, &ServerEvent::Ack { id: request.id() }).await;
+    // A fire-and-forget auth notice (SDK login flow) may hang up right after
+    // writing. The credential change must still be applied.
+    if !matches!(request, Request::NotifyAuthChanged { .. }) {
+        ack?;
+    }
 
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let writer_clone = Arc::clone(&writer);
@@ -153,6 +159,19 @@ pub(super) async fn handle_lightweight_control_request(
             super::provider_control::handle_invalidate_anthropic_usage(
                 id,
                 account_label,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::NotifyAuthChanged {
+            id, provider, auth, ..
+        } => {
+            super::provider_control::handle_notify_auth_changed_process_wide(
+                id,
+                provider,
+                auth,
+                provider_template,
+                sessions,
                 &client_event_tx,
             )
             .await;
@@ -919,6 +938,7 @@ pub(super) async fn handle_lightweight_control_request(
                 id: other.id(),
                 message: "unsupported lightweight control request".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
         }
     }
