@@ -13,6 +13,13 @@ pub struct SoftInterruptMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SoftInterruptSource {
     User,
+    /// A real user message that arrived out-of-band (email, Telegram, CLI
+    /// relay) rather than typed into this window. It is still a user request,
+    /// but the transcript must not render it identically to typed input: an
+    /// inject with no marker and no provenance is indistinguishable from the
+    /// user speaking now, and the agent then replays its own history back as
+    /// fresh requests.
+    UserExternal,
     System,
     BackgroundTask,
 }

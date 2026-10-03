@@ -114,7 +114,7 @@ impl AmbientRunnerHandle {
                 content: format!("[{} message from user]\n{}", source, text),
                 images: Vec::new(),
                 urgent: false,
-                source: SoftInterruptSource::User,
+                source: SoftInterruptSource::UserExternal,
             });
             logging::info(&format!(
                 "{} message injected into active ambient cycle: {}",
