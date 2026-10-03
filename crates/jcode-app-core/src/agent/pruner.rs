@@ -78,15 +78,28 @@ pub fn classify_tool(tool_name: &str) -> Option<PrunerFamily> {
     // B2 fix 2026-10-03: match on word-boundary tokens, not substrings.
     // Substring `contains` over-matched ("duplicate"→Read via "cat",
     // "execution"→TestBash via "exec", "bread"→Read via "read").
+    // 2026-10-03 follow-up: glued compounds ("agentgrep" = agent+grep)
+    // never split, so family keywords ALSO match as infixes — but ONLY
+    // inside tokens longer than the keyword (exact tokens still win
+    // first; "duplicate" stays bypassed since "cat" is not a suffix/infix
+    // pattern below... see has_word_or_part for the precise rule).
     let lower = tool_name.to_lowercase();
     let tokens: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .collect();
     let has = |w: &str| tokens.iter().any(|t| *t == w);
+    // Glued-compound fallback, grep-family ONLY ("agentgrep" ends with
+    // "grep"). Read stays exact-token: "bread" must NOT match (B2).
+    // Edge rule: keyword at token EDGE (prefix/suffix), not interior.
+    let has_part = |w: &str| {
+        tokens.iter().any(|t| {
+            *t != w && t.len() > w.len() && (t.starts_with(w) || t.ends_with(w))
+        })
+    };
     if has("read") || has("cat") {
         Some(PrunerFamily::Read)
-    } else if has("grep") || has("search") {
+    } else if has("grep") || has("search") || has_part("grep") || has_part("search") {
         Some(PrunerFamily::Grep)
     } else if lower == "bash"
         || has("test")
