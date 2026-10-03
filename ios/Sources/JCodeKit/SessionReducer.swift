@@ -221,7 +221,11 @@ public enum SessionReducer {
             state.errorBanner = reason
             state.isProcessing = false
             state.isReasoning = false
-        case .disconnected, .reconnecting:
+        case .reconnecting:
+            state.isReasoning = false
+            state.serverPhase = nil
+            finishStreaming(&state)
+        case .disconnected:
             state.isProcessing = false
             state.isReasoning = false
             state.serverPhase = nil
@@ -408,6 +412,7 @@ public enum SessionReducer {
         _ state: SessionState, _ payload: ServerEvent.HistoryPayload
     ) -> SessionState {
         var state = state
+        let isSameSession = state.sessionID == payload.sessionID
         state.sessionID = payload.sessionID
         state.providerName = payload.providerName ?? state.providerName
         state.modelName = payload.providerModel ?? state.modelName
@@ -420,6 +425,7 @@ public enum SessionReducer {
         state.serverVersion = payload.serverVersion ?? state.serverVersion
         state.sessionTitle = payload.displayTitle ?? state.sessionTitle
         state.reasoningEffort = payload.reasoningEffort ?? state.reasoningEffort
+        state.isProcessing = payload.isProcessing
         if let title = payload.displayTitle {
             state.sessionTitles[payload.sessionID] = title
         }
@@ -433,7 +439,7 @@ public enum SessionReducer {
 
         // History replaces the transcript wholesale: it is the server's
         // authoritative view, used on connect and reconnect.
-        state.transcript = payload.messages.compactMap { message in
+        var entries: [TranscriptEntry] = payload.messages.compactMap { message in
             let role: TranscriptEntry.Role
             switch message.role {
             case "user": role = .user
@@ -463,7 +469,23 @@ public enum SessionReducer {
             }
             return TranscriptEntry(role: role, text: message.content, toolCalls: toolCalls)
         }
+        if isSameSession {
+            preserveIdentities(of: &entries, from: state.transcript)
+        }
+        state.transcript = entries
         return state
+    }
+
+    private static func preserveIdentities(
+        of entries: inout [TranscriptEntry], from previous: [TranscriptEntry]
+    ) {
+        for index in entries.indices where index < previous.count {
+            let old = previous[index]
+            guard old.role == entries[index].role else { return }
+            let isTrailing = index == previous.count - 1
+            guard old.text == entries[index].text || isTrailing else { return }
+            entries[index].id = old.id
+        }
     }
 
     // MARK: - Helpers

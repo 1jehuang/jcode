@@ -30,6 +30,7 @@ struct EmptyTranscript: View {
             Text("Ready when you are")
                 .font(Theme.mono(17, weight: .semibold))
                 .foregroundStyle(Theme.textPrimary)
+                .accessibilityAddTraits(.isHeader)
             Text("Send a message to start driving this session.")
                 .font(.subheadline)
                 .foregroundStyle(Theme.textSecondary)
@@ -58,7 +59,8 @@ struct EmptyTranscript: View {
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("empty-transcript")
     }
 }
 
