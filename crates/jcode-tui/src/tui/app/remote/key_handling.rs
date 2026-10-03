@@ -352,8 +352,8 @@ async fn handle_remote_key_internal(
             if let Some(model) = subagent_model {
                 remote.set_subagent_model(model).await?;
             }
-            if !app.agent_models_global_scope {
-                if let Some((target, model)) = picker
+            if !app.agent_models_global_scope
+                && let Some((target, model)) = picker
                     .filtered
                     .get(picker.selected)
                     .and_then(|index| picker.entries.get(*index))
@@ -376,10 +376,9 @@ async fn handle_remote_key_internal(
                         )),
                         _ => None,
                     })
-                {
-                    app.pending_agent_model_request_id =
-                        Some(remote.set_agent_model(target, model).await?);
-                }
+            {
+                app.pending_agent_model_request_id =
+                    Some(remote.set_agent_model(target, model).await?);
             }
         }
         return app.handle_inline_interactive_key(code, modifiers);

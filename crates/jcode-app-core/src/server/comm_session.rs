@@ -372,12 +372,12 @@ async fn session_swarm_model(
     global: Option<String>,
 ) -> Option<String> {
     let agent = sessions.read().await.get(req_session_id).cloned();
-    if let Some(agent) = agent {
-        if let Ok(guard) = agent.try_lock() {
-            return guard
-                .session_for_split()
-                .effective_agent_model("swarm", global);
-        }
+    if let Some(agent) = agent
+        && let Ok(guard) = agent.try_lock()
+    {
+        return guard
+            .session_for_split()
+            .effective_agent_model("swarm", global);
     }
     Session::load_startup_stub(req_session_id)
         .map(|session| session.effective_agent_model("swarm", global.clone()))

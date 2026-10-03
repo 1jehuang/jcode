@@ -168,28 +168,27 @@ impl Sidecar {
         } else {
             model
         };
-        if let Some(model) = model.as_deref() {
-            if let Some(provider) = crate::provider::active_provider_fork() {
-                let request = if inherit {
-                    crate::provider::MultiProvider::model_switch_request_for_session_route(
-                        model,
-                        session.provider_key.as_deref(),
-                        session.route_api_method.as_deref(),
-                    )
-                } else {
-                    model.to_string()
+        if let Some(model) = model.as_deref()
+            && let Some(provider) = crate::provider::active_provider_fork()
+        {
+            let request = if inherit {
+                crate::provider::MultiProvider::model_switch_request_for_session_route(
+                    model,
+                    session.provider_key.as_deref(),
+                    session.route_api_method.as_deref(),
+                )
+            } else {
+                model.to_string()
+            };
+            if crate::provider::set_model_with_auth_refresh(provider.as_ref(), &request).is_ok() {
+                return Self {
+                    client: crate::provider::shared_http_client(),
+                    model: provider.model(),
+                    max_tokens: DEFAULT_MAX_TOKENS,
+                    backend: SidecarBackend::Provider,
+                    provider: Some(provider),
+                    reasoning_override: None,
                 };
-                if crate::provider::set_model_with_auth_refresh(provider.as_ref(), &request).is_ok()
-                {
-                    return Self {
-                        client: crate::provider::shared_http_client(),
-                        model: provider.model(),
-                        max_tokens: DEFAULT_MAX_TOKENS,
-                        backend: SidecarBackend::Provider,
-                        provider: Some(provider),
-                        reasoning_override: None,
-                    };
-                }
             }
         }
         // No live routing provider: retain extraction auto-selection as fallback

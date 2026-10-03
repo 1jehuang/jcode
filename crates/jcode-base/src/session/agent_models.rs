@@ -58,12 +58,11 @@ impl Session {
     /// routing, rather than becoming indistinguishable from use-global.
     pub fn effective_agent_model(&self, target: &str, global: Option<String>) -> Option<String> {
         let mut current = self.agent_model_overrides.clone();
-        if let Ok(path) = path(&self.id) {
-            if path.exists() {
-                if let Ok(saved) = crate::storage::read_json::<AgentModelOverrides>(&path) {
-                    current = saved;
-                }
-            }
+        if let Ok(path) = path(&self.id)
+            && path.exists()
+            && let Ok(saved) = crate::storage::read_json::<AgentModelOverrides>(&path)
+        {
+            current = saved;
         }
         current.get(target).cloned().or(global)
     }
