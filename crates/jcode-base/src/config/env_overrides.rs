@@ -146,6 +146,11 @@ impl Config {
         {
             self.tools.mcp_tools_token_threshold = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_PARALLEL_TOOLS")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.tools.parallel = parsed;
+        }
 
         // ACP adapter
         if let Ok(v) = std::env::var("JCODE_ACP_PROFILE") {

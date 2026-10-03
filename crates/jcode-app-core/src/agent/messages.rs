@@ -1,6 +1,21 @@
 use super::*;
 
 impl Agent {
+    /// Tool consumers must account each result before admitting the next one.
+    /// Unlike synchronous best-effort message helpers, this cannot lose an
+    /// increment when a concurrent observer holds the compaction lock.
+    pub(crate) async fn add_tool_result_with_duration(
+        &mut self,
+        content: Vec<ContentBlock>,
+        duration_ms: Option<u64>,
+    ) -> String {
+        let compaction = self.registry.compaction();
+        let mut manager = compaction.write().await;
+        manager.notify_message_added_blocks(&content);
+        self.session
+            .add_message_with_duration(Role::User, content, duration_ms)
+    }
+
     pub(crate) fn add_message(&mut self, role: Role, content: Vec<ContentBlock>) -> String {
         let id = self.session.add_message(role, content);
         let compaction = self.registry.compaction();

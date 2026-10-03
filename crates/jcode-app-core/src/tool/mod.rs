@@ -253,7 +253,7 @@ pub(crate) fn accept_large_output_schema_property_for_test() -> Value {
     jcode_tool_core::accept_large_output_schema_property()
 }
 
-fn accepts_large_output(input: &Value) -> bool {
+pub(crate) fn accepts_large_output(input: &Value) -> bool {
     // Same key the schema advertises, so the documented flag and the honored
     // flag cannot drift apart.
     match input.get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY) {
@@ -321,6 +321,19 @@ impl Registry {
     fn downgrade(&self) -> WeakRegistry {
         WeakRegistry {
             tools: Arc::downgrade(&self.tools),
+            mcp_policy: Arc::clone(&self.mcp_policy),
+            skills: Arc::clone(&self.skills),
+            compaction: Arc::clone(&self.compaction),
+        }
+    }
+
+    /// A second handle to this exact registry, sharing its compaction
+    /// manager. Unlike [`Clone`], which deliberately gives each clone a fresh
+    /// manager for subagents, this is for running a call of the *same*
+    /// session on another task, so the context guard sees the real budget.
+    pub(crate) fn shared_handle(&self) -> Self {
+        Self {
+            tools: Arc::clone(&self.tools),
             mcp_policy: Arc::clone(&self.mcp_policy),
             skills: Arc::clone(&self.skills),
             compaction: Arc::clone(&self.compaction),
@@ -844,8 +857,57 @@ impl Registry {
         }
     }
 
+    /// Whether `name` with `input` may run concurrently with other
+    /// concurrency-safe calls from the same model response.
+    ///
+    /// Conservative: unknown tools, SDK callback tools, stateful pre-tool gates,
+    /// and anything a `pre_tool_transform` hook could rewrite are unsafe, so the
+    /// sequential path remains the default whenever the answer is unclear.
+    pub async fn is_concurrency_safe(&self, session_id: &str, name: &str, input: &Value) -> bool {
+        let resolved_name = Self::resolve_tool_name_for_session(session_id, name);
+        if sdk::custom(session_id, resolved_name) {
+            return false;
+        }
+        // External policy gates may mutate shared state even for a read-only
+        // tool. hook_configured also honors JCODE_HOOKS_DISABLED.
+        if crate::hooks::hook_configured("pre_tool") {
+            return false;
+        }
+        // A transformer may turn a read into a write after classification.
+        if crate::config::config().hooks.pre_tool_transform.is_some()
+            && std::env::var_os("JCODE_HOOKS_DISABLED").is_none()
+        {
+            return false;
+        }
+        let tools = self.tools.read().await;
+        tools
+            .get(resolved_name)
+            .is_some_and(|tool| tool.is_concurrency_safe(input))
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        self.execute_inner(name, input, ctx, false).await
+    }
+
+    /// Only the ordered Agent prefetch consumer may defer admission. Ordinary
+    /// callers, including batch subcalls and SDK callbacks, retain their guard.
+    pub(crate) async fn execute_deferred_context_guard(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: ToolContext,
+    ) -> Result<ToolOutput> {
+        self.execute_inner(name, input, ctx, true).await
+    }
+
+    async fn execute_inner(
+        &self,
+        name: &str,
+        input: Value,
+        ctx: ToolContext,
+        defer_context_guard: bool,
+    ) -> Result<ToolOutput> {
         // Mark this call in-flight for the whole execution so the missing
         // tool-output repair paths do not mistake a slow tool for an
         // interrupted one and inject a duplicate synthetic result. See
@@ -983,9 +1045,11 @@ impl Registry {
         };
 
         // Context overflow guard: check if this output would push us over the limit
-        output = self
-            .guard_context_overflow(name, output, accepts_large_output(&input))
-            .await;
+        if !defer_context_guard {
+            output = self
+                .guard_context_overflow(name, output, accepts_large_output(&input))
+                .await;
+        }
 
         let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
         fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
@@ -1015,13 +1079,27 @@ impl Registry {
         output: ToolOutput,
         accept_large_output: bool,
     ) -> ToolOutput {
+        self.guard_context_overflow_with_usage(tool_name, output, accept_large_output, 0)
+            .await
+    }
+
+    /// Agent consumers supply history-aware usage, including results appended
+    /// since the provider's last usage report. Other callers retain the guard's
+    /// existing observed-usage behavior.
+    pub(crate) async fn guard_context_overflow_with_usage(
+        &self,
+        tool_name: &str,
+        output: ToolOutput,
+        accept_large_output: bool,
+        current_tokens: usize,
+    ) -> ToolOutput {
         let compaction = self.compaction.read().await;
         let budget = compaction.token_budget();
         if budget == 0 {
             return output;
         }
 
-        let current_tokens = compaction.effective_token_count();
+        let current_tokens = current_tokens.max(compaction.effective_token_count());
         let output_tokens = Self::estimate_tokens(&output.output);
 
         // Check 1: Would adding this output push us over the safety threshold?

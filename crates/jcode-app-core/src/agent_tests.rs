@@ -23,6 +23,9 @@ mod desktop_selfdev;
 #[path = "agent_tests/compile_remote.rs"]
 mod compile_remote;
 
+#[path = "agent_tests/parallel_tools.rs"]
+mod parallel_tools;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,

@@ -148,6 +148,17 @@ impl Tool for ReadTool {
         })
     }
 
+    fn is_concurrency_safe(&self, input: &Value) -> bool {
+        let Some(file_path) = input.get("file_path").and_then(Value::as_str) else {
+            return false;
+        };
+        let path = Path::new(file_path);
+        // Image reads can render to the shared terminal and invoke a synchronous
+        // converter. PDF extraction runs a synchronous parser without a
+        // cancellation boundary. Keep both out of the initial text-read rollout.
+        !is_image_file(path) && !is_pdf_file(path)
+    }
+
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ReadInput = serde_json::from_value(input)?;
         let range = normalize_read_range(&params)?;

@@ -109,35 +109,15 @@ fn test_websocket_continuation_request_excludes_transport_fields() {
         Some(160_000),
     );
 
-    let mut continuation = serde_json::json!({
-        "type": "response.create",
-        "previous_response_id": "resp_abc123",
-        "input": [{"role": "user", "content": "follow up"}],
-    });
-
-    if let Some(model) = base_request.get("model") {
-        continuation["model"] = model.clone();
-    }
-    if let Some(tools) = base_request.get("tools") {
-        continuation["tools"] = tools.clone();
-    }
-    if let Some(instructions) = base_request.get("instructions") {
-        continuation["instructions"] = instructions.clone();
-    }
-    if let Some(context_management) = base_request.get("context_management") {
-        continuation["context_management"] = context_management.clone();
-    }
-    if let Some(service_tier) = base_request.get("service_tier") {
-        continuation["service_tier"] = service_tier.clone();
-    }
-    if let Some(prompt_cache_key) = base_request.get("prompt_cache_key") {
-        continuation["prompt_cache_key"] = prompt_cache_key.clone();
-    }
-    if let Some(prompt_cache_retention) = base_request.get("prompt_cache_retention") {
-        continuation["prompt_cache_retention"] = prompt_cache_retention.clone();
-    }
-    continuation["store"] = serde_json::json!(false);
-    continuation["parallel_tool_calls"] = serde_json::json!(false);
+    let continuation = openai_stream_runtime::build_continuation_request(
+        &base_request,
+        "resp_abc123",
+        &[serde_json::json!({"role": "user", "content": "follow up"})],
+    );
+    assert_eq!(
+        continuation["parallel_tool_calls"],
+        base_request["parallel_tool_calls"]
+    );
 
     assert!(
         continuation.get("stream").is_none(),

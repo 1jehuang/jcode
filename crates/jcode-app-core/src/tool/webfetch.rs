@@ -71,6 +71,10 @@ impl Tool for WebFetchTool {
         })
     }
 
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        true
+    }
+
     async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         let params: WebFetchInput = serde_json::from_value(input)?;
 
