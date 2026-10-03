@@ -580,6 +580,62 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn run_turn_start_collecting_honors_hooks_suppressed() {
+        // Contract: when JCODE_HOOKS_DISABLED is set (tests, embedders), the
+        // turn_start collector must return None WITHOUT executing the
+        // configured hook. Guards unit tests against executing the
+        // developer's real hooks (proven leak: fable guardrail test).
+        let lock = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let marker = temp.path().join("marker.txt");
+        let script = write_executable_script(
+            temp.path(),
+            "turn_start_hook.sh",
+            &format!(
+                "#!/bin/sh\necho leaked-banner\necho ran >> {}\nexit 0\n",
+                crate::terminal_launch::sh_escape(&marker.to_string_lossy())
+            ),
+        );
+        // Configure via the documented env override (same surface users get
+        // with JCODE_HOOK_TURN_START); avoids coupling the test to config-file
+        // discovery details.
+        let prev_hook = std::env::var_os("JCODE_HOOK_TURN_START");
+        crate::env::set_var("JCODE_HOOK_TURN_START", script.to_string_lossy().to_string());
+        crate::config::invalidate_config_cache();
+
+        // Suppressed: collector is a no-op and the hook never runs.
+        let prev_suppress = std::env::var_os("JCODE_HOOKS_DISABLED");
+        crate::env::set_var("JCODE_HOOKS_DISABLED", "1");
+        crate::config::invalidate_config_cache();
+        assert_eq!(run_turn_start_collecting(Some("ses"), None, "test"), None);
+        assert!(!marker.exists(), "hook must not execute while suppressed");
+
+        // Unsuppressed: hook runs and its stdout is collected.
+        match prev_suppress {
+            Some(v) => crate::env::set_var("JCODE_HOOKS_DISABLED", v),
+            None => crate::env::remove_var("JCODE_HOOKS_DISABLED"),
+        }
+        crate::config::invalidate_config_cache();
+        let collected = run_turn_start_collecting(Some("ses"), None, "test");
+        assert_eq!(
+            collected.as_deref(),
+            Some("leaked-banner"),
+            "unexpected collection: {collected:?}"
+        );
+        assert!(marker.exists(), "hook should have executed");
+
+        // Restore outer env (process-global; lock guarantees exclusivity).
+        crate::env::remove_var("JCODE_HOOKS_DISABLED");
+        match prev_hook {
+            Some(v) => crate::env::set_var("JCODE_HOOK_TURN_START", v),
+            None => crate::env::remove_var("JCODE_HOOK_TURN_START"),
+        }
+        crate::config::invalidate_config_cache();
+        drop(lock);
+    }
+
+    #[cfg(unix)]
     fn write_executable_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
