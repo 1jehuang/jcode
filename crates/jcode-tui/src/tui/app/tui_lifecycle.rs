@@ -83,6 +83,18 @@ impl App {
                 self.pending_turn = true;
             }
         }
+
+        // A reload rebuilds this client's view of the session, and for that
+        // window the plan is unreadable. A re-arm judged right here would read
+        // an empty plan, decline, and never be retried, so an interrupt that
+        // happened before the reload would leave auto-poke disarmed until the
+        // user typed again. Record that the decision is still owed instead, so
+        // `settle_deferred_auto_poke_rearm` can arm once the plan actually
+        // arrives with the history.
+        //
+        // `defer_auto_poke_rearm` latches only when the session default is on,
+        // so an explicit `/poke off` records nothing and still wins.
+        crate::tui::app::commands::defer_auto_poke_rearm(self);
     }
 
     /// Re-parse keybinding snapshots when the config cache has reloaded.

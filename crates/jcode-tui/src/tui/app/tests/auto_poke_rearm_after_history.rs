@@ -1,0 +1,367 @@
+// Auto-poke re-arm must survive the window in which the plan is not in view.
+//
+// The re-arm is judged from more than one place. A user turn reaches
+// `begin_remote_send`, but that send is also reachable before the bootstrap
+// History payload has been applied, so a re-arm judged there reads an empty
+// plan, declines, and is never retried. One Esc interrupt would then leave
+// auto-poke disarmed for the rest of the session even though the plan still had
+// open items.
+//
+// Each test below names one falsifiable guarantee. If the defer/settle pair is
+// ever narrowed to the remote send path again, or the owed-rearm latch is
+// dropped, the specific assertion that fails says which guarantee went.
+
+fn rearm_test_app() -> crate::tui::app::App {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app
+}
+
+fn pending_todo(id: &str) -> crate::todo::TodoItem {
+    crate::todo::TodoItem {
+        group: None,
+        id: id.to_string(),
+        content: "Still open".to_string(),
+        status: "pending".to_string(),
+        priority: "high".to_string(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+        confidence: None,
+        completion_confidence: None,
+        confidence_history: Vec::new(),
+    }
+}
+
+/// A reload with nothing queued and no startup prompt: the shape
+/// `apply_restored_reload_input` sees for a plain `/reload` of a session that
+/// had no pending input.
+fn restored_reload_input_fixture() -> crate::tui::app::state_ui::RestoredReloadInput {
+    crate::tui::app::state_ui::RestoredReloadInput {
+        input: String::new(),
+        cursor: 0,
+        pending_images: Vec::new(),
+        submit_on_restore: false,
+        queued_messages: Vec::new(),
+        hidden_queued_system_messages: Vec::new(),
+        startup_status_notice: None,
+        startup_display_message: None,
+        interleave_message: None,
+        pending_soft_interrupts: Vec::new(),
+        pending_soft_interrupt_resend: None,
+        rate_limit_pending_message: None,
+        rate_limit_reset: None,
+        observe_mode_enabled: false,
+        observe_page_markdown: String::new(),
+        observe_page_updated_at_ms: 0,
+        split_view_enabled: false,
+        todos_view_enabled: false,
+        todo_confidence_spike_challenged: false,
+        last_todo_ownership_fingerprint: None,
+        final_response_todo_fingerprint: None,
+    }
+}
+
+#[test]
+fn restored_reload_input_defers_auto_poke_rearm_until_the_plan_is_loaded() {
+    with_temp_jcode_home(|| {
+        let mut app = rearm_test_app();
+        // An episode-scoped stop (Esc interrupt, provider guardrail, dead
+        // credential, non-retryable error) disarmed auto-poke but kept the
+        // session default, so the feature owes itself a re-arm.
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = true;
+        // The plan is empty while the client's view of the session is being
+        // rebuilt, which is exactly the state a single-point re-arm judged and
+        // lost.
+        crate::todo::save_todos(&app.session.id, &[]).expect("save empty plan");
+        assert!(
+            crate::tui::app::commands::incomplete_poke_todos(&app).is_empty(),
+            "fixture precondition: no plan is visible yet"
+        );
+
+        app.apply_restored_reload_input(restored_reload_input_fixture());
+        assert!(
+            app.auto_poke_rearm_owed,
+            "a reload must record that the re-arm decision is still owed"
+        );
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "an empty plan must not arm anything by itself"
+        );
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        assert!(!remote.has_loaded_history());
+
+        // Still pre-history: the debt has to survive this pass untouched.
+        rt.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        assert!(app.auto_poke_rearm_owed, "the debt must not be dropped");
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "nothing may be armed while the plan is unreadable"
+        );
+
+        // The plan arrives with the session it belongs to.
+        let restored_session = "ses_reloaded_with_open_plan";
+        app.remote_session_id = Some(restored_session.to_string());
+        crate::todo::save_todos(restored_session, &[pending_todo("todo-1")])
+            .expect("save plan with an unfinished task");
+        remote.mark_history_loaded();
+        rt.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+
+        // Deliberately NOT the reference's placement, and the divergence is
+        // intentional rather than a convenience. The reference arms as soon as
+        // history arrives. Here `settle_deferred_auto_poke_rearm` has exactly one
+        // caller - `schedule_auto_poke_followup_if_needed` - because that is the
+        // single place that decides whether to talk to the model. Arming on
+        // history arrival would leave the flag armed with no poke behind it, and
+        // a session that is idle after a reload has no unfinished turn for a
+        // poke to be about. What matters is that the decision is not LOST: it
+        // survives the window and is acted on the moment something can act.
+        assert!(
+            app.auto_poke_rearm_owed,
+            "the debt must survive until something can actually act on it"
+        );
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "arming must not happen merely because history landed"
+        );
+
+        assert!(
+            crate::tui::app::commands::settle_deferred_auto_poke_rearm(&mut app),
+            "once the plan is genuinely visible the owed re-arm must settle to armed"
+        );
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "a settled re-arm leaves auto-poke armed"
+        );
+        assert!(
+            !app.auto_poke_rearm_owed,
+            "the debt is settled once auto-poke is armed again"
+        );
+    });
+}
+
+#[test]
+fn explicit_poke_off_is_never_rearmed_after_history_loads() {
+    with_temp_jcode_home(|| {
+        // `/poke off` before the debt is recorded: nothing may be owed at all.
+        let mut app = rearm_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+        crate::tui::app::commands::disable_auto_poke(&mut app);
+        assert!(!app.auto_poke_default_on, "fixture precondition");
+
+        app.apply_restored_reload_input(restored_reload_input_fixture());
+        assert!(
+            !app.auto_poke_rearm_owed,
+            "an explicit /poke off must not even record a debt"
+        );
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        // Pre-history pass, then the plan lands. Still no arm.
+        rt.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        let session = "ses_reloaded_after_poke_off";
+        app.remote_session_id = Some(session.to_string());
+        crate::todo::save_todos(session, &[pending_todo("todo-1")]).expect("save plan");
+        remote.mark_history_loaded();
+        rt.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "/poke off must survive the deferred re-arm path"
+        );
+        assert!(
+            !app.auto_poke_default_on,
+            "/poke off must stay a whole-session decision"
+        );
+        assert!(!app.auto_poke_rearm_owed);
+
+        // The dangerous ordering: the debt is already recorded and the user
+        // turns the feature off before history lands. Settling must respect the
+        // off, not the older debt.
+        let mut app = rearm_test_app();
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = true;
+        crate::todo::save_todos(&app.session.id, &[]).expect("save empty plan");
+        app.apply_restored_reload_input(restored_reload_input_fixture());
+        assert!(app.auto_poke_rearm_owed, "fixture precondition: debt is owed");
+
+        crate::tui::app::commands::disable_auto_poke(&mut app);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        rt.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        let session = "ses_reloaded_poke_off_after_debt";
+        app.remote_session_id = Some(session.to_string());
+        crate::todo::save_todos(session, &[pending_todo("todo-2")]).expect("save plan");
+        remote.mark_history_loaded();
+        rt.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "a debt recorded before /poke off must not re-arm the feature"
+        );
+        assert!(!app.auto_poke_default_on);
+        assert!(
+            !app.auto_poke_rearm_owed,
+            "the debt must be dropped once the session turned the feature off"
+        );
+    });
+}
+
+#[test]
+fn deferred_rearm_arms_state_without_sending_a_poke() {
+    with_temp_jcode_home(|| {
+        // The re-arm is pure state on purpose.
+        // `schedule_auto_poke_followup_if_needed` is the single thing that
+        // decides to talk to the model at the end of a turn; emitting from the
+        // re-arm would produce nudges where no reminder belongs.
+        let mut app = rearm_test_app();
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = true;
+        crate::todo::save_todos(&app.session.id, &[]).expect("save empty plan");
+        app.apply_restored_reload_input(restored_reload_input_fixture());
+        assert!(app.auto_poke_rearm_owed, "fixture precondition: debt is owed");
+
+        let session = "ses_reloaded_pure_state";
+        app.remote_session_id = Some(session.to_string());
+        crate::todo::save_todos(session, &[pending_todo("todo-1")]).expect("save plan");
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        rt.block_on(crate::tui::app::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+
+        assert!(app.auto_poke_incomplete_todos, "the arm happened");
+        assert!(
+            app.queued_messages.is_empty(),
+            "the re-arm must not queue a poke: the end-of-turn scheduler owns that"
+        );
+        assert!(
+            !app.pending_turn && !app.is_processing,
+            "the re-arm must not start a turn"
+        );
+        assert!(
+            app.display_messages()
+                .iter()
+                .all(|message| !crate::tui::app::commands::is_poke_message(
+                    &message.content
+                )),
+            "the re-arm must not echo a poke into the transcript"
+        );
+    });
+}
+
+/// The local send path never reaches `begin_remote_send`, so if the re-arm were
+/// only wired there, one Esc in a local TUI would leave auto-poke disarmed for
+/// the rest of the session even with the plan unfinished.
+///
+/// This drives the real `submit_input` rather than calling the re-arm directly,
+/// so it fails if the wiring is missing, not only if the function misbehaves.
+#[test]
+fn local_user_turn_rearms_auto_poke_after_an_episode_stop() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        assert!(!app.is_remote, "fixture precondition: a local session");
+
+        crate::todo::save_todos(&app.session.id, &[pending_todo("todo-local-rearm")])
+            .expect("save todos");
+
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+        // What Esc does: the episode ends, the session default survives.
+        crate::tui::app::commands::stop_auto_poke_episode(&mut app);
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "fixture precondition: disarmed"
+        );
+        assert!(
+            app.auto_poke_default_on,
+            "fixture precondition: default on"
+        );
+
+        app.input = "keep going".to_string();
+        app.cursor_pos = app.input.len();
+        app.submit_input();
+
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "a local user turn must re-arm auto-poke while the plan is unfinished"
+        );
+        assert!(
+            app.auto_poke_default_on,
+            "the session default must survive: the user never turned the feature off"
+        );
+    });
+}
+
+/// A local session must not drop an owed re-arm just because the user typed
+/// while no plan was visible yet.
+///
+/// `rearm_auto_poke_if_plan_unfinished` declines when `incomplete_poke_todos` is
+/// empty, and "not decided yet" is not "nothing to do": the agent can create
+/// todos later in that same turn. `defer_auto_poke_rearm` is the only thing that
+/// turns a decline into a retry, and if it is reachable only from the remote
+/// send path then a local `submit_input` calls the re-arm directly, latches
+/// nothing, and the decline is dropped permanently.
+#[test]
+fn local_rearm_debt_survives_a_user_turn_with_no_visible_plan() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        assert!(!app.is_remote, "fixture precondition: a local session");
+
+        // What an episode-scoped stop leaves behind: disarmed, session default on.
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = true;
+
+        // The user types at a moment when nothing is unfinished, so the re-arm
+        // cannot decide.
+        crate::todo::save_todos(&app.session.id, &[]).expect("save a completed plan");
+        app.input = "now do the next thing".to_string();
+        app.cursor_pos = app.input.len();
+        app.submit_input();
+
+        // That turn creates new work and stops with it unfinished. Simulate the
+        // end of the turn so the arm flag is the only thing that can block.
+        crate::todo::save_todos(&app.session.id, &[pending_todo("todo-after-the-gap")])
+            .expect("save the new plan");
+        app.pending_turn = false;
+        app.pending_queued_dispatch = false;
+
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "an owed re-arm must not be dropped by a user turn that saw no plan: \
+             the work created after it would never be poked"
+        );
+        assert!(
+            app.auto_poke_default_on,
+            "the session default must survive: the user never turned the feature off"
+        );
+    });
+}

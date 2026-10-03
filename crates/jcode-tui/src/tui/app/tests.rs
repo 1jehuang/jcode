@@ -10,6 +10,7 @@ include!("tests/state_model_poke_01/part_02.rs");
 include!("tests/state_model_poke_02/part_01.rs");
 include!("tests/state_model_poke_02/part_02.rs");
 include!("tests/state_model_poke_03.rs");
+include!("tests/auto_poke_rearm_after_history.rs");
 include!("tests/remote_startup_input_01/part_01.rs");
 include!("tests/remote_startup_input_01/part_02.rs");
 include!("tests/remote_startup_input_02/part_01.rs");
