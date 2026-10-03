@@ -1129,7 +1129,15 @@ impl Agent {
                         None,
                     ) {
                         Some((_path, substitution, nchunks)) => {
-                            *content = substitution;
+                            // O1 byte-min floor: the substitution must never
+                            // exceed the original. Single-chunk refs carry
+                            // ~600 chars of path/cue/recipe overhead, so
+                            // small (200-600 char) results EXPAND when
+                            // offloaded — pure waste plus cache churn, zero
+                            // recoverability gain. Keep the original.
+                            if substitution.chars().count() < was {
+                                *content = substitution;
+                            }
                             jcode_base::cache_invalidation::record(
                                 "tool-result clearing",
                                 format!(

@@ -625,14 +625,16 @@ fn tool_result_clearing_counts_characters_not_bytes() {
         ContentBlock::ToolResult { content, .. } => assert_eq!(content, &cjk),
         other => panic!("CJK result under policy must survive, got: {other:?}"),
     }
-    // 300 CJK chars = 900 bytes: over policy, offloaded with char count.
+    // 300 CJK chars = 900 bytes: over policy. O1 byte-min floor: the
+    // substitution (~600 chars of path/cue/recipe) EXCEEDS the 300-char
+    // original, so the original is kept (offload file still written).
     let big_cjk = "\u{4e2d}".repeat(300);
     let two_big = vec![
         Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "call_big".to_string(),
-                content: big_cjk,
+                content: big_cjk.clone(),
                 is_error: None,
             }],
             timestamp: None,
@@ -642,11 +644,11 @@ fn tool_result_clearing_counts_characters_not_bytes() {
     ];
     let out = Agent::apply_tool_result_clearing(two_big, TEST_SESSION_ID);
     match &out[0].content[0] {
-        ContentBlock::ToolResult { content, .. } => assert!(
-            content.starts_with("[jcode-retention:offloaded was 300 chars,"),
-            "got: {content}"
+        ContentBlock::ToolResult { content, .. } => assert_eq!(
+            content, &big_cjk,
+            "byte-min floor must keep short original, got: {content}"
         ),
-        other => panic!("big CJK result must offload with char count, got: {other:?}"),
+        other => panic!("big CJK result must survive via floor, got: {other:?}"),
     }
 
     if let Some(prev) = prev_home {
@@ -1101,8 +1103,9 @@ fn tool_result_guard_prefix_no_collision() {
     crate::config::Config::invalidate_cache();
 
     // Genuine tool output starting with the OLD literal must STILL mask:
-    // the new matcher keys on [jcode-retention: only.
-    let adversarial = "[cleared by retention: was 1 chars]".to_string() + &"q".repeat(500);
+    // the new matcher keys on [jcode-retention: only. Fixture sized past
+    // the O1 byte-min floor (substitution ~600 chars) so masking engages.
+    let adversarial = "[cleared by retention: was 1 chars]".to_string() + &"q".repeat(2000);
     let messages = vec![
         Message {
             role: Role::User,
