@@ -97,21 +97,53 @@ impl Agent {
         pending
     }
 
+    fn context_budget_section(&self) -> Option<String> {
+        let limit = self.provider.context_window() as u64;
+        if limit == 0 {
+            return None;
+        }
+        let compaction = self.registry.compaction();
+        let Ok(manager) = compaction.try_read() else {
+            return None;
+        };
+        let used = manager.effective_token_count() as u64;
+        if used <= 0 {
+            return None;
+        }
+        crate::logging::info(&format!(
+            "CONTEXT_BUDGET_REMINDER used={used} limit={limit}"
+        ));
+        Some(format!(
+            "Context budget: {used} of {limit} tokens in use ({:.1}%). Judge how much room is \
+             left from this figure and not from an earlier one, because compaction resets it. \
+             Compaction here is normal policy, not a failure: it runs proactively on an EWMA \
+             forecast as the window fills, and only runs emergently after a context-limit error.",
+            (used as f64 / limit as f64) * 100.0
+        ))
+    }
+
     fn append_current_turn_system_reminder(&self, split: &mut crate::prompt::SplitSystemPrompt) {
-        let Some(reminder) = self
+        let mut sections: Vec<String> = Vec::new();
+        if let Some(budget) = self.context_budget_section() {
+            sections.push(budget);
+        }
+        if let Some(reminder) = self
             .current_turn_system_reminder
             .as_ref()
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
-        else {
+        {
+            sections.push(reminder.to_string());
+        }
+        if sections.is_empty() {
             return;
-        };
+        }
 
         if !split.dynamic_part.is_empty() {
             split.dynamic_part.push_str("\n\n");
         }
         split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(reminder);
+        split.dynamic_part.push_str(&sections.join("\n\n"));
     }
 
     /// Build split system prompt for better caching

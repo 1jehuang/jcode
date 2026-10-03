@@ -94,6 +94,11 @@ fn merge_reminder_sections(parts: [Option<String>; 3]) -> Option<String> {
 /// never disagree.
 pub(super) fn context_budget_turn_reminder(app: &App) -> Option<String> {
     let limit = app.context_limit;
+    let observed = app.current_stream_context_tokens();
+    crate::logging::info(&format!(
+        "CONTEXT_BUDGET_REMINDER limit={limit} observed={observed:?} stale={}",
+        app.streaming.streaming_context_stale
+    ));
     if limit == 0 {
         return None;
     }
