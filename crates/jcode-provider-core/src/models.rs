@@ -333,8 +333,14 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
 
     // --- Z.AI GLM family ---
     if m.contains("glm") {
-        // GLM-5.2: first GLM with a truly usable 1M-token context window.
-        if m.contains("glm-5.2") || m.contains("glm-52") || m.contains("glm-5p2") {
+        // GLM-5.2 and GLM-5.3 support a 1M-token context window.
+        if m.contains("glm-5.2")
+            || m.contains("glm-5.3")
+            || m.contains("glm-52")
+            || m.contains("glm-53")
+            || m.contains("glm-5p2")
+            || m.contains("glm-5p3")
+        {
             return Some(1_000_000);
         }
         // GLM-5 / GLM-5.1 and GLM-4.6 / GLM-4.7: 200K context.
@@ -548,6 +554,25 @@ mod tests {
     fn bare_k3_resolves_globally_to_one_million_context() {
         // Global resolution path used by the TUI meter and compaction budget (#577).
         assert_eq!(context_limit_for_model("k3"), Some(1_048_576));
+    }
+
+    #[test]
+    fn glm_53_family_resolves_to_one_million_context() {
+        for model in [
+            "glm-5.3",
+            "glm-5.3-flash",
+            "glm-5.3-flashx",
+            "zai-org/glm-5.3",
+            "glm-53",
+            "glm-5p3-flash",
+        ] {
+            assert_eq!(
+                open_weight_family_context_limit(model),
+                Some(1_000_000),
+                "unexpected context limit for {model}"
+            );
+        }
+        assert_eq!(open_weight_family_context_limit("glm-5.1"), Some(200_000));
     }
 
     #[test]
