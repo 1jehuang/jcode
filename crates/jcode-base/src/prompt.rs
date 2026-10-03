@@ -1058,19 +1058,6 @@ fn load_agents_md_files_from_dirs(
         contents.push(content);
     }
 
-    // Cross-session progress state (U4 historian-lite). Project-dir only by
-    // design — progress belongs to one project, never global. State, not
-    // instructions: loads AFTER the instruction files. Off by absence: no
-    // file means no bytes and no behavior change. The model owns the write
-    // side (updates via edit at milestones + session end); core only reads.
-    let project_progress_md = project_dir.join("PROGRESS.md");
-    if let Some((content, size)) = load_file(&project_progress_md, "Project Progress (PROGRESS.md)")
-    {
-        info.has_project_progress_md = true;
-        info.project_progress_md_chars = size;
-        contents.push(content);
-    }
-
     if contents.is_empty() {
         (None, info)
     } else {
