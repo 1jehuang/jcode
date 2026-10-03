@@ -105,6 +105,7 @@ pub mod telemetry {
 pub mod terminal_launch;
 pub mod todo;
 pub mod transcript_rules;
+pub mod transcript_recorder;
 pub mod transcript_sample;
 pub mod transport;
 pub mod usage;

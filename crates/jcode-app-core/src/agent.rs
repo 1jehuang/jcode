@@ -1582,6 +1582,54 @@ impl Agent {
             crate::telemetry::SessionEndReason::NormalExit,
         );
         self.fire_session_lifecycle_hook("session_end", "close");
+        // R3 episode recorder: scan the closing transcript for high-signal
+        // correction/preference/procedure patterns and persist episodes for
+        // future rule proposals. Fail-open (records nothing on any error),
+        // zero behavior change otherwise.
+        Self::record_transcript_episodes(&self.session.messages, &self.session.id);
+    }
+
+    /// Session-end episode scan (R3 wiring). Extracts user text + assistant
+    /// tool-call names from stored messages, scans for episodes, appends to
+    /// the persisted rule buffer. Best-effort: never panics, never propagates.
+    fn record_transcript_episodes(
+        messages: &[StoredMessage],
+        session_id: &str,
+    ) {
+        let outcome = std::panic::catch_unwind(|| {
+            let mut user_texts = Vec::new();
+            let mut tool_names = Vec::new();
+            for msg in messages {
+                if msg.role == Role::User {
+                    for block in &msg.content {
+                        if let ContentBlock::Text { text, .. } = block {
+                            user_texts.push(text.clone());
+                        }
+                    }
+                } else if msg.role == Role::Assistant {
+                    for block in &msg.content {
+                        if let ContentBlock::ToolUse { name, .. } = block {
+                            tool_names.push(name.clone());
+                        }
+                    }
+                }
+            }
+            let scope = jcode_base::transcript_rules::RuleScope::Project;
+            let mut episodes = jcode_base::transcript_recorder::scan_user_text(
+                &user_texts,
+                session_id,
+                scope,
+            );
+            episodes.extend(jcode_base::transcript_recorder::scan_tool_runs(
+                &tool_names,
+                session_id,
+                scope,
+            ));
+            jcode_base::transcript_recorder::append_episodes(&episodes);
+        });
+        if outcome.is_err() {
+            eprintln!("transcript episode recorder panicked; buffer unchanged");
+        }
     }
 
     /// Fire a compaction lifecycle observer hook (`compaction_started` /
