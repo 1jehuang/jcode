@@ -371,16 +371,23 @@ fn local_rearm_debt_survives_a_user_turn_with_no_visible_plan() {
 /// at the flag (`auto_poke_incomplete_todos`), which is necessary but not
 /// sufficient - a session can be armed and still never poke.
 ///
-/// This drives the whole chain, including the parts that can silently swallow it:
-/// the unchanged-todo fingerprint guard (`last_auto_poke_fingerprint`), which
-/// would decline a re-poke against an unchanged plan unless the episode stop
-/// cleared it, and the `has_queued_followups` guard, which would decline while
-/// the interrupted turn's leftovers are still queued.
+/// This asserts the user-visible outcome (a poke is actually queued) rather than
+/// the internal flag, so it fails on the silent stall where auto-poke looks
+/// enabled but nothing ever fires.
 ///
-/// Discriminates: if `stop_auto_poke_episode` stopped clearing the fingerprint,
-/// step 3 fires and step 6 returns false, because the plan has not changed since
-/// the poke that the interrupt cancelled. Armed-but-silent is exactly the bug
-/// class this file exists to catch.
+/// Discriminating power, verified by mutation: forcing
+/// `auto_poke_incomplete_todos = false` after `submit_input()` - i.e. simulating
+/// pre-71f05d1b1, where `submit_input` had no re-arm call - makes this test
+/// FAIL with "must produce a REAL poke, not leave the session armed and silent".
+/// It PASSES on current code. So it genuinely pins the `submit_input` re-arm
+/// wiring rather than restating the flag.
+///
+/// Note: an earlier attempt to prove this via the fingerprint guard did NOT
+/// discriminate. Restoring `last_auto_poke_fingerprint` after the episode stop
+/// still passed, because `rearm_auto_poke_if_plan_unfinished` clears the
+/// fingerprint itself on the re-arm path (`commands.rs:285`). The fingerprint
+/// reset in `stop_auto_poke_episode` is therefore redundant on this path rather
+/// than load-bearing.
 #[test]
 fn interrupted_poke_is_replaced_by_a_real_new_poke_on_the_next_user_turn() {
     with_temp_jcode_home(|| {
