@@ -224,6 +224,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         && Instant::now() >= reset_time
     {
         app.rate_limit_reset = None;
+        let account_change_resend = app.account_change_resend_at.take() == Some(reset_time);
         if !app.is_processing
             && let Some(pending) = app.rate_limit_pending_message.clone()
         {
@@ -237,26 +238,30 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 app.status = ProcessingStatus::Idle;
                 app.status_detail = None;
             }
-            let status = if pending.auto_retry {
-                format!(
-                    "✓ Retrying continuation...{}",
-                    if pending.is_system {
-                        " (system message)"
-                    } else {
-                        ""
-                    }
-                )
-            } else {
-                format!(
-                    "✓ Rate limit reset. Retrying...{}",
-                    if pending.is_system {
-                        " (system message)"
-                    } else {
-                        ""
-                    }
-                )
-            };
-            app.push_display_message(DisplayMessage::system(status));
+            // An account change already announced this resend; do not also
+            // claim the old account's limit reset.
+            if !account_change_resend {
+                let status = if pending.auto_retry {
+                    format!(
+                        "✓ Retrying continuation...{}",
+                        if pending.is_system {
+                            " (system message)"
+                        } else {
+                            ""
+                        }
+                    )
+                } else {
+                    format!(
+                        "✓ Rate limit reset. Retrying...{}",
+                        if pending.is_system {
+                            " (system message)"
+                        } else {
+                            ""
+                        }
+                    )
+                };
+                app.push_display_message(DisplayMessage::system(status));
+            }
             let _ = begin_remote_send(
                 app,
                 remote,

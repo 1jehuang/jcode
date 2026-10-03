@@ -293,6 +293,7 @@ pub(super) async fn handle_debug_client(
                     id: 0,
                     message: format!("Invalid request: {}", e),
                     retry_after_secs: None,
+                    server_resumes: false,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
@@ -348,6 +349,7 @@ pub(super) async fn handle_debug_client(
                         id,
                         message: err.to_string(),
                         retry_after_secs: None,
+                        server_resumes: false,
                     },
                 };
                 let json = encode_event(&event);
@@ -364,6 +366,7 @@ pub(super) async fn handle_debug_client(
                         id,
                         message: "Debug control is disabled. Set JCODE_DEBUG_CONTROL=1, enable display.debug_socket, or start the shared server from a self-dev session.".to_string(),
                         retry_after_secs: None,
+                        server_resumes: false,
                     };
                     let json = encode_event(&event);
                     writer.write_all(json.as_bytes()).await?;
@@ -565,6 +568,7 @@ pub(super) async fn handle_debug_client(
                     id: request.id(),
                     message: "Debug socket only allows ping, state, and debug_command".to_string(),
                     retry_after_secs: None,
+                    server_resumes: false,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;

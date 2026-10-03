@@ -71,6 +71,7 @@ pub(super) async fn handle_comm_propose_plan(
                 id,
                 message: "Not in a swarm.".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -94,6 +95,7 @@ pub(super) async fn handle_comm_propose_plan(
             id,
             message: "No coordinator for this swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -110,6 +112,7 @@ pub(super) async fn handle_comm_propose_plan(
                 id,
                 message,
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -207,6 +210,7 @@ pub(super) async fn handle_comm_propose_plan(
             id,
             message,
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -714,6 +718,7 @@ async fn require_coordinator_swarm(
             id,
             message: permission_error.to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     }
@@ -725,6 +730,7 @@ async fn require_coordinator_swarm(
                 id,
                 message: "Not in a swarm.".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             None
         }

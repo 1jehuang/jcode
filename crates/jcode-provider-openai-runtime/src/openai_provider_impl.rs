@@ -107,6 +107,10 @@ impl Provider for OpenAIProvider {
             }
         }
         let input_item_count = input.len();
+        // Pick up an account switch or relogin before anything reads the
+        // cached credential, so a persistent websocket bound to the previous
+        // account is dropped by its identity check instead of reused.
+        super::openai_stream_runtime::sync_with_stored_credentials(&self.credentials).await;
         let request = self.response_request(&input, tools, system).await;
         let model_id = openai_request_model(&request);
         let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);

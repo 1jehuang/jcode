@@ -372,6 +372,7 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
             id: 9,
             message: "rate limited".to_string(),
             retry_after_secs: Some(3),
+            server_resumes: false,
         },
         &mut remote,
     );

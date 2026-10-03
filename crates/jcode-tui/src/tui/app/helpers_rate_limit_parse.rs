@@ -124,3 +124,20 @@ mod rate_limit_parse_tests {
         assert_eq!(parse_rate_limit_error(err), Some(Duration::from_secs(30)));
     }
 }
+
+#[cfg(test)]
+mod anthropic_usage_limit_parse_tests {
+    use super::parse_rate_limit_error;
+    use std::time::Duration;
+
+    /// The Anthropic runtime fails fast on a usage limit that resets hours
+    /// away. The hold must pick up that reset time, not a bogus short retry.
+    #[test]
+    fn anthropic_fail_fast_usage_limit_message_parses_reset() {
+        let err = "Anthropic API error (429 Too Many Requests): {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"}} Usage limit reached for this Claude account; resets in 3h 17m (2026-09-29 23:43 UTC).";
+        assert_eq!(
+            parse_rate_limit_error(err),
+            Some(Duration::from_secs(3 * 3600 + 17 * 60))
+        );
+    }
+}
