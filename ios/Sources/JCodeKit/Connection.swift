@@ -36,17 +36,20 @@ public actor Connection {
         public var maxReconnectAttempts: Int?
         /// Base backoff delay in seconds, doubled per attempt and capped at 30s.
         public var baseBackoffSeconds: Double
+        public var firstReplyTimeoutSeconds: Double
 
         public init(
             gateway: Gateway,
             authToken: String,
             maxReconnectAttempts: Int? = nil,
-            baseBackoffSeconds: Double = 1.0
+            baseBackoffSeconds: Double = 1.0,
+            firstReplyTimeoutSeconds: Double = 15
         ) {
             self.gateway = gateway
             self.authToken = authToken
             self.maxReconnectAttempts = maxReconnectAttempts
             self.baseBackoffSeconds = baseBackoffSeconds
+            self.firstReplyTimeoutSeconds = firstReplyTimeoutSeconds
         }
     }
 
@@ -57,10 +60,20 @@ public actor Connection {
     private var runTask: Task<Void, Never>?
     private var continuation: AsyncStream<ConnectionOutput>.Continuation?
     private var targetSessionID: String?
+    private var workingDirectory: String?
+    private var subscribeRequestID: UInt64?
+    private var historyRequestID: UInt64?
+    private var subscribeWasReattach = false
+    private var restartAsNewSession = false
+    private var retryReattachAfter: UInt64?
+    private var busyReattachAttempts = 0
+    private var busyReattachMessage: String?
+    static let maxBusyReattachAttempts = 5
     private var stopped = false
     /// Set when the server announced a reload; the next reconnect attempt
     /// skips backoff because the drop is expected and the server returns fast.
     private var expectServerReload = false
+    private var receivedSinceConnect = false
     /// Set when the server asked this client to close; reconnecting would
     /// fight the server, so the loop ends with a failed phase instead.
     private var closeRequestedReason: String?
@@ -77,8 +90,12 @@ public actor Connection {
 
     /// Starts the connection loop. The returned stream yields phase changes
     /// and decoded events until `stop()` is called or the stream is cancelled.
-    public func start(resumeSessionID: String? = nil) -> AsyncStream<ConnectionOutput> {
+    public func start(
+        resumeSessionID: String? = nil,
+        workingDirectory: String? = nil
+    ) -> AsyncStream<ConnectionOutput> {
         targetSessionID = resumeSessionID
+        self.workingDirectory = workingDirectory
         stopped = false
         expectServerReload = false
         closeRequestedReason = nil
@@ -129,9 +146,11 @@ public actor Connection {
                     authToken: configuration.authToken
                 )
                 self.transport = transport
-                yield(.phase(.connected))
-                attempt = 0
+                receivedSinceConnect = false
+                let watchdog = startFirstReplyWatchdog(transport: transport)
+                defer { watchdog.cancel() }
                 try await subscribeAndSync()
+                attempt = 0
                 try await receiveLoop(transport: transport)
                 // Clean close: fall through to reconnect.
             } catch {
@@ -150,6 +169,23 @@ public actor Connection {
             }
             self.transport = nil
             if Task.isCancelled || stopped { break }
+            if restartAsNewSession {
+                restartAsNewSession = false
+                await transport.close()
+                continue
+            }
+            if let seconds = retryReattachAfter {
+                retryReattachAfter = nil
+                await transport.close()
+                busyReattachAttempts += 1
+                if busyReattachAttempts > Self.maxBusyReattachAttempts {
+                    yield(.phase(.failed(reason: busyReattachMessage ?? "Session is busy on another connection")))
+                    return
+                }
+                yield(.phase(.reconnecting(attempt: busyReattachAttempts)))
+                try? await Task.sleep(nanoseconds: max(seconds, 1) * 1_000_000_000)
+                continue
+            }
             if let reason = closeRequestedReason {
                 await transport.close()
                 yield(.phase(.failed(reason: reason)))
@@ -175,13 +211,23 @@ public actor Connection {
 
     private func subscribeAndSync() async throws {
         let sessionID = targetSessionID
-        try await send { .subscribe(id: $0, targetSessionID: sessionID) }
-        try await send { .getHistory(id: $0) }
+        let directory = sessionID == nil ? workingDirectory : nil
+        subscribeWasReattach = sessionID != nil
+        subscribeRequestID = try await send {
+            .subscribe(
+                id: $0,
+                targetSessionID: sessionID,
+                workingDirectory: directory,
+                continueOnDisconnect: true
+            )
+        }
+        historyRequestID = try await send { .getHistory(id: $0) }
     }
 
     private func receiveLoop(transport: any WebSocketTransport) async throws {
         while !Task.isCancelled && !stopped {
             guard let text = try await transport.receiveText() else { return }
+            receivedSinceConnect = true
             // A frame may contain multiple newline-delimited events.
             for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
                 if let event = try? ServerEvent.decode(line: String(line)) {
@@ -193,12 +239,45 @@ public actor Connection {
                     case .sessionCloseRequested(let reason):
                         closeRequestedReason =
                             reason.isEmpty ? "Server closed this session" : reason
+                    case .error(let id, let message, _)
+                    where id == subscribeRequestID && subscribeWasReattach
+                        && workingDirectory != nil && message.hasPrefix("Unknown session "):
+                        targetSessionID = nil
+                        restartAsNewSession = true
+                        return
+                    case .error(let id, let message, let retryAfter?)
+                    where id == subscribeRequestID && subscribeWasReattach:
+                        retryReattachAfter = retryAfter
+                        busyReattachMessage = message
+                        return
+                    case .done(let id) where id == subscribeRequestID:
+                        continue
+                    case .history(let payload):
+                        busyReattachAttempts = 0
+                        busyReattachMessage = nil
+                        if payload.id == historyRequestID {
+                            historyRequestID = nil
+                            yield(.phase(.connected))
+                        }
+                    case .error(let id, let message, _) where id == subscribeRequestID:
+                        closeRequestedReason = message
                     default:
                         break
                     }
                     yield(.event(event))
                     if closeRequestedReason != nil { return }
                 }
+            }
+        }
+    }
+
+    private func startFirstReplyWatchdog(transport: any WebSocketTransport) -> Task<Void, Never> {
+        let seconds = configuration.firstReplyTimeoutSeconds
+        return Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            if await !self.receivedSinceConnect {
+                await transport.close()
             }
         }
     }
