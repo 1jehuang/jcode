@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::items_after_test_module))]
+
 use super::*;
 
 /// Estimate the height needed for an image in terminal rows

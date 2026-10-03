@@ -493,6 +493,9 @@ fn sort_json(value: &Value) -> Value {
         Value::Array(values) => Value::Array(values.iter().map(sort_json).collect()),
         Value::Object(values) => {
             let mut entries: Vec<_> = values.iter().collect();
+            // `sort_by_key` cannot return a reference into the element, so the
+            // only mechanical alternative would clone every key.
+            #[allow(clippy::unnecessary_sort_by)]
             entries.sort_by_key(|(left, _)| *left);
             Value::Object(
                 entries
