@@ -1406,7 +1406,21 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         id: 7,
         session_id: "not-in-swarm".to_string(),
     };
-    let payload = serde_json::to_string(&request).expect("serialize request") + "\n";
+    // One-shot connections carry no attached session, so a `Comm*` request on
+    // this path must present the in-process capability for the session it
+    // names. Minting it here mirrors what `communicate/transport.rs` does for
+    // the real in-tree producer.
+    let payload = {
+        let mut value = serde_json::to_value(&request).expect("serialize request");
+        value
+            .as_object_mut()
+            .expect("request object")
+            .insert(
+                super::super::comm_auth::CAPABILITY_FIELD.to_string(),
+                serde_json::Value::String(super::super::comm_auth::mint("not-in-swarm")),
+            );
+        serde_json::to_string(&value).expect("serialize request") + "\n"
+    };
     client_writer
         .write_all(payload.as_bytes())
         .await

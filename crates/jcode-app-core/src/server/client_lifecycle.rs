@@ -16,6 +16,7 @@ use super::client_lifecycle_logging::{
     ServerRequestLifecycleFields, interrupt_request_log_fields, request_payload_summary,
     request_type_from_line, request_type_is_read_only, server_request_lifecycle_fields,
 };
+use super::comm_auth::{comm_claimed_session, reject_unauthorized_comm};
 use super::client_lightweight_control::{
     LightweightControlContext, handle_lightweight_control_request, parse_swarm_spawn_mode,
 };
@@ -505,6 +506,7 @@ pub(super) async fn handle_client(
                     let keep_connection_open = matches!(request, Request::Ping { .. });
                     handle_lightweight_control_request(
                         request,
+                        &line,
                         Arc::clone(&writer),
                         LightweightControlContext {
                             sessions: &sessions,
@@ -1052,6 +1054,19 @@ pub(super) async fn handle_client(
             line.len(),
         ) {
             crate::logging::info(&format!("SERVER_INTERRUPT_REQUEST_DECODED {}", fields));
+        }
+
+        // Session ownership gate for `Comm*` requests on a subscribed
+        // connection. Every `Comm*` variant names its caller in one field and
+        // its target in a separate one, so comparing that caller field against
+        // this connection's own id bounds authority to the connection's own
+        // session. Rejected before dispatch so no handler ever runs against a
+        // session this connection does not own.
+        if let Some(claim) = comm_claimed_session(&request) {
+            let auth = claim.authorize_subscribed(&client_session_id);
+            if reject_unauthorized_comm(&claim, auth, &request_kind, request_id, &client_event_tx) {
+                continue;
+            }
         }
 
         // A cancellation request must never be gated on writing an Ack to the client.

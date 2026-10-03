@@ -15,12 +15,17 @@ mod client_lightweight_control;
 mod client_session;
 mod client_state;
 mod client_writer;
+mod comm_auth;
+pub(crate) use self::comm_auth::{CAPABILITY_FIELD, claimed_session_id, mint};
 mod comm_await;
 mod comm_control;
 mod comm_graph;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+#[cfg(test)]
+#[path = "server/comm_ownership_tests.rs"]
+mod comm_ownership_tests;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
