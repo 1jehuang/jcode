@@ -1,15 +1,16 @@
 use super::ClientConnectionInfo;
 use super::client_lifecycle::process_message_streaming_mpsc;
 use super::swarm_mutation_state::{
-    PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_replay, finish_request,
-    request_key,
+    PersistedSwarmMutationResponse, SwarmMutationRuntime, begin_or_join_in_flight, begin_or_replay,
+    finish_request, request_key,
 };
 use super::{
-    SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember, SwarmState, VersionedPlan,
-    append_swarm_completion_report_instructions, broadcast_swarm_plan, broadcast_swarm_status,
-    create_headless_session, fanout_session_event, persist_swarm_state_for, record_swarm_event,
-    record_swarm_event_for_session, remove_background_tool_signal,
-    remove_session_channel_subscriptions, remove_session_from_swarm,
+    SessionControlHandle, SessionInterruptQueues, SwarmEvent, SwarmEventType, SwarmMember,
+    SwarmState, VersionedPlan, append_swarm_completion_report_instructions,
+    begin_session_interrupt_stop, broadcast_swarm_plan, broadcast_swarm_status,
+    complete_session_interrupt_stop, create_headless_session, fanout_session_event,
+    persist_swarm_state_for, record_swarm_event, record_swarm_event_for_session,
+    remove_background_tool_signal, remove_session_channel_subscriptions, remove_session_from_swarm,
     remove_session_interrupt_queue, set_member_task_label, truncate_detail, update_member_status,
     update_member_status_with_report,
 };
@@ -18,6 +19,7 @@ use crate::config::SwarmSpawnMode;
 use crate::protocol::{NotificationType, ServerEvent};
 use crate::provider::Provider;
 use crate::session::Session;
+use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
@@ -1092,7 +1094,7 @@ pub(super) async fn handle_comm_stop(
     .await;
 
     let mutation_key = request_key(&req_session_id, "stop", &[swarm_id, target_session.clone()]);
-    let Some(mutation_state) = begin_or_replay(
+    let Some(mutation_state) = begin_or_join_in_flight(
         swarm_mutation_runtime,
         &mutation_key,
         "stop",
@@ -1105,31 +1107,122 @@ pub(super) async fn handle_comm_stop(
         return;
     };
 
-    let removed_agent = super::remove_session_entry(sessions, &target_session).await;
-    let removed_live_agent = removed_agent.is_some();
-    if let Some(agent_arc) = removed_agent {
-        remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;
-        remove_background_tool_signal(&target_session);
-        if let Ok(mut agent) = agent_arc.try_lock() {
-            agent.mark_closed();
-            let memory_enabled = agent.memory_enabled();
-            let transcript = if memory_enabled {
-                Some(agent.build_transcript_for_extraction())
-            } else {
-                None
-            };
-            let sid = target_session.clone();
-            let working_dir = agent.working_dir().map(|dir| dir.to_string());
-            drop(agent);
-            if let Some(transcript) = transcript {
-                crate::memory_agent::trigger_final_extraction_with_dir(
-                    transcript,
-                    sid,
-                    working_dir,
-                );
-            }
-        }
+    // Publish `stopping` before any cancellation: the status is the recoverable
+    // marker for a stop that has not quiesced yet, and it keeps a partially
+    // stopped member from being treated as an ordinary live worker.
+    update_member_status(
+        &target_session,
+        "stopping",
+        Some(format!("Cancellation requested by {req_session_id}")),
+        swarm_members,
+        swarms_by_id,
+        Some(event_history),
+        Some(event_counter),
+        Some(swarm_event_tx),
+    )
+    .await;
+
+    // Close interrupt delivery before clearing. Producers already admitted drain
+    // first, and later live or persisted producers are refused until an explicit
+    // resume reopens the session lifecycle.
+    begin_session_interrupt_stop(&target_session).await;
+    let live_agent = sessions.read().await.get(&target_session).cloned();
+    let soft_interrupt_queue = soft_interrupt_queues
+        .read()
+        .await
+        .get(&target_session)
+        .cloned()
+        .unwrap_or_else(|| Arc::new(StdMutex::new(Vec::new())));
+    // A lock-free handle is enough: `request_cancel` fires the registered
+    // in-flight turn signals for the session, which is what reaches a turn this
+    // connection never locked.
+    let session_control = SessionControlHandle::cancel_only(
+        &target_session,
+        soft_interrupt_queue.clone(),
+        InterruptSignal::new(),
+    );
+    if let Err(error) = clear_live_stop_queue(&soft_interrupt_queue) {
+        crate::logging::warn(&format!(
+            "Initial live soft-interrupt clear failed while stopping session {target_session}: {error}"
+        ));
     }
+    if let Err(error) = clear_persisted_stop_queue(&target_session) {
+        crate::logging::warn(&format!(
+            "Initial persisted soft-interrupt clear failed while stopping session {target_session}: {error}"
+        ));
+    }
+
+    // Wait for the running turn to release the Agent while re-firing
+    // cancellation: a turn that registers its cancellation signal after stop
+    // began must not miss it. On timeout the target stays resolvable in
+    // `stopping` state so a later stop can retry; it is already cancelled, so
+    // no replacement work should be scheduled yet.
+    let mut terminal_agent = match acquire_terminal_agent_guard(live_agent, &session_control).await
+    {
+        Ok(agent) => agent,
+        Err(()) => {
+            finish_request(
+                    swarm_mutation_runtime,
+                    &mutation_state,
+                    PersistedSwarmMutationResponse::Error {
+                        message: format!(
+                            "Cancellation was requested for session '{target_session}', but its active turn did not stop within 5 seconds. The target remains in stopping state and may be stopped again; do not schedule replacement work yet."
+                        ),
+                        retry_after_secs: None,
+                    },
+                )
+                .await;
+            return;
+        }
+    };
+
+    // Delivery is still closed and every earlier producer has drained, so these
+    // verified clears are stable through routing removal and the final response.
+    if let Err(error) = clear_live_stop_queue(&soft_interrupt_queue) {
+        finish_request(
+            swarm_mutation_runtime,
+            &mutation_state,
+            PersistedSwarmMutationResponse::Error {
+                message: format!(
+                    "Session '{target_session}' quiesced, but queued live work could not be cleared: {error}. The target remains retryable in stopping state."
+                ),
+                retry_after_secs: None,
+            },
+        )
+        .await;
+        return;
+    }
+    if let Err(error) = clear_persisted_stop_queue(&target_session) {
+        finish_request(
+            swarm_mutation_runtime,
+            &mutation_state,
+            PersistedSwarmMutationResponse::Error {
+                message: format!(
+                    "Session '{target_session}' quiesced, but persisted queued work could not be cleared: {error}. The target remains retryable in stopping state."
+                ),
+                retry_after_secs: None,
+            },
+        )
+        .await;
+        return;
+    }
+
+    let extraction = terminal_agent.as_mut().and_then(|agent| {
+        agent.mark_closed();
+        agent.memory_enabled().then(|| {
+            (
+                agent.build_transcript_for_extraction(),
+                target_session.clone(),
+                agent.working_dir().map(str::to_string),
+            )
+        })
+    });
+
+    let removed_live_agent = super::remove_session_entry(sessions, &target_session)
+        .await
+        .is_some();
+    remove_session_interrupt_queue(soft_interrupt_queues, &target_session).await;
+    remove_background_tool_signal(&target_session);
 
     let (removed_swarm_id, removed_name) = {
         let mut members = swarm_members.write().await;
@@ -1169,6 +1262,10 @@ pub(super) async fn handle_comm_stop(
     )
     .await;
 
+    if let Some((transcript, session_id, working_dir)) = extraction {
+        crate::memory_agent::trigger_final_extraction_with_dir(transcript, session_id, working_dir);
+    }
+
     let response = if removed_live_agent || removed_swarm_id.is_some() {
         PersistedSwarmMutationResponse::Done
     } else {
@@ -1177,7 +1274,70 @@ pub(super) async fn handle_comm_stop(
             retry_after_secs: None,
         }
     };
+    // Terminal lifecycle only once the stop actually succeeded. A failed stop
+    // stays in `stopping` so a retry resumes where it left off instead of
+    // reporting a session that no longer exists.
+    if matches!(response, PersistedSwarmMutationResponse::Done) {
+        complete_session_interrupt_stop(&target_session);
+    }
+    // The Agent guard is retained across response persistence and delivery so no
+    // local turn or tool dispatch can reacquire the Agent before Done is visible.
     finish_request(swarm_mutation_runtime, &mutation_state, response).await;
+    drop(terminal_agent);
+}
+
+/// Remove every persisted soft interrupt queued for `session_id`, then verify
+/// that the store is empty.
+fn clear_persisted_stop_queue(session_id: &str) -> anyhow::Result<()> {
+    crate::soft_interrupt_store::clear(session_id)?;
+    let remaining = crate::soft_interrupt_store::load(session_id)?;
+    anyhow::ensure!(
+        remaining.is_empty(),
+        "{} queued soft interrupt(s) remain after clear",
+        remaining.len()
+    );
+    Ok(())
+}
+
+/// Empty the live soft-interrupt queue, then verify that it stayed empty.
+fn clear_live_stop_queue(queue: &jcode_agent_runtime::SoftInterruptQueue) -> anyhow::Result<()> {
+    let mut pending = queue
+        .lock()
+        .map_err(|_| anyhow::anyhow!("live soft-interrupt queue lock is poisoned"))?;
+    pending.clear();
+    anyhow::ensure!(
+        pending.is_empty(),
+        "live soft-interrupt queue remains nonempty"
+    );
+    Ok(())
+}
+
+/// Acquire the terminal Agent guard for a session being stopped.
+///
+/// Returns `Err(())` when the active turn does not release the Agent within
+/// five seconds, in which case the caller leaves the target in `stopping` state
+/// so a later stop can retry.
+async fn acquire_terminal_agent_guard(
+    agent: Option<Arc<Mutex<Agent>>>,
+    session_control: &SessionControlHandle,
+) -> std::result::Result<Option<tokio::sync::OwnedMutexGuard<Agent>>, ()> {
+    let Some(agent) = agent else {
+        return Ok(None);
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            // A live wake can reserve the Agent before its run_turn signal is
+            // registered. Re-fire so that late registration cannot miss stop.
+            session_control.request_cancel();
+            if let Ok(agent) = Arc::clone(&agent).try_lock_owned() {
+                return agent;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map(Some)
+    .map_err(|_| ())
 }
 
 fn swarm_stop_allowed_by_owner(

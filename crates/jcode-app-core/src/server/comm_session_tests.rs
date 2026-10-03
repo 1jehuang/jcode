@@ -1207,3 +1207,6 @@ fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
     assert_eq!(resolve_swarm_spawn_effort(None, None), None);
     assert_eq!(resolve_swarm_spawn_effort(Some(""), Some("")), None);
 }
+
+#[path = "comm_session_stop_tests.rs"]
+mod comm_session_stop_tests;

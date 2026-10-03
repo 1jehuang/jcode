@@ -1,7 +1,9 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::debug_jobs::{DebugJob, maybe_start_async_debug_job};
-use super::{ServerIdentity, SessionControlHandle, SessionInterruptQueues};
+use super::{
+    ServerIdentity, SessionControlHandle, SessionInterruptQueues, queue_soft_interrupt_for_session,
+};
 use crate::agent::Agent;
 use crate::build;
 use crate::mcp::McpConfig;
@@ -19,9 +21,34 @@ pub(super) struct DebugInterruptContext {
     pub session_id: String,
     pub shutdown_signals: Arc<RwLock<HashMap<String, InterruptSignal>>>,
     pub soft_interrupt_queues: SessionInterruptQueues,
+    pub sessions: super::SessionAgents,
 }
 
 impl DebugInterruptContext {
+    /// Queue a soft interrupt through the session's delivery lifecycle.
+    ///
+    /// The debug `queue_interrupt:` commands must not bypass the gate that
+    /// `swarm stop` closes: a stop that times out leaves the session resolvable
+    /// and its Agent unclosed, so an interrupt injected here would sit pending
+    /// across the failed-stop interval and could still run if the session is
+    /// resumed or reused before a retry.
+    async fn queue_interrupt(
+        &self,
+        content: String,
+        urgent: bool,
+        sessions: &super::SessionAgents,
+    ) -> bool {
+        queue_soft_interrupt_for_session(
+            &self.session_id,
+            content,
+            urgent,
+            SoftInterruptSource::User,
+            &self.soft_interrupt_queues,
+            sessions,
+        )
+        .await
+    }
+
     async fn control_handle(&self) -> Option<SessionControlHandle> {
         let queue = self
             .soft_interrupt_queues
@@ -157,6 +184,18 @@ pub(super) async fn execute_debug_command(
         if content.is_empty() {
             return Err(anyhow::anyhow!("queue_interrupt: requires content"));
         }
+        if let Some(ctx) = interrupt_context.as_ref() {
+            if !ctx
+                .queue_interrupt(content.to_string(), false, &ctx.sessions)
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    "queue_interrupt: session '{}' is stopping; interrupt not queued",
+                    ctx.session_id
+                ));
+            }
+            return Ok("queued".to_string());
+        }
         let agent = agent.lock().await;
         agent.queue_soft_interrupt(
             content.to_string(),
@@ -174,6 +213,18 @@ pub(super) async fn execute_debug_command(
             .trim();
         if content.is_empty() {
             return Err(anyhow::anyhow!("queue_interrupt_urgent: requires content"));
+        }
+        if let Some(ctx) = interrupt_context.as_ref() {
+            if !ctx
+                .queue_interrupt(content.to_string(), true, &ctx.sessions)
+                .await
+            {
+                return Err(anyhow::anyhow!(
+                    "queue_interrupt_urgent: session '{}' is stopping; interrupt not queued",
+                    ctx.session_id
+                ));
+            }
+            return Ok("queued (urgent)".to_string());
         }
         let agent = agent.lock().await;
         agent.queue_soft_interrupt(
@@ -871,6 +922,12 @@ mod tests {
             queue.clone(),
         )])));
 
+        // The `cancel` command does not go through the delivery gate, so an
+        // empty session map is enough here.
+        let sessions = Arc::new(RwLock::new(HashMap::from([(
+            session_id.clone(),
+            Arc::clone(&agent),
+        )])));
         let _busy_agent_lock = agent.lock().await;
         let output = tokio::time::timeout(
             Duration::from_millis(200),
@@ -883,6 +940,7 @@ mod tests {
                     session_id,
                     shutdown_signals,
                     soft_interrupt_queues,
+                    sessions,
                 }),
             ),
         )
