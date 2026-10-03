@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-static REWRITTEN_ORPHAN_TOOL_OUTPUTS: AtomicU64 = AtomicU64::new(0);
+static DROPPED_ORPHAN_TOOL_OUTPUTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiRequestLogLevel {
@@ -137,32 +137,6 @@ pub fn insert_additional_tools(
             }),
         );
     }
-}
-
-fn orphan_tool_output_to_user_message(item: &Value, missing_output: &str) -> Option<Value> {
-    let output_value = item.get("output")?;
-    let output = if let Some(text) = output_value.as_str() {
-        text.trim().to_string()
-    } else {
-        output_value.to_string()
-    };
-    if output.is_empty() || output == missing_output {
-        return None;
-    }
-
-    let call_id = item
-        .get("call_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown_call");
-
-    Some(serde_json::json!({
-        "type": "message",
-        "role": "user",
-        "content": [{
-            "type": "input_text",
-            "text": format!("[Recovered orphaned tool output: {}]\n{}", call_id, output)
-        }]
-    }))
 }
 
 pub fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
@@ -441,25 +415,24 @@ pub fn build_responses_input_with_logger(
         );
     }
 
-    let mut rewritten_pending_orphans = 0usize;
+    let mut dropped_pending_orphans = 0usize;
     if !pending_outputs.is_empty() {
         let mut pending_entries: Vec<(String, String)> =
             std::mem::take(&mut pending_outputs).into_iter().collect();
         pending_entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (call_id, output) in pending_entries {
-            let orphan_item = serde_json::json!({
-                "type": "function_call_output",
-                "call_id": sanitize_tool_id(&call_id),
-                "output": output,
-            });
-            if let Some(message_item) =
-                orphan_tool_output_to_user_message(&orphan_item, &missing_output)
-            {
-                items.push(message_item);
-                rewritten_pending_orphans += 1;
-            } else {
-                skipped_results += 1;
-            }
+        // An output still pending after both passes has no `function_call`
+        // anywhere in the history we were handed, so there is no legal
+        // `function_call_output` item to carry it. Re-encoding it as a
+        // `role: user` message satisfied the wire format, but the history is
+        // unchanged between requests, so the orphan was re-derived on *every*
+        // request and the harness rendered each copy as text the user had
+        // typed: timestamped, counted as a user turn, and passed to memory
+        // extraction, which stored the tool's own output as a user statement.
+        // Dropping it costs the model nothing it could have interpreted,
+        // because there is no call left for it to belong to.
+        for _ in pending_entries {
+            dropped_pending_orphans += 1;
+            skipped_results += 1;
         }
     }
 
@@ -472,15 +445,15 @@ pub fn build_responses_input_with_logger(
             ),
         );
     }
-    if rewritten_pending_orphans > 0 {
-        let total = REWRITTEN_ORPHAN_TOOL_OUTPUTS
-            .fetch_add(rewritten_pending_orphans as u64, Ordering::Relaxed)
-            + rewritten_pending_orphans as u64;
+    if dropped_pending_orphans > 0 {
+        let total = DROPPED_ORPHAN_TOOL_OUTPUTS
+            .fetch_add(dropped_pending_orphans as u64, Ordering::Relaxed)
+            + dropped_pending_orphans as u64;
         logger(
             OpenAiRequestLogLevel::Info,
             &format!(
-                "[openai] Rewrote {} pending orphaned tool output(s) as user messages (total={})",
-                rewritten_pending_orphans, total
+                "[openai] Dropped {} orphaned tool output(s) with no matching call (total={})",
+                dropped_pending_orphans, total
             ),
         );
     }
@@ -573,7 +546,7 @@ pub fn build_responses_input_with_logger(
     let mut used_outputs: HashSet<String> = HashSet::new();
     let mut injected_ordered = 0usize;
     let mut dropped_duplicate_outputs = 0usize;
-    let mut rewritten_orphans = 0usize;
+    let mut dropped_orphans = 0usize;
     let mut skipped_empty_orphans = 0usize;
 
     for item in normalized {
@@ -609,12 +582,11 @@ pub fn build_responses_input_with_logger(
                 dropped_duplicate_outputs += 1;
                 continue;
             }
-            if let Some(message_item) = orphan_tool_output_to_user_message(&item, &missing_output) {
-                ordered.push(message_item);
-                rewritten_orphans += 1;
-            } else {
-                skipped_empty_orphans += 1;
-            }
+            // See the pending-output flush above: an output with no matching
+            // call cannot be sent legally, and re-encoding it as user text made
+            // the harness present it as something the user typed.
+            dropped_orphans += 1;
+            skipped_empty_orphans += 1;
             continue;
         }
 
@@ -639,15 +611,15 @@ pub fn build_responses_input_with_logger(
             ),
         );
     }
-    if rewritten_orphans > 0 {
-        let total = REWRITTEN_ORPHAN_TOOL_OUTPUTS
-            .fetch_add(rewritten_orphans as u64, Ordering::Relaxed)
-            + rewritten_orphans as u64;
+    if dropped_orphans > 0 {
+        let total = DROPPED_ORPHAN_TOOL_OUTPUTS
+            .fetch_add(dropped_orphans as u64, Ordering::Relaxed)
+            + dropped_orphans as u64;
         logger(
             OpenAiRequestLogLevel::Info,
             &format!(
-                "[openai] Rewrote {} orphaned tool output(s) as user messages (total={})",
-                rewritten_orphans, total
+                "[openai] Dropped {} orphaned tool output(s) with no matching call (total={})",
+                dropped_orphans, total
             ),
         );
     }
