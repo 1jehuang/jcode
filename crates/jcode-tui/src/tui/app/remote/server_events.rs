@@ -1264,7 +1264,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 && app.current_message_id.is_none()
                 && let Some(resume_in) = retry_after_secs
             {
-                app.handle_server_owned_usage_limit_resume(resume_in);
+                app.handle_server_owned_usage_limit_resume(resume_in.min(24 * 60 * 60));
                 remote.reset_call_output_tokens_seen();
                 return true;
             }
@@ -1297,20 +1297,33 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return true;
             }
+            // Clamp server hints so a bogus value cannot park the turn for days.
             let reset_duration = retry_after_secs
-                .map(Duration::from_secs)
+                .map(|secs| Duration::from_secs(secs.min(24 * 60 * 60)))
                 .or_else(|| parse_rate_limit_error(&message));
+            let previous_account_limit = app.turn_predates_credentials_change();
+            let rate_limit_retry_exhausted = reset_duration.is_some()
+                && !previous_account_limit
+                && app
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .is_some_and(|pending| pending.retry_attempts >= App::AUTO_RETRY_MAX_ATTEMPTS);
             if let Some(reset_duration) = reset_duration {
                 // The limit was hit by a turn sent before the account changed,
                 // so it reports the previous account's reset time (possibly
                 // hours away). Resend now on the new credentials instead.
-                let previous_account_limit = app.turn_predates_credentials_change();
-                app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                if let Some(is_system) = app
-                    .rate_limit_pending_message
-                    .as_ref()
-                    .map(|pending| pending.is_system)
+                if !rate_limit_retry_exhausted
+                    && let Some(pending) = app.rate_limit_pending_message.as_mut()
                 {
+                    // A stale reset timestamp or repeated 429 must not bypass
+                    // the normal retry budget forever. Carry this count through
+                    // begin_remote_send, just like other continuation retries.
+                    if previous_account_limit {
+                        pending.retry_attempts = 0;
+                    }
+                    pending.retry_attempts += 1;
+                    let is_system = pending.is_system;
+                    app.rate_limit_reset = Some(Instant::now() + reset_duration);
                     if previous_account_limit {
                         app.arm_account_change_resend(Instant::now());
                     } else {
@@ -1374,6 +1387,21 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            if rate_limit_retry_exhausted {
+                // Do not fall through to generic retry or turn-end auto-poke:
+                // either would immediately restart the exhausted hold loop.
+                crate::tui::app::commands::disable_auto_poke(app);
+                app.overnight_auto_poke = None;
+                app.clear_pending_remote_retry();
+                app.restore_failed_input_to_box();
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your progress is saved. Wait for a valid reset, check the provider account, or switch with /model.",
+                    App::AUTO_RETRY_MAX_ATTEMPTS
+                )));
+                app.set_status_notice("Paused: provider limit did not clear");
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                return false;
+            }
             // Connectivity failures (DNS, connection reset, no route, transient
             // TLS, timeouts) are always transient: the request never reached the
             // provider. Hold the turn and resume when the network recovers,
@@ -1386,6 +1414,21 @@ pub(in crate::tui::app) fn handle_server_event(
             if is_connectivity_error
                 && app.schedule_pending_remote_network_wait_with_force(&message, true)
             {
+                return false;
+            }
+            if is_connectivity_error {
+                // Generic connectivity can be healthy while this provider's
+                // DNS remains broken. Do not let auto-poke reset the budget.
+                crate::tui::app::commands::disable_auto_poke(app);
+                app.overnight_auto_poke = None;
+                app.clear_pending_remote_retry();
+                app.restore_failed_input_to_box();
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Connection retry limit reached after {} automatic resumes. Your progress is saved. Check the provider endpoint or DNS, then re-send the message or switch with /model.",
+                    App::AUTO_RETRY_MAX_ATTEMPTS
+                )));
+                app.set_status_notice("Paused: provider connection did not recover");
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
             // Credential-failure circuit breaker: repeated auth failures mean

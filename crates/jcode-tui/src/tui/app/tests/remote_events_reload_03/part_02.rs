@@ -391,3 +391,186 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
 
+
+fn bounded_recovery_user_turn(content: &str, auto_retry: bool, retry_attempts: u8) -> PendingRemoteMessage {
+    PendingRemoteMessage {
+        content: content.to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry,
+        retry_attempts,
+        retry_at: None,
+    }
+}
+
+#[test]
+fn test_remote_openference_json_rate_limit_holds_user_turn() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut pending = bounded_recovery_user_turn("continue the adapter", false, 0);
+    pending.images = vec![("image/png".to_string(), "saved-image".to_string())];
+    pending.system_reminder = Some("preserve the existing files".to_string());
+    app.rate_limit_pending_message = Some(pending.clone());
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(41);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 41,
+            message: "OpenAI-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"error\":\"Rate limit exceeded. Too many requests per minute.\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"retry_after_seconds\":2,\"max_rpm\":25}".to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+
+    assert!(!app.is_processing);
+    let held = app.rate_limit_pending_message.as_ref().expect("rate-limited turn held");
+    assert_eq!(held.content, pending.content);
+    assert_eq!(held.images, pending.images);
+    assert_eq!(held.system_reminder, pending.system_reminder);
+    assert_eq!(held.retry_attempts, 1);
+    let wait = app
+        .rate_limit_reset
+        .expect("retry scheduled")
+        .saturating_duration_since(std::time::Instant::now());
+    assert!(wait <= std::time::Duration::from_secs(2));
+    assert!(wait > std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn test_remote_stale_quota_reset_stops_after_bounded_resumes() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.auto_poke_incomplete_todos = true;
+    app.last_submitted_input = Some("continue the adapter".to_string());
+    app.rate_limit_pending_message = Some(bounded_recovery_user_turn("continue the adapter", false, 0));
+    // A rate limit that keeps reporting a short reset, as a stale reset
+    // timestamp or a stuck provider limit does.
+    let error = "429 Too Many Requests: rate limit exceeded, retry after 30 seconds";
+
+    for attempt in 1..=App::AUTO_RETRY_MAX_ATTEMPTS {
+        app.is_processing = true;
+        app.status = ProcessingStatus::Streaming;
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: u64::from(attempt),
+                message: error.to_string(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        let pending = app.rate_limit_pending_message.as_ref().expect("hold within budget");
+        assert_eq!(pending.retry_attempts, attempt);
+        assert!(app.rate_limit_reset.is_some());
+    }
+
+    app.is_processing = true;
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: error.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    assert!(app.rate_limit_pending_message.is_none(), "no fourth automatic resend");
+    assert!(app.rate_limit_reset.is_none());
+    assert!(!app.auto_poke_incomplete_todos, "auto-poke must not restart the loop");
+    assert_eq!(app.input, "continue the adapter");
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|m| m.content.contains("Rate-limit retry limit reached"))
+    );
+}
+
+#[test]
+fn test_remote_provider_dns_failure_has_bounded_resumes() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.auto_poke_incomplete_todos = true;
+    app.auto_poke_default_on = true;
+    app.last_submitted_input = Some("continue the adapter".to_string());
+    app.rate_limit_pending_message = Some(bounded_recovery_user_turn("continue the adapter", false, 0));
+    let error = "Failed to send OpenAI-compatible chat request: client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known";
+
+    for attempt in 1..=App::AUTO_RETRY_MAX_ATTEMPTS {
+        app.is_processing = true;
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: u64::from(attempt),
+                message: error.to_string(),
+                retry_after_secs: None,
+                server_resumes: false,
+            },
+            &mut remote,
+        );
+        let pending = app.rate_limit_pending_message.as_ref().expect("held within budget");
+        assert_eq!(pending.retry_attempts, attempt);
+        assert!(matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }));
+        let wait = app
+            .rate_limit_reset
+            .unwrap()
+            .saturating_duration_since(std::time::Instant::now());
+        assert!(wait <= std::time::Duration::from_secs(5 * u64::from(attempt)));
+    }
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: error.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.rate_limit_reset.is_none());
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(!app.auto_poke_default_on);
+    assert_eq!(app.input, "continue the adapter");
+}
+
+#[test]
+fn test_offline_probes_do_not_consume_provider_retry_budget() {
+    let mut app = create_test_app();
+    app.rate_limit_pending_message = Some(bounded_recovery_user_turn("continue", true, 2));
+    for _ in 0..10 {
+        assert!(app.schedule_pending_remote_network_wait("network probe still failing"));
+    }
+    assert_eq!(app.rate_limit_pending_message.as_ref().unwrap().retry_attempts, 2);
+}
+
+#[test]
+fn test_remote_retry_hint_is_clamped_before_scheduling() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.rate_limit_pending_message = Some(bounded_recovery_user_turn("continue", false, 0));
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 99,
+            message: "rate limited".to_string(),
+            retry_after_secs: Some(u64::MAX),
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+    let wait = app
+        .rate_limit_reset
+        .unwrap()
+        .saturating_duration_since(std::time::Instant::now());
+    assert!(wait <= std::time::Duration::from_secs(24 * 60 * 60));
+    assert_eq!(app.rate_limit_pending_message.as_ref().unwrap().retry_attempts, 1);
+}

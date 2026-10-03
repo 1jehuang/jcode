@@ -143,13 +143,10 @@ impl App {
 
     /// Hold the in-flight remote turn until the network recovers, then resume it.
     ///
-    /// Connectivity failures (DNS, connection reset, no route, transient TLS,
-    /// timeouts) are always transient: the request never reached the provider,
-    /// so resending after the network comes back is both safe and correct. When
-    /// `force` is set we wait regardless of the pending message's `auto_retry`
-    /// flag and promote it to auto-retry so the tick-based resume re-sends it.
-    /// This prevents a transient disconnect from being misclassified as a
-    /// permanent, non-retryable failure that stops auto-poke.
+    /// Temporary connection failures can recover, but a provider-specific DNS
+    /// failure can persist while the general connectivity probe succeeds.
+    /// Count failed provider attempts when `force` is set, not offline probe
+    /// waits, so the same turn cannot resend forever.
     pub(super) fn schedule_pending_remote_network_wait_with_force(
         &mut self,
         reason: &str,
@@ -158,6 +155,12 @@ impl App {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
+        if force {
+            if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                return false;
+            }
+            pending.retry_attempts += 1;
+        }
         if !pending.auto_retry {
             if force {
                 pending.auto_retry = true;
@@ -167,16 +170,17 @@ impl App {
         }
 
         let plan = crate::network_retry::wait_plan();
-        let retry_at = Instant::now() + Duration::from_secs(5);
+        let retry_at =
+            Instant::now() + Duration::from_secs(5 * u64::from(pending.retry_attempts.max(1)));
         pending.retry_at = Some(retry_at);
         self.rate_limit_reset = Some(retry_at);
         self.status = ProcessingStatus::WaitingForNetwork {
             listener: plan.listener_summary.clone(),
         };
-        self.status_detail = Some("offline; waiting for network before retry".to_string());
+        self.status_detail = Some("connection failed; waiting before retry".to_string());
 
         let content = format!(
-            "📡 Network appears offline - waiting to retry automatically. {} - {}",
+            "📡 Network appears offline or the provider is unreachable - waiting to retry automatically. {} - {}",
             plan.listener_summary,
             reason.trim().trim_end_matches('.')
         );
