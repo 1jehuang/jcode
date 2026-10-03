@@ -1815,6 +1815,10 @@ impl App {
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
                 crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=queue_ownership_gate attempt={}",
+                    self.todo_completion_gate_attempts
+                ));
                 self.push_display_message(DisplayMessage::system(
                     "🔍 Checking end-to-end ownership before finishing...",
                 ));
@@ -1842,6 +1846,11 @@ impl App {
                     );
                     "🔍 Double-checking confidence jumps..."
                 };
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=queue_confidence_gate spike={} attempt={}",
+                    needs_spike_challenge,
+                    self.todo_completion_gate_attempts
+                ));
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
                 // messages and models answer instead of re-validating.
@@ -1914,21 +1923,75 @@ impl App {
             ));
             // Idling here is loop protection, but an unbounded silent one. The
             // agent stopped without touching the plan, so every later turn end
-            // declined the same way and the poke looked broken from the outside
-            // with no breaker to explain it. Once the stall is a pattern rather
-            // than one skipped turn, say so instead of idling indefinitely.
+            // declined the same way and the poke looked broken from the outside.
+            //
+            // Telling the user does not unstick anything, though - the agent is
+            // the one that can break the deadlock, and the likeliest reason a list
+            // stays frozen is that the remaining items are too coarse to show
+            // progress. So once the stall is a pattern rather than one skipped
+            // turn, ask the agent to decompose what is left or add the missing
+            // steps. Bounded, because an agent ignoring the list will ignore five
+            // prompts exactly as it ignored five pokes.
             self.auto_poke_unchanged_idle_count =
                 self.auto_poke_unchanged_idle_count.saturating_add(1);
+
+            // Tell the operator before spending any refine budget on the agent.
+            // Surfacing the stall to the user is the committed contract; asking
+            // the agent to decompose its plan is an additional measure layered
+            // on top, not a replacement for it. The counter only climbs while
+            // the list stays frozen, so this fires exactly once per stall.
             if self.auto_poke_unchanged_idle_count == Self::AUTO_POKE_UNCHANGED_IDLE_LIMIT {
                 crate::logging::info(&format!(
-                    "AUTO_POKE_DECISION action=surface reason=unchanged_todos_persistent incomplete={}",
-                    incomplete.len()
+                    "AUTO_POKE_DECISION action=idle_surfaced incomplete={} idles={}",
+                    incomplete.len(),
+                    self.auto_poke_unchanged_idle_count
                 ));
                 self.push_display_message(DisplayMessage::system(format!(
-                    "The todo list stayed unchanged across {} nudges, so auto-poke stopped pushing. /poke re-enables it.",
-                    Self::AUTO_POKE_UNCHANGED_IDLE_LIMIT
+                    "Todo list unchanged across {} nudges. Auto-poke is still trying, but it has made no progress on the plan.",
+                    self.auto_poke_unchanged_idle_count
+                )));
+                return false;
+            }
+
+            if self.auto_poke_unchanged_idle_count >= Self::AUTO_POKE_UNCHANGED_IDLE_LIMIT
+                && self.auto_poke_refine_prompt_count < Self::AUTO_POKE_REFINE_PROMPT_MAX
+            {
+                self.auto_poke_refine_prompt_count =
+                    self.auto_poke_refine_prompt_count.saturating_add(1);
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=refine_prompt incomplete={} attempt={}",
+                    incomplete.len(),
+                    self.auto_poke_refine_prompt_count
+                ));
+                self.queued_messages.push(format!(
+                    "The todo list has not changed across {} nudges. If the remaining work is not finished, the open items are probably too coarse to show progress: decompose them into concrete steps, or add the steps that are missing. If the work is in fact finished, update the todo statuses rather than stopping.",
+                    self.auto_poke_unchanged_idle_count
+                ));
+                self.pending_queued_dispatch = true;
+                return true;
+            }
+
+            // Asked as often as we are willing to. Stop asking, and say so once
+            // so the silence is explained rather than merely observed.
+            if self.auto_poke_refine_prompt_count >= Self::AUTO_POKE_REFINE_PROMPT_MAX
+                && !self.auto_poke_refine_exhausted
+            {
+                self.auto_poke_refine_exhausted = true;
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=refine_exhausted attempts={}",
+                    self.auto_poke_refine_prompt_count
+                ));
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Todo list unchanged across {} nudges and {} refine requests. Auto-poke stopped pushing; /poke re-enables it.",
+                    self.auto_poke_unchanged_idle_count,
+                    self.auto_poke_refine_prompt_count
                 )));
             }
+
+            // The list has not changed and there is nothing left to ask for.
+            // Falling through here would queue the identical poke again, which
+            // is the exact loop the fingerprint guard exists to prevent: the
+            // agent already received this nudge and did not touch the plan.
             return false;
         }
         // The poke is firing, so any previous unchanged-todo stall is over.

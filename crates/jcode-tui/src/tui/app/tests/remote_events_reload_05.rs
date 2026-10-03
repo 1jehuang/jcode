@@ -1264,3 +1264,111 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         );
     });
 }
+
+/// A persistent unchanged-todo stall must reach the agent, not just the user.
+///
+/// Telling the user "the poke stopped" does not unstick anything. The agent is
+/// the one that can break the deadlock, and the likeliest reason the list is
+/// frozen is that the remaining items are too coarse to make progress visible,
+/// so after a few idle turn ends we ask the agent to decompose what is left or
+/// add the steps that are missing.
+///
+/// What is asserted here is the bounded shape, not the exact turn it starts on:
+/// which branch the very first poke takes is not this test's concern, and
+/// pinning it made the test fail for a reason unrelated to the feature. The
+/// "a single idle stays silent" property is covered separately by
+/// `test_unchanged_todo_idling_becomes_visible_after_a_repeat`.
+#[test]
+fn test_unchanged_todos_prompt_the_agent_to_refine_the_plan_and_then_stop() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish the migration".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save an open todo");
+
+        // Drive many turn ends with the todo list frozen. Somewhere in there the
+        // agent must be asked to fix its own plan.
+        let mut refine_queued = 0usize;
+        let mut refine_text = String::new();
+        for _ in 0..(App::AUTO_POKE_REFINE_PROMPT_MAX as usize + 8) {
+            app.queued_messages.clear();
+            app.pending_queued_dispatch = false;
+            let _ = app.schedule_auto_poke_followup_if_needed();
+            for m in &app.queued_messages {
+                if m.to_lowercase().contains("decompose") {
+                    refine_queued += 1;
+                    refine_text = m.clone();
+                }
+            }
+        }
+
+        assert!(
+            refine_queued > 0,
+            "a persistent unchanged-todo stall must eventually ask the agent to refine its plan"
+        );
+        assert!(
+            refine_text.to_lowercase().contains("todo"),
+            "the refine prompt must talk about the todo list, got: {refine_text}"
+        );
+        assert!(
+            refine_queued <= App::AUTO_POKE_REFINE_PROMPT_MAX as usize,
+            "the refine prompt must stop after its budget of {}, but it was queued {refine_queued} times",
+            App::AUTO_POKE_REFINE_PROMPT_MAX
+        );
+    });
+}
+
+/// Finished work must never be nudged into decomposing itself.
+///
+/// This is the property the user cares about most: burning turns on work that
+/// is already done is worse than the stall it tries to fix. The all-complete
+/// path legitimately queues its own final-response continuation, so the check
+/// is that nothing ever asks the agent to refine a list with nothing left in it.
+#[test]
+fn test_refine_prompt_never_fires_when_all_todos_are_complete() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship it".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence_history: vec![
+                    crate::todo::ConfidenceState::Validated,
+                    crate::todo::ConfidenceState::Verified,
+                ],
+                ..Default::default()
+            }],
+        )
+        .expect("save a completed todo");
+
+        for _ in 0..(App::AUTO_POKE_REFINE_PROMPT_MAX as usize + 6) {
+            app.queued_messages.clear();
+            app.pending_queued_dispatch = false;
+            let _ = app.schedule_auto_poke_followup_if_needed();
+            let queued = app.queued_messages.join(" ").to_lowercase();
+            assert!(
+                !queued.contains("decompose"),
+                "a completed list must never be asked to decompose itself, got: {queued}"
+            );
+        }
+    });
+}

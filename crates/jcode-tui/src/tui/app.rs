@@ -1029,6 +1029,11 @@ pub struct App {
     /// incomplete-todo set was byte-identical to the previous poke. Reset
     /// whenever the poke actually fires or the feature is toggled.
     auto_poke_unchanged_idle_count: u8,
+    /// Refine prompts sent without the todo list moving. Bounded by
+    /// AUTO_POKE_REFINE_PROMPT_MAX and reset alongside the fingerprint.
+    auto_poke_refine_prompt_count: u8,
+    /// Set once the refine prompt has given up, so the user is told exactly once.
+    auto_poke_refine_exhausted: bool,
     /// Set when the current turn ended with a provider guardrail/refusal stop
     /// (ServerEvent::ProviderGuardrail). Consumed by the Done handler to
     /// update `consecutive_guardrail_stops`.
@@ -1800,6 +1805,12 @@ impl App {
     /// poke just stops working with no explanation. After this many repeats we
     /// tell the user the poke gave up and why, instead of idling indefinitely.
     const AUTO_POKE_UNCHANGED_IDLE_LIMIT: u8 = 2;
+    /// How many times we may ask the agent to refine its own todo list while
+    /// the list stays unchanged, before giving up on asking. Asking an agent
+    /// that is ignoring the list five times is no more useful than poking it
+    /// five times, so the prompt is bounded. Ordinary pokes are unaffected:
+    /// this only stops the *suggestion*, never the poke machinery.
+    const AUTO_POKE_REFINE_PROMPT_MAX: u8 = 5;
     /// Consecutive guardrail/refusal-stopped turns tolerated before automatic
     /// continuation paths (auto-poke, overnight poke) are stopped. Guardrail
     /// refusals are deterministic for the same request, so re-poking the same
