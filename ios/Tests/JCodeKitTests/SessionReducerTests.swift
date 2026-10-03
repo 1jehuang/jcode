@@ -264,6 +264,82 @@ private func event(_ line: String) -> ConnectionOutput {
     #expect(state.transcript[0].role == .user)
 }
 
+@Test func historyAttachesToolResultsToTheAssistantTurn() {
+    let history = """
+        {"type":"history","id":1,"session_id":"s","messages":[\
+        {"role":"user","content":"run it"},\
+        {"role":"assistant","content":"Running it.","tool_calls":["bash"]},\
+        {"role":"tool","content":"card-test\\n","tool_data":\
+        {"id":"toolu_1","name":"bash","input":{"command":"echo card-test"}}},\
+        {"role":"assistant","content":"OK"}\
+        ]}
+        """
+    let state = run([event(history)])
+    #expect(state.transcript.map(\.role) == [.user, .assistant, .assistant])
+    let calls = state.transcript[1].toolCalls
+    #expect(calls.count == 1)
+    #expect(calls.first?.id == "toolu_1")
+    #expect(calls.first?.name == "bash")
+    #expect(calls.first?.input == #"{"command":"echo card-test"}"#)
+    #expect(calls.first?.output == "card-test\n")
+    #expect(calls.first?.status == .succeeded)
+    #expect(state.transcript[2].text == "OK")
+}
+
+@Test func historyResultsFillSameNamedCallsInOrder() {
+    let history = """
+        {"type":"history","id":1,"session_id":"s","messages":[\
+        {"role":"assistant","content":"Two runs.","tool_calls":["bash","bash"]},\
+        {"role":"tool","content":"one","tool_data":{"id":"toolu_1","name":"bash","input":{}}},\
+        {"role":"tool","content":"two","tool_data":{"id":"toolu_2","name":"bash","input":{}}}\
+        ]}
+        """
+    let calls = run([event(history)]).transcript[0].toolCalls
+    #expect(calls.map(\.id) == ["toolu_1", "toolu_2"])
+    #expect(calls.map(\.output) == ["one", "two"])
+}
+
+@Test func historyToolErrorOutputIsShownAsFailed() {
+    let history = """
+        {"type":"history","id":1,"session_id":"s","messages":[\
+        {"role":"assistant","content":"Reading.","tool_calls":["read"]},\
+        {"role":"tool","content":"Error: file not found\\nat /tmp/x","tool_data":\
+        {"id":"toolu_1","name":"read","input":{"file_path":"/tmp/x"}}},\
+        {"role":"tool","content":"--- Command finished with exit code: 2 ---","tool_data":\
+        {"id":"toolu_2","name":"bash","input":{"command":"false"}}}\
+        ]}
+        """
+    let calls = run([event(history)]).transcript[0].toolCalls
+    #expect(calls.first?.status == .failed("Error: file not found"))
+    #expect(calls.first?.output == "Error: file not found\nat /tmp/x")
+    #expect(calls.last?.status == .failed("--- Command finished with exit code: 2 ---"))
+}
+
+@Test func historyToolOutputMentioningErrorsIsSucceeded() {
+    let history = """
+        {"type":"history","id":1,"session_id":"s","messages":[\
+        {"role":"assistant","content":"Grep.","tool_calls":["grep"]},\
+        {"role":"tool","content":"src/a.rs: error: handled\\nExit code: 0","tool_data":\
+        {"id":"toolu_1","name":"grep","input":{}}}\
+        ]}
+        """
+    #expect(run([event(history)]).transcript[0].toolCalls.first?.status == .succeeded)
+}
+
+@Test func historyToolResultWithoutAssistantGetsItsOwnEntry() {
+    let history = """
+        {"type":"history","id":1,"session_id":"s","messages":[\
+        {"role":"user","content":"q"},\
+        {"role":"tool","content":"out","tool_data":{"id":"t9","name":"read","input":"{}"}}\
+        ]}
+        """
+    let state = run([event(history)])
+    #expect(state.transcript.count == 2)
+    #expect(state.transcript[1].role == .assistant)
+    #expect(state.transcript[1].toolCalls.first?.name == "read")
+    #expect(state.transcript[1].toolCalls.first?.output == "out")
+}
+
 @Test func historyMapsToolData() {
     let history = """
         {"type":"history","id":1,"session_id":"s","messages":[\
