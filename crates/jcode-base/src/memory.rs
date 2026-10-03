@@ -2256,6 +2256,21 @@ impl MemoryManager {
         keywords: &[&str],
         limit: usize,
     ) -> Result<Vec<MemoryEntry>> {
+        Self::get_relevant_keywords_scoped(
+            &self.collect_memories_scoped(MemoryScope::All)?,
+            keywords,
+            limit,
+        )
+    }
+
+    /// Keyword fallback over an already-collected set (R1/B6: the no-brain
+    /// path for Jev failure — ranks the narrowed prefilter set, never
+    /// re-collects). Same matching + recency order as the store-wide path.
+    fn get_relevant_keywords_scoped(
+        entries: &[MemoryEntry],
+        keywords: &[&str],
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>> {
         let normalized_keywords: Vec<String> = keywords
             .iter()
             .map(|keyword| normalize_search_text(keyword))
@@ -2266,8 +2281,9 @@ impl MemoryManager {
         }
 
         let matches: Vec<_> = top_k_by_ord(
-            self.collect_memories_scoped(MemoryScope::All)?
-                .into_iter()
+            entries
+                .iter()
+                .cloned()
                 // Tombstoned (inactive) memories are invisible to retrieval (R3).
                 .filter(|entry| entry.active)
                 .filter(|entry| {
@@ -2424,6 +2440,9 @@ impl MemoryManager {
             };
         let entries = entries_opt.take().expect("prefilter stage always leaves a set");
         let _ = prefilter_dropped;
+        // R1/B6: keep a clone for the keyword fallback — the async block
+        // below moves `entries` into the Jev select coroutine.
+        let fallback_entries = entries.clone();
         let result = async {
             if entries.is_empty() {
                 return Ok(Vec::new());
@@ -2435,14 +2454,25 @@ impl MemoryManager {
         let relevant: Vec<MemoryEntry> = match result {
             Ok(results) => results.into_iter().map(|(entry, _)| entry).collect(),
             Err(error) => {
-                clear_pending_memory(session_id);
+                // R1/B6 fix 2026-10-03: no-brain fallback. Jev transport
+                // failure (or client construction failure) no longer kills
+                // recall: fall back to deterministic keyword matching over
+                // the same narrowed set, so the system survives with no LLM
+                // available. Fail-open: keyword errors also fall through to
+                // empty (never Err — recall degrades, never dies).
+                crate::logging::info(&format!(
+                    "memory Jev judge unavailable ({error}): keyword fallback"
+                ));
                 pipeline_update(|p| {
-                    p.verify = StepStatus::Error;
-                    p.inject = StepStatus::Skipped;
+                    p.verify = StepStatus::Done;
+                    p.verify_result = Some(StepResult {
+                        summary: format!("keyword fallback (Jev down: {error})"),
+                        latency_ms: started.elapsed().as_millis() as u64,
+                    });
                 });
-                set_state(MemoryState::Idle);
-                emit_memory_activity(event_tx.as_ref());
-                return Err(error);
+                let keywords: Vec<&str> = query.split_whitespace().collect();
+                Self::get_relevant_keywords_scoped(&fallback_entries, &keywords, 5)
+                    .unwrap_or_default()
             }
         };
         let count = relevant.len();
