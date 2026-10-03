@@ -50,6 +50,23 @@ if (-not (Test-Path $exe)) {
     }
 }
 
+# The file on disk is not the binary in memory. A reload can publish an older
+# binary when the sidecar was refreshed after the reload ran, and the file check
+# above passes while the server is still serving the previous commit. The server
+# writes its own hash next to its socket, so compare that too.
+# The server writes its hash as "<socket>.hash" (server.rs, registry_info.socket).
+$sock = $env:JCODE_SOCKET
+if (-not $sock) { $sock = 'E:\selfdev-tmp\jcode-WorkShop1\jcode.sock' }
+$socketHash = "$sock.hash"
+if (Test-Path $socketHash) {
+    $running = (Get-Content $socketHash -Raw).Trim()
+    if ($running -ne $shortHead) {
+        [void]$failures.Add("the running server reports $running but HEAD is $shortHead; a reload is needed or the session keeps the old code")
+    }
+} else {
+    [void]$failures.Add("no running-server hash at $socketHash; cannot confirm what is actually executing")
+}
+
 if ($failures.Count -gt 0) {
     Write-Output 'BUILD SOURCE GUARD FAILED'
     foreach ($f in $failures) { Write-Output "  - $f" }
