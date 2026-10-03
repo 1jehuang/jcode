@@ -586,26 +586,13 @@ impl App {
         } else {
             self.provider.reasoning_effort()
         };
-        let current_index = current
-            .as_ref()
-            .and_then(|c| efforts.iter().position(|e| *e == c.as_str()))
-            .unwrap_or(efforts.len() - 1); // default to last (highest)
-
         let len = efforts.len();
-        let next_index = if direction > 0 {
-            if current_index + 1 >= len {
-                current_index // already at max
-            } else {
-                current_index + 1
-            }
-        } else if current_index == 0 {
-            0 // already at min
-        } else {
-            current_index - 1
-        };
+        let current_str = current.as_deref();
+        let cycled = super::effort_cycling::cycle_effort_index(&efforts, current_str, direction);
+        let next_index = cycled.index;
+        let next_effort = cycled.effort;
 
-        let next_effort = efforts[next_index];
-        if Some(next_effort.to_string()) == current {
+        if !cycled.changed {
             let label = effort_display_label(next_effort);
             self.set_status_notice(format!(
                 "Effort: {} (already at {})",
@@ -1551,6 +1538,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 let idx = new_effort
                     .as_ref()
                     .and_then(|e| efforts.iter().position(|x| *x == e.as_str()))
+                    .or_else(|| super::effort_cycling::default_effort_index(&efforts))
                     .unwrap_or(0);
                 let bar = effort_bar(idx, efforts.len());
                 app.set_status_notice(format!("Effort: {} {}", label, bar));
