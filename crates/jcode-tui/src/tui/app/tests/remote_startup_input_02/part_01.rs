@@ -1241,14 +1241,18 @@ fn test_ctrl_tab_toggles_queue_mode() {
 
 #[test]
 fn test_auto_poke_starts_enabled_by_default() {
-    let app = create_test_app();
+    // Constructed inside a hermetic home: the default asserted here is read from
+    // config.features.auto_poke at construction, and a concurrently running test
+    // that writes auto_poke = false into a swapped JCODE_HOME would otherwise
+    // decide this assertion.
+    let app = with_temp_jcode_home(create_test_app);
 
     assert!(app.auto_poke_incomplete_todos);
 }
 
 #[test]
 fn test_ctrl_p_toggles_auto_poke_locally() {
-    let mut app = create_test_app();
+    let mut app = with_temp_jcode_home(create_test_app);
 
     assert!(app.auto_poke_incomplete_todos);
 
@@ -1487,7 +1491,9 @@ fn test_ctrl_c_requests_cancel_while_processing() {
 
 #[test]
 fn test_escape_interrupt_stops_the_poke_but_keeps_auto_poke_armed() {
-    let mut app = create_test_app();
+    // `auto_poke_default_on` is what must survive the interrupt, and it too comes
+    // from config.features.auto_poke at construction.
+    let mut app = with_temp_jcode_home(create_test_app);
     app.is_processing = true;
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
