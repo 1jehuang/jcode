@@ -2101,3 +2101,5 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
     assert!(app.record_completed_stream_cache_usage());
     assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
 }
+
+include!("tests/restored_retry_dispatch.rs");

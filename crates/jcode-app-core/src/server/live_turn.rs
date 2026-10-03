@@ -102,7 +102,10 @@ pub(super) async fn spawn_tracked_live_turn(
     display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
-) {
+) -> bool {
+    if crate::restart_snapshot::passive_restore_guard_active(session_id) {
+        return false;
+    }
     update_member_status(
         session_id,
         "running",
@@ -198,6 +201,7 @@ pub(super) async fn spawn_tracked_live_turn(
         }
         drop(reservation);
     });
+    true
 }
 
 /// Run `message` immediately as a tracked turn if the session is live and
@@ -222,8 +226,7 @@ pub(super) async fn run_live_turn_if_idle(
         detail,
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 pub(super) async fn run_live_system_turn_if_idle(
@@ -245,8 +248,7 @@ pub(super) async fn run_live_system_turn_if_idle(
         detail,
         swarm,
     )
-    .await;
-    true
+    .await
 }
 
 /// Catch only unwind panics. A killed process cannot emit a trustworthy event.

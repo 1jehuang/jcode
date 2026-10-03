@@ -6,6 +6,8 @@ use crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo
 use crate::tui::app::remote::swarm_plan_core::RemoteSwarmPlanSnapshot;
 use crate::tui::app::remote::swarm_status_core::swarm_status_transition_notice;
 
+mod error_correlation;
+
 fn allow_runtime_identity_mismatch() -> bool {
     std::env::var_os("JCODE_ALLOW_SERVER_VERSION_MISMATCH").is_some()
 }
@@ -558,6 +560,37 @@ pub(in crate::tui::app) fn handle_server_event(
             "Reset result is unchanged, but the daemon usage cache could not be refreshed: {message}. Reconnect to refresh daemon state."
         )));
         return true;
+    }
+
+    if error_correlation::handle_unrelated_error(app, &event, remote) {
+        return true;
+    }
+
+    // A socket write does not acknowledge a turn. Keep the durable retry
+    // until its own completion; errors and unrelated Done frames cannot retire it.
+    if let ServerEvent::Error { id, .. } = &event
+        && let Some(delivery) = app.restored_retry_delivery.as_ref()
+        && delivery.request_id == *id
+    {
+        app.restored_retry_delivery = None;
+    }
+    if let ServerEvent::Done { id } = &event
+        && app
+            .restored_retry_delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.request_id == *id)
+        && app.current_message_id == Some(*id)
+    {
+        let delivery = app.restored_retry_delivery.take().unwrap();
+        app.pending_remote_is_restored_retry = false;
+        if !app.restored_retries.is_empty() {
+            app.restored_retries.remove(0);
+        }
+        if let Err(error) = app.checkpoint_restored_followups(&delivery.session_id) {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Could not update completed retry checkpoint: {error}"
+            )));
+        }
     }
 
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
@@ -1138,17 +1171,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 "Client received Done id={}, current_message_id={:?}",
                 id, app.current_message_id
             ));
-            let has_resumed_turn_evidence = had_remote_resume_activity
-                || app.stream_message_ended
-                || app.has_streaming_footer_stats()
-                || !app.streaming.streaming_text.is_empty()
-                || !app.streaming_tool_calls.is_empty()
-                || matches!(
-                    app.status,
-                    ProcessingStatus::Streaming | ProcessingStatus::RunningTool(_)
-                );
-            let completes_resumed_turn =
-                app.current_message_id.is_none() && app.is_processing && has_resumed_turn_evidence;
+            let completes_resumed_turn = app.current_message_id.is_none()
+                && app.is_processing
+                && error_correlation::has_resumed_turn_evidence(app, had_remote_resume_activity);
             if app.current_message_id == Some(id) || completes_resumed_turn {
                 if !app.stream_buffer.is_empty() {
                     crate::logging::info(&format!(
@@ -1384,7 +1409,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // request. Fail fast with an actionable hint instead of burning the
             // auto-retry budget on guaranteed 4xx responses (#387).
             if crate::tui::app::commands::is_fatal_model_endpoint_error(&message) {
-                app.clear_pending_remote_retry();
+                app.stop_pending_remote_retry();
                 if app.auto_poke_incomplete_todos {
                     crate::tui::app::commands::stop_auto_poke_for_non_retryable_error(
                         app, &message,
@@ -1429,9 +1454,14 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return false;
             }
-            if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
-            {
-                app.clear_pending_remote_retry();
+            if is_failover_prompt {
+                // The provider is waiting for an explicit failover decision;
+                // a saved retry must not bypass that decision on the next tick.
+                app.stop_pending_remote_retry();
+                return false;
+            }
+            if !app.schedule_pending_remote_retry("⚠ Remote request failed.") {
+                app.stop_pending_remote_retry();
                 // No automatic retry will resend this turn, so restore the prompt the
                 // user typed back into the input box instead of dropping it.
                 app.restore_failed_input_to_box();
@@ -1715,6 +1745,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.follow_chat_bottom();
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
+                    app.restored_retries.clear();
+                    app.restored_retry_delivery = None;
+                    app.pending_remote_is_restored_retry = false;
+                    app.restored_retry_stopped = false;
                     app.interleave_message = None;
                     app.interleave_images.clear();
                     app.clear_pending_soft_interrupt_tracking();
@@ -2059,6 +2093,11 @@ pub(in crate::tui::app) fn handle_server_event(
             let reload_recovery = reload_recovery.or_else(|| {
                 ReloadContext::recovery_directive(None, was_interrupted == Some(true), "", None)
             });
+            let reload_recovery = if app.passive_restart_restore {
+                None
+            } else {
+                reload_recovery
+            };
             if let Some(reload_recovery) = reload_recovery
                 && !app.display_messages.is_empty()
             {
@@ -2812,10 +2851,12 @@ pub(in crate::tui::app) fn handle_server_event(
             false
         }
         ServerEvent::SplitResponse {
+            id,
             new_session_id,
             new_session_name,
             ..
         } => {
+            remote.finish_session_launch(id);
             if app.workspace_client.handle_split_response(&new_session_id) {
                 finish_remote_split_launch(app);
                 app.pending_split_request = false;

@@ -1229,6 +1229,117 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
 }
 
 #[test]
+fn passive_restore_rejects_continuation_then_accepts_fresh_prompt() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_passive_fresh_prompt";
+    let continuation = "stored continuation accepted by server";
+
+    super::super::reload_recovery::persist_intent(
+        "reload-accepted-continuation",
+        session_id,
+        super::super::reload_recovery::ReloadRecoveryRole::InterruptedPeer,
+        crate::tool::selfdev::ReloadRecoveryDirective {
+            reconnect_notice: Some("stored notice".to_string()),
+            continuation_message: continuation.to_string(),
+        },
+        "synthetic accepted continuation test",
+    )?;
+    assert!(super::super::reload_recovery::has_pending_for_session(
+        session_id
+    ));
+
+    crate::restart_snapshot::mark_passive_restore(session_id)?;
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let provider: Arc<dyn Provider> = Arc::new(CompleteImmediatelyProvider);
+        let registry = Registry::new(Arc::clone(&provider)).await;
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.model = Some("complete-immediately".to_string());
+        let agent = Arc::new(Mutex::new(Agent::new_with_session(
+            provider, registry, session, None,
+        )));
+
+        let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let (processing_done_tx, mut processing_done_rx) = mpsc::unbounded_channel();
+        let mut client_is_processing = false;
+        let mut processing_message_id = None;
+        let mut processing_session_id = None;
+        let mut processing_task = None;
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+
+        for paused_continuation in [true, false] {
+            start_processing_message(
+                ProcessingMessage {
+                    id: 77,
+                    content: "continue after reload".to_string(),
+                    images: Vec::new(),
+                    system_reminder: paused_continuation.then(|| continuation.to_string()),
+                    active_skill: None,
+                },
+                session_id,
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &agent,
+                &client_event_tx,
+                &processing_done_tx,
+                Vec::new(),
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+            )
+            .await;
+
+            if paused_continuation {
+                assert!(!client_is_processing);
+                assert!(processing_task.is_none());
+                assert!(crate::restart_snapshot::is_passive_restore(session_id)?);
+                assert!(super::super::reload_recovery::has_pending_for_session(
+                    session_id
+                ));
+                continue;
+            }
+            assert!(!crate::restart_snapshot::is_passive_restore(session_id)?);
+            assert!(client_is_processing);
+            assert_eq!(processing_message_id, Some(77));
+            assert_eq!(processing_session_id.as_deref(), Some(session_id));
+            assert!(processing_task.is_some());
+            assert!(
+                !super::super::reload_recovery::has_pending_for_session(session_id),
+                "fresh prompt must retire the old continuation"
+            );
+
+            let (done_id, result, _report) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), processing_done_rx.recv())
+                    .await
+                    .expect("processing task should finish")
+                    .expect("processing task should report completion");
+            assert_eq!(done_id, 77);
+            result?;
+            if let Some(handle) = processing_task.take() {
+                handle.await.expect("processing task join");
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    Ok(())
+}
+
+#[test]
 fn reload_starting_rejects_new_turns_for_multiple_sessions() {
     let _guard = crate::storage::lock_test_env();
     let _runtime = IsolatedRuntimeDir::new();

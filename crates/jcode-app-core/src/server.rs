@@ -995,14 +995,15 @@ impl Server {
                 .as_ref()
                 .map(|record| record.status == reload_recovery::ReloadRecoveryStatus::Pending)
                 .unwrap_or(false);
-            let should_resume = has_stored_recovery_intent || {
-                let agent_guard = agent.lock().await;
-                self::client_session::restored_session_was_interrupted(
-                    &session_id,
-                    &previous_status,
-                    &agent_guard,
-                )
-            };
+            let should_resume = !crate::restart_snapshot::passive_restore_guard_active(&session_id)
+                && (has_stored_recovery_intent || {
+                    let agent_guard = agent.lock().await;
+                    self::client_session::restored_session_was_interrupted(
+                        &session_id,
+                        &previous_status,
+                        &agent_guard,
+                    )
+                });
             if let Some(record) = stored_recovery_record.as_ref() {
                 reload_trace::record_value(
                     &record.reload_id,

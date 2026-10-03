@@ -107,7 +107,7 @@ async fn run_unix(args: Args) -> Result<()> {
     let mut quit = signal(SignalKind::quit())?;
     let result = tokio::select! {
         result = super::tui_launch::run_tui_client(
-            args.resume, None, false, true, Some(working_dir), false, false,
+            args.resume, None, false, true, false, Some(working_dir), false, false,
         ) => result,
         _ = hup.recv() => Ok(()),
         _ = term.recv() => Ok(()),

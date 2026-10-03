@@ -29,6 +29,7 @@ impl ReloadRecoveryRole {
 pub(super) enum ReloadRecoveryStatus {
     Pending,
     Delivered,
+    Superseded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,8 +160,9 @@ fn collect_garbage_at(now: SystemTime) -> Result<GarbageCollectionStats> {
         let should_remove = match crate::storage::read_json::<ReloadRecoveryRecord>(&path) {
             Ok(record) => {
                 record.status == ReloadRecoveryStatus::Delivered
-                    || pending_record_is_expired(&record, now)
-                        .unwrap_or_else(|| file_is_expired(&path, now))
+                    || (record.status == ReloadRecoveryStatus::Pending
+                        && pending_record_is_expired(&record, now)
+                            .unwrap_or_else(|| file_is_expired(&path, now)))
             }
             Err(_) => file_is_expired(&path, now),
         };
@@ -283,6 +285,60 @@ pub(super) fn pending_directive_for_session(
     Ok(Some(directive))
 }
 
+/// A fresh prompt supersedes the interrupted turn. Remove both recovery
+/// sources before releasing the pause, so History cannot replay old work.
+pub(super) fn resume_passive_session_with_new_prompt(session_id: &str) -> Result<()> {
+    // Keep a tombstone until a later reload writes fresh intent. Removing the
+    // record alone would allow History to infer the old interrupted turn from
+    // the transcript before the new prompt has been persisted.
+    let record = ReloadRecoveryRecord {
+        reload_id: String::new(),
+        session_id: session_id.to_string(),
+        role: ReloadRecoveryRole::InterruptedPeer,
+        status: ReloadRecoveryStatus::Superseded,
+        directive: ReloadRecoveryDirective {
+            reconnect_notice: None,
+            continuation_message: String::new(),
+        },
+        reason: "superseded by a fresh prompt after passive restore".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        delivered_at: None,
+    };
+    let path = path_for_session(session_id)?;
+    crate::storage::write_json(&path, &record)?;
+    // Do not leave an older pending record available to JSON backup recovery.
+    match std::fs::remove_file(path.with_extension("bak")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    crate::tool::selfdev::ReloadContext::discard_for_session(session_id)?;
+    crate::restart_snapshot::clear_passive_restore(session_id)
+}
+
+pub(super) fn recovery_was_superseded(session_id: &str) -> bool {
+    let record = match peek_for_session(session_id) {
+        Ok(Some(record)) if record.status == ReloadRecoveryStatus::Superseded => record,
+        Ok(_) => return false,
+        Err(_) => return true,
+    };
+    // Suppress the old transcript, not interruption recovery for every future
+    // turn in this session. A newly persisted message belongs to later work.
+    let Ok(cutoff) = chrono::DateTime::parse_from_rfc3339(&record.created_at) else {
+        return true;
+    };
+    let newer_message = crate::session::Session::load_for_remote_startup(session_id)
+        .ok()
+        .and_then(|session| {
+            session
+                .messages
+                .last()
+                .and_then(|message| message.timestamp)
+        })
+        .is_some_and(|timestamp| timestamp > cutoff);
+    !newer_message
+}
+
 pub(super) fn mark_delivered_if_matching_continuation(
     session_id: &str,
     continuation_message: &str,
@@ -399,6 +455,87 @@ mod tests {
             reconnect_notice: Some("reconnected".to_string()),
             continuation_message: message.to_string(),
         }
+    }
+
+    #[test]
+    fn passive_resume_removes_matching_legacy_context_and_backup() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let _home = IsolatedHome::new();
+        let id = "session_matching_legacy";
+        let legacy = crate::storage::jcode_dir()?.join("reload-context.json");
+        let context = crate::tool::selfdev::ReloadContext {
+            session_id: id.into(),
+            task_context: Some("old task".into()),
+            version_before: "old".into(),
+            version_after: "new".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        crate::storage::write_json(&legacy, &context)?;
+        crate::storage::write_json(&legacy, &context)?;
+        crate::restart_snapshot::mark_passive_restore(id)?;
+        resume_passive_session_with_new_prompt(id)?;
+        assert!(!legacy.exists());
+        assert!(!legacy.with_extension("bak").exists());
+        assert!(!crate::restart_snapshot::is_passive_restore(id)?);
+        Ok(())
+    }
+
+    #[test]
+    fn passive_resume_ignores_corrupt_shared_context_and_preserves_foreign_context() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let _home = IsolatedHome::new();
+        let legacy = crate::storage::jcode_dir()?.join("reload-context.json");
+        for corrupt in [false, true] {
+            if corrupt {
+                std::fs::write(&legacy, "not json")?;
+                std::fs::write(legacy.with_extension("bak"), "also not json")?;
+            } else {
+                crate::storage::write_json(
+                    &legacy,
+                    &crate::tool::selfdev::ReloadContext {
+                        session_id: "another-session".into(),
+                        task_context: Some("foreign task".into()),
+                        version_before: "old".into(),
+                        version_after: "new".into(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    },
+                )?;
+            }
+            let original = std::fs::read(&legacy)?;
+            for _ in 0..2 {
+                let id = "session_resume_with_foreign_context";
+                crate::restart_snapshot::mark_passive_restore(id)?;
+                persist_intent(
+                    "old",
+                    id,
+                    ReloadRecoveryRole::InterruptedPeer,
+                    directive("old work"),
+                    "test",
+                )?;
+                resume_passive_session_with_new_prompt(id)?;
+                assert!(!crate::restart_snapshot::is_passive_restore(id)?);
+                assert!(!has_pending_for_session(id));
+                assert!(recovery_was_superseded(id));
+                assert_eq!(std::fs::read(&legacy)?, original);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn passive_restore_keeps_pause_if_old_context_cannot_be_removed() -> Result<()> {
+        let _lock = crate::storage::lock_test_env();
+        let _home = IsolatedHome::new();
+        let id = "session_cleanup_failure";
+        crate::restart_snapshot::mark_passive_restore(id)?;
+        let path = crate::tool::selfdev::ReloadContext::path_for_session(id)?;
+        std::fs::create_dir(&path)?;
+        assert!(resume_passive_session_with_new_prompt(id).is_err());
+        assert!(crate::restart_snapshot::is_passive_restore(id)?);
+        std::fs::remove_dir(path)?;
+        resume_passive_session_with_new_prompt(id)?;
+        assert!(!crate::restart_snapshot::is_passive_restore(id)?);
+        Ok(())
     }
 
     #[test]

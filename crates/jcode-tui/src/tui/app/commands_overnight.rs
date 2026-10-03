@@ -303,6 +303,7 @@ impl App {
             return false;
         }
         self.overnight_auto_poke = None;
+        self.stop_pending_remote_retry();
         self.push_display_message(DisplayMessage::system(
             "🛑 The last request failed in a way that retrying won't fix, so we stopped the overnight run. Check /overnight status and continue manually if it looks right.".to_string(),
         ));

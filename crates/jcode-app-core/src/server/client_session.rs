@@ -57,6 +57,9 @@ pub(super) fn restored_session_was_interrupted(
     previous_status: &crate::session::SessionStatus,
     agent: &Agent,
 ) -> bool {
+    if super::reload_recovery::recovery_was_superseded(session_id) {
+        return false;
+    }
     let last_is_user = agent
         .last_message_role()
         .as_ref()
@@ -1593,7 +1596,8 @@ pub(super) async fn handle_resume_session(
     let was_interrupted = match &result {
         Ok(status) => {
             let agent_guard = agent.lock().await;
-            restored_session_was_interrupted(&session_id, status, &agent_guard)
+            !crate::restart_snapshot::passive_restore_guard_active(&session_id)
+                && restored_session_was_interrupted(&session_id, status, &agent_guard)
         }
         Err(_) => false,
     };

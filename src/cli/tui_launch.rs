@@ -86,6 +86,7 @@ pub async fn run_tui_client(
     startup_hints: Option<setup_hints::StartupHints>,
     server_spawning: bool,
     fresh_spawn: bool,
+    passive_restore: bool,
     remote_working_dir: Option<String>,
     onboarding_sim: bool,
     update_sim: bool,
@@ -144,7 +145,8 @@ pub async fn run_tui_client(
     }
     startup_profile::mark("terminal_title");
 
-    let mut app = tui::App::new_for_remote_with_options(resume_session.clone(), fresh_spawn);
+    let mut app =
+        tui::App::new_for_remote_with_restore(resume_session.clone(), fresh_spawn, passive_restore);
     if should_show_server_spawning(server_spawning).await {
         app.set_server_spawning();
     }
