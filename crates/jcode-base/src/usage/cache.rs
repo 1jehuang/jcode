@@ -150,6 +150,13 @@ pub(super) fn cached_openai_usage_for_label(label: &str) -> Option<OpenAIUsageDa
     cached_openai_usage(&openai_usage_cache_key("", Some(label)))
 }
 
+/// Forget one OpenAI label's cached usage so the next read refetches it.
+pub(super) fn forget_openai_usage_for_label(label: &str) {
+    if let Ok(mut map) = openai_usage_cache().lock() {
+        map.remove(&openai_usage_cache_key("", Some(label)));
+    }
+}
+
 pub(super) fn store_anthropic_usage(cache_key: String, data: UsageData) {
     if let Ok(mut map) = anthropic_usage_cache().lock() {
         map.insert(cache_key, data);
@@ -173,10 +180,18 @@ pub(super) fn store_openai_usage_for_generation(
     cache_key: String,
     data: OpenAIUsageData,
 ) {
+    // A label whose fresh usage confirms the limit is open again. Cleared
+    // after the cache lock is released to keep lock order flat.
+    let mut reset_label: Option<String> = None;
     if let Ok(mut map) = openai_usage_cache().lock() {
         // A request begun before a reset must not reinstate the old exhausted quota.
         if generation != openai_usage_generation() {
             return;
+        }
+        if data.confirms_usage_available()
+            && let Some(label) = cache_key.strip_prefix("label:")
+        {
+            reset_label = Some(label.to_string());
         }
         let previous = map.get(&cache_key).cloned();
         let previous_exhausted = previous
@@ -203,6 +218,12 @@ pub(super) fn store_openai_usage_for_generation(
             ));
         }
         map.insert(cache_key, data);
+    }
+    if let Some(label) = reset_label {
+        // Fresh usage says this account is open again (an early or banked
+        // reset, or the window rolled over). Drop the usage-limit mark and
+        // the provider cooldown so the next resume is actually sent.
+        crate::provider::clear_openai_provider_unavailability_for_account_label(Some(&label));
     }
 }
 

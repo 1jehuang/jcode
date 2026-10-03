@@ -685,6 +685,20 @@ impl MultiProvider {
             // block every window on that provider.
             let session_label = account_failover::account_kind(candidate)
                 .and_then(|kind| self.session_account_label(kind));
+            // A usage-limit mark holds until the reset the provider reported.
+            // If the OpenAI account was reset early, recheck live usage first
+            // so a resume is not skipped against a stale mark.
+            if candidate == ActiveProvider::OpenAI
+                && let Some(label) = session_label.as_deref()
+                && (provider_unavailability_detail_for_label(key, label).is_some()
+                    || account_failover::account_exhausted(
+                        jcode_provider_core::AccountProviderKind::OpenAi,
+                        label,
+                    )
+                    .is_some())
+            {
+                crate::usage::revalidate_openai_account_exhaustion(label).await;
+            }
             let unavailable = match session_label.as_deref() {
                 Some(label) => provider_unavailability_detail_for_label(key, label),
                 None => provider_unavailability_detail_for_account(key),

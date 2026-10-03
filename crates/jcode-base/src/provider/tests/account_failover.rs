@@ -189,7 +189,11 @@ impl Provider for FakeAccountRuntime {
             .flatten()
     }
 
-    fn set_account_pin(&self, kind: AccountProviderKind, pin: Option<AccountPin>) -> anyhow::Result<()> {
+    fn set_account_pin(
+        &self,
+        kind: AccountProviderKind,
+        pin: Option<AccountPin>,
+    ) -> anyhow::Result<()> {
         if kind == self.kind {
             *self.pin.write().unwrap() = pin;
         }
@@ -209,7 +213,8 @@ fn account_session(
     active: ActiveProvider,
     with_openai: bool,
 ) -> MultiProvider {
-    let anthropic = FakeAccountRuntime::new(AccountProviderKind::Claude, session, Arc::clone(world));
+    let anthropic =
+        FakeAccountRuntime::new(AccountProviderKind::Claude, session, Arc::clone(world));
     let openai = (with_openai || active == ActiveProvider::OpenAI).then(|| {
         FakeAccountRuntime::new(AccountProviderKind::OpenAi, session, Arc::clone(world))
             as Arc<dyn Provider>
@@ -320,7 +325,10 @@ fn in_stream_claude_usage_limit_triggers_account_failover() {
         assert_eq!(labels, ["claude-otter", "claude-fox", "claude-panda"]);
         let world = Arc::new(FakeAccountWorld::default());
         let resets_at = chrono::Utc::now().timestamp() + 3 * 3600 + 17 * 60;
-        world.set("claude-otter", FakeAccountBehavior::InStreamUsageLimit { resets_at });
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at },
+        );
         let a = account_session(&world, "A", ActiveProvider::Claude, false);
 
         let rt = enter_test_runtime();
@@ -328,7 +336,8 @@ fn in_stream_claude_usage_limit_triggers_account_failover() {
         assert_eq!(text, "hi from claude-fox");
         assert_eq!(world.labels_for("A"), ["claude-otter", "claude-fox"]);
         assert_eq!(
-            a.account_pin(AccountProviderKind::Claude).map(|pin| pin.label),
+            a.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
             Some("claude-fox".to_string()),
             "only this session is pinned to the next account"
         );
@@ -373,7 +382,8 @@ fn in_stream_codex_usage_limit_reached_triggers_account_failover() {
         assert_eq!(text, "hi from openai-fox");
         assert_eq!(world.labels_for("A"), ["openai-otter", "openai-fox"]);
         assert_eq!(
-            a.account_pin(AccountProviderKind::OpenAi).map(|pin| pin.label),
+            a.account_pin(AccountProviderKind::OpenAi)
+                .map(|pin| pin.label),
             Some("openai-fox".to_string())
         );
         assert_eq!(crate::auth::codex::get_active_account_override(), None);
@@ -390,7 +400,10 @@ fn failover_moves_only_this_session() {
         store_claude_accounts(3);
         let world = Arc::new(FakeAccountWorld::default());
         let resets_at = chrono::Utc::now().timestamp() + 3600;
-        world.set("claude-otter", FakeAccountBehavior::InStreamUsageLimit { resets_at });
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at },
+        );
         let a = account_session(&world, "A", ActiveProvider::Claude, false);
         let b = account_session(&world, "B", ActiveProvider::Claude, false);
         b.set_account_pin(
@@ -404,7 +417,8 @@ fn failover_moves_only_this_session() {
 
         // B keeps its own pin, the default is still otter, no global override.
         assert_eq!(
-            b.account_pin(AccountProviderKind::Claude).map(|pin| pin.label),
+            b.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
             Some("claude-panda".to_string())
         );
         assert_eq!(crate::auth::claude::get_active_account_override(), None);
@@ -413,7 +427,10 @@ fn failover_moves_only_this_session() {
             Some("claude-otter")
         );
         assert!(b.drain_startup_notices().is_empty());
-        assert!(b.account_failover_home(AccountProviderKind::Claude).is_none());
+        assert!(
+            b.account_failover_home(AccountProviderKind::Claude)
+                .is_none()
+        );
         assert_eq!(complete_text(&rt, &b).unwrap(), "hi from claude-panda");
         assert_eq!(world.labels_for("B"), ["claude-panda"]);
     });
@@ -521,7 +538,10 @@ fn all_exhausted_error_names_earliest_reset_and_falls_to_cross_provider_prompt()
             None,
             "the original (unpinned) state is restored"
         );
-        assert!(a.account_failover_home(AccountProviderKind::Claude).is_none());
+        assert!(
+            a.account_failover_home(AccountProviderKind::Claude)
+                .is_none()
+        );
     });
 }
 
@@ -531,7 +551,10 @@ fn returns_home_after_reset_at_turn_start() {
         store_claude_accounts(2);
         let world = Arc::new(FakeAccountWorld::default());
         let resets_at = chrono::Utc::now().timestamp() + 2;
-        world.set("claude-otter", FakeAccountBehavior::InStreamUsageLimit { resets_at });
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at },
+        );
         let a = account_session(&world, "A", ActiveProvider::Claude, false);
         let rt = enter_test_runtime();
         assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
@@ -539,7 +562,8 @@ fn returns_home_after_reset_at_turn_start() {
         // Before the reset: stay on fox.
         assert!(a.return_account_home_if_reset().is_empty());
         assert_eq!(
-            a.account_pin(AccountProviderKind::Claude).map(|pin| pin.label),
+            a.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
             Some("claude-fox".to_string())
         );
 
@@ -550,10 +574,14 @@ fn returns_home_after_reset_at_turn_start() {
             vec![AccountProviderKind::Claude]
         );
         assert_eq!(
-            a.account_pin(AccountProviderKind::Claude).map(|pin| pin.label),
+            a.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
             Some("claude-otter".to_string())
         );
-        assert!(a.account_failover_home(AccountProviderKind::Claude).is_none());
+        assert!(
+            a.account_failover_home(AccountProviderKind::Claude)
+                .is_none()
+        );
         assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-otter");
 
         // Config off: never returns on its own.
@@ -568,7 +596,8 @@ fn returns_home_after_reset_at_turn_start() {
         std::thread::sleep(std::time::Duration::from_millis(1_200));
         assert!(a.return_account_home_if_reset().is_empty());
         assert_eq!(
-            a.account_pin(AccountProviderKind::Claude).map(|pin| pin.label),
+            a.account_pin(AccountProviderKind::Claude)
+                .map(|pin| pin.label),
             Some("claude-fox".to_string())
         );
     });
@@ -580,7 +609,10 @@ fn session_failover_off_disables_rotation() {
         store_claude_accounts(3);
         let world = Arc::new(FakeAccountWorld::default());
         let resets_at = chrono::Utc::now().timestamp() + 3600;
-        world.set("claude-otter", FakeAccountBehavior::InStreamUsageLimit { resets_at });
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimit { resets_at },
+        );
         let rt = enter_test_runtime();
 
         // This session turned failover off: the usage-limit error reaches the
@@ -631,7 +663,9 @@ fn short_429_retries_same_account() {
         // never touches the process-wide override.
         world.set(
             "claude-otter",
-            FakeAccountBehavior::SyncError("Anthropic API error (429 Too Many Requests): rate limited"),
+            FakeAccountBehavior::SyncError(
+                "Anthropic API error (429 Too Many Requests): rate limited",
+            ),
         );
         let b = account_session(&world, "B", ActiveProvider::Claude, false);
         let _ = complete_text(&rt, &b).expect_err("short 429");
@@ -695,8 +729,11 @@ fn relogin_under_exhausted_label_is_not_exhausted() {
             Some(now + 3600),
         );
         assert!(
-            crate::provider::account_failover::account_exhausted(AccountProviderKind::Claude, &otter)
-                .is_some()
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::Claude,
+                &otter
+            )
+            .is_some()
         );
 
         // Same login, refreshed tokens: still exhausted.
@@ -710,8 +747,11 @@ fn relogin_under_exhausted_label_is_not_exhausted() {
         account.refresh = "refresh-rotated".to_string();
         crate::auth::claude::save_auth_file(&auth).unwrap();
         assert!(
-            crate::provider::account_failover::account_exhausted(AccountProviderKind::Claude, &otter)
-                .is_some(),
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::Claude,
+                &otter
+            )
+            .is_some(),
             "a token refresh is the same subscription"
         );
 
@@ -727,12 +767,18 @@ fn relogin_under_exhausted_label_is_not_exhausted() {
         account.refresh = "refresh-newlogin".to_string();
         crate::auth::claude::save_auth_file(&auth).unwrap();
         assert_eq!(
-            crate::provider::account_failover::account_exhausted(AccountProviderKind::Claude, &otter),
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::Claude,
+                &otter
+            ),
             None,
             "a new login under the label must not inherit the old exhaustion"
         );
         assert_eq!(
-            crate::provider::account_failover::account_resets_at(AccountProviderKind::Claude, &otter),
+            crate::provider::account_failover::account_resets_at(
+                AccountProviderKind::Claude,
+                &otter
+            ),
             None
         );
     });
@@ -770,7 +816,8 @@ fn account_failover_all_limited_turn_tries_each_account_once() {
         let rt = enter_test_runtime();
         let err = complete_text(&rt, &a).expect_err("all out");
         assert!(
-            err.to_string().contains("All 3 Claude accounts are out of usage. First reset: claude-fox"),
+            err.to_string()
+                .contains("All 3 Claude accounts are out of usage. First reset: claude-fox"),
             "{err:#}"
         );
         assert_eq!(world.requests().len(), 3, "{:?}", world.requests());
@@ -807,7 +854,8 @@ fn account_failover_next_turn_after_all_limited_sends_no_requests() {
         for turn in 0..3 {
             let err = complete_text(&rt, &a).expect_err("still all out");
             assert!(
-                err.to_string().contains("All 3 Claude accounts are out of usage. First reset: claude-fox"),
+                err.to_string()
+                    .contains("All 3 Claude accounts are out of usage. First reset: claude-fox"),
                 "turn {turn}: {err:#}"
             );
             assert_eq!(world.requests().len(), 3, "turn {turn} sent a request");
@@ -815,7 +863,11 @@ fn account_failover_next_turn_after_all_limited_sends_no_requests() {
         // Another window on the same accounts sends nothing either.
         let b = account_session(&world, "B", ActiveProvider::Claude, true);
         let _ = complete_text(&rt, &b).expect_err("all out");
-        assert!(world.labels_for("B").is_empty(), "{:?}", world.labels_for("B"));
+        assert!(
+            world.labels_for("B").is_empty(),
+            "{:?}",
+            world.labels_for("B")
+        );
         drop(first);
     });
 }
@@ -827,7 +879,10 @@ fn account_failover_unknown_reset_not_retried_within_window() {
     with_account_failover_env(|| {
         store_claude_accounts(2);
         let world = Arc::new(FakeAccountWorld::default());
-        world.set("claude-otter", FakeAccountBehavior::InStreamUsageLimitNoReset);
+        world.set(
+            "claude-otter",
+            FakeAccountBehavior::InStreamUsageLimitNoReset,
+        );
         world.set("claude-fox", FakeAccountBehavior::InStreamUsageLimitNoReset);
         let a = account_session(&world, "A", ActiveProvider::Claude, false);
         let rt = enter_test_runtime();
@@ -840,7 +895,10 @@ fn account_failover_unknown_reset_not_retried_within_window() {
         .expect("marked");
         let window = crate::provider::account_failover::UNKNOWN_RESET_EXHAUSTION_SECS;
         let now = chrono::Utc::now().timestamp();
-        assert!(until >= now + window - 5 && until <= now + window, "{until}");
+        assert!(
+            until >= now + window - 5 && until <= now + window,
+            "{until}"
+        );
         for _ in 0..3 {
             let _ = complete_text(&rt, &a).expect_err("still out");
         }
@@ -864,11 +922,17 @@ fn account_failover_return_home_still_limited_does_not_bounce() {
         );
         let a = account_session(&world, "A", ActiveProvider::Claude, false);
         assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
-        assert!(a.return_account_home_if_reset().is_empty(), "not before the reset");
+        assert!(
+            a.return_account_home_if_reset().is_empty(),
+            "not before the reset"
+        );
 
         std::thread::sleep(std::time::Duration::from_millis(2_200));
         // The provider still reports the old (now past) reset time.
-        assert_eq!(a.return_account_home_if_reset(), vec![AccountProviderKind::Claude]);
+        assert_eq!(
+            a.return_account_home_if_reset(),
+            vec![AccountProviderKind::Claude]
+        );
         assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
         assert_eq!(
             world.labels_for("A"),
@@ -888,7 +952,11 @@ fn account_failover_return_home_still_limited_does_not_bounce() {
             assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-fox");
         }
         assert_eq!(
-            world.labels_for("A").iter().filter(|l| *l == "claude-otter").count(),
+            world
+                .labels_for("A")
+                .iter()
+                .filter(|l| *l == "claude-otter")
+                .count(),
             2,
             "otter got no more requests: {:?}",
             world.labels_for("A")
@@ -902,7 +970,105 @@ fn account_failover_return_home_still_limited_does_not_bounce() {
         );
         world.set("claude-otter", FakeAccountBehavior::Ok);
         std::thread::sleep(std::time::Duration::from_millis(1_200));
-        assert_eq!(a.return_account_home_if_reset(), vec![AccountProviderKind::Claude]);
+        assert_eq!(
+            a.return_account_home_if_reset(),
+            vec![AccountProviderKind::Claude]
+        );
         assert_eq!(complete_text(&rt, &a).unwrap(), "hi from claude-otter");
+    });
+}
+
+/// Reported bug: an OpenAI account hit its limit, the usage reset early (a
+/// banked reset, or the window rolled over), and `/usage` showed it open
+/// again, yet every resume kept being skipped with "out of usage (resets
+/// 02:10)". The mark held the reported reset time and nothing re-read usage.
+/// A fresh snapshot confirming the account is open must clear the mark and
+/// the provider cooldown so the resume is actually sent.
+#[test]
+fn openai_early_reset_clears_usage_limit_mark_and_resume_is_sent() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        let labels = store_openai_accounts(1);
+        assert_eq!(labels, ["openai-otter"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+
+        // The limit was hit with a reset hours away, exactly as in the logs.
+        let far_reset = chrono::Utc::now().timestamp() + 5 * 3600;
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::OpenAi,
+            "openai-otter",
+            Some(far_reset),
+        );
+        record_provider_unavailable_for_label(
+            "openai",
+            "openai-otter",
+            "openai-otter is out of usage",
+        );
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                hard_limit_reached: true,
+                fetched_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            complete_text(&rt, &a).is_err(),
+            "while really exhausted the request is still skipped"
+        );
+        assert!(world.labels_for("A").is_empty());
+
+        // A partial or failed snapshot must not be read as "open again".
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                fetched_at: Some(std::time::Instant::now()),
+                last_error: Some("API error (500)".to_string()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::OpenAi,
+                "openai-otter"
+            )
+            .is_some(),
+            "an error snapshot proves nothing"
+        );
+
+        // Fresh usage after the early reset: weekly 0%, ordinary use allowed.
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                seven_day: Some(crate::usage::OpenAIUsageWindow {
+                    name: "7-day window".to_string(),
+                    usage_ratio: 0.0,
+                    resets_at: None,
+                }),
+                fetched_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::OpenAi,
+                "openai-otter"
+            ),
+            None,
+            "fresh usage that confirms the reset must clear the mark"
+        );
+        assert_eq!(
+            provider_unavailability_detail_for_label("openai", "openai-otter"),
+            None,
+            "and the provider cooldown"
+        );
+        assert_eq!(
+            complete_text(&rt, &a).expect("the resume must be sent after the reset"),
+            "hi from openai-otter"
+        );
+        assert_eq!(world.labels_for("A"), ["openai-otter"]);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
     });
 }

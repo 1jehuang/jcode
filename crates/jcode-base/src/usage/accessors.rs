@@ -458,6 +458,86 @@ pub fn get_sync() -> UsageData {
     UsageData::default()
 }
 
+/// Minimum spacing between live rechecks of one marked-exhausted OpenAI label.
+const OPENAI_EXHAUSTION_REVALIDATE_INTERVAL: Duration = Duration::from_secs(30);
+
+static OPENAI_EXHAUSTION_REVALIDATED_AT: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Recheck a marked-exhausted OpenAI account against live usage before its
+/// request is skipped. A usage-limit mark keeps the reset time the provider
+/// reported, so an early reset (banked reset, plan change, a window that
+/// rolled over sooner) was never noticed and every resume was skipped until
+/// that time. When fresh usage confirms the account is open again, the cache
+/// store hook clears the mark and cooldown. Throttled per label.
+pub async fn revalidate_openai_account_exhaustion(label: &str) {
+    let label = label.trim();
+    if label.is_empty() {
+        return;
+    }
+    {
+        let mut checked = OPENAI_EXHAUSTION_REVALIDATED_AT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if checked
+            .get(label)
+            .is_some_and(|at| at.elapsed() < OPENAI_EXHAUSTION_REVALIDATE_INTERVAL)
+        {
+            return;
+        }
+        checked.insert(label.to_string(), Instant::now());
+    }
+    let Some(account) = auth::codex::list_accounts()
+        .ok()
+        .and_then(|accounts| accounts.into_iter().find(|account| account.label == label))
+    else {
+        return;
+    };
+    // Unit tests use fake credentials. They exercise the store hook directly
+    // instead of reaching the real usage endpoint.
+    if cfg!(test) {
+        return;
+    }
+    super::cache::forget_openai_usage_for_label(label);
+    let fetch = super::provider_fetch::fetch_openai_usage_for_account(
+        label.to_string(),
+        auth::codex::CodexCredentials {
+            access_token: account.access_token,
+            refresh_token: account.refresh_token,
+            id_token: account.id_token,
+            account_id: account.account_id,
+            expires_at: account.expires_at,
+        },
+        Some(label),
+    );
+    // Never hold a turn hostage to a slow usage endpoint.
+    let _ = tokio::time::timeout(Duration::from_secs(8), fetch).await;
+}
+
+#[cfg(test)]
+pub(crate) fn reset_openai_exhaustion_revalidation_for_tests() {
+    OPENAI_EXHAUSTION_REVALIDATED_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
+/// Store an OpenAI label snapshot through the normal path, reset hook included.
+#[cfg(test)]
+pub(crate) fn store_openai_usage_for_label_for_tests(label: &str, data: OpenAIUsageData) {
+    super::cache::store_openai_usage_for_generation(
+        super::cache::openai_usage_generation(),
+        super::cache::openai_usage_cache_key("", Some(label)),
+        data,
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn forget_openai_usage_for_label_for_tests(label: &str) {
+    super::cache::forget_openai_usage_for_label(label);
+}
+
 /// Label-keyed usage view for per-session account failover. Returns
 /// `Some(resets_at)` (unix seconds, when known) when the cached usage of this
 /// account label says its windows are spent. Never fetches: cache only, so it
