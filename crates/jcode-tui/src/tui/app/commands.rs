@@ -111,11 +111,12 @@ pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
 /// through `disable_auto_poke` also cleared `auto_poke_default_on`, so one Esc
 /// silently disabled auto-poke for the rest of the session and the default-on
 /// re-arm in `schedule_auto_poke_followup_if_needed` could not undo it.
-pub(super) fn stop_poke_for_interrupt(app: &mut App) -> usize {
+pub(super) fn stop_auto_poke_episode(app: &mut App) -> usize {
     let cleared = clear_queued_poke_messages(app);
-    // Keep whatever the user actually armed: `/poke off` still sticks because
-    // it cleared `auto_poke_default_on`, an interrupt no longer does.
-    app.auto_poke_incomplete_todos = app.auto_poke_default_on;
+    // Left disarmed. `auto_poke_default_on` is untouched, so the next user turn
+    // re-arms through `rearm_auto_poke_on_user_turn`. Re-arming here instead
+    // would make "auto-poke resumes on your next message" untrue.
+    app.auto_poke_incomplete_todos = false;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
@@ -208,11 +209,16 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
         return false;
     }
 
-    let cleared = disable_auto_poke(app);
+    // Episode-scoped, not session-scoped: a request that failed once does not
+    // mean auto-poke should never run again. Clearing `auto_poke_default_on`
+    // here turned a single network or provider hiccup into a permanent stop for
+    // the session, which the user-turn re-arm cannot undo because the default
+    // itself was cleared.
+    let cleared = stop_auto_poke_episode(app);
     app.rate_limit_pending_message = None;
     app.rate_limit_reset = None;
     app.push_display_message(DisplayMessage::system(format!(
-        "🛑 The last request failed in a way that retrying won't fix, so we stopped poking.{} Fix the request or session, then /poke to resume.",
+        "🛑 The last request failed in a way that retrying won't fix, so we stopped poking for now.{} Fix the request or session; auto-poke resumes on your next message.",
         if cleared == 0 {
             String::new()
         } else {

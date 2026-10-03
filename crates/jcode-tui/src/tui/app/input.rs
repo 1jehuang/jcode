@@ -3125,11 +3125,11 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 if disabled_auto_poke {
                     // Interrupt, not `/poke off`: stop the in-flight poke but keep
                     // auto-poke armed so the next turn end can schedule another.
-                    super::commands::stop_poke_for_interrupt(app);
+                    super::commands::stop_auto_poke_episode(app);
                     if cancelled_overnight {
-                        app.set_status_notice("Interrupting... poke stopped, overnight cancelled");
+                        app.set_status_notice("Interrupting... auto-poke resumes on your next message, overnight cancelled");
                     } else {
-                        app.set_status_notice("Interrupting... poke stopped");
+                        app.set_status_notice("Interrupting... auto-poke resumes on your next message");
                     }
                 } else if cancelled_overnight {
                     app.set_status_notice("Interrupting... Overnight cancelled");

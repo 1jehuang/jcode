@@ -1515,11 +1515,14 @@ fn test_escape_interrupt_stops_the_poke_but_keeps_auto_poke_armed() {
     // not "never poke again". It used to clear auto_poke_default_on too, which
     // disabled auto-poke for the rest of the session with no way back short of
     // an explicit /poke on.
-    assert!(app.auto_poke_incomplete_todos);
-    assert!(app.auto_poke_default_on);
+    assert!(!app.auto_poke_incomplete_todos, "the in-flight poke is stopped");
+    assert!(
+        app.auto_poke_default_on,
+        "but the feature is still on for the session"
+    );
     assert_eq!(
         app.status_notice(),
-        Some("Interrupting... poke stopped".to_string())
+        Some("Interrupting... auto-poke resumes on your next message".to_string())
     );
     // A fresh fingerprint means the next turn end schedules a new poke.
     assert!(app.last_auto_poke_fingerprint.is_none());
