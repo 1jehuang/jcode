@@ -24,3 +24,8 @@ captures/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# Agent skills vendored by 'npx skills add' - local tooling, not repo content.
+/.agents/
+/.claude/skills/
+/skills-lock.json
