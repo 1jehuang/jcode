@@ -172,7 +172,9 @@ Do not confuse this with `spawn`. `spawn` is the agent-first path: one worker re
 
 ## Bounding the growth
 
-Deep mode is documented with no fixed depth and no per-node fan-out limit: growth is bounded only by the live-worker budget and the total member cap, and nothing upstream will stop a runaway - measured, a 5-node seed grew to 190 nodes across 37 workers while the only node carrying the user's outcome stayed blocked throughout. So every node contract should end with a hard expansion budget in its own `content`, for example `EXPANSION BUDGET: at most 2 sub-nodes, own scope only.` A node whose owner should execute it as one unit can say so verbatim: `do not expand this node` switches its assignment to atomic execution. A short artifact that lands now outranks a thorough artifact that never lands.
+Deep mode has no fixed depth and no per-node fan-out limit: growth is bounded only by the live-worker budget and the total member cap. How far to expand is the owner's call at expansion time, on the node's own terms - there is no prescribed number here, because the right breadth depends on what the node actually contains.
+
+The one control a node's brief can carry is `do not expand this node`, which switches its assignment to atomic execution for an owner that should do the work as one unit rather than decompose it.
 
 ## Workflow
 
