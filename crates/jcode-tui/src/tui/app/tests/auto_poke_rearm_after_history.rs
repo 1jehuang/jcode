@@ -452,25 +452,25 @@ fn interrupted_poke_is_replaced_by_a_real_new_poke_on_the_next_user_turn() {
         );
     });
 }
-
-/// The re-arm is wired into exactly one place: `submit_input`
-/// (`input.rs:4220` and `input.rs:4240`). A message the user sends while a turn
-/// is still running goes down `queue_message` (`input.rs:1594`) or
-/// `stage_local_interleave`, and NEITHER calls `rearm_auto_poke_on_user_turn`.
+/// The re-arm reaches every path that starts a user turn: `submit_input`, plus
+/// `queue_message` and `stage_local_interleave` for a message the user sends
+/// while a turn is still running.
 ///
-/// That is reachable right after an interrupt, because `Esc` sets
+/// That second case is reachable right after an interrupt, because `Esc` sets
 /// `cancel_requested` but leaves `is_processing` true until the cancelled turn
 /// actually unwinds. A user who types their next message in that window - the
-/// normal thing to do after interrupting - is on the queue path, so the re-arm
-/// never runs for that turn.
+/// normal thing to do after interrupting - is on the queue path. Before D3 was
+/// fixed neither `queue_message` nor `stage_local_interleave` re-armed, so
+/// auto-poke stayed disarmed with no owed debt to settle: the silent stall where
+/// the default still reads enabled but nothing ever fires.
 ///
-/// This test pins the CURRENT behaviour rather than asserting a fix: it records
-/// that the queue path leaves auto-poke disarmed and owes nothing, which is the
-/// silent-stall shape (default still on, nothing armed, no debt to settle). It
-/// fails loudly if someone later wires the re-arm into `queue_message`, at which
-/// point the assertion should be inverted deliberately rather than by accident.
+/// This test asserts the FIXED behaviour: queueing while processing re-arms, so
+/// an interrupt followed by a queued message does not silently kill the poke.
+/// The previous version of this test asserted the opposite (it pinned the bug
+/// as if it were correct); it was inverted deliberately when the queue path was
+/// wired, not by accident.
 #[test]
-fn queueing_a_message_while_processing_does_not_rearm_auto_poke() {
+fn queueing_a_message_while_processing_rearms_auto_poke() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         assert!(!app.is_remote, "fixture precondition: a local session");
@@ -494,22 +494,21 @@ fn queueing_a_message_while_processing_does_not_rearm_auto_poke() {
         app.input = "keep going".to_string();
         app.cursor_pos = app.input.len();
         crate::tui::app::input::queue_message(&mut app);
-
-        // The gap: no re-arm, and no owed debt, so the end-of-turn scheduler has
-        // nothing to settle. If this ever starts re-arming, invert this test.
+        // The fix: a message queued while processing is still a user turn, so it
+        // re-arms here too. Without it this turn left nothing armed and nothing
+        // owed, and the end-of-turn scheduler had nothing to settle.
         assert!(
-            !app.auto_poke_incomplete_todos,
-            "the queue path currently does NOT re-arm; see the doc comment - \
-             if this now passes the other way, the re-arm was wired here and \
-             this test needs inverting on purpose"
+            app.auto_poke_incomplete_todos,
+            "queueing a message mid-turn must re-arm auto-poke while the plan is \
+             unfinished, exactly as submit_input does"
         );
         assert!(
             !app.auto_poke_rearm_owed,
-            "and it latches no owed re-arm either, so this turn is a silent stall"
+            "the plan IS visible here, so the re-arm arms directly and owes no debt"
         );
         assert!(
             app.auto_poke_default_on,
-            "while the session default still reads as enabled - the confusing part"
+            "the session default must survive: the user never turned the feature off"
         );
     });
 }

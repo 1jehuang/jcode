@@ -1594,6 +1594,13 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
 pub(super) fn queue_message(app: &mut App) {
     let prepared = take_prepared_input(app);
     app.queued_messages.push(prepared.expanded);
+    // A queued message is a user turn too: it just starts one later. Without this
+    // the re-arm is reachable only from `submit_input`, and the message a user
+    // sends right after Esc takes this path - Esc sets `cancel_requested` but
+    // leaves `is_processing` true until the cancelled turn unwinds - so
+    // auto-poke stayed disarmed with no owed debt to settle. That is the silent
+    // stall: the default still reads as enabled and nothing ever fires again.
+    super::commands::rearm_auto_poke_on_user_turn(app);
 }
 
 pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
@@ -1772,20 +1779,20 @@ impl App {
     }
 
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
-        // The completion-gate breaker clears the poke flag, and the guard
-        // below returns on that very flag, so the re-arm assignment further
-        // down is unreachable once the budget is spent. One exhausted budget
-        // then silently disables the poke for the rest of the session, even
-        // once real open work appears. Settle the owed re-arm first.
+        // Settle a re-arm owed by a user turn BEFORE the guard below, which
+        // returns on `auto_poke_incomplete_todos`. Settling is what arms
+        // auto-poke, so running it after the guard would be dead code on
+        // exactly the session that owes the debt - the session that needs the
+        // poke most: an episode stop (Esc, a provider guardrail stop, a dead
+        // credential, a non-retryable error) clears the flag but leaves
+        // `auto_poke_default_on` on, and nothing re-arms until the user speaks
+        // again.
         //
-        // Checking auto_poke_default_on keeps an explicit /poke off
-        // authoritative, and incomplete_poke_todos keeps a fully completed
-        // plan from re-arming. See issue #1666.
-        // Settle a re-arm owed by a user turn BEFORE the guard below. Settling
-        // is what arms auto-poke, so running it after the guard would be dead
-        // code on exactly the session that owes the debt - the session that
-        // needs the poke most.
-        super::commands::settle_deferred_auto_poke_rearm(self);        if !self.auto_poke_incomplete_todos
+        // Settling defers to `rearm_auto_poke_if_plan_unfinished` behind an
+        // owed-debt latch, so an explicit /poke off stays authoritative and a
+        // fully completed plan still declines. See issue #1666.
+        super::commands::settle_deferred_auto_poke_rearm(self);
+        if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
             || self.pending_turn
             || self.has_queued_followups()
@@ -3169,6 +3176,10 @@ pub(super) fn stage_local_interleave(
 ) {
     app.interleave_message = Some(content);
     app.interleave_images = images;
+    // Same reasoning as `queue_message`: an interleave is a user turn too, and
+    // `submit_input` never runs for it, so without this a soft interrupt left
+    // auto-poke disarmed with no owed debt to settle.
+    super::commands::rearm_auto_poke_on_user_turn(app);
     app.set_status_notice("⏭ Sending now (interleave)");
 }
 
@@ -4211,13 +4222,16 @@ impl App {
                     .join(", ")
             ));
         }
+        // Every user turn re-arms auto-poke when the plan still has open items,
+        // images or not. If the plan is not visible yet the decision is latched
+        // as owed and settled by the end-of-turn scheduler instead of being
+        // dropped, which is how one interrupt used to leave auto-poke looking
+        // enabled while never firing again. `queue_message` and
+        // `stage_local_interleave` re-arm in their own bodies for the same reason:
+        // a message the user sends while a turn is still running never reaches
+        // this function.
+        super::commands::rearm_auto_poke_on_user_turn(self);
         if images.is_empty() {
-            // Every user turn re-arms auto-poke when the plan still has open
-            // items. If the plan is not visible yet the decision is latched as
-            // owed and settled by the end-of-turn scheduler instead of being
-            // dropped, which is how one interrupt used to leave auto-poke
-            // looking enabled while never firing again.
-            super::commands::rearm_auto_poke_on_user_turn(self);
             self.current_turn_system_reminder = merge_reminder_sections([
                 self_dev_turn_reminder(self),
                 None,
@@ -4232,12 +4246,6 @@ impl App {
                 }],
             );
         } else {
-            // Every user turn re-arms auto-poke when the plan still has open
-            // items. If the plan is not visible yet the decision is latched as
-            // owed and settled by the end-of-turn scheduler instead of being
-            // dropped, which is how one interrupt used to leave auto-poke
-            // looking enabled while never firing again.
-            super::commands::rearm_auto_poke_on_user_turn(self);
             self.current_turn_system_reminder = merge_reminder_sections([
                 self_dev_turn_reminder(self),
                 None,

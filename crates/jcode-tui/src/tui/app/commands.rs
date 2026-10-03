@@ -271,8 +271,22 @@ pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String 
 /// Arm auto-poke if the plan still has open items.
 ///
 /// Unlike [`activate_auto_poke`] this is the automatic path: it says nothing in
-/// the status line and does not hand the guardrail circuit breaker a fresh
-/// budget, because no user decision was made here.
+/// the status line, and it leaves the guardrail circuit breaker
+/// (`consecutive_guardrail_stops` / `turn_guardrail_stopped`) at whatever budget
+/// it had spent, because no user decision was made here.
+///
+/// It DOES give the *completion-gate* budget (`todo_completion_gate_attempts`)
+/// back. That gate exists to stop one unfinished plan from being nudged
+/// forever, so a new user turn is exactly the point at which it is right to
+/// start counting again; only `activate_auto_poke` also refills the guardrail
+/// breaker, because there the user said so.
+///
+/// `todo_confidence_spike_challenged` is deliberately left alone. The challenge
+/// is issued once per plan state and is cleared when the plan changes
+/// (`schedule_auto_poke_followup_if_needed`), so clearing it on every automatic
+/// re-arm would let a single abrupt confidence jump be challenged over and
+/// over. `/poke on` clears it because that is a deliberate start-over. See
+/// issue #1666.
 pub(super) fn rearm_auto_poke_if_plan_unfinished(app: &mut App) -> bool {
     if !app.auto_poke_default_on {
         return false;
