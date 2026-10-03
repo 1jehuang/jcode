@@ -337,6 +337,29 @@ fn system_reminders_are_hidden_by_default_and_opt_in_searchable() {
     });
 }
 
+/// An out-of-band user request is user-authored content. Treating any display
+/// role as system-like hid these from ordinary search, so a request the agent
+/// received could not be found again except by opting into system messages.
+#[test]
+fn external_user_requests_are_searchable_without_the_system_opt_in() {
+    with_temp_home(|home| {
+        let mut session = Session::create_with_id("external-session".to_string(), None, None);
+        session.working_dir = Some("/tmp/project".to_string());
+        session.add_message_with_display_role(
+            Role::User,
+            vec![text("external-needle")],
+            Some(StoredDisplayRole::UserExternal),
+        );
+        session.save_prepared().expect("save external session");
+
+        let options = SearchOptions::for_test("current-session");
+        assert!(
+            !run_search(home, "external-needle", &options).is_empty(),
+            "an externally injected user request must be findable by default"
+        );
+    });
+}
+
 #[test]
 fn working_dir_filter_is_case_insensitive_and_prefix_based() {
     with_temp_home(|home| {
