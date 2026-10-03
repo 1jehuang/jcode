@@ -17,7 +17,7 @@ use std::time::Instant;
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 struct RuntimeEnvGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _guard: jcode_base::storage::TestEnvGuard,
     prev_runtime: Option<std::ffi::OsString>,
 }
 

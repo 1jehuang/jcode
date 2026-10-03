@@ -666,7 +666,7 @@ mod tests {
     /// guarding one global serialize nothing, which showed up as a rotating set
     /// of failures under `cargo test` that all passed with `--test-threads=1`
     /// (issue #593). Everything touching the environment must share one lock.
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    fn lock_env() -> jcode_base::storage::TestEnvGuard {
         crate::storage::lock_test_env()
     }
 

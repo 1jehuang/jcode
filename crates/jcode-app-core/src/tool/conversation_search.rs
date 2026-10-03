@@ -315,7 +315,7 @@ mod tests {
         ConversationSearchTool::new(manager)
     }
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn env_lock() -> jcode_base::storage::TestEnvGuard {
         crate::storage::lock_test_env()
     }
 

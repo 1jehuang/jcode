@@ -1214,10 +1214,9 @@ pub fn model_switch_request_for_provider_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::MutexGuard;
 
     struct EnvGuard {
-        _lock: MutexGuard<'static, ()>,
+        _lock: crate::storage::TestEnvGuard,
         saved: Vec<(&'static str, Option<String>)>,
     }
 
