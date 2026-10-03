@@ -1116,6 +1116,113 @@ fn bare_terminal_report_length(bytes: &[u8]) -> Option<usize> {
     REPORT_FINALS.contains(&bytes[len - 1]).then_some(len)
 }
 
+/// Remove late OSC 10/11 color replies that the terminal delivered as keys.
+///
+/// Some terminals (Orca's Electron terminal, #970) answer the startup
+/// background query after the query has timed out. crossterm then decodes the
+/// reply one character at a time: the `ESC ]` introducer and `ESC \`
+/// terminator become Alt chords that never reach the composer, but the body
+/// `11;rgb:3030/3434/4646` lands in the draft character by character. No single
+/// insertion contains the whole sequence, so it has to be recognized in the
+/// accumulated buffer instead.
+fn scrub_osc_color_replies(app: &mut App) {
+    if !app.input.contains("rgb") {
+        return;
+    }
+    let Some((cleaned, cursor)) = strip_osc_color_replies(&app.input, app.cursor_pos) else {
+        return;
+    };
+    app.input = cleaned;
+    app.cursor_pos = cursor;
+}
+
+/// Strip complete OSC color reply bodies from `input`, returning the cleaned
+/// text and the cursor remapped onto it, or `None` when nothing matched.
+///
+/// A body only matches once it is complete: `1N;rgb:` (or `rgba:`) followed by
+/// three (or four for `rgba`) `/`-separated hex components that all share the
+/// first component's width. Requiring equal widths keeps a half-arrived reply
+/// from matching early and leaving its tail behind. An adjacent `]` or `\` (surviving pieces of the OSC
+/// introducer and string terminator) is removed with it.
+pub(super) fn strip_osc_color_replies(input: &str, cursor: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut search = 0usize;
+    while let Some(found) = input[search..].find(";rgb") {
+        let semi = search + found;
+        search = semi + 1;
+        // `1` then one digit before the `;`: OSC 10..=19 color reports.
+        if semi < 2 || bytes[semi - 2] != b'1' || !bytes[semi - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut start = semi - 2;
+        // A third leading digit means this is some other number, not `1N`,
+        // unless it is the tail of a reply we just matched.
+        let follows_reply = ranges.last().is_some_and(|&(_, end)| end == start);
+        if start > 0 && bytes[start - 1].is_ascii_digit() && !follows_reply {
+            continue;
+        }
+        let mut pos = semi + 4;
+        let mut wanted = 3;
+        if bytes.get(pos) == Some(&b'a') {
+            pos += 1;
+            wanted = 4;
+        }
+        if bytes.get(pos) != Some(&b':') {
+            continue;
+        }
+        pos += 1;
+        let hex_run = |from: usize| {
+            bytes[from..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_hexdigit())
+                .count()
+        };
+        let width = hex_run(pos);
+        if !(1..=4).contains(&width) {
+            continue;
+        }
+        pos += width;
+        // Later components take exactly `width` digits, so a second reply
+        // glued onto the last one (`f4f411;rgb:...`) still splits cleanly,
+        // while a component that is still arriving is too short to match.
+        let mut components = 1;
+        while components < wanted && bytes.get(pos) == Some(&b'/') && hex_run(pos + 1) >= width {
+            pos += 1 + width;
+            components += 1;
+        }
+        if components < wanted {
+            continue;
+        }
+        if start > 0 && bytes[start - 1] == b']' {
+            start -= 1;
+        }
+        if bytes.get(pos) == Some(&b'\\') {
+            pos += 1;
+        }
+        ranges.push((start, pos));
+        search = pos;
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+
+    let mut cleaned = String::with_capacity(input.len());
+    let mut new_cursor = cursor;
+    let mut last = 0usize;
+    for (start, end) in ranges {
+        cleaned.push_str(&input[last..start]);
+        if cursor >= end {
+            new_cursor -= end - start;
+        } else if cursor > start {
+            new_cursor -= cursor - start;
+        }
+        last = end;
+    }
+    cleaned.push_str(&input[last..]);
+    Some((cleaned, new_cursor))
+}
+
 pub(super) fn insert_input_text(app: &mut App, text: &str) {
     if text.is_empty() {
         return;
@@ -1161,6 +1268,7 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
 
     app.input.insert_str(app.cursor_pos, text);
     app.cursor_pos += text.len();
+    scrub_osc_color_replies(app);
 
     // Typing the final command character immediately arms picker filtering.
     // Without this, users can keep typing the command token or press Enter
@@ -4273,6 +4381,43 @@ mod terminal_control_sequence_tests {
                 "input {input:?} must be preserved verbatim"
             );
         }
+    }
+
+    /// Late OSC 11 replies typed into the composer key by key (#970).
+    #[test]
+    fn strips_late_osc_color_replies() {
+        use super::strip_osc_color_replies;
+        let strip = |input: &str| {
+            strip_osc_color_replies(input, input.len()).map(|(text, cursor)| {
+                assert_eq!(cursor, text.len(), "cursor must stay at the end");
+                text
+            })
+        };
+        assert_eq!(strip("11;rgb:3030/3434/4646").as_deref(), Some(""));
+        assert_eq!(strip("hi11;rgb:3030/3434/4646").as_deref(), Some("hi"));
+        assert_eq!(strip("]11;rgb:30/34/46\\hello").as_deref(), Some("hello"));
+        assert_eq!(
+            strip("10;rgb:cdcd/d6d6/f4f411;rgb:0000/0000/0000").as_deref(),
+            Some("")
+        );
+        assert_eq!(strip("11;rgba:ffff/ffff/ffff/ffff").as_deref(), Some(""));
+
+        // Half-arrived replies are left alone until the last component is
+        // complete, so no tail is stranded.
+        for partial in ["11;rgb:", "11;rgb:3030/34", "11;rgb:3030/3434/46"] {
+            assert_eq!(strip(partial), None, "{partial:?}");
+        }
+        // Ordinary text survives.
+        for text in ["rgb:3030/3434/4646", "111;rgb:30/34/46", "use rgb(1,2,3)"] {
+            assert_eq!(strip(text), None, "{text:?}");
+        }
+
+        // A cursor in the middle of the draft is remapped across the removal.
+        let input = "ab11;rgb:30/34/46cd";
+        assert_eq!(
+            strip_osc_color_replies(input, input.len() - 2),
+            Some(("abcd".to_string(), 2))
+        );
     }
 
     /// Non-suspicious text must not be reallocated.
