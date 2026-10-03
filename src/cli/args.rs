@@ -212,9 +212,15 @@ pub(crate) enum Command {
         no_browser: bool,
 
         /// Sign in with the installed Claude Code CLI instead of Jcode's OAuth flow.
+        /// This is the default for `--provider claude` when `claude` is installed.
         /// Jcode asks before reusing the CLI's credentials.
-        #[arg(long, conflicts_with_all = ["no_browser", "account"])]
+        #[arg(long, conflicts_with_all = ["no_browser", "account", "oauth"])]
         claude_code: bool,
+
+        /// Use Jcode's own OAuth browser flow for Claude even when the
+        /// Claude Code CLI is installed.
+        #[arg(long)]
+        oauth: bool,
 
         /// Print a script-friendly auth URL and persist temporary login state for later completion.
         #[arg(long, conflicts_with_all = ["callback_url", "auth_code"])]

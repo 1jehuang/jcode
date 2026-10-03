@@ -783,6 +783,23 @@ fn read_claude_code_keychain_blob() -> Option<String> {
     }
 }
 
+/// Whether Claude sign-in should default to the installed Claude Code CLI
+/// (`claude auth login`) instead of Jcode's own OAuth browser flow.
+///
+/// On by default whenever the `claude` binary is installed, so Claude Code
+/// accounts sign in the way Claude Code itself does. Opt out with
+/// `JCODE_CLAUDE_LOGIN_METHOD=oauth`, or force it with `=cli`.
+pub fn prefer_claude_code_cli_login() -> bool {
+    match std::env::var("JCODE_CLAUDE_LOGIN_METHOD")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Ok("oauth" | "jcode") => false,
+        Ok("cli" | "claude-code" | "claude_code") => true,
+        _ => crate::auth::command_exists("claude"),
+    }
+}
+
 /// Whether Claude Code's native credentials (Keychain or env token) appear to
 /// be present, regardless of trust. Used to surface an import candidate even
 /// when the JSON credentials file does not exist (the common macOS case).

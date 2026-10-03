@@ -289,3 +289,47 @@ fn tui_openai_compatible_local_key_save_allows_empty_key() -> anyhow::Result<()>
         Ok(())
     })
 }
+
+/// Claude Code CLI is the default Claude sign-in when `claude` is installed:
+/// the prompt marks it as the default and Enter picks it. The env override
+/// keeps Jcode OAuth as the default for users who opt out.
+#[test]
+fn claude_login_defaults_to_claude_code_cli_and_enter_picks_default() {
+    use super::PendingLogin;
+    let _lock = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_CLAUDE_LOGIN_METHOD");
+
+    crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", "cli");
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.start_claude_login();
+    let prompt = app.display_messages().last().unwrap().content.clone();
+    assert!(prompt.contains("Claude Code CLI (default)"), "{prompt}");
+    assert!(prompt.contains("Enter for 2"));
+    // The input loop takes the pending login before dispatching the reply.
+    app.pending_login = None;
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, String::new());
+    assert!(
+        app.pending_login.is_none(),
+        "Enter must start the default method"
+    );
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("jcode login --provider claude --claude-code"),
+        "Enter must start the Claude Code CLI method"
+    );
+
+    crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", "oauth");
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.start_claude_login();
+    let prompt = app.display_messages().last().unwrap().content.clone();
+    assert!(prompt.contains("Jcode OAuth (default)"), "{prompt}");
+    assert!(prompt.contains("Enter for 1"));
+
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", value),
+        None => crate::env::remove_var("JCODE_CLAUDE_LOGIN_METHOD"),
+    }
+}

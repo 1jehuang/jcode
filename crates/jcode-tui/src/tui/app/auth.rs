@@ -590,10 +590,12 @@ impl App {
     }
 
     fn start_claude_login(&mut self) {
-        self.push_display_message(DisplayMessage::system(
-            "Claude login method\n\n1. Jcode OAuth (default): sign in directly in a browser.\n2. Claude Code CLI: sign in with `claude auth login` in a new terminal, then approve Jcode's access to that login.\n\nReply 1 or 2, or /cancel."
-                .to_string(),
-        ));
+        let prompt = if crate::auth::claude::prefer_claude_code_cli_login() {
+            "Claude login method\n\n1. Jcode OAuth: sign in directly in a browser.\n2. Claude Code CLI (default): sign in with `claude auth login` in a new terminal, then approve Jcode's access to that login.\n\nReply 1 or 2 (Enter for 2), or /cancel."
+        } else {
+            "Claude login method\n\n1. Jcode OAuth (default): sign in directly in a browser.\n2. Claude Code CLI: sign in with `claude auth login` in a new terminal, then approve Jcode's access to that login.\n\nReply 1 or 2 (Enter for 1), or /cancel."
+        };
+        self.push_display_message(DisplayMessage::system(prompt.to_string()));
         self.set_status_notice("Claude login: choose 1 or 2");
         self.begin_pending_login(PendingLogin::ClaudeMethodChoice);
     }
@@ -2086,12 +2088,17 @@ impl App {
         }
 
         if trimmed.is_empty() {
+            if matches!(pending, PendingLogin::ClaudeMethodChoice) {
+                if crate::auth::claude::prefer_claude_code_cli_login() {
+                    self.start_claude_code_cli_login();
+                } else {
+                    self.start_jcode_claude_login();
+                }
+                return;
+            }
             let help = match &pending {
                 PendingLogin::AutoImportSelection { .. } => {
                     "Auto import is waiting for your selection. Reply with a to approve all, 1,3 to approve specific sources, or /cancel to abort.".to_string()
-                }
-                PendingLogin::ClaudeMethodChoice => {
-                    "Choose 1 for Jcode OAuth or 2 for Claude Code CLI, or /cancel.".to_string()
                 }
                 _ => "Login still in progress. Complete it in your browser, or paste the callback URL / authorization code here. Type /cancel to abort.".to_string(),
             };

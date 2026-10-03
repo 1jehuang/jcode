@@ -508,6 +508,7 @@ fn login_no_browser_flag_parses() {
             account,
             no_browser,
             claude_code,
+            oauth,
             print_auth_url,
             callback_url,
             auth_code,
@@ -525,6 +526,7 @@ fn login_no_browser_flag_parses() {
             assert!(account.is_none());
             assert!(no_browser);
             assert!(!claude_code);
+            assert!(!oauth);
             assert!(!print_auth_url);
             assert!(callback_url.is_none());
             assert!(auth_code.is_none());
@@ -1084,4 +1086,28 @@ fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
             "stdio must not silently ignore an API socket override"
         );
     }
+}
+
+#[test]
+fn claude_login_oauth_flag_parses_and_conflicts_with_claude_code() {
+    let args = Args::try_parse_from(["jcode", "login", "--provider", "claude", "--oauth"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Login {
+            oauth: true,
+            claude_code: false,
+            ..
+        })
+    ));
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "login",
+            "--provider",
+            "claude",
+            "--oauth",
+            "--claude-code",
+        ])
+        .is_err()
+    );
 }

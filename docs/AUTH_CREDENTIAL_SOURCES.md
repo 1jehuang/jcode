@@ -36,8 +36,13 @@ Key facts that trip people up:
 
 To sign in through the installed Claude Code CLI instead of Jcode's OAuth
 browser flow, run `jcode login --provider claude --claude-code` in an interactive
-terminal on the machine running Jcode. The local `/login` Claude choice also
-offers this method. Jcode asks permission before using Claude Code's login.
+terminal on the machine running Jcode. When the `claude` binary is installed,
+this is the default: `jcode login --provider claude` and the local `/login`
+Claude choice (press Enter) both use the Claude Code CLI. Use
+`jcode login --provider claude --oauth`, choose 1 in `/login`, or set
+`JCODE_CLAUDE_LOGIN_METHOD=oauth` to keep Jcode's OAuth flow. Account labels,
+`--no-browser`, scriptable flags, and non-interactive shells
+always use Jcode's OAuth flow. Jcode asks permission before using Claude Code's login.
 Claude Code retains its own credential; on macOS, Jcode copies its Keychain
 credential into `~/.jcode/auth.json` so Jcode's direct API runtime can use it.
 With a custom `CLAUDE_CONFIG_DIR` or `JCODE_HOME`, run the command in a shell
