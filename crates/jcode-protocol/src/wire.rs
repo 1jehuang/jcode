@@ -197,6 +197,16 @@ pub enum Request {
     #[serde(rename = "get_history")]
     GetHistory { id: u64 },
 
+    /// List recent persisted jcode sessions without attaching to one. This is
+    /// available before Subscribe so remote clients can choose a project and
+    /// session before they know a server-side working directory.
+    #[serde(rename = "list_recent_sessions")]
+    ListRecentSessions {
+        id: u64,
+        /// Requested maximum. The server applies its own upper bound.
+        limit: usize,
+    },
+
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
     GetModelCatalog {
@@ -1267,6 +1277,13 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         display_title: String,
+    },
+
+    /// Recent persisted sessions (response to ListRecentSessions).
+    #[serde(rename = "recent_sessions")]
+    RecentSessions {
+        id: u64,
+        sessions: Vec<RecentSessionSummary>,
     },
 
     /// Full conversation history (response to GetHistory)

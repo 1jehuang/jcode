@@ -24,6 +24,7 @@ use super::client_session::{
 };
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
+    handle_list_recent_sessions,
 };
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
@@ -502,7 +503,10 @@ pub(super) async fn handle_client(
         match decode_request(&line) {
             Ok(request) => {
                 if request.is_lightweight_control_request() {
-                    let keep_connection_open = matches!(request, Request::Ping { .. });
+                    let keep_connection_open = matches!(
+                        request,
+                        Request::Ping { .. } | Request::ListRecentSessions { .. }
+                    );
                     handle_lightweight_control_request(
                         request,
                         Arc::clone(&writer),
@@ -1860,6 +1864,12 @@ pub(super) async fn handle_client(
                 send_swarm_plan_to_session(&client_session_id, &swarm_members, &swarm_plans).await;
                 if let Some(snapshot) = try_available_models_snapshot(&agent) {
                     last_available_models_snapshot = Some(snapshot);
+                }
+            }
+
+            Request::ListRecentSessions { id, limit } => {
+                if handle_list_recent_sessions(id, limit, &writer).await.is_err() {
+                    break;
                 }
             }
 

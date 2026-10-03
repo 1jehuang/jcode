@@ -70,6 +70,40 @@ fn test_compacted_history_request_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn test_recent_sessions_request_and_event_roundtrip() -> Result<()> {
+    let request = Request::ListRecentSessions { id: 8, limit: 25 };
+    let json = serde_json::to_string(&request)?;
+    assert_eq!(json, r#"{"type":"list_recent_sessions","id":8,"limit":25}"#);
+    let Request::ListRecentSessions { id, limit } = parse_request_json(&json)? else {
+        return Err(anyhow!("wrong request type"));
+    };
+    assert_eq!(id, 8);
+    assert_eq!(limit, 25);
+
+    let event = r#"{
+        "type":"recent_sessions",
+        "id":8,
+        "sessions":[{
+            "session_id":"session_oak_123",
+            "title":"Fix gateway picker",
+            "working_dir":"/srv/jcode",
+            "updated_at":"2026-09-29T16:50:01Z",
+            "status":"closed"
+        }]
+    }"#;
+    let ServerEvent::RecentSessions { id, sessions } = parse_event_json(event)? else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(id, 8);
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "session_oak_123");
+    assert_eq!(sessions[0].title, "Fix gateway picker");
+    assert_eq!(sessions[0].working_dir.as_deref(), Some("/srv/jcode"));
+    assert_eq!(sessions[0].status, "closed");
+    Ok(())
+}
+
+#[test]
 fn test_notify_auth_changed_provider_hint_is_optional() -> Result<()> {
     let legacy = r#"{"type":"notify_auth_changed","id":9}"#;
     let decoded = parse_request_json(legacy)?;
