@@ -352,6 +352,34 @@ async fn handle_remote_key_internal(
             if let Some(model) = subagent_model {
                 remote.set_subagent_model(model).await?;
             }
+            if !app.agent_models_global_scope
+                && let Some((target, model)) = picker
+                    .filtered
+                    .get(picker.selected)
+                    .and_then(|index| picker.entries.get(*index))
+                    .and_then(|entry| match entry.action {
+                        crate::tui::PickerAction::AgentModelChoice {
+                            target,
+                            clear_override,
+                        } => Some((
+                            match target {
+                                crate::tui::AgentModelTarget::Swarm => "swarm",
+                                crate::tui::AgentModelTarget::Review => "review",
+                                crate::tui::AgentModelTarget::Judge => "judge",
+                                crate::tui::AgentModelTarget::Memory => "memory",
+                                crate::tui::AgentModelTarget::Ambient => "ambient",
+                            }
+                            .to_string(),
+                            (!clear_override).then(|| {
+                                super::super::inline_interactive::subagent_picker_model_spec(entry)
+                            }),
+                        )),
+                        _ => None,
+                    })
+            {
+                app.pending_agent_model_request_id =
+                    Some(remote.set_agent_model(target, model).await?);
+            }
         }
         return app.handle_inline_interactive_key(code, modifiers);
     }
@@ -1496,7 +1524,7 @@ async fn handle_remote_key_internal(
                         "Autoreview",
                         parent_session_id.clone(),
                         app_mod::commands::build_autoreview_startup_message(&parent_session_id),
-                        crate::config::config().autoreview.model.clone(),
+                        app_mod::commands::current_autoreview_model_override(app),
                         None,
                     );
                     if app.is_processing {
@@ -1554,7 +1582,7 @@ async fn handle_remote_key_internal(
                         "Autojudge",
                         parent_session_id.clone(),
                         app_mod::commands::build_autojudge_startup_message(&parent_session_id),
-                        crate::config::config().autojudge.model.clone(),
+                        app_mod::commands::current_autojudge_model_override(app),
                         None,
                     );
                     if app.is_processing {
@@ -1582,11 +1610,7 @@ async fn handle_remote_key_internal(
 
                 if trimmed == "/review" {
                     let (model_override, provider_key_override) =
-                        app_mod::commands::preferred_one_shot_review_override()
-                            .map(|(model, provider_key)| (Some(model), Some(provider_key)))
-                            .unwrap_or_else(|| {
-                                (crate::config::config().autoreview.model.clone(), None)
-                            });
+                        app_mod::commands::current_review_model_override(app);
                     let parent_session_id =
                         app_mod::commands::current_feedback_target_session_id(app);
                     app_mod::commands::queue_review_spawn_remote(
@@ -1622,11 +1646,7 @@ async fn handle_remote_key_internal(
 
                 if trimmed == "/judge" {
                     let (model_override, provider_key_override) =
-                        app_mod::commands::preferred_one_shot_review_override()
-                            .map(|(model, provider_key)| (Some(model), Some(provider_key)))
-                            .unwrap_or_else(|| {
-                                (crate::config::config().autojudge.model.clone(), None)
-                            });
+                        app_mod::commands::current_judge_model_override(app);
                     let parent_session_id =
                         app_mod::commands::current_feedback_target_session_id(app);
                     app_mod::commands::queue_review_spawn_remote(

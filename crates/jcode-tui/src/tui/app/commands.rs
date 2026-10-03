@@ -14,12 +14,14 @@ pub(super) use super::commands_review::queue_autojudge_remote;
 pub(super) use super::commands_review::{
     ImproveCommand, ManualSubagentSpec, RefactorCommand, autojudge_status_message,
     autoreview_status_message, build_autojudge_startup_message, build_autoreview_startup_message,
-    build_judge_startup_message, build_review_startup_message, current_feedback_target_session_id,
-    handle_autojudge_command_local, handle_autoreview_command_local, handle_judge_command_local,
-    handle_observe_command, handle_review_command_local, launch_forked_session_local,
-    launch_prompt_in_new_session_local, maybe_trigger_autojudge_local,
-    maybe_trigger_autoreview_local, preferred_one_shot_review_override,
-    prepare_review_spawned_session, queue_review_spawn_remote, reset_current_session,
+    build_judge_startup_message, build_review_startup_message, current_autojudge_model_override,
+    current_autoreview_model_override, current_feedback_target_session_id,
+    current_judge_model_override, current_review_model_override, handle_autojudge_command_local,
+    handle_autoreview_command_local, handle_judge_command_local, handle_observe_command,
+    handle_review_command_local, launch_forked_session_local, launch_prompt_in_new_session_local,
+    maybe_trigger_autojudge_local, maybe_trigger_autoreview_local,
+    preferred_one_shot_review_override, prepare_review_spawned_session, queue_review_spawn_remote,
+    reset_current_session,
 };
 pub(super) use super::todos_view::handle_todos_view_command;
 use super::{App, DisplayMessage, LocalRewindUndoSnapshot, ProcessingStatus};
@@ -3294,6 +3296,12 @@ pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
     }
 
     let rest = trimmed.strip_prefix("/agents").unwrap_or_default().trim();
+    let (global, rest) = match rest.split_once(' ') {
+        Some(("global" | "default", tail)) => (true, tail.trim()),
+        _ if matches!(rest, "global" | "default") => (true, ""),
+        _ => (false, rest),
+    };
+    app.agent_models_global_scope = global;
     if rest.is_empty() {
         app.open_agents_picker();
         return true;
@@ -3301,7 +3309,7 @@ pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
 
     let Some(target) = parse_agents_target(rest) else {
         app.push_display_message(DisplayMessage::error(
-            "Usage: /agents or /agents <swarm|review|judge|memory|ambient>".to_string(),
+            "Usage: /agents [default|global] [swarm|review|judge|memory|ambient]".to_string(),
         ));
         return true;
     };

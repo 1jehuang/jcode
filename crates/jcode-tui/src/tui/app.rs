@@ -888,6 +888,8 @@ pub struct App {
     mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,
+    agent_models_global_scope: bool,
+    pending_agent_model_request_id: Option<u64>,
     display_messages: Vec<DisplayMessage>,
     display_messages_version: u64,
     display_user_message_count: usize,

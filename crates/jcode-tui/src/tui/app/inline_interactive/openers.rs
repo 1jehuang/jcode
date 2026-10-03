@@ -25,12 +25,27 @@ impl App {
         ]
         .into_iter()
         .map(|target| {
-            let configured = load_agent_model_override(target);
+            let configured = if self.agent_models_global_scope {
+                load_agent_model_override(target)
+            } else {
+                self.session.effective_agent_model(
+                    agent_model_target_slug(target),
+                    load_agent_model_override(target),
+                )
+            };
             let summary = configured
                 .clone()
                 .unwrap_or_else(|| agent_model_default_summary(target, self));
             PickerEntry {
-                name: agent_model_target_label(target).to_string(),
+                name: format!(
+                    "{} [{}]",
+                    agent_model_target_label(target),
+                    if self.agent_models_global_scope {
+                        "global"
+                    } else {
+                        "session"
+                    }
+                ),
                 options: vec![PickerOption {
                     provider: summary,
                     api_method: agent_model_target_config_path(target).to_string(),
@@ -195,7 +210,13 @@ impl App {
         ) {
             return;
         }
-        let configured = load_agent_model_override(target);
+        let global_scope = self.agent_models_global_scope;
+        let configured = if global_scope {
+            load_agent_model_override(target)
+        } else {
+            self.session
+                .effective_agent_model(agent_model_target_slug(target), None)
+        };
         let inherit_summary = agent_model_default_summary(target, self);
         self.open_model_picker();
         let load_started = std::time::Instant::now();
@@ -269,12 +290,20 @@ impl App {
             picker.entries.insert(
                 0,
                 PickerEntry {
-                    name: format!("inherit ({})", inherit_summary),
+                    name: if global_scope {
+                        format!("use global fallback ({})", inherit_summary)
+                    } else {
+                        "use global default [session]".to_string()
+                    },
                     options: vec![PickerOption {
                         provider: "default".to_string(),
                         api_method: agent_model_target_config_path(target).to_string(),
                         available: true,
-                        detail: "clear saved override".to_string(),
+                        detail: if global_scope {
+                            "clear global default".to_string()
+                        } else {
+                            format!("clear only this session override · {}", inherit_summary)
+                        },
                         estimated_reference_cost_micros: None,
                     }],
                     action: PickerAction::AgentModelChoice {
@@ -293,6 +322,31 @@ impl App {
                     effort: None,
                 },
             );
+
+            let mut inherit = picker.entries[0].clone();
+            inherit.name = "inherit coordinator".to_string();
+            inherit.options[0].provider = "inherit".to_string();
+            inherit.options[0].detail = if global_scope {
+                "global default: inherit coordinator"
+            } else {
+                "session: bypass global default"
+            }
+            .to_string();
+            inherit.action = PickerAction::AgentModelChoice {
+                target,
+                clear_override: false,
+            };
+            inherit.is_current = configured.as_deref() == Some("inherit");
+            picker.entries.insert(1, inherit);
+            for entry in &mut picker.entries {
+                for option in &mut entry.options {
+                    option.detail = format!(
+                        "[{}] {}",
+                        if global_scope { "global" } else { "session" },
+                        option.detail
+                    );
+                }
+            }
 
             if target == AgentModelTarget::Memory {
                 for entry in &mut picker.entries {

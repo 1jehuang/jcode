@@ -624,7 +624,7 @@ impl Request {
             Request::RefreshModels { id } => *id,
             Request::SetModel { id, .. } => *id,
             Request::SetRoute { id, .. } => *id,
-            Request::SetSubagentModel { id, .. } => *id,
+            Request::SetSubagentModel { id, .. } | Request::SetAgentModel { id, .. } => *id,
             Request::RunSubagent { id, .. } => *id,
             Request::SetReasoningEffort { id, .. } => *id,
             Request::SetServiceTier { id, .. } => *id,
