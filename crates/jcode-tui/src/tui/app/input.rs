@@ -84,6 +84,42 @@ fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> 
     }
 }
 
+/// Merge any number of optional reminder sections, preserving order.
+fn merge_reminder_sections(parts: [Option<String>; 3]) -> Option<String> {
+    let joined: Vec<String> = parts.into_iter().flatten().collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join("\n\n"))
+    }
+}
+
+/// Tell the model every turn whether it is operating in self-dev mode.
+///
+/// `Session::is_self_dev` decides this from the working directory rather than
+/// from how the binary was built, so it is easy to be wrong in both directions.
+/// An agent that assumes it is editing jcode when it is not will report on, or
+/// reload, the wrong tree. State it once per turn, with the evidence, instead of
+/// leaving it to be inferred.
+fn self_dev_turn_reminder(app: &App) -> Option<String> {
+    if !app.session.is_self_dev() {
+        return None;
+    }
+    let dir = app
+        .session
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| "<unset>".to_string());
+    Some(format!(
+        "Self-dev mode is ON: the working directory `{dir}` is the jcode source tree. Here \\\\
+        `selfdev build` and `selfdev reload` publish and restart a locally built binary \\\\
+        rather than a released one (currently {} {}). Edits to this tree change that \\\\
+        binary, so confirm the running build with `server:info` after any reload.",
+        jcode_build_meta::version(),
+        jcode_build_meta::git_hash(),
+    ))
+}
+
 pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
     input.trim().strip_prefix('!').map(str::trim)
 }
@@ -4040,7 +4076,11 @@ impl App {
             ));
         }
         if images.is_empty() {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
+            self.current_turn_system_reminder = merge_reminder_sections([
+                self_dev_turn_reminder(self),
+                None,
+                mission_turn_reminder(&self.session.id),
+            ]);
             self.add_provider_message(Message::user(&input));
             self.session.add_message(
                 Role::User,
@@ -4050,7 +4090,11 @@ impl App {
                 }],
             );
         } else {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
+            self.current_turn_system_reminder = merge_reminder_sections([
+                self_dev_turn_reminder(self),
+                None,
+                mission_turn_reminder(&self.session.id),
+            ]);
             self.add_provider_message(Message::user_with_images(&input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
@@ -4132,7 +4176,11 @@ impl App {
             }
 
             self.current_turn_system_reminder =
-                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+                merge_reminder_sections([
+                    self_dev_turn_reminder(self),
+                    reminder,
+                    mission_turn_reminder(&self.session.id),
+                ]);
 
             if has_combined {
                 self.add_provider_message(Message::user(&combined));
