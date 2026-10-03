@@ -1668,7 +1668,16 @@ fn opencode_sqlite_preview_shows_latest_turns() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = dir.path().join("opencode.db");
     let f = crate::opencode_db::fixture::Fixture::create(&db);
-    f.session("ses_long", None, "Long", "/tmp/long", "p", "m", 9_000_000, None);
+    f.session(
+        "ses_long",
+        None,
+        "Long",
+        "/tmp/long",
+        "p",
+        "m",
+        9_000_000,
+        None,
+    );
     for i in 1..=55 {
         let msg = format!("msg_{i:03}");
         let role = if i % 2 == 1 { "user" } else { "assistant" };
@@ -1682,7 +1691,17 @@ fn opencode_sqlite_preview_shows_latest_turns() {
     drop(f);
     let preview = load_opencode_db_preview(&db, "ses_long").expect("preview");
     let text: Vec<&str> = preview.iter().map(|m| m.content.as_str()).collect();
-    assert!(text.contains(&"turn-55-marker"), "latest turn missing: {text:?}");
-    assert!(!text.contains(&"turn-1-marker"), "oldest turn shown: {text:?}");
-    assert_eq!(text.last(), Some(&"turn-55-marker"), "must stay oldest-first");
+    assert!(
+        text.contains(&"turn-55-marker"),
+        "latest turn missing: {text:?}"
+    );
+    assert!(
+        !text.contains(&"turn-1-marker"),
+        "oldest turn shown: {text:?}"
+    );
+    assert_eq!(
+        text.last(),
+        Some(&"turn-55-marker"),
+        "must stay oldest-first"
+    );
 }

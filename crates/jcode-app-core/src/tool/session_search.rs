@@ -1375,7 +1375,11 @@ fn collect_opencode_external_sessions(
         let db_ids: std::collections::HashSet<String> =
             candidates.iter().map(|(_, id, _)| id.clone()).collect();
         for path in collect_recent_files_recursive(root, "json", options.max_scan_sessions) {
-            let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else {
+            let Some(id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+            else {
                 continue;
             };
             if db_ids.contains(&id) {
@@ -1432,8 +1436,12 @@ fn collect_opencode_external_sessions(
                 let Some(db) = db.as_deref() else { continue };
                 // Title/metadata matches still need a record, but no history.
                 let load_history = db_matches.contains(&id);
-                match load_opencode_db_external_session(db, row, load_history, options.include_tools)
-                {
+                match load_opencode_db_external_session(
+                    db,
+                    row,
+                    load_history,
+                    options.include_tools,
+                ) {
                     Ok(record) => records.push(record),
                     Err(_) => report.parse_errors += 1,
                 }

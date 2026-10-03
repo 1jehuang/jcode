@@ -708,27 +708,33 @@ fn opencode_db_fixture(home: &Path) -> crate::opencode_db::fixture::Fixture {
 fn opencode_sqlite_tool_output_is_searchable_with_include_tools() {
     with_temp_home(|home| {
         let f = opencode_db_fixture(home);
-        f.session("ses_tool", None, "Tool run", "/tmp/t", "p", "m", 3_000_000, None)
-            .message("ses_tool", "msg_t", "assistant", 100)
-            .text("ses_tool", "msg_t", "prt_t0", "running a command")
-            .part(
-                "ses_tool",
-                "msg_t",
-                "prt_t1",
-                json!({"type": "tool", "tool": "bash", "state": {
+        f.session(
+            "ses_tool", None, "Tool run", "/tmp/t", "p", "m", 3_000_000, None,
+        )
+        .message("ses_tool", "msg_t", "assistant", 100)
+        .text("ses_tool", "msg_t", "prt_t0", "running a command")
+        .part(
+            "ses_tool",
+            "msg_t",
+            "prt_t1",
+            json!({"type": "tool", "tool": "bash", "state": {
                     "input": {"command": "ls toolinputneedle"},
                     "output": "zebraquartz-output-needle"}}),
-            )
-            .part(
-                "ses_tool",
-                "msg_t",
-                "prt_t2",
-                json!({"type": "reasoning", "text": "reasonneedle pondering"}),
-            );
+        )
+        .part(
+            "ses_tool",
+            "msg_t",
+            "prt_t2",
+            json!({"type": "reasoning", "text": "reasonneedle pondering"}),
+        );
         drop(f);
         let mut options = SearchOptions::for_test("current-session");
         options.source_filter = Some("opencode".to_string());
-        for query in ["zebraquartz-output-needle", "toolinputneedle", "reasonneedle"] {
+        for query in [
+            "zebraquartz-output-needle",
+            "toolinputneedle",
+            "reasonneedle",
+        ] {
             options.include_tools = false;
             assert!(
                 run_search(home, query, &options).is_empty(),

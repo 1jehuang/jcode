@@ -255,7 +255,11 @@ fn load_messages_with(
             continue;
         };
         for text in texts {
-            let text = if include_tools { text.trim() } else { text.as_str() };
+            let text = if include_tools {
+                text.trim()
+            } else {
+                text.as_str()
+            };
             if text.trim().is_empty() {
                 continue;
             }
