@@ -67,6 +67,7 @@ pub mod memory_types;
 pub mod message;
 pub mod model_pricing;
 pub mod model_usage;
+pub mod opencode_db;
 pub mod output_style;
 pub mod plan;
 pub mod platform;
