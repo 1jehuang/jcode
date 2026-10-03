@@ -95,10 +95,19 @@ pub struct CategoryAgreement {
     pub agree: f64,
     pub kappa: Option<f64>,
     pub kappa_ci95_half: Option<f64>,
+    /// Raw 2x2 table (kept for arm-stratified routing; F1/F2 2026-10-03).
+    pub table: AgreementTable,
+    /// Which arm this category measures (default Mixed = legacy kappa path).
+    pub arm: CategoryArm,
 }
 
 impl CategoryAgreement {
     pub fn from_table(table: AgreementTable) -> Self {
+        Self::from_table_with_arm(table, CategoryArm::Mixed)
+    }
+
+    /// Explicit-arm constructor. Default Mixed keeps legacy kappa path exactly.
+    pub fn from_table_with_arm(table: AgreementTable, arm: CategoryArm) -> Self {
         let (kappa, ci) = kappa_and_ci(table);
         let n = table.n();
         CategoryAgreement {
@@ -106,6 +115,8 @@ impl CategoryAgreement {
             agree: table.agree_rate().unwrap_or(0.0),
             kappa,
             kappa_ci95_half: ci,
+            table,
+            arm,
         }
     }
 
@@ -116,6 +127,41 @@ impl CategoryAgreement {
             _ => None,
         }
     }
+}
+
+/// Which behavioral arm a category measures (F1/F2 2026-10-03).
+/// A declared arm — never inferred from the table: a mixed category at
+/// perfect agreement (C1-fix 20/0/0/19) has b=c=0 and would misclassify
+/// under any zero-cell heuristic. Default Mixed keeps legacy kappa path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CategoryArm {
+    /// Find + reject rows: kappa lower-bound bar (legacy path).
+    #[default]
+    Mixed,
+    /// Find rows only: miss-rate bar (kappa never consulted).
+    FindOnly,
+    /// Reject rows only: false-surface-rate bar (kappa never consulted).
+    RejectOnly,
+}
+
+/// Miss rate on find-tasks: b/(a+b). `None` on empty arm (unmeasurable,
+/// never zero). Ledger ground truth 5/52 (2026-10-03).
+pub fn miss_rate_k(table: AgreementTable) -> Option<f64> {
+    let denom = table.a + table.b;
+    if denom == 0 {
+        return None;
+    }
+    Some(table.b as f64 / denom as f64)
+}
+
+/// False-surface rate on reject-tasks: c/(c+d). `None` on empty arm.
+/// Ledger ground truth 38/217 (2026-10-03).
+pub fn false_surface_rate_p(table: AgreementTable) -> Option<f64> {
+    let denom = table.c + table.d;
+    if denom == 0 {
+        return None;
+    }
+    Some(table.c as f64 / denom as f64)
 }
 
 /// Pass bars for the Tier-2 gate. Every rate bar is evaluated on a CI lower
@@ -140,6 +186,18 @@ pub struct Tier2GateBars {
     pub cwr_min_n: usize,
     /// Maximum NEEDS-WORK rate (mirrors h6 shadow: transport not yet clean).
     pub max_needswork_rate: f64,
+    /// Maximum miss rate on find-tasks (stratified CWR-K, F1 2026-10-03).
+    pub cwr_k_max_rate: f64,
+    /// Minimum find-task rows for the CWR-K bar.
+    pub cwr_k_min_n: usize,
+    /// Maximum false-surface rate on reject-tasks (stratified FSR-P).
+    pub fsr_p_max_rate: f64,
+    /// Minimum reject-task rows for the FSR-P bar.
+    pub fsr_p_min_n: usize,
+    /// Maximum per-category miss rate (single-arm FindOnly categories).
+    pub miss_k_max_rate: f64,
+    /// Maximum per-category false-surface rate (single-arm RejectOnly).
+    pub fsr_p_cat_max_rate: f64,
 }
 
 impl Default for Tier2GateBars {
@@ -153,6 +211,12 @@ impl Default for Tier2GateBars {
             cwr_max_rate: 0.10,
             cwr_min_n: 200,
             max_needswork_rate: 0.05,
+            cwr_k_max_rate: 0.10,
+            cwr_k_min_n: 200,
+            fsr_p_max_rate: 0.10,
+            fsr_p_min_n: 200,
+            miss_k_max_rate: 0.10,
+            fsr_p_cat_max_rate: 0.10,
         }
     }
 }
@@ -178,6 +242,13 @@ pub struct Tier2GateInput {
     /// CWR and its denominator (judge-relevant rows, shadow volume).
     pub cwr_rate: Option<f64>,
     pub cwr_n: usize,
+    /// Stratified CWR-K (miss on find-tasks) and its denominator.
+    /// `None` = bar skipped = zero behavior change on old inputs.
+    pub cwr_k_rate: Option<f64>,
+    pub cwr_k_n: usize,
+    /// Stratified FSR-P (false-surface on reject-tasks) and denominator.
+    pub fsr_p_rate: Option<f64>,
+    pub fsr_p_n: usize,
     pub needswork_rate: f64,
     /// Model ids that produced the evidence (pinned-id check).
     pub models_used: Vec<String>,
@@ -240,6 +311,52 @@ pub fn evaluate_gate(input: &Tier2GateInput, bars: &Tier2GateBars) -> GateVerdic
                     cat.n, bars.min_n_per_category
                 ),
             };
+        }
+        // Arm-stratified routing (F1/F2 2026-10-03): declared arm decides
+        // the bar. Mixed = legacy kappa path bit-for-bit. Single-arm
+        // categories skip kappa (incoherent there) for rate bars.
+        match cat.arm {
+            CategoryArm::FindOnly => {
+                match miss_rate_k(cat.table) {
+                    None => {
+                        return GateVerdict::Unknown {
+                            reason: format!(
+                                "category {name}: miss rate unmeasurable (empty find arm)"
+                            ),
+                        };
+                    }
+                    Some(rate) => {
+                        if rate > bars.miss_k_max_rate {
+                            failures.push(format!(
+                                "category {name}: miss rate {rate:.3} above bar {:.3}",
+                                bars.miss_k_max_rate
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
+            CategoryArm::RejectOnly => {
+                match false_surface_rate_p(cat.table) {
+                    None => {
+                        return GateVerdict::Unknown {
+                            reason: format!(
+                                "category {name}: false-surface rate unmeasurable (empty reject arm)"
+                            ),
+                        };
+                    }
+                    Some(rate) => {
+                        if rate > bars.fsr_p_cat_max_rate {
+                            failures.push(format!(
+                                "category {name}: false-surface rate {rate:.3} above bar {:.3}",
+                                bars.fsr_p_cat_max_rate
+                            ));
+                        }
+                    }
+                }
+                continue;
+            }
+            CategoryArm::Mixed => {}
         }
         match cat.kappa_lower() {
             None => {
@@ -313,6 +430,41 @@ pub fn evaluate_gate(input: &Tier2GateInput, bars: &Tier2GateBars) -> GateVerdic
                     bars.cwr_max_rate
                 ));
             }
+        }
+    }
+    // Stratified globals (F1 2026-10-03): evaluated AFTER the legacy
+    // blended CWR bar, only when supplied. `None` = skipped = zero
+    // behavior change on old inputs. Thin arms yield Unknown on floors.
+    if let Some(rate) = input.cwr_k_rate {
+        if input.cwr_k_n < bars.cwr_k_min_n {
+            return GateVerdict::Unknown {
+                reason: format!(
+                    "CWR-K: n={} below floor {}",
+                    input.cwr_k_n, bars.cwr_k_min_n
+                ),
+            };
+        }
+        if rate > bars.cwr_k_max_rate {
+            failures.push(format!(
+                "CWR-K {rate:.3} above bar {:.3}",
+                bars.cwr_k_max_rate
+            ));
+        }
+    }
+    if let Some(rate) = input.fsr_p_rate {
+        if input.fsr_p_n < bars.fsr_p_min_n {
+            return GateVerdict::Unknown {
+                reason: format!(
+                    "FSR-P: n={} below floor {}",
+                    input.fsr_p_n, bars.fsr_p_min_n
+                ),
+            };
+        }
+        if rate > bars.fsr_p_max_rate {
+            failures.push(format!(
+                "FSR-P {rate:.3} above bar {:.3}",
+                bars.fsr_p_max_rate
+            ));
         }
     }
     if failures.is_empty() {
@@ -438,6 +590,10 @@ mod tests {
             },
             cwr_rate: Some(0.05),
             cwr_n: 240,
+            cwr_k_rate: None,
+            cwr_k_n: 0,
+            fsr_p_rate: None,
+            fsr_p_n: 0,
             needswork_rate: 0.02,
             models_used: vec![TIER2_PRIMARY_MODEL.to_string()],
         }
@@ -688,4 +844,130 @@ mod tests {
             Ok(serde_json::json!({"answers": answers}))
         }
     }
+    #[test]
+    fn stratified_helpers_decompose_recorded_blended_cwr() {
+        // Ledger ground truth 2026-10-03 (combined_norm.jsonl x em.json):
+        // blended 38/85 decomposes to miss 5/52 + FSR 38/217.
+        let blended = AgreementTable { a: 47, b: 5, c: 38, d: 179 };
+        assert!((miss_rate_k(blended).unwrap() - 5.0 / 52.0).abs() < 1e-12);
+        assert!((false_surface_rate_p(blended).unwrap() - 38.0 / 217.0).abs() < 1e-12);
+        let blended_rate: f64 = 38.0 / 85.0;
+        assert!((blended_rate - 0.4470588235294118).abs() < 1e-12);
+        // Empty arms are unmeasurable, never zero.
+        assert_eq!(miss_rate_k(AgreementTable { a: 0, b: 0, c: 3, d: 5 }), None);
+        assert_eq!(
+            false_surface_rate_p(AgreementTable { a: 3, b: 1, c: 0, d: 0 }),
+            None
+        );
+    }
+
+    #[test]
+    fn stratified_globals_are_opt_in_legacy_inputs_unchanged() {
+        // `None` stratified rates: legacy Ship path bit-for-bit.
+        let input = passing_input();
+        assert!(matches!(
+            evaluate_gate(&input, &Tier2GateBars::default()),
+            GateVerdict::Ship
+        ));
+        // Supplied-passing stratified rates: still Ship.
+        let mut supplied = passing_input();
+        supplied.cwr_k_rate = Some(0.05);
+        supplied.cwr_k_n = 240;
+        supplied.fsr_p_rate = Some(0.05);
+        supplied.fsr_p_n = 240;
+        assert!(matches!(
+            evaluate_gate(&supplied, &Tier2GateBars::default()),
+            GateVerdict::Ship
+        ));
+        // Supplied FSR-P 0.175 at n=217 (ledger value): NoShip naming FSR-P.
+        // CWR-K supplied at floor-passing n so the FSR-P failure is reached.
+        let mut failing = passing_input();
+        failing.cwr_k_rate = Some(5.0 / 52.0);
+        failing.cwr_k_n = 200;
+        failing.fsr_p_rate = Some(38.0 / 217.0);
+        failing.fsr_p_n = 217;
+        match evaluate_gate(&failing, &Tier2GateBars::default()) {
+            GateVerdict::NoShip { reasons } => {
+                assert!(reasons.iter().any(|r| r.contains("FSR-P")), "{reasons:?}");
+            }
+            other => panic!("expected NoShip on FSR-P, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stratified_globals_hold_unknown_on_thin_data() {
+        // Thin stratified arms yield Unknown even at passing rates.
+        let mut input = passing_input();
+        input.cwr_k_rate = Some(0.05);
+        input.cwr_k_n = 52;
+        input.fsr_p_rate = Some(0.05);
+        input.fsr_p_n = 148;
+        match evaluate_gate(&input, &Tier2GateBars::default()) {
+            GateVerdict::Unknown { reason } => {
+                assert!(reason.contains("CWR-K") || reason.contains("FSR-P"), "{reason}");
+            }
+            other => panic!("expected Unknown on thin stratified arms, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_arm_categories_skip_kappa_for_rate_bars() {
+        // P-bench (0,0,23,125): kappa 0.0 exactly, but RejectOnly routes
+        // to the false-surface bar: NoShip with NO kappa reason.
+        let mut per_category = BTreeMap::new();
+        per_category.insert(
+            "P-bench".to_string(),
+            CategoryAgreement::from_table_with_arm(
+                AgreementTable { a: 0, b: 0, c: 23, d: 125 },
+                CategoryArm::RejectOnly,
+            ),
+        );
+        let mut input = passing_input();
+        input.per_category = per_category;
+        match evaluate_gate(&input, &Tier2GateBars::default()) {
+            GateVerdict::NoShip { reasons } => {
+                assert!(!reasons.iter().any(|r| r.contains("kappa")), "{reasons:?}");
+                assert!(reasons.iter().any(|r| r.contains("false-surface")), "{reasons:?}");
+            }
+            other => panic!("expected NoShip on FSR, got {other:?}"),
+        }
+        // K-bench FindOnly with passing miss rate: category passes its bar.
+        let mut per_category = BTreeMap::new();
+        per_category.insert(
+            "K-bench".to_string(),
+            CategoryAgreement::from_table_with_arm(
+                AgreementTable { a: 100, b: 2, c: 0, d: 0 },
+                CategoryArm::FindOnly,
+            ),
+        );
+        let mut input = passing_input();
+        input.per_category = per_category;
+        assert!(matches!(
+            evaluate_gate(&input, &Tier2GateBars::default()),
+            GateVerdict::Ship
+        ));
+    }
+
+    #[test]
+    fn single_arm_categories_hold_unknown_on_empty_arm() {
+        // FindOnly with a+b=0 but n above floor: Unknown on the arm
+        // (unmeasurable), never a pass. Table (0,0,60,60): n=120.
+        let mut per_category = BTreeMap::new();
+        per_category.insert(
+            "K-empty".to_string(),
+            CategoryAgreement::from_table_with_arm(
+                AgreementTable { a: 0, b: 0, c: 60, d: 60 },
+                CategoryArm::FindOnly,
+            ),
+        );
+        let mut input = passing_input();
+        input.per_category = per_category;
+        match evaluate_gate(&input, &Tier2GateBars::default()) {
+            GateVerdict::Unknown { reason } => {
+                assert!(reason.contains("miss rate unmeasurable"), "{reason}");
+            }
+            other => panic!("expected Unknown on empty arm, got {other:?}"),
+        }
+    }
+
 }
