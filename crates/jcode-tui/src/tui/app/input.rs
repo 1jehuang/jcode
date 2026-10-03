@@ -1678,6 +1678,17 @@ impl App {
     }
 
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        // Settle the owed re-arm BEFORE the guard below. Once the
+        // completion-gate breaker has cleared the flag, every re-arm path after
+        // that guard is unreachable, so genuine open work appearing later would
+        // never revive the poke. An explicit user choice to disable the poke
+        // still wins: only auto_poke_default_on re-arms.
+        if !self.auto_poke_incomplete_todos && self.auto_poke_default_on {
+            if !super::commands::incomplete_poke_todos(self).is_empty() {
+                self.auto_poke_incomplete_todos = true;
+                self.todo_completion_gate_attempts = 0;
+            }
+        }
         if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
             || self.pending_turn

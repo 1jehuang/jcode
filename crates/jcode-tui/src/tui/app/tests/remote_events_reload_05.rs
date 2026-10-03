@@ -343,6 +343,100 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
     });
 }
 
+/// Coverage gap: the test above covers disarming, nothing covers re-arming.
+///
+/// Once the completion-gate budget is spent the flag is cleared, and the rearm
+/// sits *behind* the `!auto_poke_incomplete_todos` guard at the top of
+/// `schedule_auto_poke_followup_if_needed`, so it is unreachable. Open work
+/// that appears afterwards never revives the poke, which defeats the purpose:
+/// the harness should keep verifying completion on its own after an exhausted
+/// budget instead of waiting for the user to re-arm by hand.
+#[test]
+fn test_auto_poke_rearms_when_new_open_work_appears_after_budget_exhausted() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the fix".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(50)],
+                ..Default::default()
+            }],
+        )
+        .expect("save low-confidence completed todo");
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing ownership assessment");
+
+        for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
+            assert!(
+                app.schedule_auto_poke_followup_if_needed(),
+                "attempt {attempt} should still schedule a gate nudge"
+            );
+            app.queued_messages.clear();
+            app.pending_queued_dispatch = false;
+        }
+
+        assert!(
+            !app.schedule_auto_poke_followup_if_needed(),
+            "exhausted gate must not schedule another nudge"
+        );
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "budget exhaustion disarms auto-poke"
+        );
+
+        // Genuine open work now exists. The poke must come back on its own.
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        crate::todo::save_todos(
+            &app.session.id,
+            &[
+                crate::todo::TodoItem {
+                    id: "todo-1".to_string(),
+                    content: "Ship the fix".to_string(),
+                    status: "completed".to_string(),
+                    priority: "high".to_string(),
+                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                    completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                    confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(50)],
+                    ..Default::default()
+                },
+                crate::todo::TodoItem {
+                    id: "todo-2".to_string(),
+                    content: "Investigate the remaining failure".to_string(),
+                    status: "in_progress".to_string(),
+                    priority: "high".to_string(),
+                    ..Default::default()
+                },
+            ],
+        )
+        .expect("add an open todo after the gate budget is exhausted");
+
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "new open work must re-arm auto-poke after the gate budget was exhausted"
+        );
+    });
+}
+
 #[test]
 fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
     with_temp_jcode_home(|| {
