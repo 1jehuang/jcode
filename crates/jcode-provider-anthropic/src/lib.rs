@@ -61,6 +61,13 @@ pub fn format_messages_with_native(
     // and the conversation is permanently unsendable. Prefer the real output
     // over the synthetic placeholder, and otherwise keep the first occurrence.
     let messages = &dedupe_tool_results(messages);
+    // Anthropic requires every tool_use to be answered in the very next
+    // message. A tool whose result was persisted later (after another turn was
+    // written in between, e.g. a reload or a scheduled-task wake-up while tools
+    // were still running) leaves the call unanswered where it matters and its
+    // result stranded later on, and the request 400s permanently. Move such
+    // results up to directly follow their call.
+    let messages = &hoist_late_tool_results(messages);
 
     // First pass: collect all tool_use IDs and tool_result IDs
     let mut tool_use_ids: HashSet<String> = HashSet::new();
@@ -267,6 +274,146 @@ pub fn format_messages_with_native(
     }
 
     merged
+}
+
+/// Move each `tool_result` that is not in the message directly after its
+/// `tool_use` up into a user message placed directly after the assistant
+/// message that made the call. Results already in the right place are left
+/// alone. Runs after dedupe, so each id has at most one result.
+fn hoist_late_tool_results(messages: &[Message]) -> Vec<Message> {
+    use std::collections::{HashMap, HashSet};
+
+    // Assistant message index that made each call.
+    let mut call_at: HashMap<&str, usize> = HashMap::new();
+    for (mi, msg) in messages.iter().enumerate() {
+        if matches!(msg.role, Role::Assistant) {
+            for block in &msg.content {
+                if let ContentBlock::ToolUse { id, .. } = block {
+                    call_at.insert(id, mi);
+                }
+            }
+        }
+    }
+
+    // Results that are not in the message right after their call. Consecutive
+    // messages of one role are merged into one later, so compare "turn"
+    // positions: parallel calls stored as one user message per result, and
+    // back-to-back assistant messages, each collapse into a single turn.
+    let turn: Vec<usize> = {
+        let mut t = 0usize;
+        let mut prev: Option<bool> = None;
+        messages
+            .iter()
+            .map(|m| {
+                let is_user = matches!(m.role, Role::User);
+                if prev.is_some_and(|p| p != is_user) {
+                    t += 1;
+                }
+                prev = Some(is_user);
+                t
+            })
+            .collect()
+    };
+    let mut late: HashSet<(usize, usize)> = HashSet::new();
+    let mut moved: HashMap<usize, Vec<ContentBlock>> = HashMap::new();
+    for (mi, msg) in messages.iter().enumerate() {
+        for (bi, block) in msg.content.iter().enumerate() {
+            let ContentBlock::ToolResult { tool_use_id, .. } = block else {
+                continue;
+            };
+            let Some(&call) = call_at.get(tool_use_id.as_str()) else {
+                continue; // no call anywhere: nothing to pair with
+            };
+            let in_place = turn[mi] == turn[call] + 1;
+            if !in_place {
+                // Insert after the last message of the call's turn, so a run
+                // of assistant messages stays one turn.
+                let anchor = (call..messages.len())
+                    .take_while(|&i| turn[i] == turn[call])
+                    .last()
+                    .unwrap_or(call);
+                let dest = moved.entry(anchor).or_default();
+                for j in std::iter::once(bi).chain(attached_to_result(&msg.content, bi)) {
+                    late.insert((mi, j));
+                    dest.push(msg.content[j].clone());
+                }
+            }
+        }
+    }
+    if late.is_empty() {
+        return messages.to_vec();
+    }
+    jcode_logging::warn(&format!(
+        "[anthropic] Moved {} late tool_result block(s) up to directly follow their tool_use",
+        late.len()
+    ));
+
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len() + moved.len());
+    for (mi, msg) in messages.iter().enumerate() {
+        let content: Vec<ContentBlock> = msg
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(bi, _)| !late.contains(&(mi, *bi)))
+            .map(|(_, b)| b.clone())
+            .collect();
+        if !content.is_empty() {
+            out.push(Message {
+                content,
+                ..msg.clone()
+            });
+        }
+        if let Some(results) = moved.remove(&mi) {
+            // Same-role merging later folds this into the next user message
+            // when there is one, keeping the results first.
+            out.push(Message {
+                role: Role::User,
+                content: results,
+                timestamp: msg.timestamp,
+                tool_duration_ms: None,
+            });
+        }
+    }
+    out
+}
+
+/// Indices of the blocks that belong to the tool_result at `result_idx`, in
+/// order. A tool output is stored as the result followed by its images (each
+/// optionally followed by an "[Attached image ...]" label) and then its
+/// `ToolReference` blocks, so those travel with the result when it moves.
+/// References for the same call elsewhere in the message are included too,
+/// since they are matched to the result by id within one message.
+fn attached_to_result(blocks: &[ContentBlock], result_idx: usize) -> Vec<usize> {
+    const IMAGE_LABEL_PREFIX: &str = "[Attached image associated with the preceding tool result:";
+    let ContentBlock::ToolResult { tool_use_id, .. } = &blocks[result_idx] else {
+        return Vec::new();
+    };
+    let is_own_reference = |block: &ContentBlock| matches!(block, ContentBlock::ToolReference { tool_use_id: id, .. } if id == tool_use_id);
+    let mut attached = Vec::new();
+    let mut after_image = false;
+    let mut end = result_idx + 1;
+    while let Some(block) = blocks.get(end) {
+        let belongs = match block {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::Text { text, .. } => after_image && text.starts_with(IMAGE_LABEL_PREFIX),
+            other => is_own_reference(other),
+        };
+        if !belongs {
+            break;
+        }
+        after_image = matches!(block, ContentBlock::Image { .. });
+        attached.push(end);
+        end += 1;
+    }
+    attached.extend(
+        blocks
+            .iter()
+            .enumerate()
+            .skip(end)
+            .filter(|(_, block)| is_own_reference(block))
+            .map(|(i, _)| i),
+    );
+    attached
 }
 
 /// Fold `ContentBlock::ToolReference` blocks into their tool_result.
