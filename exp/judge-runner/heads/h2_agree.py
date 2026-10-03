@@ -86,6 +86,15 @@ def main():
         if qid in cat:
             bump(tables[cat[qid]], e_ok, j_rel)
         if r.get("abstained") is True:
+            abstained = True
+        else:
+            # []-as-abstain rule (decided 2026-10-03, REMAINING.md Tier-2 b):
+            # an empty verdict list IS the judge abstaining (it surfaced
+            # nothing). No emitter needed on the listwise path; transport
+            # errors are excluded above (counted as NEEDS-WORK, never here).
+            judge_ids = ((r.get("judge") or {}).get("verdict") or {}).get("relevant_ids")
+            abstained = isinstance(judge_ids, list) and len(judge_ids) == 0
+        if abstained:
             abst_n += 1
             if qid in abst_gold:
                 if abst_gold[qid]:
