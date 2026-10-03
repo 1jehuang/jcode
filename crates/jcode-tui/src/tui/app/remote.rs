@@ -170,6 +170,23 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
+    needs_redraw |= app.maybe_progress_provider_failover_countdown();
+    // The countdown stages the switch; send it here (keys are not involved).
+    // The failed turn is resent once the server confirms with ModelChanged.
+    if let Some(spec) = app.pending_model_switch.take() {
+        match remote.set_model(&spec).await {
+            Ok(_) => app.remote_model_switch_in_flight = true,
+            Err(error) => {
+                app.pending_fallback_resend = None;
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Failed to request model switch: {}",
+                    error
+                )));
+                app.set_status_notice("Model switch failed");
+            }
+        }
+        needs_redraw = true;
+    }
 
     let _ = check_debug_command(app, remote).await;
 
@@ -224,6 +241,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         && Instant::now() >= reset_time
     {
         app.rate_limit_reset = None;
+        let account_change_resend = app.account_change_resend_at.take() == Some(reset_time);
         if !app.is_processing
             && let Some(pending) = app.rate_limit_pending_message.clone()
         {
@@ -237,26 +255,30 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 app.status = ProcessingStatus::Idle;
                 app.status_detail = None;
             }
-            let status = if pending.auto_retry {
-                format!(
-                    "✓ Retrying continuation...{}",
-                    if pending.is_system {
-                        " (system message)"
-                    } else {
-                        ""
-                    }
-                )
-            } else {
-                format!(
-                    "✓ Rate limit reset. Retrying...{}",
-                    if pending.is_system {
-                        " (system message)"
-                    } else {
-                        ""
-                    }
-                )
-            };
-            app.push_display_message(DisplayMessage::system(status));
+            // An account change already announced this resend; do not also
+            // claim the old account's limit reset.
+            if !account_change_resend {
+                let status = if pending.auto_retry {
+                    format!(
+                        "✓ Retrying continuation...{}",
+                        if pending.is_system {
+                            " (system message)"
+                        } else {
+                            ""
+                        }
+                    )
+                } else {
+                    format!(
+                        "✓ Rate limit reset. Retrying...{}",
+                        if pending.is_system {
+                            " (system message)"
+                        } else {
+                            ""
+                        }
+                    )
+                };
+                app.push_display_message(DisplayMessage::system(status));
+            }
             let _ = begin_remote_send(
                 app,
                 remote,
@@ -485,62 +507,17 @@ async fn apply_terminal_event(
                         }
                     }
                 }
-                if let Some(selection) = app.pending_account_picker_action.take() {
-                    match selection {
-                        crate::tui::AccountPickerAction::Switch { provider_id, label } => {
-                            match provider_id.as_str() {
-                                "claude" => {
-                                    if let Err(e) = crate::auth::claude::set_active_account(&label)
-                                    {
-                                        app.push_display_message(DisplayMessage::error(format!(
-                                            "Failed to switch account: {}",
-                                            e
-                                        )));
-                                    } else {
-                                        crate::auth::AuthStatus::invalidate_cache();
-                                        app.context_limit = app.provider.context_window() as u64;
-                                        app.context_warning_shown = false;
-                                        let _ = remote.switch_anthropic_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(format!(
-                                            "Switched to Anthropic account `{}`.",
-                                            label
-                                        )));
-                                        app.set_status_notice(format!(
-                                            "Account: switched to {}",
-                                            label
-                                        ));
-                                    }
-                                }
-                                "openai" => {
-                                    if let Err(e) = crate::auth::codex::set_active_account(&label) {
-                                        app.push_display_message(DisplayMessage::error(format!(
-                                            "Failed to switch OpenAI account: {}",
-                                            e
-                                        )));
-                                    } else {
-                                        crate::auth::AuthStatus::invalidate_cache();
-                                        app.context_limit = app.provider.context_window() as u64;
-                                        app.context_warning_shown = false;
-                                        let _ = remote.switch_openai_account(&label).await;
-                                        app.push_display_message(DisplayMessage::system(format!(
-                                            "Switched to OpenAI account `{}`.",
-                                            label
-                                        )));
-                                        app.set_status_notice(format!(
-                                            "OpenAI account: switched to {}",
-                                            label
-                                        ));
-                                    }
-                                }
-                                _ => app.push_display_message(DisplayMessage::error(format!(
-                                    "Provider `{}` does not support account switching.",
-                                    provider_id
-                                ))),
-                            }
-                        }
-                        crate::tui::AccountPickerAction::Add { .. }
-                        | crate::tui::AccountPickerAction::Replace { .. }
-                        | crate::tui::AccountPickerAction::OpenCenter { .. } => {}
+                if let Some(selection) = app.pending_account_picker_action.take()
+                    && let Some(command) =
+                        crate::tui::app::auth::account_command_from_inline_action(&selection)
+                {
+                    if let Err(error) = app
+                        .execute_window_account_command_remote(command, remote)
+                        .await
+                    {
+                        app.push_display_message(DisplayMessage::error(format!(
+                            "Failed to update this window's account: {error}"
+                        )));
                     }
                 }
             }

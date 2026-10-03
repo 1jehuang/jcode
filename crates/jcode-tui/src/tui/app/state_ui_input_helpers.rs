@@ -917,7 +917,22 @@ impl App {
         if prefix.starts_with("/account ") || prefix.starts_with("/accounts ") {
             let mut suggestions = vec![
                 ("/account list".into(), "Open all provider/account actions"),
-                ("/account switch".into(), "Switch active account by label"),
+                (
+                    "/account switch".into(),
+                    "Use a saved account in this window",
+                ),
+                (
+                    "/account default".into(),
+                    "Set the default account for new windows",
+                ),
+                (
+                    "/account unpin".into(),
+                    "This window follows the default account",
+                ),
+                (
+                    "/account failover".into(),
+                    "Per-window account failover on|off|status",
+                ),
                 (
                     "/account default-provider".into(),
                     "Set preferred default provider",
@@ -1390,6 +1405,12 @@ impl App {
             return false;
         };
         if cmd == self.input.trim() {
+            return false;
+        }
+        // The input is already a complete command that means the same thing
+        // as the highlighted suggestion (e.g. `/account switch claude-fox`
+        // vs `/account claude switch claude-fox`): let Enter submit it.
+        if super::auth::same_account_command(self.input.trim(), &cmd) {
             return false;
         }
 

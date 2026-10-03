@@ -93,6 +93,8 @@ impl Client {
             crash_on_disconnect: false,
             continue_on_disconnect: false,
             terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+            account_pins: Vec::new(),
+            supports_session_accounts: false,
         };
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
@@ -329,6 +331,41 @@ impl Client {
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
         Ok(id)
+    }
+
+    /// Send a one-shot auth-change notice and wait for the server's verdict.
+    ///
+    /// Returns an error when the server rejects the request or closes the
+    /// connection without confirming, so callers never log a notice as
+    /// delivered when the server did not apply it.
+    pub async fn notify_auth_changed_and_wait(
+        &mut self,
+        provider: Option<&str>,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let id = self.notify_auth_changed_for_provider(provider).await?;
+        let wait = async {
+            loop {
+                match self.read_event().await? {
+                    ServerEvent::Done { id: done_id } if done_id == id => return Ok(()),
+                    ServerEvent::Error {
+                        id: error_id,
+                        message,
+                        ..
+                    } if error_id == id || error_id == 0 => {
+                        anyhow::bail!("server rejected auth change notice: {message}")
+                    }
+                    _ => continue,
+                }
+            }
+        };
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(result) => result,
+            Err(_) => anyhow::bail!(
+                "server did not confirm the auth change notice within {}s",
+                timeout.as_secs()
+            ),
+        }
     }
 
     pub async fn debug_command(&mut self, command: &str, session_id: Option<&str>) -> Result<u64> {

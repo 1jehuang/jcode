@@ -468,6 +468,14 @@ pub enum BusEvent {
     /// Synchronous provider activation after a login/import has completed, so
     /// the model picker can stop hiding the stale pre-auth catalog.
     AuthCatalogRefreshReady,
+    /// Credentials changed (login, account switch, or an external edit of a
+    /// credential file). The server forwards this to every connected client
+    /// so turns held on the previous account's limit resend promptly.
+    CredentialsChanged {
+        provider: Option<String>,
+        /// Stored account label whose credentials changed. `None` = unknown/any.
+        account_label: Option<String>,
+    },
     /// A background provider setup task selected a model for this session.
     ProviderModelActivated {
         session_id: String,

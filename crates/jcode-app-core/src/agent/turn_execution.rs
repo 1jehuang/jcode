@@ -1158,6 +1158,7 @@ impl Agent {
             self.session.model = Some(self.provider_model());
         }
         self.restore_reasoning_effort_from_session();
+        self.restore_account_pins_from_session();
         let model_ms = model_start.elapsed().as_millis();
 
         let mark_active_start = Instant::now();

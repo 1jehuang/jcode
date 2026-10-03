@@ -815,6 +815,8 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         crash_on_disconnect: false,
         continue_on_disconnect: false,
         terminal_env: Vec::new(),
+        account_pins: Vec::new(),
+        supports_session_accounts: false,
     }
 }
 
@@ -2145,4 +2147,110 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+/// `jcode login` (and the SDK login flow) open a fresh socket and send only
+/// `notify_auth_changed`. The daemon must apply it without a Subscribe and
+/// answer Done, not reject it as a stateful request.
+#[tokio::test]
+async fn lone_notify_auth_changed_is_applied_without_subscribe() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("auth sandbox");
+    let _runtime = IsolatedRuntimeDir::new();
+    let (server_stream, client_stream) = crate::transport::Stream::pair().expect("socket pair");
+    let forked = Arc::new(AtomicBool::new(false));
+    let provider_template: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::clone(&forked),
+    });
+    let mut bus_rx = crate::bus::Bus::global().subscribe();
+
+    let sessions: SessionAgents = Arc::new(RwLock::new(HashMap::new()));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let (global_event_tx, _) = broadcast::channel(8);
+    let (debug_response_tx, _) = broadcast::channel(8);
+    let (swarm_event_tx, _) = broadcast::channel(8);
+    let server_task = tokio::spawn(handle_client(
+        server_stream,
+        Arc::clone(&sessions),
+        global_event_tx,
+        provider_template,
+        Arc::new(RwLock::new(false)),
+        Arc::new(RwLock::new(String::new())),
+        Arc::new(RwLock::new(0usize)),
+        Arc::clone(&client_connections),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        FileTouchService::new(),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(ClientDebugState::default())),
+        debug_response_tx,
+        Arc::new(RwLock::new(std::collections::VecDeque::new())),
+        Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        swarm_event_tx,
+        "jcode-test".to_string(),
+        "🧪".to_string(),
+        Arc::new(crate::mcp::SharedMcpPool::from_default_config()),
+        Arc::new(RwLock::new(HashMap::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        AwaitMembersRuntime::default(),
+        SwarmMutationRuntime::default(),
+    ));
+
+    let (client_reader, mut client_writer) = client_stream.into_split();
+    let mut client_reader = BufReader::new(client_reader);
+    let request = Request::NotifyAuthChanged {
+        id: 9,
+        provider: Some("claude".to_string()),
+        auth: None,
+        prefer_strongest: false,
+    };
+    let payload = serde_json::to_string(&request).expect("serialize request") + "\n";
+    client_writer
+        .write_all(payload.as_bytes())
+        .await
+        .expect("write request");
+
+    loop {
+        let mut line = String::new();
+        let n = tokio::time::timeout(Duration::from_secs(5), client_reader.read_line(&mut line))
+            .await
+            .expect("reply before timeout")
+            .expect("read reply");
+        assert!(n > 0, "server hung up without confirming the auth change");
+        match decode_request_or_event(&line) {
+            ServerEvent::Ack { id: 9 } => {}
+            ServerEvent::Done { id: 9 } => break,
+            ServerEvent::Error { message, .. } => {
+                panic!("lone notify_auth_changed was rejected: {message}")
+            }
+            other => panic!("unexpected reply {other:?}"),
+        }
+    }
+    // Like `jcode login`, hang up after Done. The server must end cleanly.
+    drop(client_writer);
+    tokio::time::timeout(Duration::from_secs(5), server_task)
+        .await
+        .expect("server ends after the one-shot client hangs up")
+        .expect("server task join")
+        .expect("server task result");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, bus_rx.recv())
+            .await
+            .expect("CredentialsChanged must reach every client after a one-shot notify");
+        if let Ok(crate::bus::BusEvent::CredentialsChanged { .. }) = event {
+            break;
+        }
+    }
+    assert!(
+        !forked.load(Ordering::SeqCst),
+        "one-shot notify must not fork a session provider"
+    );
+    assert!(client_connections.read().await.is_empty());
+    assert!(sessions.read().await.is_empty());
 }

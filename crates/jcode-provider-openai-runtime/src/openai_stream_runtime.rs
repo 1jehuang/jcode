@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Mutex as StdMutex;
 
 #[path = "openai_usage_recording.rs"]
 mod openai_usage_recording;
@@ -14,9 +15,82 @@ use self::openai_stream_timeout::{
     effective_https_idle_timeout, effective_ws_completion_timeout_secs,
 };
 
+/// Access tokens this process minted by refreshing a stored credential, mapped
+/// to the stored refresh token they were minted from. Refreshes of jcode-stored
+/// accounts are persisted, but a refresh of an external login (for example
+/// `~/.codex/auth.json`) is not, so the cache legitimately differs from the
+/// store and must not be reverted to the rotated-away stored token.
+static REFRESHED_FROM: LazyLock<StdMutex<HashMap<String, String>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn record_refreshed_from(access_token: &str, stored_refresh_token: &str) {
+    let mut map = REFRESHED_FROM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if map.len() > 64 {
+        map.clear();
+    }
+    map.insert(access_token.to_string(), stored_refresh_token.to_string());
+}
+
+fn was_refreshed_from(access_token: &str, stored_refresh_token: &str) -> bool {
+    REFRESHED_FROM
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(access_token)
+        .is_some_and(|origin| origin == stored_refresh_token)
+}
+
+/// Replace this session's cached credential when the stored login changed.
+///
+/// Every provider runtime (one per session, fork, or swarm worker) caches its
+/// own credential, while an account switch, same-label relogin, or external
+/// Codex relogin only rewrites the store and at most notifies one session.
+/// Re-reading the store (local file reads, no network) before each request
+/// makes every live session pick up the new account on its next request or
+/// retry. The cached credential's shape selects the source so an OAuth session
+/// stays on OAuth and an API-key session stays on its API key.
+pub(super) async fn sync_with_stored_credentials(
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    account_pin: &AccountPinSlot,
+) {
+    let (cached_access, cached_is_oauth) = {
+        let cached = credentials.read().await;
+        (
+            cached.access_token.clone(),
+            !cached.refresh_token.is_empty() || cached.id_token.is_some(),
+        )
+    };
+    if cached_access.is_empty() {
+        return;
+    }
+    let stored = if cached_is_oauth {
+        load_scoped_openai_oauth_credentials(account_pin).map(|(creds, _)| creds)
+    } else {
+        jcode_base::auth::codex::load_api_key_credentials()
+    };
+    let Ok(stored) = stored else {
+        return;
+    };
+    if stored.access_token == cached_access
+        || was_refreshed_from(&cached_access, &stored.refresh_token)
+    {
+        return;
+    }
+    let mut cached = credentials.write().await;
+    if cached.access_token == cached_access {
+        jcode_base::logging::info(
+            "OpenAI stored credentials changed (account switch or relogin); using the new login",
+        );
+        *cached = stored;
+    }
+}
+
 pub(super) async fn openai_access_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
+    account_pin: &AccountPinSlot,
 ) -> anyhow::Result<String> {
+    sync_with_stored_credentials(credentials, account_pin).await;
     let (access_token, refresh_token, needs_refresh) = {
         let tokens = credentials.read().await;
         if tokens.access_token.is_empty() {
@@ -45,7 +119,7 @@ pub(super) async fn openai_access_token(
         return Ok(access_token);
     }
 
-    force_refresh_openai_token(credentials, &refresh_token).await
+    force_refresh_openai_token(credentials, account_pin, &refresh_token).await
 }
 
 /// Unconditionally refresh the OpenAI access token using the stored refresh
@@ -54,10 +128,102 @@ pub(super) async fn openai_access_token(
 /// its local expiry window.
 pub(super) async fn force_refresh_openai_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
+    account_pin: &AccountPinSlot,
     refresh_token: &str,
 ) -> anyhow::Result<String> {
-    let refreshed = oauth::refresh_openai_tokens(refresh_token).await?;
+    // Start from the stored login: if the user swapped accounts since the
+    // rejected request was built, retry with the new account's token instead
+    // of refreshing the old account's refresh token.
+    sync_with_stored_credentials(credentials, account_pin).await;
+    {
+        let current = credentials.read().await;
+        if current.refresh_token != refresh_token && !current.access_token.is_empty() {
+            return Ok(current.access_token.clone());
+        }
+    }
+    // Chained refreshes of a non-persisted login keep pointing at the stored
+    // refresh token they ultimately came from.
+    let origin = {
+        let current = credentials.read().await;
+        REFRESHED_FROM
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&current.access_token)
+            .cloned()
+            .unwrap_or_else(|| refresh_token.to_string())
+    };
+    // A pinned session refreshes and persists to its own account only.
+    let refreshed = match account_pin.get() {
+        Some(pin) => {
+            oauth::refresh_openai_tokens_scoped(
+                refresh_token,
+                jcode_base::auth::AccountScope::Pinned(&pin),
+            )
+            .await?
+        }
+        None => oauth::refresh_openai_tokens(refresh_token).await?,
+    };
+    record_refreshed_from(&refreshed.access_token, &origin);
+    Ok(commit_openai_refresh(credentials, refresh_token, refreshed).await)
+}
+
+/// OAuth credential this provider instance should use: the pinned jcode
+/// account when pinned, else the default resolution (identical to
+/// `codex::load_oauth_credentials`). Records the resolved label on the slot.
+/// A pin whose account is gone is dropped so the session follows the default.
+pub(super) fn load_scoped_openai_oauth_credentials(
+    account_pin: &AccountPinSlot,
+) -> anyhow::Result<(CodexCredentials, Option<String>)> {
+    use jcode_base::auth::AccountScope;
+    if let Some(pin) = account_pin.get() {
+        match jcode_base::auth::codex::load_oauth_credentials_scoped(AccountScope::Pinned(&pin)) {
+            Ok((creds, label)) => {
+                account_pin.set_resolved_label(label.clone());
+                return Ok((creds, label));
+            }
+            Err(err)
+                if err
+                    .downcast_ref::<jcode_base::auth::account_store::PinnedAccountMissing>()
+                    .is_some() =>
+            {
+                jcode_base::logging::warn(&format!(
+                    "{err}; this session falls back to the default OpenAI account"
+                ));
+                account_pin.set(None);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let (creds, label) =
+        jcode_base::auth::codex::load_oauth_credentials_scoped(AccountScope::Default)?;
+    account_pin.set_resolved_label(
+        label
+            .clone()
+            .or_else(jcode_base::auth::codex::default_account_label),
+    );
+    Ok((creds, label))
+}
+
+/// Write a finished refresh into the session cache and return the bearer the
+/// caller should use.
+///
+/// The account can change while the refresh awaits the OAuth response. The
+/// result only belongs in the cache while the cache still holds the refresh
+/// token the refresh started from. Otherwise the cache now holds another
+/// login (or a newer refresh of the same one), so keep it and return its
+/// bearer instead of pairing the old account's token with the new account id.
+pub(super) async fn commit_openai_refresh(
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    refreshed_from: &str,
+    refreshed: oauth::OAuthTokens,
+) -> String {
     let mut tokens = credentials.write().await;
+    if tokens.refresh_token != refreshed_from && !tokens.access_token.is_empty() {
+        jcode_base::logging::info(
+            "OpenAI credentials changed while a token refresh was in flight; keeping the new login",
+        );
+        return tokens.access_token.clone();
+    }
     let account_id = tokens.account_id.clone();
     let id_token = refreshed
         .id_token
@@ -73,13 +239,14 @@ pub(super) async fn force_refresh_openai_token(
         expires_at: Some(refreshed.expires_at),
     };
 
-    Ok(new_access_token)
+    new_access_token
 }
 
 /// Stream the response from OpenAI API
 pub(super) async fn stream_response(
     client: Client,
     credentials: Arc<RwLock<CodexCredentials>>,
+    account_pin: AccountPinSlot,
     request: Value,
     initial_status_detail: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
@@ -102,7 +269,7 @@ pub(super) async fn stream_response(
     ));
     emit_status_detail(&tx, initial_status_detail).await;
     emit_connection_phase(&tx, ConnectionPhase::Authenticating).await;
-    let access_token = openai_access_token(&credentials).await?;
+    let access_token = openai_access_token(&credentials, &account_pin).await?;
     let creds = credentials.read().await;
     // Account switching can race token refresh. Never combine an old bearer
     // with a new account header or attribute that request to the new account.
@@ -215,7 +382,7 @@ pub(super) async fn stream_response(
                 )));
             }
 
-            match force_refresh_openai_token(&credentials, &refresh_token).await {
+            match force_refresh_openai_token(&credentials, &account_pin, &refresh_token).await {
                 Ok(_) => {
                     jcode_base::logging::info(
                         "OpenAI access token rejected; refreshed credentials and will retry",
@@ -1147,6 +1314,7 @@ async fn continue_persistent_ws_locked(
 /// This replaces the old `stream_response_websocket` for the fresh-connection path.
 pub(super) async fn stream_response_websocket_persistent(
     credentials: Arc<RwLock<CodexCredentials>>,
+    account_pin: AccountPinSlot,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
@@ -1171,7 +1339,7 @@ pub(super) async fn stream_response_websocket_persistent(
         ],
     );
 
-    let access_token = openai_access_token(&credentials).await?;
+    let access_token = openai_access_token(&credentials, &account_pin).await?;
     let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
     jcode_base::logging::info(&format!(
         "OpenAI limit diag: opening fresh persistent WS request usage=({})",
@@ -1667,6 +1835,11 @@ fn classify_unavailable_model_error(status: StatusCode, body: &str) -> Option<St
 
 /// Check if an error is transient and should be retried
 pub(super) fn is_retryable_error(error_str: &str) -> bool {
+    // Subscription usage spent until a far reset: retrying on the same
+    // account is doomed. Fail fast so account failover can move the session.
+    if jcode_provider_core::classify_account_usage_limit(error_str).is_some() {
+        return false;
+    }
     // Shared transport-layer classifier used by every other provider. This
     // covers transient TLS/network faults (connection reset/closed/refused/
     // aborted, broken pipe, timeouts, unexpected EOF, error decoding/reading,

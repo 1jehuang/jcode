@@ -1974,6 +1974,10 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
             .as_deref()
             .and_then(overscroll_short_reasoning)
             .map(str::to_string),
+        account: data
+            .window_account
+            .as_ref()
+            .map(|account| account.display()),
     };
 
     let alignment = if app.centered_mode() {
@@ -2002,6 +2006,8 @@ struct OverscrollFacts {
     provider: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    /// Account this window uses (`claude-fox`, `claude-otter (default)`).
+    account: Option<String>,
 }
 
 /// Per-fact detail level. 0 is the fullest form. Higher levels are more
@@ -2015,6 +2021,7 @@ struct OverscrollLevels {
     auth: u8,
     provider: u8,
     model: u8,
+    account: u8,
 }
 
 /// Compaction ladder, applied one step at a time until the line fits.
@@ -2033,6 +2040,7 @@ const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
     |l| l.context = 2,  // "▰▱▱▱ 29%" -> "29%"
     |l| l.git = 2,      // hide git status
     |l| l.branch = 2,   // hide branch
+    |l| l.account = 1,  // hide "· claude-fox"
     |l| l.model = 1,    // drop reasoning effort
     |l| l.dir = 1,      // "~/…/jcode" -> "jcode"
 ];
@@ -2140,6 +2148,11 @@ fn overscroll_fact_spans(
             && let Some(effort) = &facts.effort
         {
             group.push(Span::styled(format!(" {effort}"), muted));
+        }
+        if levels.account == 0
+            && let Some(account) = &facts.account
+        {
+            group.push(Span::styled(format!(" · {account}"), muted));
         }
         out.push(group);
     }

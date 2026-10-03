@@ -432,7 +432,7 @@ impl App {
         self.input.clear();
         self.cursor_pos = 0;
         self.set_status_notice(format!(
-            "Account → {} (↑↓ or j/k, Enter to select)",
+            "Account → {} (Enter: use in this window · d: make default)",
             provider_label
         ));
     }
@@ -476,9 +476,12 @@ impl App {
     fn build_all_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
         let claude_accounts = crate::auth::claude::list_accounts().unwrap_or_default();
         let openai_accounts = crate::auth::codex::list_accounts().unwrap_or_default();
-        let claude_active = crate::auth::claude::active_account_label()
+        // "Active" here means the account THIS window uses.
+        let claude_active = self
+            .window_account_label("claude")
             .unwrap_or_else(crate::auth::claude::primary_account_label);
-        let openai_active = crate::auth::codex::active_account_label()
+        let openai_active = self
+            .window_account_label("openai")
             .unwrap_or_else(crate::auth::codex::primary_account_label);
         let next_claude = crate::auth::claude::next_account_label()
             .unwrap_or_else(|_| crate::auth::claude::primary_account_label());
@@ -519,11 +522,10 @@ impl App {
                 name: account_display_name("Claude", &account.label, claude_accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
-                    api_method: if is_active {
-                        "active".to_string()
-                    } else {
-                        "saved".to_string()
-                    },
+                    api_method: self
+                        .account_row_badge("claude", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!(
                         "{} - {} - {} - plan {}",
@@ -574,11 +576,10 @@ impl App {
                 name: account_display_name("OpenAI", &account.label, openai_accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
-                    api_method: if is_active {
-                        "active".to_string()
-                    } else {
-                        "saved".to_string()
-                    },
+                    api_method: self
+                        .account_row_badge("openai", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,
@@ -773,7 +774,8 @@ impl App {
 
     fn build_claude_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
         let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
-        let active_label = crate::auth::claude::active_account_label()
+        let active_label = self
+            .window_account_label("claude")
             .unwrap_or_else(crate::auth::claude::primary_account_label);
         let next_label = crate::auth::claude::next_account_label()
             .unwrap_or_else(|_| crate::auth::claude::primary_account_label());
@@ -802,11 +804,10 @@ impl App {
                 name: account_display_name("Claude", &account.label, accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "Claude".to_string(),
-                    api_method: if is_active {
-                        "active".to_string()
-                    } else {
-                        "saved".to_string()
-                    },
+                    api_method: self
+                        .account_row_badge("claude", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!(
                         "{} - {} - {} - plan {}",
@@ -929,7 +930,8 @@ impl App {
 
     fn build_openai_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
         let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
-        let active_label = crate::auth::codex::active_account_label()
+        let active_label = self
+            .window_account_label("openai")
             .unwrap_or_else(crate::auth::codex::primary_account_label);
         let next_label = crate::auth::codex::next_account_label()
             .unwrap_or_else(|_| crate::auth::codex::primary_account_label());
@@ -958,11 +960,10 @@ impl App {
                 name: account_display_name("OpenAI", &account.label, accounts.len()),
                 options: vec![crate::tui::PickerOption {
                     provider: "OpenAI".to_string(),
-                    api_method: if is_active {
-                        "active".to_string()
-                    } else {
-                        "saved".to_string()
-                    },
+                    api_method: self
+                        .account_row_badge("openai", &account.label)
+                        .0
+                        .to_string(),
                     available: true,
                     detail: format!("{} - {} - acct {}", email, status, account_id),
                     estimated_reference_cost_micros: None,

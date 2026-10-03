@@ -225,6 +225,7 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         initial_provider: None,
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        account_failover: Default::default(),
     }
 }
 
@@ -1026,6 +1027,7 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         initial_provider: None,
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        account_failover: Default::default(),
     }
 }
 
@@ -1204,7 +1206,10 @@ include!("tests/auth_refresh.rs");
 include!("tests/model_resolution.rs");
 include!("tests/issue_534_profile_preservation.rs");
 include!("tests/fallback_failover.rs");
+include!("tests/billing_failover.rs");
+include!("tests/account_failover.rs");
 include!("tests/catalog_subscription.rs");
+include!("tests/account_pins.rs");
 
 /// Rendering the route catalog must never schedule network work.
 ///
