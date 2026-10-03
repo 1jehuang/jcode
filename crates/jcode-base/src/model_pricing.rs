@@ -159,7 +159,8 @@ fn normalize_model_id(model: &str) -> &str {
 pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
     let is_openai_compatible = jcode_provider.trim().starts_with("openai-compatible:");
     let cache = ensure_cache_fresh()?;
-    if let Some(provider_id) = models_dev_provider_id(jcode_provider)
+    let mapped_provider = models_dev_provider_id(jcode_provider);
+    if let Some(provider_id) = mapped_provider
         && let Some(models) = cache.providers.get(provider_id)
     {
         let model = normalize_model_id(model);
@@ -174,12 +175,14 @@ pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
             return Some(*cost);
         }
     }
-    // Reseller/aggregator keys absent from models.dev (`openai-compatible:
-    // kilocode`, ...) still serve vendor models under vendor ids. Match the
-    // same id across the other providers' tables instead of assuming
-    // unpriced. First-party providers never take this path: their catalog
-    // entries are the reviewed authority.
-    if is_openai_compatible {
+    // Reseller/aggregator keys that models.dev does not list as a provider at
+    // all (`openai-compatible:kilocode`, ...) still serve vendor models under
+    // vendor ids. Match the same id across the other providers' tables instead
+    // of assuming unpriced. A profile that *does* have a models.dev mapping
+    // keeps its own table as the authority: a model missing there is left
+    // unpriced rather than billed at an unrelated provider's rate. First-party
+    // providers never take this path either.
+    if is_openai_compatible && mapped_provider.is_none() {
         return cross_provider_lookup(&cache, model);
     }
     None
@@ -227,12 +230,17 @@ fn modal_pricing(candidates: &[(&str, ModelCost)]) -> Option<ModelCost> {
         .map(|(_, cost)| *cost)
 }
 
+/// Key a price for modal counting. `None` cache rates get a distinct
+/// sentinel: a missing cache rate is not the same listing as an explicitly
+/// free one, and merging them would let a missing/zero rate outvote a paid
+/// cache majority.
 fn cost_key(cost: &ModelCost) -> [u64; 4] {
+    const MISSING: u64 = u64::MAX;
     [
         cost.input_usd_per_mtok.to_bits(),
         cost.output_usd_per_mtok.to_bits(),
-        cost.cache_read_usd_per_mtok.unwrap_or(0.0).to_bits(),
-        cost.cache_write_usd_per_mtok.unwrap_or(0.0).to_bits(),
+        cost.cache_read_usd_per_mtok.map_or(MISSING, f64::to_bits),
+        cost.cache_write_usd_per_mtok.map_or(MISSING, f64::to_bits),
     ]
 }
 
@@ -473,6 +481,164 @@ mod tests {
         assert!((cost.input_usd_per_mtok - 0.20).abs() < 1e-9);
         assert!((cost.output_usd_per_mtok - 1.50).abs() < 1e-9);
         assert_eq!(cost.cache_read_usd_per_mtok, Some(0.02));
+
+        // Exact-id match beats bare-name match: when one provider lists the
+        // full `vendor/model` id and others list only the bare name, the
+        // full-id listing is the authority even if the bare listings agree on
+        // a competing price and outnumber it.
+        save_test_cache(&[
+            (
+                "first-party-vendor",
+                "acme/tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.30,
+                    output_usd_per_mtok: 2.50,
+                    cache_read_usd_per_mtok: Some(0.05),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "reseller-bare-listing",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.99,
+                    output_usd_per_mtok: 9.99,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "another-bare-listing",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.99,
+                    output_usd_per_mtok: 9.99,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+        let cost = lookup("openai-compatible:kilocode", "acme/tiny-model").expect("priced");
+        assert!((cost.input_usd_per_mtok - 0.30).abs() < 1e-9);
+        assert!((cost.output_usd_per_mtok - 2.50).abs() < 1e-9);
+        assert_eq!(cost.cache_read_usd_per_mtok, Some(0.05));
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn mapped_compatible_profiles_do_not_borrow_foreign_pricing() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        save_test_cache(&[
+            (
+                "deepseek",
+                "deepseek-chat",
+                ModelCost {
+                    input_usd_per_mtok: 0.28,
+                    output_usd_per_mtok: 0.42,
+                    cache_read_usd_per_mtok: Some(0.028),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "zai",
+                "glm-5.3-flash",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: Some(0.03),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+
+        // A mapped profile reads its own table.
+        let owned = lookup("openai-compatible:deepseek", "deepseek-chat").expect("priced");
+        assert!((owned.input_usd_per_mtok - 0.28).abs() < 1e-9);
+
+        // A model absent from the mapped profile's own table stays unpriced
+        // even though the catalog lists it under a different provider: the
+        // mapping is the authority, so another provider's rate is never
+        // inherited.
+        assert!(lookup("openai-compatible:deepseek", "glm-5.3-flash").is_none());
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn missing_cache_rates_do_not_merge_with_free_ones() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        // Alphabetically-first listings have a missing cache_read and an
+        // explicitly free one; two later listings agree on a paid rate.
+        // Treating missing (None) and free (0.0) as the same listing would
+        // merge them into a 2-2 tie that the alphabetically-first provider
+        // wins, reporting a missing rate instead of the paid majority.
+        save_test_cache(&[
+            (
+                "a-missing",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "b-free",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: Some(0.0),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "c-paid",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: Some(0.03),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+            (
+                "d-paid",
+                "tiny-model",
+                ModelCost {
+                    input_usd_per_mtok: 0.15,
+                    output_usd_per_mtok: 0.50,
+                    cache_read_usd_per_mtok: Some(0.03),
+                    cache_write_usd_per_mtok: None,
+                },
+            ),
+        ]);
+
+        let cost = lookup("openai-compatible:kilocode", "tiny-model").expect("priced");
+        assert!((cost.input_usd_per_mtok - 0.15).abs() < 1e-9);
+        assert_eq!(cost.cache_read_usd_per_mtok, Some(0.03));
 
         clear_memory_cache_for_tests();
         if let Some(prev) = prev_home {
