@@ -959,7 +959,9 @@ mod tests {
             .handle_overlay_key(KeyCode::Char('f'), KeyModifiers::empty())
             .unwrap();
         assert!(matches!(
-            picker.handle_overlay_key(KeyCode::Char('d'), KeyModifiers::empty()).unwrap(),
+            picker
+                .handle_overlay_key(KeyCode::Char('d'), KeyModifiers::empty())
+                .unwrap(),
             OverlayAction::Continue
         ));
     }

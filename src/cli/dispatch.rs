@@ -1115,7 +1115,6 @@ fn print_provider_test_coverage_report(report: &str, colorize: bool) {
     }
 }
 
-
 /// Stored account labels for a provider family, used to find the label a
 /// login just created.
 fn login_account_labels(family: &str) -> Vec<String> {
@@ -1149,7 +1148,11 @@ fn make_login_default(
         .iter()
         .find(|label| !before.contains(label))
         .cloned()
-        .or_else(|| requested.filter(|r| after.iter().any(|l| l == r)).map(str::to_string))
+        .or_else(|| {
+            requested
+                .filter(|r| after.iter().any(|l| l == r))
+                .map(str::to_string)
+        })
         .or_else(|| match family {
             "claude" => crate::auth::claude::active_account_label(),
             _ => crate::auth::codex::active_account_label(),
@@ -1167,7 +1170,9 @@ fn make_login_default(
         "openai-oauth"
     };
     let _ = crate::auth::account_pool::sync_order_with_default_route(route);
-    output::stderr_info(&format!("{label} is now the default account for new windows."));
+    output::stderr_info(&format!(
+        "{label} is now the default account for new windows."
+    ));
     Ok(())
 }
 

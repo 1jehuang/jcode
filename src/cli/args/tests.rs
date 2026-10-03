@@ -1069,7 +1069,12 @@ fn account_flag_is_repeatable_for_tui_and_run() {
     // `jcode login --account` keeps naming the login target, and `--default`
     // makes the new login the default.
     let args = Args::try_parse_from([
-        "jcode", "login", "claude", "--account", "claude-fox", "--default",
+        "jcode",
+        "login",
+        "claude",
+        "--account",
+        "claude-fox",
+        "--default",
     ])
     .unwrap();
     let Some(Command::Login {
@@ -1128,7 +1133,10 @@ fn account_pins_resolve_stored_labels_and_emails() {
     );
     let err = crate::cli::account_pins::resolve_account_pins(&[claude.clone(), claude.clone()])
         .unwrap_err();
-    assert!(err.to_string().contains("one --account per provider"), "{err}");
+    assert!(
+        err.to_string().contains("one --account per provider"),
+        "{err}"
+    );
     assert!(crate::cli::account_pins::resolve_account_pins(&["nobody".to_string()]).is_err());
 }
 
@@ -1138,7 +1146,11 @@ fn account_pins_resolve_stored_labels_and_emails() {
 fn account_pins_reject_missing_label_with_known_prefix() {
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     let (claude, openai) = store_cli_accounts();
-    let missing = if claude == "claude-zebra" { "claude-yak" } else { "claude-zebra" };
+    let missing = if claude == "claude-zebra" {
+        "claude-yak"
+    } else {
+        "claude-zebra"
+    };
     let err = crate::cli::account_pins::resolve_account_pins(&[missing.to_string()])
         .expect_err("a missing account must not pass validation");
     let text = err.to_string();
@@ -1163,7 +1175,14 @@ fn global_account_flag_applies_to_run() {
     assert_eq!(pins, vec![("claude".to_string(), claude.clone())]);
 
     let args = Args::try_parse_from([
-        "jcode", "--account", &claude, "--account", &openai, "run", "--account", "fox@example.com",
+        "jcode",
+        "--account",
+        &claude,
+        "--account",
+        &openai,
+        "run",
+        "--account",
+        "fox@example.com",
         "hi",
     ])
     .unwrap();

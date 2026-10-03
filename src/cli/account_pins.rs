@@ -25,7 +25,10 @@ pub fn resolve_account_pins(values: &[String]) -> Result<Vec<(String, String)>> 
 
 /// `jcode --account X run --account Y`: the top-level values apply to `run`
 /// too. A `run` value wins for the same provider.
-pub fn merge_account_values(global: &[String], subcommand: &[String]) -> Result<Vec<(String, String)>> {
+pub fn merge_account_values(
+    global: &[String],
+    subcommand: &[String],
+) -> Result<Vec<(String, String)>> {
     let mut pins = resolve_account_pins(subcommand)?;
     for (provider, label) in resolve_account_pins(global)? {
         if !pins.iter().any(|(existing, _)| *existing == provider) {
