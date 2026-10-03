@@ -33,6 +33,7 @@ pub(super) async fn run_stream_with_retries(
     auth: ProviderAuth,
     send_openrouter_headers: bool,
     conversation_id: String,
+    extra_headers: ExtraHeaders,
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -94,6 +95,7 @@ pub(super) async fn run_stream_with_retries(
             auth.clone(),
             send_openrouter_headers,
             &conversation_id,
+            &extra_headers,
             request.clone(),
             attempt_tx,
             Arc::clone(&provider_pin),
@@ -163,6 +165,7 @@ async fn stream_response(
     auth: ProviderAuth,
     send_openrouter_headers: bool,
     conversation_id: &str,
+    extra_headers: &[(reqwest::header::HeaderName, reqwest::header::HeaderValue)],
     request: Value,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
@@ -196,6 +199,7 @@ async fn stream_response(
             .header("X-Title", "jcode");
     }
     req = apply_opencode_session_header(req, &api_base, conversation_id);
+    req = apply_extra_headers(req, extra_headers);
     req = apply_grok_cli_turn_headers(req, &auth, &model, conversation_id);
 
     let response = jcode_provider_core::transport::send_with_initial_response_timeout(
