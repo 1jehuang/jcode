@@ -1171,7 +1171,11 @@ impl App {
         self.side_panel.focused_page_id = None;
         self.side_panel_user_hidden = true;
         self.side_panel_explicit_hidden = true;
-        if !self.diff_mode.has_side_pane() {
+        // Keep focus only when the File diff pane stays on screen. It is drawn
+        // only in File mode with at least one edit message to show.
+        let file_diff_stays_visible =
+            self.diff_mode.is_file() && self.display_edit_tool_message_count > 0;
+        if !file_diff_stays_visible {
             self.set_diff_pane_focus(false);
         }
         self.sync_diagram_fit_context();
