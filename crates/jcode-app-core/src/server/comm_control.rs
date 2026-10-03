@@ -893,15 +893,152 @@ fn spawn_assigned_task_run(
             &assignment_text,
             vec![],
             None,
-            event_tx,
+            event_tx.clone(),
         )
         .await;
-        let completion_report = if result.is_ok() {
-            let agent = agent_arc.lock().await;
-            agent.latest_assistant_text_after(start_message_index)
-        } else {
-            None
+        // A usage limit that resets later keeps the task in progress: wait
+        // for the reset (the heartbeat keeps the task from going stale) and
+        // continue the same turn. Other errors fail the task as before.
+        let (result, completion_report) = match result {
+            Err(error) => {
+                let on_wait = {
+                    let swarm_id = swarm_id.clone();
+                    let task_id = task_id.clone();
+                    let target_session = target_session.clone();
+                    let swarm_members = Arc::clone(&swarm_members);
+                    let swarms_by_id = Arc::clone(&swarms_by_id);
+                    let swarm_plans = Arc::clone(&swarm_plans);
+                    let swarm_coordinators = Arc::clone(&swarm_coordinators);
+                    move |plan: &super::usage_limit_resume::UsageLimitResumePlan| {
+                        let detail = plan.status_detail();
+                        let swarm_id = swarm_id.clone();
+                        let task_id = task_id.clone();
+                        let target_session = target_session.clone();
+                        let swarm_members = Arc::clone(&swarm_members);
+                        let swarms_by_id = Arc::clone(&swarms_by_id);
+                        let swarm_plans = Arc::clone(&swarm_plans);
+                        let swarm_coordinators = Arc::clone(&swarm_coordinators);
+                        Box::pin(async move {
+                            touch_swarm_task_progress(
+                                &swarm_id,
+                                &task_id,
+                                Some(&target_session),
+                                Some(detail.clone()),
+                                Some(detail),
+                                &swarm_members,
+                                &swarms_by_id,
+                                &swarm_plans,
+                                &swarm_coordinators,
+                            )
+                            .await;
+                            broadcast_swarm_plan(
+                                &swarm_id,
+                                Some("task_rate_limited".to_string()),
+                                &swarm_plans,
+                                &swarm_members,
+                                &swarms_by_id,
+                            )
+                            .await;
+                        }) as futures::future::BoxFuture<'static, ()>
+                    }
+                };
+                let swarm_ctx = super::live_turn::LiveTurnSwarmContext::new(
+                    &swarm_members,
+                    &swarms_by_id,
+                    &event_history,
+                    &event_counter,
+                    &swarm_event_tx,
+                );
+                match super::usage_limit_resume::resume_turn_after_usage_limit(
+                    Arc::clone(&agent_arc),
+                    None,
+                    &target_session,
+                    error,
+                    None,
+                    &event_tx,
+                    &swarm_ctx,
+                    &on_wait,
+                )
+                .await
+                {
+                    super::usage_limit_resume::ResumeOutcome::NotUsageLimit { error, .. }
+                    | super::usage_limit_resume::ResumeOutcome::Failed { error, .. } => {
+                        (Err(error), None)
+                    }
+                    super::usage_limit_resume::ResumeOutcome::Completed {
+                        guard,
+                        completion_report,
+                    } => {
+                        drop(guard);
+                        (Ok(()), completion_report)
+                    }
+                    super::usage_limit_resume::ResumeOutcome::Superseded => {
+                        // The user (or another turn) took the worker over.
+                        // Release the task back to the queue, like the
+                        // no-artifact requeue path, so the normal assignment
+                        // flow can hand it out again instead of leaving it
+                        // assigned to a worker that is no longer running it.
+                        let _ = heartbeat_stop_tx.send(true);
+                        let _ = heartbeat_task.await;
+                        let previous_items = {
+                            let plans = swarm_plans.read().await;
+                            plans
+                                .get(&swarm_id)
+                                .map(|plan| plan.items.clone())
+                                .unwrap_or_default()
+                        };
+                        {
+                            let now_ms = now_unix_ms();
+                            let mut plans = swarm_plans.write().await;
+                            if let Some(plan) = plans.get_mut(&swarm_id)
+                                && let Some(item) =
+                                    plan.items.iter_mut().find(|item| item.id == task_id)
+                                && item.status == "running"
+                            {
+                                item.status = "queued".to_string();
+                                item.assigned_to = None;
+                                let progress =
+                                    plan.task_progress.entry(task_id.clone()).or_default();
+                                progress.assigned_session_id = None;
+                                progress.last_heartbeat_unix_ms = Some(now_ms);
+                                progress.last_checkpoint_unix_ms = Some(now_ms);
+                                progress.checkpoint_summary =
+                                    Some("requeued: usage-limit resume was superseded".to_string());
+                                progress.stale_since_unix_ms = None;
+                                progress.checkpoint_count =
+                                    Some(progress.checkpoint_count.unwrap_or(0) + 1);
+                                plan.version += 1;
+                            }
+                        }
+                        let swarm_state = SwarmState {
+                            members: Arc::clone(&swarm_members),
+                            swarms_by_id: Arc::clone(&swarms_by_id),
+                            plans: Arc::clone(&swarm_plans),
+                            coordinators: Arc::clone(&swarm_coordinators),
+                        };
+                        persist_swarm_state_for(&swarm_id, &swarm_state).await;
+                        broadcast_swarm_plan_with_previous(
+                            &swarm_id,
+                            Some("task_requeued_superseded".to_string()),
+                            Some(&previous_items),
+                            &swarm_plans,
+                            &swarm_members,
+                            &swarms_by_id,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+            Ok(()) => {
+                let agent = agent_arc.lock().await;
+                (
+                    Ok(()),
+                    agent.latest_assistant_text_after(start_message_index),
+                )
+            }
         };
+        drop(event_tx);
         let _ = heartbeat_stop_tx.send(true);
         let _ = heartbeat_task.await;
 
@@ -1274,6 +1411,7 @@ pub(super) async fn handle_comm_assign_role(
             id,
             message: "Only the coordinator can assign roles. (Tip: if the coordinator has disconnected, use assign_role with target_session set to your own session ID to self-promote.)".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -1285,6 +1423,7 @@ pub(super) async fn handle_comm_assign_role(
                 id,
                 message: "Not in a swarm.".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         }
@@ -1895,6 +2034,7 @@ pub(super) async fn handle_comm_assign_next(
                 id,
                 message: "No runnable unassigned tasks are available in the swarm plan".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         };
@@ -1971,6 +2111,7 @@ pub(super) async fn handle_comm_assign_next(
                         id,
                         message: format!("Failed to spawn preferred worker: {error}"),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     return;
                 }
@@ -2009,6 +2150,7 @@ pub(super) async fn handle_comm_assign_next(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
             }
         }
@@ -2066,6 +2208,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: "Unknown task control action. Use start, wake, resume, retry, reassign, replace, or salvage.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -2094,6 +2237,7 @@ pub(super) async fn handle_comm_task_control(
                     action.as_str()
                 ),
                 retry_after_secs: None,
+                server_resumes: false,
             });
             return;
         };
@@ -2104,6 +2248,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message,
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2117,6 +2262,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: format!("Task '{}' not found in swarm plan", task_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     };
@@ -2126,6 +2272,7 @@ pub(super) async fn handle_comm_task_control(
             id,
             message: task_control_status_error(action, &snapshot.status, &task_id),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -2149,6 +2296,7 @@ pub(super) async fn handle_comm_task_control(
                 task_id
             ),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -2163,6 +2311,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2176,6 +2325,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, assignee, requested_target
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2196,6 +2346,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2207,6 +2358,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2307,6 +2459,7 @@ pub(super) async fn handle_comm_task_control(
                         assignee
                     ),
                     retry_after_secs: Some(1),
+                    server_resumes: false,
                 });
             }
         }
@@ -2319,6 +2472,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2362,6 +2516,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2370,6 +2525,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message: format!("'target_session' is required for {}.", action.as_str()),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             };
@@ -2379,6 +2535,7 @@ pub(super) async fn handle_comm_task_control(
                     id,
                     message: format!("Task '{}' is already assigned to '{}'.", task_id, assignee),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2391,6 +2548,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, assignee
                     ),
                     retry_after_secs: Some(1),
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2408,6 +2566,7 @@ pub(super) async fn handle_comm_task_control(
                         task_id, snapshot.status
                     ),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
                 return;
             }
@@ -2542,6 +2701,7 @@ pub(super) async fn handle_client_debug_command(
         id,
         message: "ClientDebugCommand is for internal use only".to_string(),
         retry_after_secs: None,
+        server_resumes: false,
     });
 }
 
@@ -2586,6 +2746,7 @@ async fn require_plan_driver_swarm(
             id,
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return None;
     };
@@ -2620,6 +2781,7 @@ async fn require_plan_driver_swarm(
         id,
         message: permission_error.to_string(),
         retry_after_secs: None,
+        server_resumes: false,
     });
     None
 }

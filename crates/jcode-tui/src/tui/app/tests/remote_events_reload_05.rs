@@ -36,6 +36,7 @@ fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
                 id: rejected_id,
                 message: "Already processing a message".to_string(),
                 retry_after_secs: None,
+                server_resumes: false,
             },
             &mut remote,
         );

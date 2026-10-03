@@ -1214,6 +1214,12 @@ pub enum ServerEvent {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after_secs: Option<u64>,
+        /// Set only when the server scheduled an automatic resume of this
+        /// (server-initiated) turn after a usage-limit reset. Clients show a
+        /// "server will resume" notice only when this is true; otherwise the
+        /// error is terminal and shown normally.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        server_resumes: bool,
     },
 
     /// Pong response
@@ -1485,6 +1491,15 @@ pub enum ServerEvent {
     #[serde(rename = "model_usage_updated")]
     ModelUsageUpdated {
         route: jcode_provider_core::ModelRoute,
+    },
+
+    /// Credentials changed server-wide (login, account switch, or an external
+    /// edit of a credential file). Broadcast to every connected client so a
+    /// turn held on the previous account's rate/usage limit can resend now.
+    #[serde(rename = "credentials_changed")]
+    CredentialsChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
 
     /// Available models updated (pushed after auth changes)

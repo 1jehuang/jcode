@@ -17,6 +17,20 @@ pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
         return None;
     }
 
+    // A compact JSON object is one whitespace token. Scanning its digits can
+    // miss retry_after_seconds entirely or accidentally pick max_rpm instead.
+    let body = error
+        .split_once("response:")
+        .map_or(error, |(_, body)| body)
+        .trim();
+    let body = body.split("\nHint:").next().unwrap_or(body);
+    let structured_delay = jcode_provider_core::retry_after::retry_after_body_delay(body);
+    if structured_delay.is_some() || body.contains("\"retry_after_seconds\"") {
+        // Invalid structured delays stay invalid rather than falling through
+        // to a loose numeric scan, which could mistake -1 for one second.
+        return structured_delay;
+    }
+
     if let Some(idx) = error_lower.find("retry") {
         let after = &error_lower[idx..];
         for word in after.split_whitespace() {
@@ -122,5 +136,38 @@ mod rate_limit_parse_tests {
     fn plain_retry_seconds_still_parse() {
         let err = "429 Too Many Requests: retry after 30 seconds";
         assert_eq!(parse_rate_limit_error(err), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn openference_json_retry_after_seconds_is_parsed() {
+        let err = "OpenAI-compatible chat request failed\n  status: 429 Too Many Requests\n  response: {\"error\":\"Rate limit exceeded. Too many requests per minute.\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\",\"retry_after_seconds\":2,\"max_rpm\":25}\nHint: check network connectivity";
+        assert_eq!(parse_rate_limit_error(err), Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn invalid_json_retry_after_does_not_use_max_rpm() {
+        for value in ["-1", "null", "true", "\"soon\""] {
+            let err = format!(
+                "status: 429 Too Many Requests\n  response: {{\"retry_after_seconds\": {value}, \"max_rpm\": 25}}"
+            );
+            assert_eq!(parse_rate_limit_error(&err), None, "{err}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod anthropic_usage_limit_parse_tests {
+    use super::parse_rate_limit_error;
+    use std::time::Duration;
+
+    /// The Anthropic runtime fails fast on a usage limit that resets hours
+    /// away. The hold must pick up that reset time, not a bogus short retry.
+    #[test]
+    fn anthropic_fail_fast_usage_limit_message_parses_reset() {
+        let err = "Anthropic API error (429 Too Many Requests): {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"}} Usage limit reached for this Claude account; resets in 3h 17m (2026-09-29 23:43 UTC).";
+        assert_eq!(
+            parse_rate_limit_error(err),
+            Some(Duration::from_secs(3 * 3600 + 17 * 60))
+        );
     }
 }

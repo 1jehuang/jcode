@@ -534,6 +534,7 @@ pub(super) async fn handle_comm_await_members(
             id,
             message: "Not in a swarm. Use a git repository to enable swarm features.".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
     }
 }
