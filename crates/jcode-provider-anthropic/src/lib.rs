@@ -65,6 +65,11 @@ pub fn format_messages_with_native(
     // server_tool_use / web_search_tool_result pairs are stored as ProviderNative
     // blocks and therefore need their own recovery path.
     let repaired_messages = repair_dangling_anthropic_server_tools(messages);
+    // A duplicated run of history (for example a journal replayed on top of a
+    // snapshot that already contained it, #1632) repeats `tool_use` ids. Only
+    // the first copy can be answered, so drop the repeats before results are
+    // deduplicated; otherwise the second copy is sent with no result after it.
+    let repaired_messages = dedupe_tool_uses(&repaired_messages);
     let messages = &dedupe_tool_results(&repaired_messages);
 
     // First pass: collect all tool_use IDs and tool_result IDs
@@ -464,6 +469,52 @@ fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Vec<Message> 
         }
     }
     repaired
+}
+
+/// Keep only the first `tool_use` block for each id. Anthropic requires every
+/// `tool_use` to be answered by a `tool_result` in the very next message, and a
+/// repeated id can never satisfy that because its result is deduplicated to
+/// the first occurrence.
+fn dedupe_tool_uses(messages: &[Message]) -> Vec<Message> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut duplicate_seen = false;
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, .. } = block
+                && !seen.insert(id.as_str())
+            {
+                duplicate_seen = true;
+            }
+        }
+    }
+    if !duplicate_seen {
+        return messages.to_vec();
+    }
+
+    let mut kept: HashSet<String> = HashSet::new();
+    let mut dropped = 0usize;
+    let out = messages
+        .iter()
+        .map(|msg| {
+            let mut msg = msg.clone();
+            msg.content.retain(|block| match block {
+                ContentBlock::ToolUse { id, .. } => {
+                    let keep = kept.insert(id.clone());
+                    if !keep {
+                        dropped += 1;
+                    }
+                    keep
+                }
+                _ => true,
+            });
+            msg
+        })
+        .collect();
+    jcode_logging::warn(&format!(
+        "[anthropic] Dropped {dropped} repeated tool_use block(s); each tool_use id may appear only once"
+    ));
+    out
 }
 
 /// Remove duplicate `tool_result` blocks so each `tool_use_id` is answered
