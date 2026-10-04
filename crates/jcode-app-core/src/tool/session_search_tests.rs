@@ -42,6 +42,15 @@ fn save_test_session(id: &str, messages: Vec<(Role, Vec<ContentBlock>)>) -> Sess
     session
 }
 
+/// Save a session pinned to a specific project directory.
+fn save_session_in(id: &str, working_dir: &str, needle: &str) {
+    let mut session = Session::create_with_id(id.to_string(), None, None);
+    session.short_name = Some(format!("short-{id}"));
+    session.working_dir = Some(working_dir.to_string());
+    session.add_message(Role::Assistant, vec![text(needle)]);
+    session.save().expect("save scoped test session");
+}
+
 fn run_report(home: &Path, query: &str, options: &SearchOptions) -> SearchReport {
     search_sessions_blocking(
         &home.join("sessions"),
@@ -353,6 +362,73 @@ fn working_dir_filter_is_case_insensitive_and_prefix_based() {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].session_id, "dir-session");
     });
+}
+
+#[test]
+fn search_defaults_to_the_calling_sessions_own_project() {
+    with_temp_home(|home| {
+        save_session_in("mine", "/tmp/project-a", "scope-default-needle");
+        save_session_in("theirs", "/tmp/project-b", "scope-default-needle");
+
+        // No working_dir argument: the session's own project is the default scope.
+        let filter = resolve_working_dir_filter(None, Some(std::path::Path::new("/tmp/project-a")));
+        assert_eq!(filter.as_deref(), Some("/tmp/project-a"));
+
+        let mut options = SearchOptions::for_test("current-session");
+        options.working_dir_filter = filter;
+        let results = run_search(home, "scope-default-needle", &options);
+
+        assert_eq!(
+            results.len(),
+            1,
+            "a scoped search must not read other projects' transcripts: {:?}",
+            results.iter().map(|r| &r.session_id).collect::<Vec<_>>()
+        );
+        assert_eq!(results[0].session_id, "mine");
+    });
+}
+
+#[test]
+fn star_is_the_explicit_opt_out_for_cross_project_recall() {
+    assert_eq!(
+        resolve_working_dir_filter(Some("*"), Some(std::path::Path::new("/tmp/project-a"))),
+        None,
+        "\"*\" must search every project"
+    );
+
+    with_temp_home(|home| {
+        save_session_in("mine", "/tmp/project-a", "star-optout-needle");
+        save_session_in("theirs", "/tmp/project-b", "star-optout-needle");
+
+        let mut options = SearchOptions::for_test("current-session");
+        options.working_dir_filter =
+            resolve_working_dir_filter(Some("*"), Some(std::path::Path::new("/tmp/project-a")));
+        let results = run_search(home, "star-optout-needle", &options);
+
+        assert_eq!(
+            results.len(),
+            2,
+            "\"*\" should deliberately span projects: {:?}",
+            results.iter().map(|r| &r.session_id).collect::<Vec<_>>()
+        );
+    });
+}
+
+#[test]
+fn an_explicit_working_dir_overrides_the_session_default() {
+    let filter = resolve_working_dir_filter(
+        Some("/tmp/project-b"),
+        Some(std::path::Path::new("/tmp/project-a")),
+    );
+    assert_eq!(filter.as_deref(), Some("/tmp/project-b"));
+}
+
+#[test]
+fn session_without_a_working_dir_does_not_invent_one() {
+    // Isolation invariant 1: with no session cwd, an unscoped search is the
+    // honest answer. Falling back to the daemon's cwd would silently scope the
+    // search to whichever project happened to start the process.
+    assert_eq!(resolve_working_dir_filter(None, None), None);
 }
 
 #[test]

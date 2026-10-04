@@ -297,7 +297,7 @@ that path; it is a guard against regression rather than a proof of this fix.
 
 ### P1.2 - `session_search` has no default project scope
 
-- [ ] **Status:** pending
+- [x] **Status:** done
 - **Where:** `crates/jcode-app-core/src/tool/session_search.rs:493`
   (`working_dir_filter: params.working_dir.clone()`), schema at `:309-312`; registered as
   a base tool at `crates/jcode-app-core/src/tool/mod.rs:447-448`.
@@ -313,6 +313,31 @@ that path; it is a guard against regression rather than a proof of this fix.
   it. Restrict the fallback to a warning or require an absolute path.
 - **Acceptance:** with no `working_dir` argument, results contain only sessions whose cwd
   matches the calling session's cwd (prefix semantics, case-insensitive).
+
+**Resolution.** `resolve_working_dir_filter` in
+`crates/jcode-app-core/src/tool/session_search.rs` decides the scope: an explicit argument
+wins, `"*"` is the documented opt-out for genuinely global recall, and otherwise the filter
+defaults to `ctx.working_dir`. The schema description states both the default and the
+opt-out, so the behavior is discoverable from the tool definition rather than only from
+source.
+
+When `ctx.working_dir` is `None` the filter stays `None` rather than falling back to the
+daemon's cwd. That is the same deliberate `None` decision isolation invariant 1 demands: a
+session-scoped path must not resolve from whichever project happened to start the process.
+An unscoped search that admits it is unscoped is honest; one silently scoped to the wrong
+project is not.
+
+The matcher fallback in `crates/jcode-session-types/src/lib.rs` no longer degrades to
+substring matching. A bare filter with no `/` is a project *name* and now matches only whole
+path segments, so `jcode` matches `/workspace/jcode` and its subdirectories but no longer
+matches `/workspace/jcode-old` or `/workspace/myjcode`. That is the invariant 4 rule about
+guarding sloppy-filter fallbacks so they cannot quietly widen the result set.
+
+**Tests.** Four tests in `session_search_tests.rs` and one in `jcode-session-types`. Verified
+by reverting each half independently: restoring the substring fallback fails
+`bare_working_dir_filter_matches_whole_segments_not_substrings`, dropping the session default
+fails `search_defaults_to_the_calling_sessions_own_project`, and removing the `"*"` opt-out
+fails `star_is_the_explicit_opt_out_for_cross_project_recall`. All pass again once restored.
 - **Test:** write sessions under two temp dirs, call the tool with only a query, assert
   only the current project's sessions come back.
 

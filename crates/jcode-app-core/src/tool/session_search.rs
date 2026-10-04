@@ -60,6 +60,8 @@ const LEGACY_INDEX_FILE_NAME: &str = "session_search_recent_index_v1.json";
 #[derive(Debug, Deserialize)]
 struct SearchInput {
     query: String,
+    /// Defaults to the calling session's working directory. Pass "*" to search
+    /// every project deliberately.
     #[serde(default)]
     working_dir: Option<String>,
     #[serde(default)]
@@ -308,7 +310,7 @@ impl Tool for SessionSearchTool {
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Only sessions whose working directory matches this path prefix (case-insensitive)."
+                    "description": "Only sessions whose working directory matches this path prefix (case-insensitive). Defaults to this session's own working directory. Pass \"*\" to search all projects."
                 },
                 "limit": {
                     "type": "integer",
@@ -490,7 +492,10 @@ impl Tool for SessionSearchTool {
 
         let options = SearchOptions {
             current_session_id: ctx.session_id.clone(),
-            working_dir_filter: params.working_dir.clone(),
+            working_dir_filter: resolve_working_dir_filter(
+                params.working_dir.as_deref(),
+                ctx.working_dir.as_deref(),
+            ),
             limit,
             max_per_session,
             include_current: params.include_current.unwrap_or(false),
@@ -560,6 +565,35 @@ fn parse_role_filter(raw: Option<&str>) -> std::result::Result<Option<RoleFilter
     RoleFilter::parse(raw).map(Some).ok_or_else(|| {
         format!("role must be one of all, user, assistant, or metadata; received {raw}.")
     })
+}
+
+/// Decide which project scope a search covers.
+///
+/// The agent-facing default is this session's own working directory. Without
+/// it an agent in project A could read transcripts from every project on the
+/// machine, which is the cross-project leak isolation invariant 4 rules out.
+/// An explicit "*" is the documented opt-out for genuinely global recall.
+///
+/// When the session has no working directory the filter stays `None`. It is
+/// never filled in from the daemon's cwd: invariant 1 says a session-scoped
+/// path may not fall back to whichever project started the process, and
+/// inventing a scope here would be worse than an unscoped, honest search.
+fn resolve_working_dir_filter(
+    requested: Option<&str>,
+    session_working_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    let requested = requested.map(str::trim).filter(|raw| !raw.is_empty());
+
+    if let Some(raw) = requested {
+        // "*" means every project. Any other value is the agent's explicit choice
+        // and is passed through for the matcher to interpret.
+        if raw == "*" {
+            return None;
+        }
+        return Some(raw.to_string());
+    }
+
+    session_working_dir.map(|dir| dir.to_string_lossy().into_owned())
 }
 
 fn normalize_optional_filter(raw: Option<String>) -> Option<String> {
