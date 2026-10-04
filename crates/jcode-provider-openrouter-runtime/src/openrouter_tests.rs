@@ -2146,6 +2146,27 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
     assert_eq!(provider.context_window(), 1_000_000);
 }
 
+/// #1625: `--provider auto` applies the configured DeepSeek profile through
+/// env (API base, key name, cache namespace) without `JCODE_OPENROUTER_MODEL`.
+/// The explicit API base disables autodetection, so the model must come from
+/// the profile itself, not the OpenRouter `anthropic/claude-sonnet-4` default.
+#[test]
+fn env_applied_builtin_profile_uses_profile_default_model_not_openrouter_default() {
+    let _lock = ENV_LOCK.lock();
+    let _clean = isolate_openrouter_autodetect_env();
+    let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", "https://api.deepseek.com");
+    let _key_name = EnvVarGuard::set("JCODE_OPENROUTER_API_KEY_NAME", "DEEPSEEK_API_KEY");
+    let _env_file = EnvVarGuard::set("JCODE_OPENROUTER_ENV_FILE", "deepseek.env");
+    let _api_key = EnvVarGuard::set("DEEPSEEK_API_KEY", "test");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "deepseek");
+    let _catalog = EnvVarGuard::set("JCODE_OPENROUTER_MODEL_CATALOG", "0");
+
+    let provider = OpenRouterProvider::new().expect("provider");
+
+    assert_eq!(provider.model(), "deepseek-v4-flash");
+    assert_eq!(provider.context_window(), 1_000_000);
+}
+
 /// DeepSeek renamed `deepseek-v4-flash` to `deepseek-flash`. Its live
 /// `/v1/models` now reports `deepseek-flash` and `deepseek-v4-pro`; both are
 /// 1M-window models. Without the renamed spelling in the static classifier the
@@ -2270,7 +2291,9 @@ fn conifer_context_fallback_yields_to_live_and_disk_catalog_without_remapping_al
 
 #[test]
 fn explicit_cached_context_window_precedes_zai_family_fallback() {
-    let model = "glm-5.3-issue-1087";
+    // GLM-5.1 keeps a 200K static guess (GLM-5.2/5.3 moved to 1M in 083df8805),
+    // so the cached 1M window conflicts with it as the regression requires.
+    let model = "glm-5.1-issue-1087";
     jcode_base::provider::populate_context_limits(HashMap::from([(model.to_string(), 1_000_000)]));
     let provider = OpenRouterProvider {
         model: Arc::new(RwLock::new(model.to_string())),

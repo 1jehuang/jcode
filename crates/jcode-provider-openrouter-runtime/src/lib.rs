@@ -1722,6 +1722,18 @@ impl OpenRouterProvider {
                     .as_ref()
                     .and_then(|profile| profile.default_model.clone())
             })
+            .or_else(|| {
+                // A built-in profile applied through env (e.g. `--provider auto`
+                // enabling a configured DeepSeek key) sets the API base, which
+                // disables autodetection above. Fall back to that profile's own
+                // default model instead of the OpenRouter default, which the
+                // direct endpoint does not serve (#1625).
+                profile_id
+                    .as_deref()
+                    .and_then(openai_compatible_profile_by_id)
+                    .map(resolve_openai_compatible_profile)
+                    .and_then(|profile| profile.default_model)
+            })
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
         // Parse provider routing from environment
