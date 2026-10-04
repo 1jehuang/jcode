@@ -160,9 +160,33 @@ fn main() {
     //   * A `[package].version` bump touches Cargo.toml (declared below), which
     //     refreshes the embedded metadata for the next build.
     //   * `cargo clean` / editing this build script naturally re-runs it.
-    // For ordinary dev builds the embedded git hash/dirty flag may lag the very
-    // latest commit within a session; that is a cosmetic `--version` detail and
-    // an acceptable trade for keeping incremental builds incremental.
+    //
+    // An earlier version of this comment ended here and called a lagging hash "a
+    // cosmetic `--version` detail". That was wrong, and specifically wrong on
+    // Windows. The embedded hash is what
+    // `jcode_build_support::validate_binary_version_matches_source_report`
+    // compares against `source.short_hash` before publishing, so a stale hash is
+    // not cosmetic -- it is the reason the publish gate refuses, and the refusal
+    // looks like a build problem rather than a caching one.
+    //
+    // Why it bites on Windows and not on Unix: `dev_cargo.sh` exports
+    // JCODE_BUILD_GIT_HASH, and `rerun-if-env-changed` below then fires on every
+    // build. `jcode_build_support::paths::selfdev_build_command_for_target` skips
+    // that wrapper on Windows (`if wrapper.is_file() && !is_windows`) to avoid
+    // `bash` resolving to WSL, so on Windows the variable is never exported, the
+    // env trigger never fires, and the hash only refreshes when some other
+    // declared input happens to change.
+    //
+    // Probed on Windows at 22909eb7a: HEAD moved to 22909eb7a, a plain
+    // `cargo build --profile selfdev -p jcode --bin jcode` returned 0 in 1.5s
+    // without re-running this script, and the binary still reported
+    // `(c023d8053, dirty)`.
+    //
+    // The fix belongs in the caller rather than here, because watching the git
+    // files here is exactly the ~18s full-tree recompile the note above is
+    // avoiding, and `jcode-build-meta` sits at the bottom of the crate graph.
+    // See the reload path in `jcode-build-support` for the workaround that does
+    // not slow down incremental builds.
     println!(
         "cargo:rerun-if-changed={}",
         repo_root.join("Cargo.toml").display()
