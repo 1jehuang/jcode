@@ -105,6 +105,15 @@ fn clear_snapshot_removes_saved_file() {
 fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
     let _guard = TestEnvGuard::new().expect("setup test env");
 
+    // `sh` does not exist in a plain Windows environment, so spawning it
+    // failed with "program not found" there. Spawn a command that exits
+    // immediately on whichever shell the host has.
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/C", "exit", "0"])
+        .spawn()
+        .expect("spawn child");
+    #[cfg(not(windows))]
     let mut child = std::process::Command::new("sh")
         .arg("-c")
         .arg("exit 0")
@@ -145,6 +154,15 @@ fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
 fn arm_auto_restore_from_recent_crashes_ignores_old_crashes() {
     let _guard = TestEnvGuard::new().expect("setup test env");
 
+    // `sh` does not exist in a plain Windows environment, so spawning it
+    // failed with "program not found" there. Spawn a command that exits
+    // immediately on whichever shell the host has.
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/C", "exit", "0"])
+        .spawn()
+        .expect("spawn child");
+    #[cfg(not(windows))]
     let mut child = std::process::Command::new("sh")
         .arg("-c")
         .arg("exit 0")
@@ -187,6 +205,10 @@ fn arm_auto_restore_from_recent_crashes_ignores_old_crashes() {
 /// it, so the negative cannot pass because the helper always returns `None`.
 #[test]
 fn resolve_session_cwd_without_a_configured_dir_is_none_not_the_daemon_cwd() {
+    // `set_current_dir` is process-global, so this must hold the same shared
+    // lock the other cwd-mutating test uses. Without it the two raced, and the
+    // loser failed restoring its own cwd.
+    let _guard = TestEnvGuard::new().expect("setup test env");
     let repo = tempfile::TempDir::new().expect("repo dir");
     let prev_cwd = std::env::current_dir().expect("cwd");
     // Point the process cwd at a real repo so the pre-fix fallback would resolve
