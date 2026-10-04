@@ -1637,10 +1637,68 @@ Refreshing a baseline to today's numbers is not a fix, because it makes all of
 this growth permanent and invisible to the ratchet. That decision is a product
 call and is deliberately left open rather than decided here.
 
-What is established is the mechanism: the ratchets are wired correctly, they
-were green, and four commits on 2026-07-24 and 2026-07-26 turned them red
-without anyone re-baselining. The gap is in the process, not in the tooling, and
-that is what the next step has to close.
+What is established is the mechanism: the ratchets are wired correctly, and
+they went red at specific commits. The paragraph that used to stand here said
+those commits "turned them red without anyone re-baselining", and that was
+wrong. It was inferred from the first-red table without reading the baseline
+history, which is easy to do and wrong, because re-baselining is the normal
+way these files are maintained.
+
+The four baselines have been maintained continuously, not abandoned:
+
+| baseline | commits touching it |
+| --- | --- |
+| `panic_budget.json` | 27 |
+| `swallowed_error_budget.json` | 50 |
+| `code_size_budget.json` | 103 |
+| `test_size_budget.json` | 60 |
+
+`git log --format=%s -- scripts/<baseline>` on each file is a list of
+`chore: rebaseline ...` commits, not a silent history. Reading
+`panic_budget.json`'s `total` oldest-first gives a trajectory that is mostly
+deliberate *cleanup*, not drift:
+
+```
+1164 -> 1159 -> 1137 -> 1112 -> 1102 -> 113 -> 109 -> 0 -> 21 -> 23
+     -> 34 -> 35 -> 33 -> 55 -> 56 -> 43 -> 61 -> 60 -> 60 -> 60 -> 62
+     -> 63 -> 77 -> 77
+```
+
+Ten of those 23 transitions move the number down, including `109 -> 0`
+(`c86e7719d`, "Ratchet production panic budget to zero"), `1102 -> 113`
+(`d1905bf3f`) and `56 -> 43` (`84c10f3cd`). One caveat on reading this: the
+sequence is from `git log` oldest-first, and the first seven entries are
+pre-split totals in the thousands that no longer correspond to the current
+metric, so the early values are historical rather than comparable. Only the
+trailing run from `113` onward is meaningful, and that run contains both cleanup
+and re-baselining.
+
+Note also that `0506d723f`'s subject says `(67 -> 33)` while the file's
+recorded `total` on either side of it is `35 -> 33`. The subject and the file
+disagree; the file is what the ratchet evaluates.
+
+Worse for the claim, panic-prone is the one ratchet where the first-red commit
+**did** re-baseline, and it still went red. `cb44c735d` is a merge
+(`Merge remote-tracking branch 'origin/discovery/fro...`) that moved
+`panic_budget.json` from `total: 61` to `total: 60` and dropped
+`crates/jcode-tui/src/tui/app/helpers.rs: 1`, recording that a tracked site had
+disappeared -- and the merge simultaneously brought in new panic-prone code
+elsewhere. The baseline moved down by one and the gate stayed shut.
+
+So the real mechanism is neither "nobody ran it" nor "the tooling is broken".
+It is that a re-baseline captures the tree at the instant it runs, so any commit
+that grows a ratchet and rebaselines it in the same change makes the gate green
+while saying nothing about whether the growth was acceptable, and any merge
+that carries both a rebaseline and unrelated growth leaves it red for reasons the
+baseline diff does not explain. The other three ratchets never had a baseline
+change at all between their last-green and first-red commits, which means they
+were red purely because the tree grew past a standing baseline -- that part of
+the original claim survives, for three of four.
+
+The gap is therefore narrower than "the process": re-baselining is routine and
+often correct, and the missing thing is a recorded decision about whether a
+given growth is acceptable, which `--update` cannot express and which is why
+this stays a product call.
 
 ## The ratchet's own defect: sites were matched by line number
 
