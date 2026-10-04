@@ -244,6 +244,7 @@ pub(super) fn changed_credentials(
 }
 
 /// Providers whose account identity differs between two snapshots.
+#[cfg(test)]
 pub(super) fn changed_providers(
     before: &CredentialIdentity,
     after: &CredentialIdentity,
@@ -275,6 +276,7 @@ fn announced_watch_providers(announced: Option<&str>) -> Vec<&'static str> {
 /// Providers whose change must be published after taking snapshot `now`.
 /// `announced` is `Some(provider)` when the snapshot was triggered by an
 /// in-process announcement for `provider` (`None` inside means all).
+#[cfg(test)]
 pub(super) fn providers_to_publish(
     last: &CredentialIdentity,
     now: &CredentialIdentity,
@@ -306,6 +308,7 @@ pub(super) fn changes_to_publish(
 /// client. Mirrors the in-process auth-change path, scoped to the provider
 /// whose login changed: a relogin often reuses the label, so the old login's
 /// usage snapshot and usage-limit marker would otherwise gate the new one.
+#[cfg(test)]
 fn apply_external_change(provider: &'static str) {
     apply_external_credential_change(&CredentialChange {
         provider,

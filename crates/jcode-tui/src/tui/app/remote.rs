@@ -513,15 +513,13 @@ async fn apply_terminal_event(
                 if let Some(selection) = app.pending_account_picker_action.take()
                     && let Some(command) =
                         crate::tui::app::auth::account_command_from_inline_action(&selection)
-                {
-                    if let Err(error) = app
+                    && let Err(error) = app
                         .execute_window_account_command_remote(command, remote)
                         .await
-                    {
-                        app.push_display_message(DisplayMessage::error(format!(
-                            "Failed to update this window's account: {error}"
-                        )));
-                    }
+                {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to update this window's account: {error}"
+                    )));
                 }
             }
             needs_redraw = true;
