@@ -46,6 +46,12 @@ Workaround used for now: verify each touched module in its own process, for exam
 `cargo test -p jcode-app-core --lib comm_ownership`. A real fix belongs in the test
 harness, not in any isolation task.
 
+- **How the rest of this backlog got verified anyway.** Every task above passes with
+  `--test-threads=1` and a module filter, which is also why the workaround is only a
+  nuisance rather than a correctness risk: a wedged run fails loudly with a timeout
+  instead of reporting a green result. The blocker was left alone deliberately, since
+  it lives in `jcode-base` test harness code and predates every task in this file.
+
 ---
 
 ## P0: Session ownership (HIGH)
@@ -826,6 +832,18 @@ shipped unverified.
   `tool::config_edit_notice` 8/8, `server::comm_ownership_tests` 4/4. The whole
   `server::` filter was not run: it exceeds ten minutes on pre-existing slow and
   hanging tests unrelated to this change.
+- **Known limit on reach: the notice is only visible in a TUI client.** Verified at
+  runtime, not inferred. A headless session does register as a swarm member
+  (`server/headless.rs:241`), so the watcher does deliver to it, but
+  `server/headless.rs:231-236` drains every `ServerEvent` into a discard task, and
+  `ServerEvent::Notification` is rendered only by
+  `jcode-tui/.../remote/server_events.rs:2602`. A live `jcode run` reported "no
+  global config change messages were received" while the watcher had fired. This is
+  pre-existing and applies equally to every other notification, so it is recorded
+  here rather than fixed inside P3.2: making headless and ACP clients print
+  notifications is its own piece of work with its own output-formatting decisions.
+  Until then the honest claim is "reaches every *TUI* session", not "reaches every
+  session".
 
 
 ---
