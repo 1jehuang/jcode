@@ -1165,13 +1165,68 @@ to the code it protects, not in a separate integration bucket.
     `read.rs`, and restoring the fallback fails it with
     `a path with no parent must not be rooted at the cwd: "."`.
 
-  The guard's own proof is 32 cases, all invoking the real script: eight forbidden shapes,
-  six legitimate ones, `cfg(test)` exemption, the three laundering paths, the removal path
-  (a deleted site is a note, then `--update` drops it), `--explain`, and three malformed
-  baseline shapes that must be refused with an actionable message and no traceback. A
-  separate probe confirms comment stripping creates no blind spot: a violation before a
-  trailing `//` is still caught, and a `//` inside a string literal does not truncate the
-  line.
+### The guard has its own proof
+
+  A ratchet that nothing tests is a ratchet that can be quietly broken, and this
+  one was: three of the nine revisions above were holes in the *guard* rather than
+  in the code it watches, and each shipped with CI green. So the guard is tested
+  like code, in `scripts/test_cwd_fallback_ratchet.py` (28 cases, `python3 -m
+  unittest`), which CI runs alongside the ratchet itself.
+
+  Each case plants a file under a scratch `src/` and runs the **real** script as a
+  subprocess, because the behaviour worth testing includes argument handling,
+  exit codes, and the messages a user reads. Two details are load-bearing and were
+  wrong on the first attempt, both caught by the suite failing rather than by
+  review: the script resolves its own repo root from `__file__`, so the copy under
+  test is the one inside the scratch tree (running the real path scanned the real
+  repository and every planted violation passed); and the guard only scans `src/`
+  and `crates/`, so a violation planted at the scratch root is invisible. A guard
+  that cannot see the planted file would have made all of this vacuous.
+
+  Coverage: eight forbidden shapes rejected, eight legitimate ones left alone, the
+  two comment-stripping edges in both directions, the three laundering paths, the
+  removal path, `--explain`, four malformed baselines refused with a message and no
+  traceback, and `RealBaselineTest` asserting the committed baseline passes and
+  every entry carries a reason.
+
+  **One case asserts a hole, not a fix.** `test_known_blind_spot_named_closure`
+  plants `unwrap_or_else(rooted_else)` and requires the guard to pass it. A text
+  ratchet cannot see through a function name to the `Path::new(".")` behind it, and
+  matching every `unwrap_or_else(` would flag hundreds of legitimate combinators.
+  The guard's header records this as deliberate; the test fails if someone widens
+  the pattern, so closing the hole has to be a conscious act rather than a drive-by.
+
+  Every case was mutation-tested. Each of the seven reverted fixes above was
+  reintroduced into a copy of the guard and the suite rerun:
+
+  | reverted fix | caught by | collateral |
+  | --- | --- | --- |
+  | `DOT_RE` blind to closures | `test_rejects_unwrap_or_else_closure` (+`..._pathbuf_from_closure`) | none |
+  | comment stripping removed | `test_ignores_doc_comment_quoting_the_shape` | none |
+  | `--update` absorbs a new site | `test_update_cannot_absorb_a_site_into_an_existing_entry` | none |
+  | baseline validation removed | `test_baseline_must_be_a_mapping` | none |
+  | entry silences the whole file | `test_entry_silences_only_its_own_line` | none |
+  | string awareness lost in comment stripping | `test_string_literal_slashes_do_not_truncate` | none |
+  | comment stripping eats trailing code | `test_still_reports_code_before_a_trailing_comment` | none |
+
+  Two false proofs were found and discarded while doing this, both of which had
+  reported success:
+
+  - The `--update` mutation was first written as `if False:`, which is a
+    `SyntaxError` inside a comprehension. All 23 remaining cases failed on the
+    crash, which looked like emphatic detection. Rewritten as `and False` it is
+    still syntactically valid, still reverts the same fix, and is caught by
+    exactly the one case meant to catch it.
+  - The harness did not copy `cwd_fallback.json` into the scratch tree, so
+    `test_every_committed_entry_carries_a_reason` ERRORed on a missing file under
+    *every* mutation and appeared to be a universal detector. It had detected
+    nothing. With the baseline copied, it fails under none of the seven, which is
+    correct: it asserts a property of the committed data, not of the guard's
+    matching logic.
+
+  So the suite's value is not "it passes". It is that each case fails when the
+  specific thing it was written for is undone, and no case is load-bearing for a
+  reason it does not own.
 
 ---
 

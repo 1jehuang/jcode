@@ -75,6 +75,16 @@ BASELINE_FILE = REPO_ROOT / "scripts" / "cwd_fallback.json"
 #                                   honestly infer the type. It is matched only
 #                                   when it sits next to a `current_dir()`, where
 #                                   the cwd is unambiguous.
+#   unwrap_or_else(named_fn)         a known limitation, not an oversight. The
+#                                   fallback is behind a name, so nothing on the
+#                                   line says "." or `current_dir()`; matching every
+#                                   `unwrap_or_else(` would flag hundreds of
+#                                   legitimate combinators. Caught this way it is
+#                                   a hole: a caller can hide the substitution here
+#                                   and the guard stays green. `test_cwd_
+#                                   fallback_ratchet.py` pins that it stays a hole
+#                                   so the day someone widens the pattern they have
+#                                   to close this test on purpose.
 #
 # The composite cases need a window, because rustfmt wraps them:
 #

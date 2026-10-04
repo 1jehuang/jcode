@@ -78,6 +78,13 @@ jobs:
         shell: bash
         run: python3 scripts/check_cwd_fallback_budget.py
 
+      # The ratchet above shipped with three holes in the guard itself, each with
+      # CI green, so it needs its own proof. Run next to it: a ratchet that is
+      # silently broken looks identical to one that is working.
+      - name: Test the process-cwd fallback ratchet
+        shell: bash
+        run: python3 -m unittest -v scripts/test_cwd_fallback_ratchet.py
+
       - name: Enforce swallowed-error usage ratchet
         shell: bash
         run: python3 scripts/check_swallowed_error_budget.py
