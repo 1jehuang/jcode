@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+mod claude_code;
+pub use claude_code::{
+    CLAUDE_CODE_BIN_ENV, CLAUDE_CODE_DEFAULT_BINARY, CLAUDE_CODE_DEFAULT_INSTANCE_ID,
+    ClaudeCodeConfig, ClaudeCodeInstanceConfig, is_valid_claude_code_instance_id,
+};
 mod display;
 pub use display::DisplayConfig;
 pub mod keybindings;
@@ -1381,6 +1386,8 @@ pub struct ProviderConfig {
     /// Maximum exponential-backoff delay between transient-error retries.
     /// Default: 30 seconds. Overridable via `JCODE_RETRY_BACKOFF_CAP_SECS`.
     pub retry_backoff_cap_secs: u64,
+    /// `[provider.claude_code]`: Claude through the local Claude Code CLI.
+    pub claude_code: ClaudeCodeConfig,
 }
 
 impl Default for ProviderConfig {
@@ -1406,6 +1413,7 @@ impl Default for ProviderConfig {
             stream_idle_timeout_secs: 180,
             max_retries: 8,
             retry_backoff_cap_secs: 30,
+            claude_code: ClaudeCodeConfig::default(),
         }
     }
 }

@@ -4,7 +4,8 @@
 //! Environment variables override config file settings.
 
 pub use jcode_config_types::{
-    AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
+    AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, ClaudeCodeConfig,
+    ClaudeCodeInstanceConfig, CompactionConfig,
     CompactionMode, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
     DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
     KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
@@ -59,6 +60,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_COPY_SELECTION_TOGGLE_KEY",
     "JCODE_COPILOT_PREMIUM",
     "JCODE_GEMINI_FORCE_OAUTH",
+    "JCODE_CLAUDE_CODE_BIN",
     "GOOGLE_CLOUD_PROJECT",
     "GOOGLE_CLOUD_PROJECT_ID",
     "JCODE_WAKE_MODE",

@@ -436,6 +436,31 @@ cross_provider_failover = "countdown"
 # max_retries = 8
 # retry_backoff_cap_secs = 30
 
+# Claude Code mode: run Claude through the official `claude` CLI (your Claude
+# subscription, used by Claude Code itself) instead of jcode's native Anthropic
+# transport. Opt in per session with `--provider claude-code` or models like
+# `claude-code:claude-opus-4-8`. Native Claude stays unchanged.
+# With no instances listed, one implicit "default" instance uses the CLI's
+# default login (~/.claude). Each extra instance is a separate login isolated by
+# its own CLAUDE_CONFIG_DIR (`home`); log in with
+# `jcode login --provider claude-code --account <id>`.
+# Env override for the binary: JCODE_CLAUDE_CODE_BIN.
+# [provider.claude_code]
+# binary = "claude"
+# permission_mode = "default"   # default | acceptEdits | bypassPermissions | plan | auto
+# setting_sources = ["user", "project", "local"]
+# expose_jcode_tools = true
+# default_instance = "default"
+#
+# [[provider.claude_code.instances]]
+# id = "default"
+# display_name = "Claude (Max)"
+#
+# [[provider.claude_code.instances]]
+# id = "personal"
+# display_name = "Claude Personal"
+# home = "~/.claude_personal"
+
 [server]
 # Who executes autonomous wake requests from background completion/stall,
 # swarm await completion, and communication delivery.

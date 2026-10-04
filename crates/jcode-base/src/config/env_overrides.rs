@@ -883,6 +883,13 @@ impl Config {
 
         // Explicit environment overrides win, but never export config values:
         // self-written env would mask subsequent config edits/removals.
+        if let Ok(v) = std::env::var(jcode_config_types::CLAUDE_CODE_BIN_ENV) {
+            let v = v.trim();
+            if !v.is_empty() {
+                self.provider.claude_code.binary = v.to_string();
+            }
+        }
+
         if let Ok(v) = std::env::var("JCODE_GEMINI_FORCE_OAUTH") {
             self.provider.gemini_force_oauth = parse_env_bool(&v).unwrap_or(false);
         }
