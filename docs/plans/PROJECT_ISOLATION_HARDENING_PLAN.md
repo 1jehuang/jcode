@@ -997,15 +997,26 @@ suspected bugs later.
 Cross-cutting tests that must exist for this class of bug. Each is small and belongs next
 to the code it protects, not in a separate integration bucket.
 
-- [ ] **Session ownership:** a client cannot act on another session's id (P0.1).
+- [x] **Session ownership:** a client cannot act on another session's id (P0.1).
+  Covered by `server/comm_ownership_tests.rs` (socket-level: a client attached to session A
+  cannot reach B, asserting absence of *effect* on B rather than an error string, across both
+  the subscribed-connection and one-shot-control request paths), `server/comm_auth_tests.rs`
+  (capability arithmetic in isolation), and `tool/bg.rs` / `jcode-base/src/todo.rs` /
+  `jcode-base/src/background/tests.rs` for the background-task and todo objects.
 - [x] **Cwd binding:** a session created in dir B, attached from dir A, keeps dir B (P0.3).
 - [x] **Pool isolation:** same-named shared servers with different configs do not share a
   process (P1.1).
 - [x] **Search scoping:** `session_search` with no `working_dir` returns only the current
   project (P1.2).
 - [x] **Task ownership:** `bg cancel` from another session is rejected (P1.3).
-- [ ] **No-cwd sessions:** with `working_dir: None`, no project skills, no project AGENTS.md,
-  no project swarm prompt, and relative paths error (P2.1, P2.2, P2.3, P2.5).
+- [x] **No-cwd sessions:** with `working_dir: None`, no project skills, no project AGENTS.md,
+  no project swarm prompt, and relative paths error (P2.1, P2.2, P2.3, P2.5). Each sub-property
+  has its own negative test placed next to the code it protects:
+  `jcode-base/src/skill.rs:1281` and `:1339` (no project skills even under a repo cwd) plus
+  `tool/skill.rs:479` (the tool does not list the daemon cwd's project skills);
+  `jcode-base/src/prompt_tests.rs:168` (global `~/AGENTS.md` still loads, project one does not);
+  `jcode-base/src/prompt_tests.rs:686` and `agent_tests/swarm_prompt.rs:103` (no project swarm
+  prompt); `tool/tests.rs:2042` `relative_paths_are_refused_without_a_working_dir_instead_of_using_the_daemon_cwd`.
 - [x] **Project key stability:** two spellings of one path hash identically (P3.1).
 - [x] **Global config visibility:** a `~/.jcode/config.toml` change reaches every
   session in the daemon, including sessions in other projects, however it was
