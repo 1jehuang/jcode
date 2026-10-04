@@ -442,17 +442,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("a.png");
         let jpeg = dir.path().join("b.jpeg");
-        std::fs::write(&png, b"png bytes").unwrap();
-        std::fs::write(&jpeg, b"jpeg bytes").unwrap();
+        let png_bytes = super::tiny_png_bytes_for_test();
+        let mut jpeg_bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([4, 5, 6])))
+            .write_to(&mut jpeg_bytes, image::ImageFormat::Jpeg)
+            .unwrap();
+        let jpeg_bytes = jpeg_bytes.into_inner();
+        std::fs::write(&png, &png_bytes).unwrap();
+        std::fs::write(&jpeg, &jpeg_bytes).unwrap();
 
         let images =
             dropped_image_files(&format!("'{}' '{}'", png.display(), jpeg.display())).unwrap();
-        assert_eq!(images[0], ("image/png".to_string(), b"png bytes".to_vec()));
-        assert_eq!(
-            images[1],
-            ("image/jpeg".to_string(), b"jpeg bytes".to_vec())
-        );
+        assert_eq!(images[0], ("image/png".to_string(), png_bytes));
+        assert_eq!(images[1], ("image/jpeg".to_string(), jpeg_bytes));
         assert!(dropped_image_files("ordinary pasted text").is_none());
+    }
+
+    /// #1712: a dropped BMP is attached as PNG, never `image/bmp`, and a file
+    /// that is not really an image is not attached at all.
+    #[test]
+    fn dropped_bmp_is_converted_and_fake_image_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let bmp = dir.path().join("pic.bmp");
+        let mut bmp_bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([7, 8, 9])))
+            .write_to(&mut bmp_bytes, image::ImageFormat::Bmp)
+            .unwrap();
+        std::fs::write(&bmp, bmp_bytes.into_inner()).unwrap();
+        let images = dropped_image_files(&bmp.display().to_string()).unwrap();
+        assert_eq!(images[0].0, "image/png");
+        assert!(images[0].1.starts_with(b"\x89PNG"));
+
+        let fake = dir.path().join("fake.png");
+        std::fs::write(&fake, b"png bytes").unwrap();
+        assert!(dropped_image_files(&fake.display().to_string()).is_none());
     }
 
     #[test]
@@ -653,7 +676,9 @@ pub(in crate::tui::app) mod newline;
 mod paste_guard;
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
-use paste_guard::image_media_type;
+use paste_guard::load_dropped_image;
+#[cfg(test)]
+pub(crate) use paste_guard::tiny_png_bytes_for_test;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
     if app.append_ssh_login_input(&text) {
@@ -682,12 +707,10 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
                 insert_input_text(app, " ");
             }
 
-            if let Some(media_type) = image_media_type(&path)
-                && let Ok(data) = std::fs::read(&path)
-            {
+            if let Some((media_type, data)) = load_dropped_image(&path) {
                 attach_image(
                     app,
-                    media_type.to_string(),
+                    media_type,
                     base64::engine::general_purpose::STANDARD.encode(data),
                 );
                 image_count += 1;
@@ -748,11 +771,7 @@ fn dropped_image_files(text: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let paths = parse_dropped_paths(text)?;
     paths
         .into_iter()
-        .map(|path| {
-            let media_type = image_media_type(&path)?;
-            let data = std::fs::read(path).ok()?;
-            Some((media_type.to_string(), data))
-        })
+        .map(|path| load_dropped_image(&path))
         .collect()
 }
 

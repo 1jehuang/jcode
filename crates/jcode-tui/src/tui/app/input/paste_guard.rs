@@ -35,15 +35,49 @@ pub(in crate::tui::app) fn expire_for_test() {
     LAST_PASTE.with(|cell| cell.set(None));
 }
 
-/// Media type for image file extensions accepted by drag-and-drop paste.
-pub(super) fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
-    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "gif" => Some("image/gif"),
-        "webp" => Some("image/webp"),
-        "bmp" => Some("image/bmp"),
-        "tif" | "tiff" => Some("image/tiff"),
-        _ => None,
+/// Test hook: bytes of a real 1x1 PNG, for drop tests that need content
+/// `load_dropped_image` accepts.
+#[cfg(test)]
+pub(crate) fn tiny_png_bytes_for_test() -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3])))
+        .write_to(&mut out, image::ImageFormat::Png)
+        .expect("encode png");
+    out.into_inner()
+}
+
+/// True for file extensions drag-and-drop paste treats as images.
+fn has_image_extension(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff"
+            )
+        })
+}
+
+/// Load a dropped image file as a provider-safe `(media_type, bytes)` pair.
+///
+/// The extension only decides whether to try. The media type comes from the
+/// bytes, and BMP/ICO/TIFF are converted to PNG, because an unsupported image
+/// block in history makes every later request fail (#1712). Returns `None`
+/// when the file is not an image the model can view, so the caller falls back
+/// to inserting the path as text.
+pub(super) fn load_dropped_image(path: &std::path::Path) -> Option<(String, Vec<u8>)> {
+    if !has_image_extension(path) {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    match crate::image_normalize::normalize_image_bytes(data) {
+        Ok(image) => Some((image.media_type.to_string(), image.data)),
+        Err(reason) => {
+            crate::logging::info(&format!(
+                "dropped file {} not attached as image: {reason}",
+                path.display()
+            ));
+            None
+        }
     }
 }
