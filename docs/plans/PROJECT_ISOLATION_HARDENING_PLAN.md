@@ -130,11 +130,12 @@ this work.
   - `server::util::newest_reload_candidate_integration_tests::selfdev_daemon_reloads_into_fresh_release_after_update`
   - `server::util::newest_reload_candidate_integration_tests::selfdev_pin_is_preserved_when_it_is_the_freshest_build`
 - `tool` (13)
-  - `tool::agentgrep::tests::build_find_args_allows_glob_only_search`
-  - `tool::agentgrep::tests::build_grep_args_drops_match_all_glob`
-  - `tool::agentgrep::tests::build_grep_args_includes_scope_flags`
-  - `tool::agentgrep::tests::build_outline_args_accepts_file_field`
-  - `tool::agentgrep::tests::build_smart_args_uses_terms`
+  - `tool::agentgrep::tests::build_find_args_allows_glob_only_search` -- **fixed, see
+    below**
+  - `tool::agentgrep::tests::build_grep_args_drops_match_all_glob` -- fixed
+  - `tool::agentgrep::tests::build_grep_args_includes_scope_flags` -- fixed
+  - `tool::agentgrep::tests::build_outline_args_accepts_file_field` -- fixed
+  - `tool::agentgrep::tests::build_smart_args_uses_terms` -- fixed
   - `tool::agentgrep::tests::execute_runs_linked_grep`
   - `tool::agentgrep::tests::execute_runs_linked_grep_when_path_points_to_file`
   - `tool::desktop_selfdev::tests::*` -- 3 or 4 of 11 per run, **and the set changes every
@@ -147,6 +148,59 @@ this work.
   - `tool::tests::tool_parameter_descriptions_stay_under_token_cap`
 - `update` (1)
   - `update::update_rate_limit::tests::prefers_retry_after_and_clamps`
+
+##### Five of those 27 were hardcoded POSIX separators, and the fix was the test
+
+`agentgrep::tests` failed 7 of 35. Five of the seven were one defect, and it was
+in the tests, not the code: they asserted `Some("/tmp/root/.")` where
+`build_*_args` joins with `Path::join`, so Windows produces `/tmp/root\.` and
+Linux produces `/tmp/root/.`. Every failing assertion had the same shape, e.g.
+
+```
+assertion `left == right` failed
+  left: Some("/tmp/root\\.")
+ right: Some("/tmp/root/.")
+```
+
+Fixed by computing the expectation the way the code does, which is a pattern
+already used correctly elsewhere in the same file:
+
+```rust
+Some(Path::new("/tmp/root").join(".").to_string_lossy().as_ref())
+```
+
+This is a portability fix and nothing more. It does not touch `build_grep_args`,
+`build_find_args`, `build_smart_args_and_query` or `build_outline_args`, and it
+does not change what those functions do on any platform. Those five tests would
+already have passed on ubuntu; they were only ever broken on Windows.
+
+That the fix still binds was checked rather than assumed: reverting the two
+`join(".")` expectations to the POSIX literal turns exactly those two tests red
+again (33 passed/2 failed becomes 31 passed/4 failed), and the file is restored
+and `git hash-object`-verified afterwards. An assertion that cannot fail is not
+a test. Net effect on this box: `agentgrep::tests` goes from 7 failures to 2,
+and the two survivors -- `execute_runs_linked_grep` and
+`execute_runs_linked_grep_when_path_points_to_file` -- genuinely shell out to
+`rg`, so they stay recorded above.
+
+Getting here took four probes, and three of them first gave a wrong answer,
+which is worth recording because the wrong answers were all plausible:
+
+| probe | said | why it was wrong |
+| --- | --- | --- |
+| slice `text[-3000:]` for the assertion | "no failure block" | the tail was all compiler warnings; the result was earlier in the stream |
+| read `/tmp/root/repo` as separator-free | 3 of 5 tests broken | `/workspace/repo` fails too; `Path::join` splits the *last* component |
+| `shutil.which("bash")` for a shell gate | "gate is broken" | it found WSL's `bash.EXE`, a launcher stub that cannot parse `pipefail` |
+| `shutil.move(.bak)` then immediate re-run | 4 failures after restore | cargo reused the build of the mutated source; `git hash-object` already proved the restore byte-exact |
+
+The pattern worth keeping: each of those was a probe defect, not a code defect,
+and in every case the tell was that the result disagreed with something already
+measured. Checking the next result against the previous one is what caught them.
+
+The 27 count above is the baseline before this fix. After it, `agentgrep::tests`
+contributes 2 rather than 7, so a fresh whole-suite run should show 22
+app-core failures rather than 27 -- unless the `desktop_selfdev` race moves that
+number, which it does by design.
 
 - `server/headless.rs` drains every `ServerEvent` into a discard task, so `jcode
   run` and ACP sessions can never observe the P3.2 config-change notice (nor any
@@ -1350,6 +1404,14 @@ Measured on this tree, before and after `scripts/check_all_budgets.py`:
 | six sequential steps | 4 of 6 | 1 (`code size`) |
 | one aggregating step | 4 of 6 | 4, named, in one log |
 
+That comparison holds only once a developer has reached the ratchets at all,
+and the "before" row in particular was never observed on CI -- see
+[Four ratchets are red](#four-ratchets-are-red-and-ci-has-been-red-with-them)
+for the measured state of the five gates in front of them. Both rows sit behind
+the same `fmt`, `check`, `clippy`, `metadata` and `warning budget` steps, so if
+any of those is red the aggregator is exactly as invisible as the six steps it
+replaced. Making the reporting better is not the same as making it reachable.
+
 `scripts/check_guardrails.sh` already aggregated gates locally, but it is bash,
 which makes it unusable on a Windows checkout, and it interleaves the slow
 `cargo` gates with the fast Python ratchets. The new script is Python, runs only
@@ -1433,9 +1495,70 @@ tree, with 11 files unformatted across `jcode-app-core`, `jcode-base` and
 ratchets were **skipped rather than failing**. The `quality` job was red anyway,
 but the four budget ratchets were not being evaluated at all.
 
-Fixed in `fd36fa060` by running `cargo fmt --all` over those files, so the four
-ratchets are now reached. That is what exposed them: all four exit 1 at HEAD,
-which is what this section is about.
+Fixed in `fd36fa060` by running `cargo fmt --all` over those files. The sentence
+that used to stand here read "so the four ratchets are now reached", and it was
+wrong. Formatting was only the *first* of five gates between `checkout` and the
+ratchets, and nothing was measured past the first one.
+
+Enumerating the `quality` job's steps in order and running each one locally:
+
+| # | ci.yml step | exit | verdict |
+|---|---|---|---|
+| 1 | `check_module_files.py` | 0 | passes |
+| 2 | `cargo fmt --all -- --check` | 0 | passes (this is what `fd36fa060` fixed) |
+| 3 | `cargo check --all-targets --all-features` | 101 | **fails on this box only** |
+| 4 | `cargo clippy --all-targets --all-features -- -D warnings` | 101 | **fails on this box only** |
+| 5 | `cargo metadata --locked` | 0 | passes |
+| 6 | `check_warning_budget.sh` | 1 | **fails on this box only** |
+| — | `check_all_budgets.py` | 1 | the goal; runs, and names all four red gates |
+
+Steps 3, 4 and 6 each fail here for a platform reason, so none of them
+establishes that ubuntu passes. That is the honest state of the measurement, and
+it is why "the ratchets are now reached" was not merely unverified but
+overstated.
+
+- Step 3 fails because `tikv-jemalloc-sys`'s build script shells out to `sh`,
+  which a `cmd.exe` build does not put on `PATH`. It is a jemalloc dependency
+  and is not reachable through `cargo check` on ubuntu.
+- Step 4 fails on exactly two diagnostics, both `needless_return`, both at
+  `crates/jcode-storage/src/lib.rs:272` and `:300`. Both sit inside
+  `#[cfg(windows)]` blocks, so the preprocessor deletes them before clippy runs
+  on ubuntu. Both were last touched 2026-07-19 (`88561571e8`, `76d36db103`),
+  well before any of this work, and no commit here touches that crate.
+- Step 6 fails 6 warnings against a baseline of 0. All six are dead code that
+  only *looks* dead on this box: every one of them is used under
+  `#[cfg(unix)]` or `#[cfg(any(target_os = "linux", target_os = "macos"))]`.
+
+  | symbol | site | live on linux because |
+  |---|---|---|
+  | `risk_ctx` unused `mut` | `bash_destructive_gate.rs:18` | its only mutating use is `:22`, `#[cfg(not(windows))]` |
+  | `host_profile` never used | `desktop_selfdev.rs:360` | called from `:299`, `#[cfg(any(linux, macos))]` |
+  | `ProcessGroup.0` never read | `desktop_selfdev.rs:437` | constructed at `:470`, `#[cfg(unix)]` |
+  | `MAX_TRANSFER_BYTES` | `auth_import.rs:4` | used at `:65`, `#[cfg(unix)]` |
+  | `IsTerminal` | `auth_import.rs:6` | used at `:23`, `#[cfg(unix)]` |
+  | `take_stashed_handoff` never used | `cloud_move.rs:1656` | called from `ssh.rs:120`, `#[cfg(unix)]` |
+
+  Getting to this table took three passes that each contradicted the one
+  before. Scanning a fixed window of lines around the warning found no `cfg`
+  at all and implied all six were platform-independent. Searching only the
+  defining file claimed `take_stashed_handoff` and `host_profile` were dead
+  everywhere, which a workspace-wide `git grep` refuted -- a `pub(crate)` function
+  can be called from a sibling module. Only the third pass, which lists every
+  mention in the workspace and the cfg gate in effect at each, agrees with the
+  rest of the evidence.
+
+  Note that two of `MAX_TRANSFER_BYTES`'s uses in `jcode-base` are test-only
+  (`transfer.rs:961` and `:1006`, under `#[cfg(all(test, unix))]`), and the
+  `#[cfg(test)]`-gated use of `IsTerminal` at `session_picker.rs:2424` is in a
+  different crate entirely. Neither affects this table: the gate runs plain
+  `cargo check -q`, so it never compiles those sites on any platform, and the
+  windows-only warnings come from the ungated imports in `auth_import.rs`.
+
+No Linux target is installed on this box (`rustup target list --installed`
+reports only `x86_64-pc-windows-msvc`), so none of the three was observed on
+ubuntu. Each is an argument from cfg structure, not a measurement, and a
+`cargo check --target x86_64-unknown-linux-gnu` on a box that has the target
+would settle all three at once.
 
 An earlier version of this section said the ratchets run unconditionally and
 therefore that `master`'s quality job fails *because of them*, adding that this
