@@ -69,17 +69,19 @@ fn test_new_session_subscribe_model_changed_announces_no_model_switch() {
             .iter()
             .map(|m| m.content.clone())
             .collect::<Vec<_>>();
-        assert!(
-            !announced.iter().any(|c| c.contains("Switched to model")),
-            "subscribe-time ModelChanged must not claim a model switch; transcript: {announced:?}"
-        );
-
         let notice = app.status_notice();
-        assert!(
-            !notice
+        // One assertion over both user-visible artifacts, so a failure reports
+        // exactly what a brand-new session wrongly shows the user.
+        let spurious = announced
+            .iter()
+            .any(|c| c.contains("Switched to model"))
+            || notice
                 .as_deref()
-                .is_some_and(|text| text.starts_with("Model \u{2192}")),
-            "subscribe-time ModelChanged must not set a 'Model -> ...' status notice; got {notice:?}"
+                .is_some_and(|text| text.starts_with("Model \u{2192}"));
+        assert!(
+            !spurious,
+            "subscribe-time ModelChanged must not announce a switch; \
+             transcript: {announced:?}, status notice: {notice:?}"
         );
     });
 }

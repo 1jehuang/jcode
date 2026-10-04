@@ -2015,11 +2015,57 @@ pub(super) async fn handle_comm_assign_next(
         return;
     }
 
+    // Pinned target: the coordinator named the worker, so the only thing left
+    // to pick is the task. Resolve it HERE, before delegating, for the same
+    // reason the unpinned branch above resolves at :1891.
+    //
+    // The `assign_task` dedup key is
+    // `[swarm_id, requested_target, requested_task_id or "__next_runnable__",
+    //   message]` (:1481-1494) and it does NOT include the request id.
+    // Forwarding `task_id = None` collapsed that component to the constant
+    // `"__next_runnable__"`, so N consecutive pinned assign_next calls to the
+    // SAME worker produced ONE key, and `AssignDedupMode::ReplayFinal`
+    // replayed the first persisted response for FINAL_STATE_TTL instead of
+    // advancing the frontier: the coordinator got the same task_id back and no
+    // work happened. Resolving first makes the component vary per call, exactly
+    // as it already did on the unpinned path.
+    //
+    // Deliberately NOT `next_runnable_task_id_reclaiming_stranded` (the unpinned
+    // branch's selector). That one WRITES the plan: `reclaim_stranded_assignment`
+    // clears `assigned_to`, bumps `plan.version` and the per-node
+    // `dead_assignee_reclaims` counter (capped at MAX_DEAD_ASSIGNEE_RECLAIMS = 3
+    // in crates/jcode-plan/src/lib.rs:633). Calling it here would put that write
+    // OUTSIDE the mutation guard, so a dropped-socket retry that is about to be
+    // replayed would still mutate the plan and then return the stale response --
+    // breaking the very idempotency ReplayFinal exists to provide. It would also
+    // let a pinned assign_next loop spend reclaim budget that belongs to the
+    // automatic requeue-pickup path. `next_unassigned_runnable_task_id` is
+    // side-effect-free and is the exact selector `handle_comm_assign_task_with_mode`
+    // uses at :1553-1555, so WHAT gets picked is unchanged; only the key advances.
+    let swarm_id = match require_plan_driver_swarm(
+        id,
+        &req_session_id,
+        "Only the coordinator can assign tasks.",
+        client_event_tx,
+        swarm_members,
+        swarm_plans,
+        swarm_coordinators,
+    )
+    .await
+    {
+        Some(swarm_id) => swarm_id,
+        None => return,
+    };
+    // `None` is forwarded unchanged, so the "no runnable unassigned tasks" error
+    // still originates in the handler and travels the identical persisted-
+    // response path it always did.
+    let selected_task_id = next_unassigned_runnable_task_id(&swarm_id, swarm_plans).await;
+
     handle_comm_assign_task(
         id,
         req_session_id,
         target_session,
-        None,
+        selected_task_id,
         message,
         client_event_tx,
         sessions,

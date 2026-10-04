@@ -2305,6 +2305,12 @@ pub(in crate::tui::app) fn handle_server_event(
             context_window,
             ..
         } => {
+            // `handle_subscribe` reports the active route on EVERY connect, so a
+            // ModelChanged arriving on its own does not mean the user switched
+            // models. Capture the intent before clearing the flag, otherwise a
+            // brand-new launcher session opens with a spurious
+            // "✓ Switched to model" line and a "Model → ..." status notice.
+            let user_initiated_switch = app.remote_model_switch_in_flight;
             app.remote_model_switch_in_flight = false;
             if let Some(err) = error {
                 if let Some(prepared) = app.pending_prompt_after_model_switch.take() {
@@ -2339,13 +2345,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 // previous model's level.
                 app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
-                if !app.auth_catalog_refresh_pending {
+                // Only a switch the user actually asked for is announced. All the
+                // route state the subscribe fix needed is set above and is
+                // unaffected by this gate.
+                if user_initiated_switch && !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model
                     )));
                 }
-                app.set_status_notice(format!("Model → {}", model));
+                if user_initiated_switch {
+                    app.set_status_notice(format!("Model → {}", model));
+                }
             }
             false
         }

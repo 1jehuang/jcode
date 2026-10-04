@@ -1237,6 +1237,41 @@ async fn run_swarm_plan_to_terminal(
     }
 }
 
+/// Whether a `CommAssignTaskResponse` repeats a dispatch this coordination loop
+/// has already accepted, i.e. a replayed response rather than new dispatch
+/// progress. Pure for unit testing.
+///
+/// A pinned `target_session` makes the mutation key the server dedups on
+/// (`comm_control.rs`: `[swarm_id, target, "__next_runnable__", message]`)
+/// identical on every iteration of the dispatch loop, so every call after the
+/// first is answered inside the 30s final-state TTL by re-emitting the stored
+/// `CommAssignTaskResponse` under a fresh request id. Accepting that again would
+/// count one dispatch once per open slot, which is upstream issue #1209's
+/// "8 identical assignments".
+///
+/// The key is the `(task, worker)` PAIR, not the task id alone. This loop is
+/// also the beneficiary of the stranded-node reclaim
+/// (`comm_control.rs`, `next_runnable_task_id_reclaiming_stranded`): a node
+/// stranded on a dead assignee is legitimately re-dispatched, and it always
+/// lands on a DIFFERENT worker, because auto-pick only considers ready,
+/// non-busy members and a dead assignee is none of those. Keying on the pair
+/// keeps that re-dispatch (new progress) while still catching the replay
+/// (byte-identical response), where a task-id-only key would under-fill.
+///
+/// Matching on the pair is still safe against a genuine double-assignment: the
+/// server only ever hands the same `(task, worker)` back twice by replaying,
+/// because an assigned node is excluded from `next_unassigned_runnable_item_id`
+/// and an explicit re-assign of an actively worked node is rejected outright.
+fn run_plan_dispatch_repeats(
+    accepted: &[(String, String)],
+    task_id: &str,
+    target_session: &str,
+) -> bool {
+    accepted
+        .iter()
+        .any(|(seen_task, seen_target)| seen_task == task_id && seen_target == target_session)
+}
+
 async fn run_swarm_plan_loop(
     ctx: &ToolContext,
     params: &CommunicateInput,
@@ -1359,6 +1394,11 @@ async fn run_swarm_plan_loop(
         let active_count = summary.active_ids.len().max(in_flight_sessions.len());
         let available_slots = concurrency_limit.saturating_sub(active_count);
         let mut assigned_sessions = Vec::new();
+        // `(task_id, target_session)` pairs this coordination loop has already
+        // accepted. Scoped to the loop, like `assigned_sessions`: a node that is
+        // legitimately re-run in a LATER loop (TTL lapse, or an explicit retry
+        // requeueing it) is new progress, not a replay.
+        let mut accepted_dispatches: Vec<(String, String)> = Vec::new();
         // Member-cap fallback state, reset each coordination loop. When the swarm
         // hits its total member cap, fresh spawns are refused; instead of aborting
         // the whole run we first free finished owned workers (incremental cleanup)
@@ -1393,6 +1433,30 @@ async fn run_swarm_plan_loop(
                     target_session,
                     ..
                 }) => {
+                    // A byte-identical repeat is the server replaying a stored response
+                    // under this request's id, not a second dispatch. Counting it
+                    // inflated `assignment_count` (the progress card and the
+                    // terminal summary reported dispatch that never happened)
+                    // and pushed the same worker into `assigned_sessions`
+                    // repeatedly, which became `await_sessions` verbatim.
+                    // `break` (not `continue`) so control still reaches
+                    // `utilization.record_loop` and the await below with the
+                    // assignments this wave really made.
+                    if run_plan_dispatch_repeats(
+                        &accepted_dispatches,
+                        &task_id,
+                        &target_session,
+                    ) {
+                        reporter
+                            .log(&format!(
+                                "assign_next replayed an already-dispatched assignment ({} -> {}); \
+                                 stopping this dispatch wave",
+                                task_id, target_session
+                            ))
+                            .await;
+                        break;
+                    }
+                    accepted_dispatches.push((task_id.clone(), target_session.clone()));
                     assignment_count += 1;
                     slots_remaining -= 1;
                     reporter
@@ -3245,6 +3309,18 @@ impl Tool for CommunicateTool {
                 }
 
                 let mut assignments = Vec::new();
+                // Upstream issue #1209: this loop used to re-pick the head of the
+                // queue on every iteration and hand the SAME node back, so a
+                // 13-wide ready frontier produced "8 identical assignments of
+                // catalog-evaluate to session_kangaroo". Reproduced on this
+                // branch with a pinned `target_session`: a 3-node plan at limit 3
+                // assigned one node twice. A repeat means the frontier is not
+                // advancing, so stop rather than spend the remaining slots on
+                // duplicate work for one worker.
+                    // Keyed on the (task_id, target_session) PAIR, not task_id alone: a repeat of
+    // the same node for a DIFFERENT worker is a real second dispatch and must be
+    // kept. Adjudicated in artifacts/gap-client-guard-adjudication.md.
+    let mut assigned_pairs: Vec<(String, String)> = Vec::new();
                 let available_slots = concurrency_limit.saturating_sub(active_count);
                 for _ in 0..available_slots {
                     let request = Request::CommAssignNext {
@@ -3264,7 +3340,14 @@ impl Tool for CommunicateTool {
                             task_id,
                             target_session,
                             ..
-                        }) => assignments.push(format!("{} -> {}", task_id, target_session)),
+                        }) => {
+                            let pair = (task_id.clone(), target_session.clone());
+                            if assigned_pairs.contains(&pair) {
+                                break;
+                            }
+                            assigned_pairs.push(pair);
+                            assignments.push(format!("{} -> {}", task_id, target_session));
+                        }
                         Ok(ServerEvent::Error { message, .. })
                             if message.contains("No runnable unassigned tasks")
                                 || message.contains("No ready or completed swarm agents") =>
