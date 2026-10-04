@@ -630,6 +630,53 @@ pub fn emergency_truncate_large_payloads(
     truncated
 }
 
+/// Whether a provider error is a deterministic rejection of an inline image
+/// (a 400 `invalid_request_error` naming an image block: unsupported
+/// `media_type`, undecodable data, dimension or animation limits). The same
+/// history would be rejected on every retry, so the agent strips images and
+/// retries once instead of leaving the session permanently broken (#1712).
+pub fn is_image_rejection_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if is_request_payload_too_large_error(&lower) {
+        return false;
+    }
+    let names_image_block = lower.contains(".image.source")
+        || lower.contains(".image.")
+        || lower.contains("image.source")
+        || lower.contains("could not process image")
+        || lower.contains("invalid image")
+        || lower.contains("unsupported image")
+        || lower.contains("image_parse_error")
+        || lower.contains("invalid_image");
+    let is_client_rejection = lower.contains("invalid_request_error")
+        || lower.contains("invalid_image")
+        || lower.contains("image_parse_error")
+        || contains_independent_status_code(&lower, "400");
+    names_image_block && is_client_rejection
+}
+
+/// Replace every inline image with a short text note. Used after a provider
+/// rejected an image so the retried request carries none. Returns the number
+/// of images replaced.
+pub fn strip_all_images_in_contents(contents: &mut [&mut Vec<ContentBlock>]) -> usize {
+    let mut stripped = 0;
+    for content in contents.iter_mut() {
+        for block in content.iter_mut() {
+            if let ContentBlock::Image { media_type, .. } = block {
+                let media_type = media_type.clone();
+                *block = ContentBlock::Text {
+                    text: format!(
+                        "[Image omitted: the provider rejected an image in this conversation (media_type={media_type}). Re-open or re-screenshot it in PNG/JPEG if visual details are needed.]"
+                    ),
+                    cache_control: None,
+                };
+                stripped += 1;
+            }
+        }
+    }
+    stripped
+}
+
 /// Whether a provider error indicates the *serialized request body* was too
 /// large (HTTP 413), as distinct from exceeding the model's token context
 /// window. Anthropic surfaces this as `request_too_large` / "Request exceeds the
@@ -1029,6 +1076,21 @@ mod tests {
 
     #[test]
     fn detects_request_payload_too_large_errors() {
+        // Image rejections are a different class.
+        assert!(is_image_rejection_error(
+            "Anthropic API error (400 Bad Request): {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"messages.720.content.0.tool_result.content.1.image.source.base64.media_type: Input should be 'image/jpeg', 'image/png', 'image/gif' or 'image/webp'\"}}"
+        ));
+        assert!(is_image_rejection_error(
+            "400 invalid_request_error: messages.3.content.1.image.source.base64: Could not process image"
+        ));
+        assert!(!is_image_rejection_error(
+            "Anthropic API error (413 Payload Too Large): image too big request_too_large"
+        ));
+        assert!(!is_image_rejection_error(
+            "400 invalid_request_error: messages.5: `tool_use` ids were found without `tool_result` blocks"
+        ));
+        assert!(!is_image_rejection_error("rate limit exceeded"));
+
         assert!(is_request_payload_too_large_error(
             "Anthropic API error (413 Payload Too Large): {\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}"
         ));
@@ -1100,5 +1162,35 @@ mod tests {
         let stripped = emergency_strip_large_images(&mut messages, 2000);
         assert_eq!(stripped, 1);
         assert!(matches!(messages[0].content[0], ContentBlock::Text { .. }));
+    }
+}
+
+#[cfg(test)]
+mod image_rejection_tests {
+    use super::*;
+
+    #[test]
+    fn strip_all_images_replaces_every_image_with_a_note() {
+        let mut a = vec![
+            ContentBlock::Text {
+                text: "keep".into(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/bmp".into(),
+                data: "Qk0=".into(),
+            },
+        ];
+        let mut b = vec![ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "iVBO".into(),
+        }];
+        let mut contents = vec![&mut a, &mut b];
+        assert_eq!(strip_all_images_in_contents(&mut contents), 2);
+        assert!(matches!(&a[0], ContentBlock::Text { text, .. } if text == "keep"));
+        assert!(
+            matches!(&a[1], ContentBlock::Text { text, .. } if text.contains("media_type=image/bmp"))
+        );
+        assert!(matches!(&b[0], ContentBlock::Text { .. }));
     }
 }

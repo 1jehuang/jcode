@@ -23,6 +23,37 @@ impl JournalReplayStats {
     }
 }
 
+/// Held (shared) for the duration of every session save. Shutdown takes it
+/// exclusively so `process::exit` cannot land between a checkpoint's snapshot
+/// write and its journal delete (#1632).
+static SAVES_IN_FLIGHT: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Block until no session save is in progress (or `timeout` elapses), then
+/// keep new saves from starting. Call right before exiting the process.
+/// Returns `true` when all in-flight saves finished in time.
+pub fn drain_saves_for_shutdown(timeout: std::time::Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match SAVES_IN_FLIGHT.try_write() {
+            Ok(guard) => {
+                // Leak the guard: saves stay blocked until the process exits.
+                std::mem::forget(guard);
+                return true;
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                std::mem::forget(poisoned.into_inner());
+                return true;
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
 /// Makes journal replay idempotent with respect to the snapshot it is applied on.
 ///
 /// A checkpoint writes the full snapshot and then deletes the journal. If the
@@ -204,6 +235,19 @@ fn replay_journal_lines(
 }
 
 impl Session {
+    /// Replace every stored inline image with a text note, after a provider
+    /// deterministically rejected an image (#1712). Persisted on next save.
+    pub fn strip_all_images(&mut self) -> usize {
+        let mut contents: Vec<&mut Vec<crate::message::ContentBlock>> =
+            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let stripped = jcode_compaction_core::strip_all_images_in_contents(&mut contents);
+        if stripped > 0 {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+        stripped
+    }
+
     fn pre_wipe_backup_path(path: &Path, timestamp: i64) -> PathBuf {
         let file_name = path
             .file_name()
@@ -485,6 +529,10 @@ impl Session {
     }
 
     fn save_inner(&mut self, force: bool) -> Result<()> {
+        // Shutdown waits for this guard so it cannot exit mid-checkpoint.
+        let _save_guard = SAVES_IN_FLIGHT
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // A session that migrated to another machine (or whose on-disk copy was
         // replaced by a newer returned transcript) must not be overwritten by
         // this stale in-memory copy.
