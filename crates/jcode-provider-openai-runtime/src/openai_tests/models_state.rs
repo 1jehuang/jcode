@@ -161,6 +161,12 @@ fn test_summarize_ws_input_counts_tool_outputs() {
 }
 
 #[test]
+fn test_persistent_ws_response_with_tool_calls_resets_chain() {
+    assert!(!persistent_ws_response_requires_chain_reset(0));
+    assert!(persistent_ws_response_requires_chain_reset(1));
+}
+
+#[test]
 fn test_persistent_ws_idle_policy_thresholds() {
     assert!(!persistent_ws_idle_needs_healthcheck(Duration::from_secs(
         5
@@ -352,6 +358,13 @@ fn test_service_tier_can_be_changed_while_a_request_snapshot_is_held() {
 /// endpoints. If these ever diverge, OpenAI returns 401.
 #[test]
 fn openai_catalog_and_chat_endpoints_agree_on_credential_shape() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let _home_dir = tempfile::tempdir().expect("temp JCODE_HOME");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", _home_dir.path());
+    let _a = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
+    let _b = EnvVarGuard::remove("OPENAI_BASE_URL");
+    let _c = EnvVarGuard::remove("OPENAI_API_BASE");
+
     // API-key-shaped credential: no refresh token, no id token.
     let api_key_creds = CodexCredentials {
         access_token: "sk-platform-key".to_string(),
@@ -406,6 +419,8 @@ fn openai_catalog_and_chat_endpoints_agree_on_credential_shape() {
 #[test]
 fn responses_url_honors_api_base_override_in_api_key_mode() {
     let _guard = jcode_base::storage::lock_test_env();
+    let _home_dir = tempfile::tempdir().expect("temp JCODE_HOME");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", _home_dir.path());
     let _b = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
     let _c = EnvVarGuard::remove("OPENAI_BASE_URL");
     let _d = EnvVarGuard::remove("OPENAI_API_BASE");
@@ -464,6 +479,8 @@ fn responses_url_ignores_override_in_chatgpt_mode() {
 #[test]
 fn resolve_api_base_precedence_and_validation() {
     let _guard = jcode_base::storage::lock_test_env();
+    let _home_dir = tempfile::tempdir().expect("temp JCODE_HOME");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", _home_dir.path());
     let _a = EnvVarGuard::remove("JCODE_OPENAI_API_BASE");
     let _b = EnvVarGuard::remove("OPENAI_BASE_URL");
     let _c = EnvVarGuard::remove("OPENAI_API_BASE");

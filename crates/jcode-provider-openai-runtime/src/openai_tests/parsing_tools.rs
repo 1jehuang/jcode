@@ -179,6 +179,72 @@ fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_d
 }
 
 #[test]
+fn test_tool_call_chain_reset_survives_duplicate_output_item_done() {
+    let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
+    let mut streaming_tool_calls = HashMap::new();
+    let mut completed_tool_items = HashSet::new();
+    let mut pending = VecDeque::new();
+    let mut response_tool_call_count = 0usize;
+
+    let added = r#"{"type":"response.output_item.added","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"batch","arguments":""}}"#;
+    let event = parse_openai_response_event(
+        added,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("tool start must be emitted at output_item.added");
+    if stream_event_starts_tool_call(&event) {
+        response_tool_call_count += 1;
+    }
+
+    assert_eq!(response_tool_call_count, 1);
+    assert!(persistent_ws_response_requires_chain_reset(
+        response_tool_call_count
+    ));
+
+    let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[]}"}"#;
+    let event = parse_openai_response_event(
+        done,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("expected tool end for empty arguments");
+    if stream_event_starts_tool_call(&event) {
+        response_tool_call_count += 1;
+    }
+
+    assert_eq!(response_tool_call_count, 1);
+    assert!(completed_tool_items.contains("fc_123"));
+    assert!(persistent_ws_response_requires_chain_reset(
+        response_tool_call_count
+    ));
+
+    let duplicate_done = r#"{"type":"response.output_item.done","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"batch","arguments":"{\"tool_calls\":[]}"}}"#;
+    let duplicate = parse_openai_response_event(
+        duplicate_done,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    );
+
+    assert!(duplicate.is_none(), "duplicate function call should be skipped");
+    completed_tool_items.clear();
+    assert!(
+        persistent_ws_response_requires_chain_reset(response_tool_call_count),
+        "reset decision must not depend on completed_tool_items still retaining the id"
+    );
+}
+
+#[test]
 fn test_parse_openai_response_output_item_done_emits_native_compaction() {
     let mut saw_text_delta = false;
     let mut saw_thinking_delta = false;

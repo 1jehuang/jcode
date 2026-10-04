@@ -703,7 +703,7 @@ pub fn run_setup_hotkey(
                     "    \x1b[1mCmd+Shift+'\x1b[0m new jcode self-dev session (last jcode repo)"
                 );
                 install_cli_launch_hints_notice();
-                return Ok(());
+                Ok(())
             }
             Err(e) => {
                 eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);
@@ -1331,7 +1331,7 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
 
     #[cfg(target_os = "macos")]
     {
-        if state.launch_count % 3 != 0 {
+        if !state.launch_count.is_multiple_of(3) {
             return startup_hints;
         }
 
@@ -1350,7 +1350,7 @@ pub fn maybe_show_setup_hints() -> Option<StartupHints> {
             return nudge_macos_ghostty(&mut state);
         }
 
-        return startup_hints;
+        startup_hints
     }
 
     #[cfg(windows)]
@@ -2438,7 +2438,7 @@ pub fn run_setup_launcher() -> Result<()> {
                 eprintln!(
                     "  Launch Jcode from the Jcode Desktop app, a terminal, or the Cmd+; hotkey."
                 );
-                return Ok(());
+                Ok(())
             }
             Err(e) => {
                 eprintln!("  \x1b[31m✗\x1b[0m Failed: {}", e);

@@ -269,6 +269,7 @@ struct RecentSessionIndexEntry {
     saved: bool,
     save_label: Option<String>,
     updated_at_ms: i64,
+    #[allow(dead_code)]
     last_active_at_ms: Option<i64>,
 }
 

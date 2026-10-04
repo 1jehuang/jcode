@@ -870,6 +870,7 @@ async fn continue_persistent_ws_locked(
     let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
+    let mut response_tool_call_count = 0usize;
     let mut saw_response_completed = false;
     let mut consumer_dropped = false;
     let mut pending: VecDeque<StreamEvent> = VecDeque::new();
@@ -1007,6 +1008,9 @@ async fn continue_persistent_ws_locked(
                         let _ = tx.send(Ok(event)).await;
                         return PersistentWsResult::TerminalError;
                     }
+                    if stream_event_starts_tool_call(&event) {
+                        response_tool_call_count += 1;
+                    }
                     usage_recorder.observe(&event).await;
                     if tx.send(Ok(event)).await.is_err() {
                         consumer_dropped = true;
@@ -1033,6 +1037,9 @@ async fn continue_persistent_ws_locked(
                     }
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
                         saw_response_completed = true;
+                    }
+                    if stream_event_starts_tool_call(&event) {
+                        response_tool_call_count += 1;
                     }
                     usage_recorder.observe(&event).await;
                     if tx.send(Ok(event)).await.is_err() {
@@ -1089,6 +1096,34 @@ async fn continue_persistent_ws_locked(
                     "consumer_dropped_before_response_completed".to_string(),
                 ),
                 ("consumer_dropped", consumer_dropped.to_string()),
+            ],
+        );
+        *guard = None;
+        return PersistentWsResult::Success;
+    }
+
+    // A completed response that emitted tool calls is not safe to reuse as a
+    // `previous_response_id`. The next user turn may not include the matching
+    // tool outputs in the incremental delta, and OpenAI rejects that chain with
+    // "No tool output found for function call ...". Reset to the full transcript
+    // path, whose request builder pairs function calls with outputs explicitly.
+    if persistent_ws_response_requires_chain_reset(response_tool_call_count) {
+        let tool_call_count = response_tool_call_count;
+        jcode_base::logging::info(&format!(
+            "Persistent WS response emitted {} tool call(s); clearing response chain",
+            tool_call_count
+        ));
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "response_had_tool_calls".to_string()),
+                ("tool_call_count", tool_call_count.to_string()),
+                (
+                    "elapsed_ms",
+                    stream_started.elapsed().as_millis().to_string(),
+                ),
             ],
         );
         *guard = None;
@@ -1300,6 +1335,7 @@ pub(super) async fn stream_response_websocket_persistent(
     let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
+    let mut response_tool_call_count = 0usize;
     let mut saw_response_completed = false;
     let mut saw_api_activity = false;
     let ws_started_at = Instant::now();
@@ -1446,6 +1482,9 @@ pub(super) async fn stream_response_websocket_persistent(
                             let _ = tx.send(Ok(event)).await;
                             return Ok(());
                         }
+                        if stream_event_starts_tool_call(&event) {
+                            response_tool_call_count += 1;
+                        }
                         usage_recorder.observe(&event).await;
                         if tx.send(Ok(event)).await.is_err() {
                             log_openai_stream_lifecycle(
@@ -1484,6 +1523,9 @@ pub(super) async fn stream_response_websocket_persistent(
                         }
                         if matches!(event, StreamEvent::MessageEnd { .. }) {
                             saw_response_completed = true;
+                        }
+                        if stream_event_starts_tool_call(&event) {
+                            response_tool_call_count += 1;
                         }
                         usage_recorder.observe(&event).await;
                         if tx.send(Ok(event)).await.is_err() {
@@ -1536,6 +1578,35 @@ pub(super) async fn stream_response_websocket_persistent(
                 )));
             }
         }
+    }
+
+    // Do not save response chains that end with tool calls. A future turn can
+    // replay the full transcript safely, but a `previous_response_id` chain can
+    // require function_call_output items that are outside the incremental delta.
+    if persistent_ws_response_requires_chain_reset(response_tool_call_count) {
+        let tool_call_count = response_tool_call_count;
+        jcode_base::logging::info(&format!(
+            "Fresh WS response emitted {} tool call(s); not saving response chain",
+            tool_call_count
+        ));
+        let mut guard = persistent_ws.lock().await;
+        *guard = None;
+        drop(guard);
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "fresh_ws_stream_complete_not_saved",
+            vec![
+                ("model", request_model_label.clone()),
+                ("transport", "websocket".to_string()),
+                (
+                    "elapsed_ms",
+                    stream_started_at.elapsed().as_millis().to_string(),
+                ),
+                ("reason", "response_had_tool_calls".to_string()),
+                ("tool_call_count", tool_call_count.to_string()),
+            ],
+        );
+        return Ok(());
     }
 
     // Save the WebSocket connection and response_id for reuse on next turn
