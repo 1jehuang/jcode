@@ -122,6 +122,40 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     }
 }
 
+/// Reads the next newline-delimited `ServerEvent`, with its raw JSON text.
+///
+/// `stream_pair` is a live named-pipe pair on Windows, so `read_to_end` never
+/// returns there: the peer half stays open for the life of the test and no EOF
+/// is ever delivered. Read the events the test already knows to expect instead.
+async fn read_one_event<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+) -> (crate::protocol::ServerEvent, String) {
+    read_n_raw_events(reader, 1).await.pop().expect("one event")
+}
+
+/// Reads exactly `want` newline-delimited events, keeping each raw JSON line.
+async fn read_n_raw_events<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    want: usize,
+) -> Vec<(crate::protocol::ServerEvent, String)> {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let mut events = Vec::new();
+    while events.len() < want {
+        let line = lines
+            .next_line()
+            .await
+            .expect("read event")
+            .expect("stream ended before every expected event arrived");
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = serde_json::from_str(&line).expect("parse event");
+        events.push((event, line));
+    }
+    events
+}
+
 #[tokio::test]
 #[expect(
     clippy::await_holding_lock,
@@ -210,14 +244,8 @@ async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
 
     drop(busy_guard);
     drop(writer);
-    let mut bytes = Vec::new();
-    peer.read_to_end(&mut bytes).await.unwrap();
-    let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
-        .lines()
-        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
-        .collect();
-    assert_eq!(events.len(), 6);
-    for (index, event) in events.into_iter().enumerate() {
+    let events = read_n_raw_events(&mut peer, 6).await;
+    for (index, (event, _raw)) in events.into_iter().enumerate() {
         match event {
             crate::protocol::ServerEvent::History {
                 session_id: returned_id,
@@ -414,16 +442,7 @@ async fn assert_history_service_tier_and_pdf_capability(
     drop(busy_guard);
     drop(writer);
 
-    let mut bytes = Vec::new();
-    stream_b
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read history event bytes");
-    let mut cursor = std::io::Cursor::new(bytes);
-    let mut line = String::new();
-    cursor.read_line(&mut line).expect("read first line");
-    let event: crate::protocol::ServerEvent =
-        serde_json::from_str(line.trim()).expect("decode history event");
+    let (event, raw_line) = read_one_event(&mut stream_b).await;
 
     if !supports_pdf_panels {
         #[derive(serde::Deserialize)]
@@ -444,13 +463,13 @@ async fn assert_history_service_tier_and_pdf_capability(
             messages: Vec<serde_json::Value>,
             side_panel: LegacySnapshot,
         }
-        let legacy: LegacyHistory = serde_json::from_str(line.trim()).unwrap();
+        let legacy: LegacyHistory = serde_json::from_str(raw_line.trim()).unwrap();
         assert_eq!(legacy.messages.len(), 1);
         assert!(matches!(
             legacy.side_panel.pages[0].format,
             LegacyFormat::Markdown
         ));
-        assert!(!line.contains("pdf_data"));
+        assert!(!raw_line.contains("pdf_data"));
     }
 
     match event {
@@ -559,16 +578,7 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
     drop(busy_guard);
     drop(writer);
 
-    let mut bytes = Vec::new();
-    stream_b
-        .read_to_end(&mut bytes)
-        .await
-        .expect("read model catalog event bytes");
-    let mut cursor = std::io::Cursor::new(bytes);
-    let mut line = String::new();
-    cursor.read_line(&mut line).expect("read first line");
-    let event: crate::protocol::ServerEvent =
-        serde_json::from_str(line.trim()).expect("decode model catalog event");
+    let (event, _raw_line) = read_one_event(&mut stream_b).await;
 
     match event {
         crate::protocol::ServerEvent::History {
