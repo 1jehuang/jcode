@@ -194,10 +194,23 @@ async fn access_with(base: &str, key: &str, force: bool) -> Access {
         Ok(client) => check_access(&client, base, key).await,
         Err(_) => Access::Unknown,
     };
-    *ACCESS.lock().unwrap_or_else(|e| e.into_inner()) = Some(CachedAccess {
-        identity: identity(base, key),
+    let identity = identity(base, key);
+    let mut cache = ACCESS.lock().unwrap_or_else(|e| e.into_inner());
+    // The cached state drives the tool description, which sits in the provider
+    // prompt-cache prefix of every session in this process. A transient check
+    // failure (timeout, 5xx) must not flip a known state to Unknown and back,
+    // or each flip invalidates every session's cache. Callers still receive the
+    // fresh result, so execution keeps failing closed.
+    let cached = match cache.as_ref() {
+        Some(previous) if access == Access::Unknown && previous.identity == identity => {
+            previous.access
+        }
+        _ => access,
+    };
+    *cache = Some(CachedAccess {
+        identity,
         checked_at: Instant::now(),
-        access,
+        access: cached,
     });
     access
 }
