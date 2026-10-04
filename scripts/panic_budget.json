@@ -1,5 +1,5 @@
 {
-  "total": 166,
+  "total": 167,
   "tracked_files": {
     "crates/jcode-app-core/build.rs": 4,
     "crates/jcode-app-core/src/agent/provider.rs": 1,
@@ -16,7 +16,7 @@
     "crates/jcode-app-core/src/tool/sdk.rs": 1,
     "crates/jcode-base/examples/voice_recorder.rs": 2,
     "crates/jcode-base/examples/voice_startup_profile.rs": 2,
-    "crates/jcode-base/src/auth/oauth.rs": 3,
+    "crates/jcode-base/src/auth/oauth.rs": 4,
     "crates/jcode-base/src/hooks.rs": 1,
     "crates/jcode-base/src/mcp/manager.rs": 2,
     "crates/jcode-base/src/memory_jev.rs": 1,
