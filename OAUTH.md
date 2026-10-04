@@ -130,8 +130,9 @@ a session picks one per turn.
 | Model ids | `claude-opus-4-8`, `claude-oauth:...` | `claude-code:claude-opus-4-8` |
 
 Why use it: the subscription is used by the official Claude Code client itself,
-which is the path Anthropic's consumer terms describe for subscription use.
-Native Claude stays the default and is unchanged.
+so requests come from the client Anthropic ships for subscription use rather
+than from a third-party transport. Check Anthropic's current terms for your
+plan. Native Claude stays the default and is unchanged.
 
 Enable it:
 
@@ -177,8 +178,8 @@ Limitations (first version):
 - jcode's `/compact` is not used; Claude Code compacts its own context.
 - Banked reset credits, history rewind/fork, Windows `.cmd` shims and Bedrock
   instances are not supported.
-- Usage windows come from Claude Code's own rate-limit events, so they appear
-  after the first turn of a session.
+- Per-instance usage windows are not shown in the usage panel yet; use
+  `claude` `/usage` for now.
 
 ## OpenAI / Codex OAuth
 
