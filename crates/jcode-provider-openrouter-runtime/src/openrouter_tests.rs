@@ -2146,6 +2146,27 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
     assert_eq!(provider.context_window(), 1_000_000);
 }
 
+/// #1625: `--provider auto` applies the configured DeepSeek profile through
+/// env (API base, key name, cache namespace) without `JCODE_OPENROUTER_MODEL`.
+/// The explicit API base disables autodetection, so the model must come from
+/// the profile itself, not the OpenRouter `anthropic/claude-sonnet-4` default.
+#[test]
+fn env_applied_builtin_profile_uses_profile_default_model_not_openrouter_default() {
+    let _lock = ENV_LOCK.lock();
+    let _clean = isolate_openrouter_autodetect_env();
+    let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", "https://api.deepseek.com");
+    let _key_name = EnvVarGuard::set("JCODE_OPENROUTER_API_KEY_NAME", "DEEPSEEK_API_KEY");
+    let _env_file = EnvVarGuard::set("JCODE_OPENROUTER_ENV_FILE", "deepseek.env");
+    let _api_key = EnvVarGuard::set("DEEPSEEK_API_KEY", "test");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "deepseek");
+    let _catalog = EnvVarGuard::set("JCODE_OPENROUTER_MODEL_CATALOG", "0");
+
+    let provider = OpenRouterProvider::new().expect("provider");
+
+    assert_eq!(provider.model(), "deepseek-v4-flash");
+    assert_eq!(provider.context_window(), 1_000_000);
+}
+
 /// DeepSeek renamed `deepseek-v4-flash` to `deepseek-flash`. Its live
 /// `/v1/models` now reports `deepseek-flash` and `deepseek-v4-pro`; both are
 /// 1M-window models. Without the renamed spelling in the static classifier the
