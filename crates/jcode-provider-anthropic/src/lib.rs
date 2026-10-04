@@ -466,7 +466,8 @@ fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Vec<Message> 
     repaired
 }
 
-/// Remove duplicate tool_result blocks so each tool_use_id is answered/// exactly once, preferring real output over a synthetic placeholder.
+/// Remove duplicate `tool_result` blocks so each `tool_use_id` is answered
+/// exactly once, preferring real output over a synthetic placeholder.
 /// Messages left with no content at all are dropped by the caller's
 /// `!content.is_empty()` guard.
 fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
