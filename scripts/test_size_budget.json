@@ -19,7 +19,7 @@
     "crates/jcode-base/src/session_tests/cases.rs": 2959,
     "crates/jcode-harness-api-server/src/translate_tests.rs": 4028,
     "crates/jcode-plan/src/dag/tests.rs": 1392,
-    "crates/jcode-provider-anthropic-runtime/src/anthropic_tests.rs": 2301,
+    "crates/jcode-provider-anthropic-runtime/src/anthropic_tests.rs": 2461,
     "crates/jcode-provider-openrouter-runtime/src/openrouter_tests.rs": 3899,
     "crates/jcode-sdk/tests/client_behavior.rs": 1385,
     "crates/jcode-telemetry-core/src/tests.rs": 1598,
