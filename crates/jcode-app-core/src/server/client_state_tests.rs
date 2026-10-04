@@ -9,10 +9,8 @@ use crate::tool::Registry;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::io::BufRead as _;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
 struct MockProvider(Option<&'static str>);

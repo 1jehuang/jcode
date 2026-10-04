@@ -225,7 +225,7 @@ fn resolve_session_cwd_without_a_configured_dir_is_none_not_the_daemon_cwd() {
     // Positive control.
     let configured = tempfile::TempDir::new().expect("configured dir");
     assert_eq!(
-        resolve_session_cwd(Some(&configured.path().to_string_lossy().to_string())),
+        resolve_session_cwd(Some(&configured.path().to_string_lossy())),
         Some(configured.path().to_path_buf()),
         "a session that recorded a directory must still resolve to it"
     );
@@ -235,7 +235,7 @@ fn resolve_session_cwd_without_a_configured_dir_is_none_not_the_daemon_cwd() {
     std::fs::create_dir_all(&gone).expect("create dir");
     std::fs::remove_dir_all(&gone).expect("remove dir");
     assert_eq!(
-        resolve_session_cwd(Some(&gone.to_string_lossy().to_string())),
+        resolve_session_cwd(Some(&gone.to_string_lossy())),
         None,
         "a recorded directory that is gone must not fall back to the daemon cwd"
     );

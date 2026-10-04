@@ -476,6 +476,10 @@ mod tests {
     /// correct helper is indistinguishable from a call site that stopped using
     /// it (the P1.3 `all_sessions` lesson).
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test serializes storage environment and moves the process cwd, so the guard must span the awaits"
+    )]
     async fn skill_tool_with_no_working_dir_does_not_list_daemon_cwd_project_skills() {
         let _env = crate::storage::lock_test_env();
         let repo = tempfile::tempdir().expect("tempdir");

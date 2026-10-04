@@ -23,7 +23,9 @@ pub struct AmbientManager {
 /// is what lets the error name the owning session.
 #[derive(Debug)]
 pub enum CancelOutcome {
-    Removed { item: ScheduledItem },
+    // Boxed so the enum stays pointer-sized: `ScheduledItem` is ~264 bytes and this
+    // variant is the only large one, which tripped `clippy::large_enum_variant` under `-D warnings`.
+    Removed { item: Box<ScheduledItem> },
     NotOwned { created_by: String },
     NotFound,
 }
@@ -134,7 +136,7 @@ impl AmbientManager {
 
         let removed = self.queue.remove_by_id(id)?;
         Ok(CancelOutcome::Removed {
-            item: removed.unwrap(),
+            item: Box::new(removed.unwrap()),
         })
     }
 

@@ -988,7 +988,7 @@ impl ScheduleTool {
 
         let mut manager = AmbientManager::new()?;
         let item = match manager.cancel_schedule(id, &ctx.session_id)? {
-            CancelOutcome::Removed { item } => item,
+            CancelOutcome::Removed { item } => *item,
             CancelOutcome::NotOwned { .. } if all_sessions => {
                 // The caller named the opt-out explicitly, so finish the job here
                 // rather than reporting a refusal it already accepted.

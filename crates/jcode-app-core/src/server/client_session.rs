@@ -1355,7 +1355,6 @@ async fn claim_live_target_agent(
     Some(target)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Decide which working directory a client-reported directory may bind an
 /// existing session to.
 ///
@@ -1405,6 +1404,7 @@ fn session_working_dir_for_client(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_resume_session(
     id: u64,
     session_id: String,

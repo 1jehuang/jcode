@@ -5,8 +5,6 @@
 //! over the code-size ratchet and is measured with its `#[cfg(test)]` module
 //! stripped, so the two cannot both be satisfied by rebaselining.
 
-use std::path::Path;
-
 use super::gather_git_snapshot;
 
 /// A manifest with no working_dir must not be described by the git state of

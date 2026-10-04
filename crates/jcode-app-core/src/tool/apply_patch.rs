@@ -172,7 +172,7 @@ impl Tool for ApplyPatchTool {
                     let diff = generate_diff_summary("", contents);
                     publish_file_touch(
                         &ctx,
-                        &resolved,
+                        resolved,
                         path,
                         "created",
                         &diff,
@@ -196,7 +196,7 @@ impl Tool for ApplyPatchTool {
                     // this tool's normal job.
                     let risk_ctx =
                         jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
-                    if jcode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
+                    if jcode_command_risk::is_catastrophic_target(resolved, &risk_ctx) {
                         results.push(format!(
                             "✗ {}: refused, this path is protected and must never \
                              be deleted by an agent",
@@ -211,7 +211,7 @@ impl Tool for ApplyPatchTool {
                         let diff = generate_diff_summary(old_contents, "");
                         publish_file_touch(
                             &ctx,
-                            &resolved,
+                            resolved,
                             path,
                             "deleted",
                             &diff,
@@ -276,7 +276,7 @@ impl Tool for ApplyPatchTool {
                                 }
                                 publish_file_touch(
                                     &ctx,
-                                    &resolved,
+                                    resolved,
                                     path,
                                     "modified",
                                     &diff,
@@ -284,7 +284,7 @@ impl Tool for ApplyPatchTool {
                                 );
                                 publish_file_touch(
                                     &ctx,
-                                    &dest_resolved,
+                                    dest_resolved,
                                     dest,
                                     "modified",
                                     &diff,
@@ -319,7 +319,7 @@ impl Tool for ApplyPatchTool {
                                 .await;
                                 publish_file_touch(
                                     &ctx,
-                                    &resolved,
+                                    resolved,
                                     path,
                                     "modified",
                                     &diff,

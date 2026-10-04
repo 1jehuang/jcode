@@ -808,14 +808,15 @@ mod tests {
 
         // The writer's own pid is what a real in-process reload would record.
         assert_eq!(
-            ReloadState::load().expect("marker written by write_reload_state").pid,
+            ReloadState::load()
+                .expect("marker written by write_reload_state")
+                .pid,
             std::process::id(),
             "write_reload_state must record the writing process's pid"
         );
 
         let socket_path = temp.path().join("missing.sock");
-        let status =
-            inspect_reload_wait_status(&socket_path, Duration::from_secs(30), None).await;
+        let status = inspect_reload_wait_status(&socket_path, Duration::from_secs(30), None).await;
         assert_eq!(
             status,
             ReloadWaitStatus::Waiting {
@@ -858,8 +859,7 @@ mod tests {
         state.write();
 
         let socket_path = temp.path().join("missing.sock");
-        let status =
-            inspect_reload_wait_status(&socket_path, Duration::from_secs(30), None).await;
+        let status = inspect_reload_wait_status(&socket_path, Duration::from_secs(30), None).await;
         assert!(
             matches!(status, ReloadWaitStatus::Failed(Some(_))),
             "a Starting marker whose pid is dead must not keep the client Waiting, got {status:?}"

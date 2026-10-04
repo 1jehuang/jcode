@@ -12,6 +12,10 @@ use super::ToolExecutionMode;
 use super::read::ReadTool;
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test serializes storage environment and moves the process cwd, so the guard must span the awaits"
+)]
 async fn missing_root_path_does_not_suggest_files_from_the_daemon_cwd() {
     let _lock = crate::storage::lock_test_env();
     let prev_cwd = std::env::current_dir().expect("cwd");
@@ -100,6 +104,10 @@ async fn missing_root_path_does_not_suggest_files_from_the_daemon_cwd() {
 /// hunk instead would write the first file and only then fail, leaving the
 /// project in a state neither the agent nor the user asked for.
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test serializes storage environment and moves the process cwd, so the guard must span the awaits"
+)]
 async fn apply_patch_writes_nothing_when_any_path_in_the_patch_is_unresolvable() {
     let _lock = crate::storage::lock_test_env();
     let prev_cwd = std::env::current_dir().expect("cwd");

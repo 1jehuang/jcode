@@ -390,7 +390,7 @@ where
     };
     writer
         .write_all(
-            &(serde_json::to_string(&request).expect("serialize subscribe") + "\n").as_bytes(),
+            (serde_json::to_string(&request).expect("serialize subscribe") + "\n").as_bytes(),
         )
         .await
         .expect("write subscribe");

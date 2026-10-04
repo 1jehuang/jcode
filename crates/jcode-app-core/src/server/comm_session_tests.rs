@@ -1266,7 +1266,7 @@ fn visible_spawn_without_a_working_dir_errors_instead_of_using_the_daemon_cwd() 
     let (session_id, launched) = {
         let launched_dir = &launched_dir;
         prepare_visible_spawn_session(
-            Some(&target.path().to_string_lossy().to_string()),
+            Some(&target.path().to_string_lossy()),
             None,
             None,
             None,

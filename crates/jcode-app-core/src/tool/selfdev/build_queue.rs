@@ -130,12 +130,11 @@ export -f cargo
             .current_dir(&repo_dir)
             .args(["log", "-1", "--format=%cI"])
             .output()
+            && date.status.success()
         {
-            if date.status.success() {
-                let value = String::from_utf8_lossy(&date.stdout).trim().to_string();
-                if !value.is_empty() {
-                    cmd.env("JCODE_BUILD_GIT_DATE", value);
-                }
+            let value = String::from_utf8_lossy(&date.stdout).trim().to_string();
+            if !value.is_empty() {
+                cmd.env("JCODE_BUILD_GIT_DATE", value);
             }
         }
 
