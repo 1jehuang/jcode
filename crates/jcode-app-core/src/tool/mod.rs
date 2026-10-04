@@ -1729,3 +1729,8 @@ mod mcp_allow_list_tests {
 
 #[cfg(test)]
 mod tests;
+
+// Own file so these do not grow `tests.rs`, which is already over the test-size
+// ratchet, and so `read.rs`'s isolation guarantees are readable in one place.
+#[cfg(test)]
+mod read_tests;

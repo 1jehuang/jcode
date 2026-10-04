@@ -515,5 +515,5 @@ fn is_match_all_glob(glob: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "agentgrep_tests.rs"]
+#[path = "agentgrep/agentgrep_tests.rs"]
 mod tests;

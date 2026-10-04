@@ -2192,6 +2192,12 @@ impl App {
             .unwrap_or_else(|| session_id.chars().take(8).collect());
 
         let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
+        // Falls back to the process cwd on purpose: this runs in the foreground
+        // TUI process, where the cwd is the project the user launched jcode from.
+        // It is not session-scoped code, so invariant 1 does not apply. The gap
+        // that does matter is that this opens a *different session*'s window without
+        // using that session's working_dir; see the isolation plan. Recorded in
+        // scripts/cwd_fallback.json.
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         match jcode_app_core::session_launch::spawn_resume_in_new_terminal(&exe, &session_id, &cwd)
         {

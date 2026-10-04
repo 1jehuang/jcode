@@ -5,6 +5,24 @@ struct ResolvedSearchScope {
     glob: Option<String>,
 }
 
+/// The directory a resolved search scope should be rooted at.
+///
+/// Split out from `resolved_search_scope` so the parentless case can be tested
+/// directly. `resolved_search_scope` cannot reach it: it only calls this after
+/// `is_file()`, and every path whose `parent()` is `None` is a directory or
+/// absent, so the `None` arm is unreachable through the tool's public surface.
+/// Testing it through `build_grep_args` produced a test that passed with the
+/// old `unwrap_or_else(|| Path::new("."))` restored, i.e. it proved nothing.
+pub(crate) fn scope_root_for(path: &Path) -> Result<String> {
+    match path.parent() {
+        Some(parent) => Ok(parent.display().to_string()),
+        None => Err(anyhow::anyhow!(
+            "agentgrep: path has no parent directory: {}",
+            path.display()
+        )),
+    }
+}
+
 fn resolved_search_scope(
     ctx: &ToolContext,
     path: Option<&str>,
@@ -22,11 +40,7 @@ fn resolved_search_scope(
 
     let resolved = resolve_path_arg(ctx, path)?;
     if resolved.is_file() {
-        let root = resolved
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .display()
-            .to_string();
+        let root = scope_root_for(&resolved)?;
         let glob = resolved
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());

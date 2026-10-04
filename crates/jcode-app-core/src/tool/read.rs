@@ -304,23 +304,43 @@ fn is_binary_file(path: &Path) -> bool {
     false
 }
 
+/// Test-only view of the suggestion helper, so a test can assert directly that
+/// a parentless path never produces a daemon-side suggestion. Kept next to the
+/// helper rather than reached through `execute`, because `execute` short-circuits
+/// on `path.exists()` before reaching this code for exactly the parentless paths
+/// under test.
+#[cfg(test)]
+pub(crate) fn suggestions_for_test(path: &Path) -> Vec<String> {
+    find_similar_files(path)
+}
+
 fn find_similar_files(path: &Path) -> Vec<String> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let filename = path.file_name().map(|s| s.to_string_lossy().to_lowercase());
+    // No suggestions for a path with no parent directory, rather than falling
+    // back to `.`: the OS would resolve that against the daemon's directory and
+    // list whichever project happened to start this process.
+    //
+    // This is defence in depth, not a live bug fix. `ReadTool` checks
+    // `path.exists()` before calling here, and every path that is both absolute
+    // and parentless (`C:\`, `C:/`, `\\?\C:\`) also exists, while a path that
+    // does not exist always has both a parent and a file name. Verified with a
+    // compiled probe; `tool::tests::missing_root_path_does_not_suggest_files_from_the_daemon_cwd`
+    // asserts the property directly and fails if the early return is replaced
+    // with the `.` fallback.
+    let (Some(parent), Some(filename)) = (path.parent(), path.file_name()) else {
+        return Vec::new();
+    };
+    let filename = filename.to_string_lossy().to_lowercase();
 
     let mut suggestions = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(parent) {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy().to_lowercase();
-            if let Some(ref target) = filename {
-                // Simple similarity check
-                let target_str: &str = target.as_ref();
-                if name.contains(target_str) || target_str.contains(&name as &str) {
-                    suggestions.push(entry.path().display().to_string());
-                    if suggestions.len() >= 3 {
-                        break;
-                    }
+            // Simple similarity check
+            if name.contains(&filename) || filename.contains(&name as &str) {
+                suggestions.push(entry.path().display().to_string());
+                if suggestions.len() >= 3 {
+                    break;
                 }
             }
         }

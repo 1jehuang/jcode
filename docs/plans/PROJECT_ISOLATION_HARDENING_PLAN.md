@@ -1,8 +1,10 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3, P2.5, P3.1-P3.2 done)
-Last reviewed: 2026-10-04 (P3.2 shipped; whole-suite hang diagnosed and fixed, so
-whole-suite runs are now usable as acceptance evidence)
+Status: **done** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3, P2.5, P3.1-P3.2, P5.1-P5.3 done)
+Last reviewed: 2026-10-04 (P5.3 hardened twice after shipping: the guard's pattern set was
+blind to closures and its `--update` could launder sites, and fixing both exposed two further
+real violations and a 27-site allowlist. Four real violations are now fixed, each with a
+mutation-proven test; every tracked item in this document is closed)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -1021,10 +1023,155 @@ to the code it protects, not in a separate integration bucket.
 - [x] **Global config visibility:** a `~/.jcode/config.toml` change reaches every
   session in the daemon, including sessions in other projects, however it was
   written (P3.2).
-- [ ] **A lint or grep check** (optional but cheap) asserting no new
+- [x] **A lint or grep check** (optional but cheap) asserting no new
   `unwrap_or(Path::new("."))` / `unwrap_or_else(|| std::env::current_dir())` appears in
   session-scoped code paths without a comment explaining why. See the invariants in
   `AGENTS.md`.
+
+  Shipped as `scripts/check_cwd_fallback_budget.py` over `scripts/cwd_fallback.json`, wired
+  into `scripts/check_guardrails.sh` and CI. The scan unit is the *statement*, not the line:
+  a chain that rustfmt wrapped is joined before matching, then classified as one of
+  `dot`, `cwd-as-value`, or `cwd-error-swallowed`.
+
+  Two findings came from fixing the two real violations this guard now protects, both
+  session-scoped code rather than anything legitimate:
+
+  - `tool/read.rs:308` `find_similar_files` had `path.parent().unwrap_or(Path::new("."))`.
+    Replaced with a `let ... else` that returns no suggestions.
+
+    The first version of this entry claimed a probe had shown the branch was
+    merely an "unreachable panic-silencer", and shipped a test asserting the hint
+    never named the daemon directory. **That claim was wrong and the test was
+    vacuous**, caught by mutation testing rather than by reading the code:
+
+    - The test used `PathBuf::from(MAIN_SEPARATOR.to_string())` as its parentless
+      probe. On Windows `\` is *drive-relative*, so `is_absolute()` is false and
+      `resolve_path` joined it onto the session dir. The helper never saw a
+      parentless path at all.
+    - Switching to a real drive root (`C:\`) made the probe correct but the test
+      *still* passed with the `unwrap_or(Path::new("."))` restored.
+    - Instrumenting the fallback branch with a panic showed it never fired at
+      all, which located the real reason: `ReadTool::execute` checks
+      `path.exists()` **before** calling `find_similar_files`, and a compiled
+      probe established that every path both absolute and parentless (`C:\`,
+      `C:/`, `\\?\C:\`) also *exists*. A path that does not exist always has both
+      a parent and a file name. So the branch is genuinely unreachable through
+      this tool, and the fix is defence in depth rather than a live bug.
+
+    The shipped test now asserts what is actually load-bearing: the
+    parentless-and-absolute paths all exist (so the early return is not the only
+    thing hiding the branch), and `find_similar_files` produces no daemon-side
+    suggestion for a parentless input. It reaches the helper through a
+    `#[cfg(test)] pub(crate) fn suggestions_for_test`, because going through
+    `execute` cannot reach it for any parentless path. Restoring the old
+    `unwrap_or(Path::new("."))` now fails the test, which the earlier version
+    did not.
+  - `server/jade_relay.rs:1116` `create_launch_session` fell back to
+    `std::env::current_dir()`, discarding the `default_working_dir` that
+    `LaunchRequest::from_event` already carries from the `jade_relay_launch_working_dir`
+    opt-in. Now bails, naming both ways to supply a directory. Tests live in
+    `server/jade_relay_launch_tests.rs`, a sibling `#[path]` module like
+    `comm_ownership_tests.rs`, because `jade_relay.rs` is already over the
+    oversized-file budget and the fix must not grow it further:
+    `launch_without_a_working_dir_is_refused_instead_of_using_the_daemon_cwd` and its
+    control `launch_with_an_explicit_working_dir_uses_it`.
+
+  Sites are grandfathered in `cwd_fallback.json`, each file carrying a reason that says what
+  the fallback actually resolves to, and each carrying an in-code
+  `Recorded in scripts/cwd_fallback.json` comment. The reasons fall into three groups:
+
+  - **Per-user global caches**, deliberately shared by every project and therefore not
+    project-scoped per `AGENTS.md` rule 4: `jcode-provider-openai/src/stream.rs`
+    (generated images), `jcode-base/src/{browser,copilot_usage,model_pricing,
+    provider_activity}.rs`, `jcode-provider-openrouter/src/lib.rs` (model and endpoint
+    caches), `jcode-tui/src/tui/app/{debug,test_harness}.rs`, and
+    `jcode-tui-visual-debug/src/lib.rs`. These resolve under `~/.jcode` or the user config
+    dir; the cwd is only reached when even the home directory is unavailable.
+  - **Foreground TUI**, where the daemon cwd *is* this process's own cwd and the session's
+    or repo's working dir is preferred immediately above the fallback:
+    `inline_interactive.rs`, `tui_state.rs`, `remote_diff.rs`, `commands.rs`,
+    `commands_review.rs`, `input.rs`, `server_events.rs`, `state_ui_maintenance.rs`.
+  - **SDK and tooling**, which run outside a daemon session by construction:
+    `jcode-sdk/src/launch.rs` (the embedding application is the caller's project),
+    `jcode-build-meta/build.rs` (a Cargo build script),
+    `jcode-build-support/src/{paths,platform_support}.rs` (launcher install),
+    `src/bin/tui_bench/side_panel.rs`, and `src/cli/commands.rs`.
+
+  The pattern set went through five falsified revisions, each caught by running the guard
+  rather than by reasoning. Recorded so the next reader does not re-walk them:
+
+  1. The first two shapes alone missed `current_dir().unwrap_or_else(|_| PathBuf::from("."))`.
+  2. Adding bare `unwrap_or_default()` flagged `serde_json::to_string(..).unwrap_or_default()`
+     and similar everywhere. It is a generic combinator, not a cwd fallback.
+  3. Narrowing to `unwrap_or_default()` *next to* `current_dir()` then flagged
+     `client_api.rs:79` and `session_rebuild.rs:8`, because bare `current_dir()?`
+     propagated the error and is the sanctioned foreground/CLI idiom that `AGENTS.md`
+     explicitly permits.
+  4. A +-1 line window reported whole blocks, four lines for one call, two of them blank,
+     and two classifications returned exit 0 because the regex needed a neighbour that
+     the window had already consumed.
+  5. Statement units plus a *first*-method test finally separated the path case
+     (`current_dir().unwrap_or_else(|_| PathBuf::from("."))`) from the display-string case
+     (`current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown")`).
+     Asking instead whether *some* method came first made every true positive disappear,
+     because the swallow itself then looked like a transform.
+
+  The first-method rule also correctly dropped three earlier candidates: `bash.rs:887`
+  prints the daemon dir in a refusal *message*, `state_ui.rs:1959` and `:2045` are
+  `"unknown"` display fallbacks.
+
+  The pattern set went through **eight** falsified revisions and the laundering contract
+  through one more, every one caught by running the guard rather than by reasoning. Recorded
+  so the next reader does not re-walk them. Items 1-5 are above; 6-9 are new:
+
+  6. `FIRST_METHOD_RE.match` was anchored at index 0, so every *wrapped* chain -- the shape
+     rustfmt actually produces -- was skipped, since `statement_at` joins with a space. Now
+     `search`, which is also the more honest reading of "the first method".
+  7. **`--update` laundered sites.** It refused to add a new *file* with no reason, but it
+     re-recorded existing files from the current scan, so a new violation planted inside an
+     already-grandfathered file was absorbed silently and inherited that file's unrelated
+     justification (`--update` exited 0 and the site count went 2 -> 3). The module
+     docstring claimed this was impossible. `--update` is now monotone: it may only
+     *remove* sites, so the budget can never be grown by the tool that enforces it.
+     Adding a site is a hand edit carrying a reason.
+  8. **`DOT_RE` was blind to closures.** It matched `unwrap_or(Path::new("."))` but not
+     `unwrap_or_else(|| Path::new("."))`, because the closure sits between the paren and the
+     constructor. `AGENTS.md` forbids that shape by name, so the ratchet was blinder than
+     the rule it enforces. A planted `unwrap_or_else` probe was reported clean. Fixing it
+     exposed **24 further sites** that had been invisible the whole time.
+  9. **The guard flagged its own doc comments.** Fix 8's explanation quotes
+     `unwrap_or_else(|| Path::new("."))` in prose, and the guard reported it. Line comments
+     are now stripped before matching, respecting string literals. Block comments are
+     deliberately *not* stripped: a `/* ... */` quoting the shape is still reported, because
+     over-clearing costs one manual allowlist entry while under-clearing costs a real
+     violation going unnoticed.
+
+  Of the 24 sites fix 8 exposed, two were genuine violations of invariant 1 and are fixed
+  here; the rest are the global-cache, foreground-TUI, and tooling shapes above:
+
+  - `overnight.rs:670` `gather_git_snapshot` resolved `Path::new(".")` when a manifest named
+    no working dir, so an overnight run would report the branch and dirty count of whichever
+    project started the daemon. `GitSnapshot` already has an `error` field, so the fix
+    reports the absence instead of inventing a directory. Probed: with the fallback restored
+    the test fails with `branch must stay unknown, got Some("master")` -- the starting
+    project's branch.
+  - `tool/agentgrep/args.rs:27` `resolved_search_scope` resolved a parentless search path to
+    `"."`. **This fix is defence in depth, not a live bug, and the plan doc records why:**
+    every path whose `parent()` is `None` (`/`, `C:\`, `C:/`, `C:`, and the empty path) is
+    either a directory or does not exist, and the branch is guarded by `is_file()`, so the
+    fallback was already unreachable. Two tests that tried to bind to it through
+    `build_grep_args` both passed with the fallback restored, so both proved nothing. The
+    logic now lives in a `pub(crate) fn scope_root_for`, the same testing seam used for
+    `read.rs`, and restoring the fallback fails it with
+    `a path with no parent must not be rooted at the cwd: "."`.
+
+  The guard's own proof is 32 cases, all invoking the real script: eight forbidden shapes,
+  six legitimate ones, `cfg(test)` exemption, the three laundering paths, the removal path
+  (a deleted site is a note, then `--update` drops it), `--explain`, and three malformed
+  baseline shapes that must be refused with an actionable message and no traceback. A
+  separate probe confirms comment stripping creates no blind spot: a violation before a
+  trailing `//` is still caught, and a `//` inside a string literal does not truncate the
+  line.
 
 ---
 

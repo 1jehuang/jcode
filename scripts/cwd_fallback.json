@@ -1,0 +1,228 @@
+{
+  "grandfathered": {
+    "crates/jcode-base/src/browser.rs": {
+      "reason": "Deliberately global, not project-scoped: a per-user browser-profile directory that every project's session shares and that is keyed by the user's own account, not by a session. When even the home directory is unavailable there is no project-correct answer, and the process cwd is the conventional last resort for a scratch profile.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 46
+        }
+      ]
+    },
+    "crates/jcode-base/src/copilot_usage.rs": {
+      "reason": "Deliberately global, not project-scoped: a per-user usage ledger under ~/.jcode that every project writes into, because provider quota is spent against the user's account rather than a repository. The cwd fallback only applies when ~/.jcode cannot be resolved at all.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 12
+        }
+      ]
+    },
+    "crates/jcode-base/src/model_pricing.rs": {
+      "reason": "Deliberately global, not project-scoped: a per-user pricing cache under ~/.jcode shared by every project, since prices are a property of the provider, not of a checkout. The cwd fallback only applies when ~/.jcode cannot be resolved at all.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 60
+        }
+      ]
+    },
+    "crates/jcode-base/src/provider_activity.rs": {
+      "reason": "Deliberately global, not project-scoped: a per-user provider-activity ledger under ~/.jcode that every project appends to, since the activity is attributable to an account and not to a repository. The cwd fallback only applies when ~/.jcode cannot be resolved at all.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 80
+        }
+      ]
+    },
+    "crates/jcode-build-meta/build.rs": {
+      "reason": "Cargo build script, not session code: it resolves the repository root from CARGO_MANIFEST_DIR at compile time and has no session and no daemon cwd to consult.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 181
+        }
+      ]
+    },
+    "crates/jcode-build-support/src/paths.rs": {
+      "reason": "Launcher install tooling, not session code: it writes next to an installed launcher binary and is driven by the install scripts, so the parent of that binary is the correct answer.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 403
+        }
+      ]
+    },
+    "crates/jcode-build-support/src/platform_support.rs": {
+      "reason": "Launcher install tooling, not session code: it stages a backup beside the destination binary, so the destination's parent directory is the correct answer.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 51
+        }
+      ]
+    },
+    "crates/jcode-provider-openai/src/stream.rs": {
+      "reason": "Deliberately global, not project-scoped: generated images land in one shared cache that every project's session writes into and the user is shown the absolute path for. The process cwd is only a stand-in for the historical `<cwd>/.jcode/generated-images` layout; nothing here is resolved relative to a session's working_dir.",
+      "sites": [
+        {
+          "kind": "cwd-error-swallowed",
+          "line": 860
+        }
+      ]
+    },
+    "crates/jcode-provider-openrouter/src/lib.rs": {
+      "reason": "Deliberately global, not project-scoped: OpenRouter model and endpoint caches under ~/.jcode shared by every project, describing the provider rather than any checkout. The cwd fallback only applies when the home directory cannot be resolved at all.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 360
+        },
+        {
+          "kind": "dot",
+          "line": 559
+        }
+      ]
+    },
+    "crates/jcode-sdk/src/launch.rs": {
+      "reason": "SDK entry points run in the embedding application's own process, which is the caller's project by construction. LaunchOptions.working_dir is documented as the directory inherited by sessions in the launched instance, so a caller that omits it is asking for its own cwd; line 215 spawns the api-bridge subprocess there, and the home_dir() helper below resolves $HOME for SDK callers that have no session working dir to consult. Not daemon session code.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 215
+        },
+        {
+          "kind": "dot",
+          "line": 693
+        }
+      ]
+    },
+    "crates/jcode-tui-visual-debug/src/lib.rs": {
+      "reason": "Deliberately global, not project-scoped: one visual-debug log for the whole installation under the user config dir, written by every project to the same file on purpose. The cwd fallback only applies when the config dir cannot be resolved at all.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 335
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/app/commands.rs": {
+      "reason": "Foreground TUI process spawning a terminal for an existing session: the session working_dir is preferred first, and the daemon cwd fallback only applies to a session record that names no directory.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 437
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/app/commands_review.rs": {
+      "reason": "Foreground TUI process spawning a review terminal: active_working_dir is preferred first, and the process cwd is only used when the live session has no valid directory.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 745
+        },
+        {
+          "kind": "dot",
+          "line": 810
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/app/debug.rs": {
+      "reason": "Deliberately global, not project-scoped: terminal recordings are collected per user under the config dir so a single timeline can be replayed across projects. The cwd fallback only applies when the config dir cannot be resolved at all.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 743
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/app/inline_interactive.rs": {
+      "reason": "Foreground TUI process, not session-scoped code: the daemon cwd is this process's own cwd, and the session's working_dir is preferred immediately below wherever the picker knows one.",
+      "sites": [
+        {
+          "kind": "cwd-error-swallowed",
+          "line": 2744
+        },
+        {
+          "kind": "cwd-error-swallowed",
+          "line": 3005
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/app/input.rs": {
+      "reason": "Foreground TUI process opening a sibling terminal: active_working_dir is preferred first, and the process cwd is only used when the live session has no valid directory.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 1957
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/app/remote/server_events.rs": {
+      "reason": "Foreground TUI process attaching a terminal to a session it just learned about: the new session's working_dir is preferred first, and the process cwd is the last resort.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 2867
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/app/state_ui_maintenance.rs": {
+      "reason": "Foreground TUI process spawning a terminal for a merge session: repo_dir is preferred first, and the process cwd is only used when no repository dir was recorded.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 530
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/app/tui_state.rs": {
+      "reason": "Foreground TUI process spawning a new window for an existing session; the session's own working_dir is not plumbed into this call, which is a known gap tracked in the isolation plan, not a deliberate exemption.",
+      "sites": [
+        {
+          "kind": "cwd-error-swallowed",
+          "line": 2201
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/remote_diff.rs": {
+      "reason": "Client-side diff rendering in the foreground TUI, which resolves the path it was handed in the project the user launched it from.",
+      "sites": [
+        {
+          "kind": "cwd-error-swallowed",
+          "line": 108
+        }
+      ]
+    },
+    "crates/jcode-tui/src/tui/test_harness.rs": {
+      "reason": "Deliberately global, not project-scoped: the visual-debug bundle output directory belongs to the test harness installation rather than to any one project. The cwd fallback only applies when the config dir cannot be resolved at all.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 466
+        }
+      ]
+    },
+    "src/bin/tui_bench/side_panel.rs": {
+      "reason": "Benchmark harness binary, not session code: it writes side-panel assets next to the file it was handed, and has no session working dir.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 57
+        }
+      ]
+    },
+    "src/cli/commands.rs": {
+      "reason": "CLI command in the foreground process: it derives a viewer directory from the dashboard path it was given, and a parentless dashboard path means a relative one the user typed.",
+      "sites": [
+        {
+          "kind": "dot",
+          "line": 1093
+        }
+      ]
+    }
+  },
+  "version": 1
+}

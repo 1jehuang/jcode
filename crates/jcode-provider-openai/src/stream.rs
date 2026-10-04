@@ -852,6 +852,11 @@ fn handle_openai_image_generation_item(
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default();
+    // Global per-user image cache, deliberately not project-scoped: the path
+    // is reported to the user as an absolute file path, and a session from any
+    // project writes into the same cache. Derived from the process cwd only to
+    // keep the historical layout (`<cwd>/.jcode/generated-images`). Recorded in
+    // scripts/cwd_fallback.json.
     let dir = std::env::current_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join(".jcode")

@@ -2738,6 +2738,9 @@ impl App {
             return;
         }
 
+        // The process cwd, used only when the picker does not know a better
+        // directory for the target below. Foreground TUI, not session-scoped.
+        // Recorded in scripts/cwd_fallback.json.
         let default_cwd = std::env::current_dir().unwrap_or_default();
         let socket = std::env::var("JCODE_SOCKET").ok();
         let mut spawned = 0usize;
@@ -2996,6 +2999,9 @@ impl App {
         }
 
         let exe = launch_client_executable();
+        // Same foreground-TUI fallback as above: this process's cwd, used only
+        // when the picker has no working_dir for the target. Recorded in
+        // scripts/cwd_fallback.json.
         let cwd = std::env::current_dir().unwrap_or_default();
         let socket = std::env::var("JCODE_SOCKET").ok();
         let mut spawned = 0usize;

@@ -20,12 +20,12 @@ pub(crate) use self::comm_auth::{CAPABILITY_FIELD, claimed_session_id, mint};
 mod comm_await;
 mod comm_control;
 mod comm_graph;
-mod comm_plan;
-mod comm_session;
-mod comm_sync;
 #[cfg(test)]
 #[path = "server/comm_ownership_tests.rs"]
 mod comm_ownership_tests;
+mod comm_plan;
+mod comm_session;
+mod comm_sync;
 mod config_watch;
 mod debug;
 mod debug_ambient;
@@ -41,6 +41,10 @@ mod debug_testers;
 mod durable_state;
 mod headless;
 mod jade_relay;
+// Sibling file: `jade_relay.rs` is over the code-size ratchet already.
+#[cfg(test)]
+#[path = "server/jade_relay_launch_tests.rs"]
+mod jade_relay_launch_tests;
 mod lifecycle;
 mod live_turn;
 mod provider_control;

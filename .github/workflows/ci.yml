@@ -74,6 +74,10 @@ jobs:
         shell: bash
         run: python3 scripts/check_panic_budget.py
 
+      - name: Enforce process-cwd fallback ratchet
+        shell: bash
+        run: python3 scripts/check_cwd_fallback_budget.py
+
       - name: Enforce swallowed-error usage ratchet
         shell: bash
         run: python3 scripts/check_swallowed_error_budget.py

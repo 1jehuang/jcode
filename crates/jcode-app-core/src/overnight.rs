@@ -667,7 +667,19 @@ fn disk_available_gb(path: &Path) -> Option<f64> {
 
 pub fn gather_git_snapshot(working_dir: Option<&Path>) -> GitSnapshot {
     let captured_at = Utc::now();
-    let dir = working_dir.unwrap_or_else(|| Path::new("."));
+    // No working_dir means there is no project to report on. Falling back to
+    // `Path::new(".")` here would silently report the git status of whichever
+    // project happened to start the daemon, which is exactly the cross-project
+    // leak the isolation invariants forbid. Report the absence instead.
+    let Some(dir) = working_dir else {
+        return GitSnapshot {
+            captured_at,
+            branch: None,
+            dirty_count: None,
+            dirty_summary: Vec::new(),
+            error: Some("no working directory for this run; git status unavailable".to_string()),
+        };
+    };
     let branch = run_git(dir, &["branch", "--show-current"])
         .ok()
         .map(|value| value.trim().to_string())
@@ -1044,6 +1056,10 @@ fn write_text_file(path: &Path, content: &str) -> Result<()> {
     std::fs::write(path, content)?;
     Ok(())
 }
+
+// Sibling file so these do not grow `overnight.rs`; see the module docs.
+#[cfg(test)]
+mod git_snapshot_tests;
 
 #[cfg(test)]
 mod tests {

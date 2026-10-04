@@ -1034,12 +1034,12 @@ fn add_user_id(body: &mut serde_json::Value, user_id: Option<&str>) {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LaunchRequest {
-    text: String,
-    working_dir: Option<String>,
-    model: Option<String>,
-    provider_key: Option<String>,
-    selfdev: bool,
+pub(super) struct LaunchRequest {
+    pub(super) text: String,
+    pub(super) working_dir: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) provider_key: Option<String>,
+    pub(super) selfdev: bool,
 }
 
 impl LaunchRequest {
@@ -1108,12 +1108,19 @@ fn provider_key_for_launch_model(
     crate::provider::provider_for_model(model).map(str::to_string)
 }
 
-fn create_launch_session(request: &LaunchRequest) -> Result<(String, PathBuf)> {
-    let cwd = request
-        .working_dir
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+pub(super) fn create_launch_session(request: &LaunchRequest) -> Result<(String, PathBuf)> {
+    // No fallback to the process cwd: that is whichever project started this
+    // daemon, so rooting the launched session there would hand one project a
+    // session that reads and writes another. Bail, naming both ways to set one.
+    let Some(cwd) = request.working_dir.as_deref().map(PathBuf::from) else {
+        anyhow::bail!(
+            "relay launch has no working_dir and no configured \
+             jade_relay_launch_working_dir, so there is no project directory to \
+             launch in. Send working_dir in the event, or set \
+             jade_relay_launch_working_dir. Refusing to fall back to the daemon's \
+             directory, which belongs to a different project."
+        );
+    };
     if !cwd.is_dir() {
         anyhow::bail!("launch working_dir is not a directory: {}", cwd.display());
     }
