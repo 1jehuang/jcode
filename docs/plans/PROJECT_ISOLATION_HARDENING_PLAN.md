@@ -1,7 +1,7 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3, P2.5 done)
-Last reviewed: 2026-10-04 (P2.5 shipped)
+Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3, P2.5, P3.1 done)
+Last reviewed: 2026-10-04 (P3.1 shipped)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -684,7 +684,7 @@ shipped unverified.
 
 ### P3.1 - Project hashing is unstable and unnormalized
 
-- [ ] **Status:** pending
+- [x] **Status:** shipped (`project_key` migration; see "What shipped" below)
 - **Where:** `DefaultHasher` over a raw `PathBuf`:
   - memory: `crates/jcode-base/src/memory.rs:173-181`
   - legacy notes: `crates/jcode-base/src/memory.rs:284-290`
@@ -710,6 +710,38 @@ shipped unverified.
   memory file and one goal directory.
 - **Test:** create a temp dir, hash it via two path spellings, assert identical; assert the
   migration moves a legacy file and reports it.
+- **What shipped:** the shared helper already existed from P1.1
+  (`crates/jcode-base/src/project_scope.rs`), so this was a migration rather than a new
+  abstraction. All three `DefaultHasher` sites now call `project_scope::project_key`:
+  `memory.rs` `project_memory_file` and `legacy_notes_path`, and `goal.rs` `project_goals_dir`.
+  Because changing a key derivation silently strands every existing user's data,
+  `project_scope` gained `legacy_project_key` (reproduces `DefaultHasher` exactly, and is
+  used only to locate old files), `migrate_legacy_project_key` (`rename`, falling back to
+  `copy_recursively` plus remove across devices, skipping when either side is missing or the
+  new key already exists), and `copy_recursively`. Each of the three sites carries its old
+  directory or file forward on read. Migration failures are deliberately ignored and the
+  reason is documented at each site: losing past data beats failing a call that merely asks
+  where the data lives.
+- **Divergence from the plan above, deliberate:** no manifest file was written. The old key
+  is not a reverse-lookup index, so there is nothing to record that the on-disk path does
+  not already carry, and a manifest would be a second source of truth to keep in sync. The
+  legacy key is recomputed from the project path, which is always known at the call site.
+- **Bug found while doing this:** `stable_digest` emitted `sha256:<hex>`, and `:` is an
+  illegal character in a Windows filename. It never mattered while the digest was only a
+  scope string or a `.json` suffix; using it as a directory name for goals exposed it. The
+  digest is now bare hex, and the test that had pinned the prefix was rewritten to assert
+  every character is an ASCII hex digit rather than to pin a format that Windows rejects.
+- **Tests:** 5 in `project_scope::tests` (the legacy key reproduces the old value; recursive
+  directory migration; an existing new key wins over a legacy directory; no-op when there is
+  nothing to move), 2 in `memory::project_key_tests`, 3 in `goal::project_key_tests`. Each
+  half was reverted separately to prove the tests bind to it: the key migration, the memory
+  carry-forward, and the goal carry-forward each failed on their own while their siblings
+  stayed green. `goal.rs` previously had **no test module at all**, which is why the goal
+  half shipped unverified for as long as it did; adding one is part of this change.
+- **Verification:** `cargo test -p jcode-base --lib` 1630 passed, 13 failed, all 13 the
+  pre-existing set (6 `auth::cursor` needing `sqlite3` absent on this machine, 2
+  `background::reconcile_*`, 5 others). `mcp` 67/67, confirming the digest format change did
+  not disturb a consumer. `cargo build --workspace --tests` clean.
 
 ### P3.2 - Global config is writable by any project's agent
 
@@ -776,7 +808,7 @@ to the code it protects, not in a separate integration bucket.
 - [x] **Task ownership:** `bg cancel` from another session is rejected (P1.3).
 - [ ] **No-cwd sessions:** with `working_dir: None`, no project skills, no project AGENTS.md,
   no project swarm prompt, and relative paths error (P2.1, P2.2, P2.3, P2.5).
-- [ ] **Project key stability:** two spellings of one path hash identically (P3.1).
+- [x] **Project key stability:** two spellings of one path hash identically (P3.1).
 - [ ] **A lint or grep check** (optional but cheap) asserting no new
   `unwrap_or(Path::new("."))` / `unwrap_or_else(|| std::env::current_dir())` appears in
   session-scoped code paths without a comment explaining why. See the invariants in

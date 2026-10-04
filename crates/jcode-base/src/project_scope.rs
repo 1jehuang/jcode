@@ -18,7 +18,10 @@ use std::path::Path;
 /// and relative segments into one spelling. It fails for paths that do not
 /// exist yet, so the lexical fallback is used instead.
 fn normalize_path(path: &Path) -> String {
-    let resolved = path.canonicalize().ok().unwrap_or_else(|| path.to_path_buf());
+    let resolved = path
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| path.to_path_buf());
     let text = strip_verbatim_prefix(&resolved.to_string_lossy());
     trim_trailing_separator(&text)
 }
@@ -95,17 +98,81 @@ pub fn optional_project_key(path: Option<&Path>) -> String {
     }
 }
 
-/// Stable hex digest. See [`project_key`] for why this is not `DefaultHasher`.
+/// The pre-P3.1 project key: `DefaultHasher` over the raw `PathBuf`.
+///
+/// Kept only so [`migrate_legacy_project_key`] can find files written by an
+/// older build. It reproduces the old derivation exactly, quirks included, and
+/// must never be used to *name* new data: `DefaultHasher` is explicitly
+/// documented as unstable across Rust releases, so a toolchain bump would
+/// change this value and strand the very files the migration exists to find.
+pub fn legacy_project_key(path: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Move a project-scoped file or directory from the legacy key to [`project_key`].
+///
+/// Returns `true` if a migration happened. The legacy location is left in
+/// place: it is the only copy of that data until the new location has been
+/// written, and the caller decides when to remove it.
+pub fn migrate_legacy_project_key(old_item: &Path, new_item: &Path) -> std::io::Result<bool> {
+    if !old_item.exists() || new_item.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = new_item.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::rename(old_item, new_item) {
+        Ok(()) => Ok(true),
+        // A rename across devices (an old store on another mount) cannot be
+        // atomic. Copy then remove, and report failure rather than pretending.
+        Err(_) => {
+            copy_recursively(old_item, new_item)?;
+            std::fs::remove_dir_all(old_item).or_else(|_| std::fs::remove_file(old_item))?;
+            Ok(true)
+        }
+    }
+}
+
+fn copy_recursively(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_recursively(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+/// Stable hex SHA-256 prefix. See [`project_key`] for why this is not
+/// `DefaultHasher`.
+///
+/// The output is deliberately bare hex with no algorithm prefix: these keys name
+/// directories as well as scope strings, and `:` is an illegal character in a
+/// Windows path component. The prefix this function used to emit
+/// (`sha256:<hex>`) only became a real bug once P3.1 started using the key as a
+/// directory name, which is why it is worth stating rather than assuming.
 fn stable_digest(input: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(input.as_bytes());
-    let hex: String = digest[..8].iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("sha256:{hex}")
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{optional_project_key, project_key, strip_verbatim_prefix};
+    use super::{
+        legacy_project_key, migrate_legacy_project_key, optional_project_key, project_key,
+        strip_verbatim_prefix,
+    };
     use std::path::{Path, PathBuf};
 
     /// Compare two spellings without tripping over the verbatim prefix that
@@ -135,8 +202,7 @@ mod tests {
         let first = &keys[0].1;
         for (variant, key) in &keys[1..] {
             assert_eq!(
-                first,
-                key,
+                first, key,
                 "'{variant:?}' must resolve to the same project as '{:?}'",
                 keys[0].0
             );
@@ -163,7 +229,11 @@ mod tests {
         let missing = dir.path().join("not-created-yet");
 
         assert_ne!(project_key(&missing), project_key(dir.path()));
-        assert!(project_key(&missing).starts_with("sha256:"));
+        assert!(
+            project_key(&missing).chars().all(|c| c.is_ascii_hexdigit()),
+            "a project key must be usable as a filename on every platform, got {:?}",
+            project_key(&missing)
+        );
     }
 
     #[test]
@@ -181,9 +251,108 @@ mod tests {
     #[test]
     fn verbatim_prefix_is_stripped_from_drive_and_unc_paths() {
         assert_eq!(strip_verbatim_prefix(r"\\?\C:\repo"), r"C:\repo");
-        assert_eq!(strip_verbatim_prefix(r"\\?\UNC\srv\share\repo"), r"\\srv\share\repo");
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\srv\share\repo"),
+            r"\\srv\share\repo"
+        );
         // Non-Windows and already-normal paths pass through untouched.
         assert_eq!(strip_verbatim_prefix("/repo"), "/repo");
         assert_eq!(strip_verbatim_prefix(r"C:\repo"), r"C:\repo");
+    }
+
+    #[test]
+    fn legacy_project_key_reproduces_the_pre_p31_derivation() {
+        // The whole migration depends on this reproducing the old value exactly.
+        // If it drifts, every existing user's memories and goals are stranded
+        // with no way to find them.
+        let dir = tempfile::tempdir().expect("tempdir");
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        dir.path().hash(&mut hasher);
+        let expected = format!("{:016x}", hasher.finish());
+        assert_eq!(legacy_project_key(dir.path()), expected);
+
+        // Positive control: the legacy key must NOT equal the new one, or the
+        // migration would have nothing to move and this test proves nothing.
+        assert_ne!(legacy_project_key(dir.path()), project_key(dir.path()));
+    }
+
+    #[test]
+    fn migration_moves_a_legacy_file_to_the_stable_key() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = root
+            .path()
+            .join(format!("{}.json", legacy_project_key(dir.path())));
+        let new = root
+            .path()
+            .join(format!("{}.json", project_key(dir.path())));
+        std::fs::write(&old, "{\"memories\":[]}").expect("seed legacy");
+
+        assert!(migrate_legacy_project_key(&old, &new).expect("migrate"));
+        assert!(new.exists(), "the file must be reachable at the new key");
+        assert_eq!(
+            std::fs::read_to_string(&new).expect("read"),
+            "{\"memories\":[]}",
+            "the migrated file must keep its contents"
+        );
+    }
+
+    #[test]
+    fn migration_leaves_an_existing_new_key_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = root
+            .path()
+            .join(format!("{}.json", legacy_project_key(dir.path())));
+        let new = root
+            .path()
+            .join(format!("{}.json", project_key(dir.path())));
+        std::fs::write(&old, "legacy").expect("seed legacy");
+        std::fs::write(&new, "current").expect("seed current");
+
+        assert!(
+            !migrate_legacy_project_key(&old, &new).expect("migrate"),
+            "a project that already has data under the new key must not be overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&new).expect("read"),
+            "current",
+            "the newer data must win"
+        );
+    }
+
+    #[test]
+    fn migration_moves_a_legacy_goal_directory_with_its_contents() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = root.path().join(legacy_project_key(dir.path()));
+        let new = root.path().join(project_key(dir.path()));
+        std::fs::create_dir_all(old.join("nested")).expect("seed legacy dir");
+        std::fs::write(old.join("nested").join("goal.json"), "{}").expect("seed goal");
+
+        assert!(migrate_legacy_project_key(&old, &new).expect("migrate"));
+        assert_eq!(
+            std::fs::read_to_string(new.join("nested").join("goal.json")).expect("read"),
+            "{}",
+            "a goal directory must migrate recursively, not as an empty folder"
+        );
+    }
+
+    #[test]
+    fn migration_is_a_no_op_when_there_is_nothing_to_move() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = root
+            .path()
+            .join(format!("{}.json", legacy_project_key(dir.path())));
+        let new = root
+            .path()
+            .join(format!("{}.json", project_key(dir.path())));
+        assert!(
+            !migrate_legacy_project_key(&old, &new).expect("migrate"),
+            "a fresh install has no legacy file and must report no migration"
+        );
     }
 }

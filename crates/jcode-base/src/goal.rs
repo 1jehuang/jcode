@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 pub use jcode_task_types::{Goal, GoalMilestone, GoalScope, GoalStatus, GoalStep, GoalUpdate};
@@ -531,12 +530,19 @@ fn project_goals_dir(working_dir: Option<&Path>) -> Result<Option<PathBuf>> {
     let Some(dir) = working_dir else {
         return Ok(None);
     };
-    Ok(Some(
-        crate::storage::jcode_dir()?
-            .join("goals")
-            .join("projects")
-            .join(project_hash(dir)),
-    ))
+    let projects = crate::storage::jcode_dir()?.join("goals").join("projects");
+    let path = projects.join(project_hash(dir));
+
+    // Carry forward a directory written under the old DefaultHasher key, otherwise
+    // every existing user's goals would silently vanish on this upgrade (P3.1).
+    // A migration failure is ignored: losing past goals is better than failing the
+    // call that merely asks where goals live.
+    let legacy = projects.join(crate::project_scope::legacy_project_key(dir));
+    if legacy != path {
+        let _ = crate::project_scope::migrate_legacy_project_key(&legacy, &path);
+    }
+
+    Ok(Some(path))
 }
 
 fn load_goals_in_dir(dir: &Path) -> Result<Vec<Goal>> {
@@ -568,11 +574,11 @@ fn sort_goals(goals: &mut [Goal]) {
     });
 }
 
+/// Per-project key for goal storage. Delegates to the one shared derivation
+/// point so goals and memories can never disagree about which project a path
+/// names (P3.1).
 fn project_hash(path: &Path) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    let mut hasher = DefaultHasher::new();
-    path.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    crate::project_scope::project_key(path)
 }
 
 fn session_attachment_path(session_id: &str) -> Result<PathBuf> {
@@ -712,3 +718,81 @@ fn goal_memory_content(goal: &Goal) -> String {
 #[cfg(test)]
 #[path = "goal_tests.rs"]
 mod goal_tests;
+
+#[cfg(test)]
+mod project_key_tests {
+    use super::project_goals_dir;
+    use crate::project_scope::{legacy_project_key, project_key};
+    use crate::storage;
+    use std::path::PathBuf;
+
+    /// The goal directory must be named with the stable key, and one repo spelled
+    /// two ways must map to one directory.
+    ///
+    /// Goals used a `DefaultHasher` of their own, so they could already disagree
+    /// with memories about which project a path names. This drives the real
+    /// lookup so a caller that went back to hashing the raw path would fail here.
+    #[test]
+    fn project_goals_dir_uses_the_stable_key_and_unifies_path_spellings() {
+        let _lock = storage::lock_test_env();
+        let repo = tempfile::tempdir().expect("tempdir");
+
+        let dir = project_goals_dir(Some(repo.path()))
+            .expect("goals dir")
+            .expect("a working dir yields a project goals dir");
+        assert_eq!(
+            dir.file_name().expect("file name").to_string_lossy(),
+            project_key(repo.path()),
+            "goals must be stored under the same stable key as every other project scope"
+        );
+        assert_ne!(
+            dir.file_name().expect("file name").to_string_lossy(),
+            legacy_project_key(repo.path()),
+            "positive control: the legacy key must differ, or this proves nothing"
+        );
+
+        // Positive control: a different spelling of the same repo, one directory.
+        let dotted = PathBuf::from(repo.path()).join(".");
+        assert_eq!(
+            project_goals_dir(Some(&dotted)).expect("dotted"),
+            Some(dir),
+            "two spellings of one repo must not fragment its goals"
+        );
+    }
+
+    /// Goals written under the legacy key must survive the upgrade.
+    #[test]
+    fn project_goals_dir_carries_a_legacy_directory_forward() {
+        let _lock = storage::lock_test_env();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let projects = storage::jcode_dir()
+            .expect("jcode dir")
+            .join("goals")
+            .join("projects");
+        std::fs::create_dir_all(&projects).expect("create goals dir");
+
+        let legacy = projects.join(legacy_project_key(repo.path()));
+        std::fs::create_dir_all(&legacy).expect("seed legacy dir");
+        std::fs::write(legacy.join("goal-1.json"), "{}").expect("seed goal");
+
+        let dir = project_goals_dir(Some(repo.path()))
+            .expect("goals dir")
+            .expect("a working dir yields a project goals dir");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("goal-1.json")).expect("migrated goal"),
+            "{}",
+            "goals written under the legacy key must be carried forward, not orphaned"
+        );
+    }
+
+    /// No working dir means no project, never the daemon's own directory.
+    #[test]
+    fn project_goals_dir_is_absent_without_a_working_dir() {
+        let _lock = storage::lock_test_env();
+        assert_eq!(
+            project_goals_dir(None).expect("goals dir"),
+            None,
+            "a session with no working dir has no project goals directory"
+        );
+    }
+}
