@@ -1254,6 +1254,7 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // a single separator.
     if text == " " && at_end && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
     {
+        app.input_typing_undo = None;
         return;
     }
 

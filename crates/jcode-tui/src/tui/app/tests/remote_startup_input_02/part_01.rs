@@ -1093,6 +1093,20 @@ fn test_typing_undo_does_not_merge_paste_or_later_burst() {
 }
 
 #[test]
+fn test_picker_swallowed_space_starts_new_typing_undo_step() {
+    let mut app = create_test_app();
+    for c in "/model".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty()).unwrap();
+    }
+    assert_eq!(app.input(), "/model ");
+    app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Char('g'), KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input(), "/model g");
+    app.undo_input_change();
+    assert_eq!(app.input(), "/model ");
+}
+
+#[test]
 fn test_handle_key_ctrl_h_does_not_insert_text() {
     let mut app = create_test_app();
     app.set_input_for_test("hello");
