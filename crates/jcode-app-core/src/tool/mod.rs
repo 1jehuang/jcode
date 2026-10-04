@@ -12,6 +12,7 @@ mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
+pub(crate) use self::config_edit_notice::comparable_path as config_comparable_path;
 mod conversation_search;
 mod debug_socket;
 mod desktop_selfdev;

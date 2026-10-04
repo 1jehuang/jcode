@@ -26,6 +26,7 @@ mod comm_sync;
 #[cfg(test)]
 #[path = "server/comm_ownership_tests.rs"]
 mod comm_ownership_tests;
+mod config_watch;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
@@ -1348,6 +1349,15 @@ impl Server {
                 monitor_swarm_event_tx,
             )
             .await;
+        });
+
+        // Watch the global config.toml so a change is reported to every session,
+        // not just the one that made it. Its own task rather than another arm of
+        // `monitor_bus`, because that loop blocks on bus traffic: a config edited
+        // while jcode is idle would otherwise go unnoticed until the next event.
+        let config_watch_members = Arc::clone(&self.swarm_state.members);
+        tokio::spawn(async move {
+            config_watch::watch_config_file(config_watch_members).await;
         });
 
         // Resume any background `swarm await_members` watchers that were active

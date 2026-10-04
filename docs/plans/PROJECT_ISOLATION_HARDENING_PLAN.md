@@ -1,7 +1,7 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3, P2.5, P3.1 done)
-Last reviewed: 2026-10-04 (P3.1 shipped)
+Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3, P2.5, P3.1-P3.2 done)
+Last reviewed: 2026-10-04 (P3.2 shipped)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -745,7 +745,7 @@ shipped unverified.
 
 ### P3.2 - Global config is writable by any project's agent
 
-- [ ] **Status:** pending
+- [x] **Status:** shipped (option (b), made daemon-wide; see "What shipped" below)
 - **Where:** `crates/jcode-app-core/src/tool/apply_patch.rs:105-108` opens a
   `ConfigEditWatch`; `crates/jcode-app-core/src/tool/config_edit_notice.rs:1-8` states
   explicitly that agents writing `~/.jcode/config.toml` is normal workflow, and the
@@ -758,6 +758,75 @@ shipped unverified.
   outside a selfdev session, or (b) keep it allowed and make the notice loud in the TUI,
   naming the keys changed and the fact that the change is daemon-wide.
 - **Acceptance:** whichever option is chosen is enforced and tested.
+
+- **Choice: (b), made daemon-wide and relocated to the daemon.** The plan
+  offered two options and (b) is the right one: agents are expected to configure
+  themselves, and a confirmation prompt on a global file is a wall, not a
+  boundary. But the plan located the fix at the file-tool layer, and that
+  location has an unfixable bypass. `bash` can write the same file
+  (`echo '[model]\ndefault = 1' >> ~/.jcode/config.toml`), `bash.rs` has no concept of
+  config at all, and neither do a user's editor, `sed`, and every
+  other process on the machine. A gate there protects two of five writers.
+- **What shipped:** `crates/jcode-app-core/src/server/config_watch.rs`, a poller
+  in its own spawned task that diffs `~/.jcode/config.toml` every
+  `CONFIG_WATCH_INTERVAL` (5s) and fans a `Notification` out to **every** member
+  session, across every project. Spawned next to `monitor_bus` in `server.rs`.
+  Its own task rather than another arm of `monitor_bus`, because that loop blocks
+  on `receiver.recv()`: a config edited while jcode is idle would go unnoticed
+  until the next unrelated event.
+- **Still one mechanism per concern, not two.** The behavior of
+  `tool/config_edit_notice.rs` is unchanged: it tells the *writing* session which
+  keys it changed and whether each is live, while the watcher notifies the
+  sessions that did *not* write it. Collapsing them would lose one or the other.
+  The only edit to that file is making
+  `config_edit_notice::comparable` public (as `comparable_path`), so the watcher
+  re-baselines on a moved `JCODE_HOME` using the identical comparison the notice
+  uses rather than a second one that could disagree.
+- **Every transition is reported, not just edits.** `ConfigState` is a tri-state
+  (`Unobserved` / `Absent` / `Content`) rather than `Option<String>`, because
+  creation and deletion are the two transitions that revert *every* session at
+  once: the first write applies settings that were silently falling back to
+  defaults, and deleting the file drops every session back to defaults. An
+  `Option<String>` conflates "no baseline yet" with "file absent" and absorbs both.
+  Found by the create/delete tests while writing them, not by the revert proofs.
+- **Tests:** 13 in `server::config_watch::tests`, at four levels. Tick: a setting
+  change names the key; one edit is reported once and not repeated; the first
+  write of a nonexistent file is reported; a comment-only edit is silent; a config
+  that stops parsing is reported as ignored; a moved path re-baselines instead of
+  reporting a phantom; delete and recreate are both reported; no summary smuggles
+  a run of spaces. Fanout: all three sessions across three working dirs receive it
+  with the right scope and no channel, and a session that left is skipped rather
+  than fatal. Loop: a change is noticed with no other daemon activity at all.
+  Wiring: the daemon spawns the watcher.
+- **Revert proofs.** Each independent half was reverted on its own and the suite
+  re-run. Removing the `server.rs` spawn failed exactly the wiring test. Aliasing
+  `Absent` -> `Unobserved` failed exactly the two create/delete tests plus the loop
+  test. `targets.into_iter().take(1)` failed exactly the cross-project fanout test.
+  Inflating the loop sleep past the test's own wait, and adding a
+  `break` for a single pass, each failed exactly the loop test. `11 passed; 1
+  failed` every time, so no guard shipped unverified.
+- **One probe was discarded rather than counted as a proof.** Swapping the loop
+  sleep for `yield_now` does not stop the loop ticking, so the loop test still
+  passed; and deleting the sleep entirely deadlocked the single-threaded runtime.
+  The accepted probe is the inflated sleep, which keeps the loop running but
+  cannot deliver inside the test window. A guard that cannot be shown to fail is
+  not a guard.
+- **The positive control found a real shipped defect.** Asserting `message == ""`
+  in the loop test failed as intended and printed the delivered message, which
+  read "...is running its settings              for the first time." Both the
+  `Absent -> Some` and `Content -> None` summaries shipped runs of 12 and 14
+  spaces mid-sentence, from spaces typed inside the literal (not from the `\
+  continuation, which Rust strips). Fixed, and
+  `no_reported_summary_carries_runs_of_whitespace` guards it -- proven by
+  reinstating the runs, which failed exactly that test, `12 passed; 1 failed`.
+  The guard deliberately excludes the parse-failure summary, which embeds a
+  `toml` diagnostic whose aligned gutter markers are correct output and must not
+  be rewritten.
+- **Verification:** `cargo test -p jcode-app-core --lib config_watch` 13/13,
+  `tool::config_edit_notice` 8/8, `server::comm_ownership_tests` 4/4. The whole
+  `server::` filter was not run: it exceeds ten minutes on pre-existing slow and
+  hanging tests unrelated to this change.
+
 
 ---
 
@@ -809,6 +878,9 @@ to the code it protects, not in a separate integration bucket.
 - [ ] **No-cwd sessions:** with `working_dir: None`, no project skills, no project AGENTS.md,
   no project swarm prompt, and relative paths error (P2.1, P2.2, P2.3, P2.5).
 - [x] **Project key stability:** two spellings of one path hash identically (P3.1).
+- [x] **Global config visibility:** a `~/.jcode/config.toml` change reaches every
+  session in the daemon, including sessions in other projects, however it was
+  written (P3.2).
 - [ ] **A lint or grep check** (optional but cheap) asserting no new
   `unwrap_or(Path::new("."))` / `unwrap_or_else(|| std::env::current_dir())` appears in
   session-scoped code paths without a comment explaining why. See the invariants in
