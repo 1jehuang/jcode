@@ -1,6 +1,6 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1, P0.2, P0.3 done)
+Status: **in_progress** (P0.1, P0.2, P0.3, P0.4 done)
 Last reviewed: 2026-10-04 (commit `0d34e73f3`)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
@@ -167,7 +167,7 @@ They are also the cheapest to fix, so do them first.
 
 ### P0.4 - Session attach has no identity check at all
 
-- [ ] **Status:** pending (this one may become a design decision rather than a code change)
+- [x] **Status:** done
 - **Where:** `required_subscribe_working_dir` (`client_lifecycle.rs:81-89`) validates only
   that the path is absolute and non-empty; `resolve_target_subscribe_working_dir`
   (`:109-153`) returns `Ok(())` immediately at `:122-124` when the client supplies its own
@@ -179,14 +179,52 @@ They are also the cheapest to fix, so do them first.
   (`crates/jcode-tui/src/tui/session_picker.rs:279-291`, default filter `All`).
   Cross-project attach is therefore *allowed*; what is missing is that it is allowed
   **implicitly and without trace**.
-- **Decision needed:** choose one of
-  - (a) keep it permissive and make the risk explicit: log cross-project attach at warn
-    level and show the other project's path in the attach confirmation; or
-  - (b) require the target session's cwd to match unless the client passes an explicit
-    `allow_cross_project_attach` flag; or
-  - (c) issue a per-session capability token at create time and require it on attach.
-- **Acceptance:** whichever option is chosen is documented, enforced, and covered by a test.
-  Silent permissive attach is not an acceptable outcome.
+- **Decision: option (a), keep it permissive and make the risk explicit.** Option (b) would
+  break the session picker's cross-project listing, which is deliberate product behavior
+  (see Context above). Option (c) buys nothing here: the socket is local and unauthenticated,
+  so a token in the same trust domain adds no isolation, only ceremony. The transport half of
+  this item (no auth token, Windows pipe without `SecurityAttributes`) is a separate concern
+  and is **not** covered by this decision.
+- **Server half (done):** the attach is logged at warn level with the cause it actually
+  has. `SubscribeWorkingDirRefusal` distinguishes `HomeDirectory` from `CrossProject`;
+  before this, one hardcoded home-directory message was served from all four refusal sites,
+  so every cross-project attach was logged as a home-directory report.
+  `subscribe_working_dir_refusal_message` builds the text as a value rather than formatting it
+  inside the logging call, so the wording itself is assertable rather than only the
+  classification.
+- **Client half (done):** the client sends its launch directory in `Subscribe` and used to
+  discard it, so both values needed to detect the mismatch were present and unused.
+  `App.client_launch_working_dir` keeps it, deliberately separate from `session.working_dir`:
+  the disagreement between the two is the entire signal. `cross_project_attach_notice`
+  compares them the way the daemon does (canonicalized) and names **both** projects.
+- **Why a transcript card and not a status notice:** which tree every file and shell tool
+  will touch is the most important fact about the session that follows, and
+  `TuiState::status_notice` expires after 3 seconds. It is stashed through
+  `set_pending_startup_notice` so it survives the remote History bootstrap clearing a fresh
+  session's transcript.
+- **Where it fires:** remote startup resume (both the normal and the `reload_fast_start`
+  variant, which defers the transcript but already has the directory), and an explicit
+  `/resume` or workspace switch. The switch path uses
+  `note_cross_project_attach_for_session`, which reads the *target's* directory off disk
+  because `app.session` still describes the session being left. Guarded by
+  `cross_project_attach_notice_shown` so a reconnect does not re-announce.
+- **Deliberately quiet:** under SSH, where the process cwd is the laptop's and describes
+  nothing about the remote session; and when either directory is unknown. Reporting an
+  unverified mismatch would produce a notice on ordinary sessions and train the user to
+  ignore it.
+- **Acceptance:** met. The permissive attach is documented (here), enforced in the sense of
+  being surfaced on both server and client, and covered by tests. Silent permissive attach
+  no longer exists.
+- **Tests:** `cross_project_attach_notice_names_both_projects`,
+  `..._is_quiet_when_the_projects_agree`, `..._stays_quiet_when_either_side_is_unknown`,
+  `..._tolerates_unresolvable_paths`,
+  `cross_project_attach_shows_the_user_which_project_the_session_belongs_to`,
+  `..._notice_fires_once_per_client`, `same_project_attach_shows_no_notice`,
+  `subscribe_working_dir_refusal_reason_names_the_actual_cause`,
+  `subscribe_working_dir_refusal_log_states_the_actual_cause`.
+- **Defect found while writing the tests:** `same_project_dir` fell back to "unequal strings
+  means a mismatch" when canonicalization failed, which reported `/repo` and `/repo/.` as two
+  projects. The fallback now trims trailing separators first, keeping a bare root intact.
 
 ---
 
