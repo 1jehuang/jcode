@@ -142,10 +142,16 @@ pub fn reload_process_alive(pid: u32) -> bool {
         matches!(err.raw_os_error(), Some(libc::EPERM))
     }
 
+    // Windows has no `kill(pid, 0)`. `crate::platform::is_process_running`
+    // does the platform-correct equivalent there (`OpenProcess` with
+    // `PROCESS_QUERY_LIMITED_INFORMATION`, then `GetExitCodeProcess`).
+    // This used to be an unconditional `true` stub, which was a real
+    // product bug, not a test-only one: every nonzero pid reported alive,
+    // so `ReloadWaitStatus::Failed` was unreachable on Windows and a reload
+    // whose process died mid-wait hung at `Waiting` forever.
     #[cfg(not(unix))]
     {
-        let _ = pid;
-        true
+        crate::platform::is_process_running(pid)
     }
 }
 
@@ -741,13 +747,16 @@ mod tests {
     /// dead at the moment of selection. Retries guard against the (extremely
     /// rare) case where the kernel immediately recycles the pid for another
     /// test thread's process.
-    #[cfg(unix)]
     fn spawn_and_reap_dead_pid() -> u32 {
         use std::process::Command;
+        // `sh` is absent on plain Windows, so the probe must not assume it.
+        #[cfg(windows)]
+        let (program, args) = ("cmd", ["/C", "exit", "0"]);
+        #[cfg(not(windows))]
+        let (program, args) = ("sh", ["-c", "exit 0"]);
         for _ in 0..16 {
-            let mut child = Command::new("/bin/sh")
-                .arg("-c")
-                .arg("exit 0")
+            let mut child = Command::new(program)
+                .args(args)
                 .spawn()
                 .expect("spawn short-lived child");
             let pid = child.id();
@@ -766,7 +775,6 @@ mod tests {
     // preservation, corrupt-marker tolerance, and the dead last-known-pid
     // fallback.
 
-    #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn inspect_reload_wait_status_idle_when_last_known_pid_is_dead_without_marker() {
@@ -916,7 +924,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn reload_process_alive_handles_zero_and_dead_pids() {
         assert!(!reload_process_alive(0), "pid 0 is never a live reload pid");
