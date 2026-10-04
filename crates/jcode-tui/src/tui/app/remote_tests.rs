@@ -477,6 +477,73 @@ fn submit_prepared_remote_input_defers_until_history_loads() {
 }
 
 #[test]
+fn cross_project_attach_shows_the_user_which_project_the_session_belongs_to() {
+    let mut app = create_test_app();
+    app.client_launch_working_dir = Some("/client/project".to_string());
+    app.session.working_dir = Some("/server/project".to_string());
+
+    assert!(
+        app.note_cross_project_attach(),
+        "attaching from one project to a session in another must be surfaced"
+    );
+
+    let card = app
+        .display_messages
+        .iter()
+        .find(|m| m.content.contains("/server/project"))
+        .unwrap_or_else(|| panic!("no notice card names the session project; got: {:#?}", app.display_messages));
+    assert!(
+        card.content.contains("/client/project"),
+        "the notice must name the project the user launched in: {}",
+        card.content
+    );
+}
+
+#[test]
+fn cross_project_attach_notice_fires_once_per_client() {
+    // A reconnect re-runs remote startup, so the same mismatch must not re-announce
+    // itself every time the client reattaches.
+    let mut app = create_test_app();
+    app.client_launch_working_dir = Some("/client/project".to_string());
+    app.session.working_dir = Some("/server/project".to_string());
+
+    assert!(app.note_cross_project_attach());
+    let cards_after_first = app
+        .display_messages
+        .iter()
+        .filter(|m| m.content.contains("/server/project"))
+        .count();
+
+    assert!(!app.note_cross_project_attach());
+    let cards_after_second = app
+        .display_messages
+        .iter()
+        .filter(|m| m.content.contains("/server/project"))
+        .count();
+
+    assert_eq!(
+        cards_after_first, cards_after_second,
+        "the notice must not be repeated on reattach"
+    );
+}
+
+#[test]
+fn same_project_attach_shows_no_notice() {
+    // The common case must stay silent: a notice that fires on an ordinary session
+    // would train the user to ignore it.
+    let mut app = create_test_app();
+    app.client_launch_working_dir = Some("/client/project".to_string());
+    app.session.working_dir = Some("/client/project/".to_string());
+
+    assert!(!app.note_cross_project_attach());
+    assert!(
+        app.display_messages.is_empty(),
+        "a same-project attach must not post anything: {:#?}",
+        app.display_messages
+    );
+}
+
+#[test]
 fn remote_skill_invocation_with_prompt_sends_remote_turn() {
     let mut app = create_test_app();
     app.is_remote = true;

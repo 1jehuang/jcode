@@ -692,6 +692,8 @@ impl App {
             input_undo_stack: Vec::new(),
             history_draft: None,
             status_notice: None,
+            client_launch_working_dir: crate::tui::client_launch_working_dir(),
+            cross_project_attach_notice_shown: false,
             learn_hint: None,
             learn_hint_shown_this_session: false,
             terminal_setup_hint_shown_this_session: false,
@@ -1151,6 +1153,8 @@ impl App {
             input_undo_stack: Vec::new(),
             history_draft: None,
             status_notice: None,
+            client_launch_working_dir: crate::tui::client_launch_working_dir(),
+            cross_project_attach_notice_shown: false,
             learn_hint: None,
             learn_hint_shown_this_session: false,
             terminal_setup_hint_shown_this_session: false,
@@ -1399,8 +1403,10 @@ impl App {
                     "Remote reload fast start: deferring persisted transcript for {} until server history",
                     session_id
                 ));
+                app.note_cross_project_attach();
             } else {
                 app.restore_remote_startup_history(session_id);
+                app.note_cross_project_attach();
             }
             if fresh_spawn && !reload_fast_start {
                 crate::logging::info(&format!(

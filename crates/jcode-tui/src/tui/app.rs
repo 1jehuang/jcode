@@ -1554,6 +1554,17 @@ pub struct App {
     history_draft: Option<(String, usize)>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
+    // The directory this client launched in, which is the project the *user* is
+    // sitting in. A session belongs to whatever project it was created in, so this
+    // is deliberately kept separate from `session.working_dir`: after attaching to a
+    // session in another project the two differ, and that difference is the whole
+    // signal for `cross_project_attach_notice`. `None` for an SSH client, whose cwd
+    // is the laptop's and describes nothing about the remote session.
+    client_launch_working_dir: Option<String>,
+    // Whether the cross-project attach notice has already been shown to this user.
+    // A reconnect re-runs remote startup, so without this the same mismatch would
+    // re-announce itself on every reattach.
+    cross_project_attach_notice_shown: bool,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press
     // <key>"). Rendered in its own pop-out color, separate from status_notice,
     // and shown at most once per session.

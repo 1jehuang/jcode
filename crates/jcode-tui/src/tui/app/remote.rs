@@ -205,8 +205,12 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 Ok(()) => {
                     let label = crate::id::extract_session_name(&target_session)
                         .map(|name| name.to_string())
-                        .unwrap_or(target_session);
+                        .unwrap_or_else(|| target_session.clone());
                     app.set_status_notice(format!("Workspace → {}", label));
+                    // An explicit switch is the ordinary case for a session in
+                    // another project, and it is exactly where the user can least afford
+                    // to be surprised about which tree the file and shell tools act on.
+                    app.note_cross_project_attach_for_session(&target_session);
                     return true;
                 }
                 Err(err) => {

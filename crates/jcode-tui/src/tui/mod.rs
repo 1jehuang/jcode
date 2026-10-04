@@ -1835,6 +1835,80 @@ pub(crate) fn resolve_subscribe_metadata(
     (working_dir_str, if selfdev { Some(true) } else { None })
 }
 
+/// The directory this client launched in: the project the *user* is sitting in.
+///
+/// This is the same value `subscribe_metadata` sends to the daemon, kept separately
+/// because it is a different question from "which project does this session belong
+/// to". The daemon refuses to move an existing session to another project, so the two
+/// can legitimately disagree, and when they do the user needs to be told rather than
+/// silently dropped into someone else's repository.
+///
+/// `None` under SSH, where the process cwd is the laptop's and says nothing about the
+/// remote session, and `None` for a client that reports a remote working dir it was
+/// handed instead.
+pub(crate) fn client_launch_working_dir() -> Option<String> {
+    if is_ssh_remote() {
+        return None;
+    }
+    std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+/// One-shot notice shown when this client attaches to a session that belongs to a
+/// different project than the one it launched in.
+///
+/// The attach itself is correct and ordinary: a client reconnecting to a session must
+/// honor the session's project, not the cwd it happens to be sitting in. But the
+/// consequence is that the composer and every file tool now act on the session's
+/// project, not the directory in the user's terminal, and that is invisible unless
+/// something says so. Returns `None` when both sides agree, when either side is
+/// unknown, or for an SSH client.
+///
+/// The comparison is canonicalized so `/repo` and `/repo/.` are not reported as two
+/// different projects, matching the daemon's own comparison.
+pub(crate) fn cross_project_attach_notice(
+    client_launch_dir: Option<&str>,
+    session_working_dir: Option<&str>,
+) -> Option<String> {
+    let client = client_launch_dir?;
+    let session = session_working_dir?;
+    if same_project_dir(client, session) {
+        return None;
+    }
+    Some(format!(
+        "Attached to a session in {session}, not {client}. Tools here act on that project."
+    ))
+}
+
+fn same_project_dir(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        // At least one path cannot be canonicalized, so it no longer exists (or does
+        // not exist yet). Normalize what can be normalized without the filesystem
+        // before giving up, otherwise a trailing separator alone would read as a
+        // different project.
+        _ => trim_trailing_separator(a) == trim_trailing_separator(b),
+    }
+}
+
+/// Drop trailing separators, keeping a bare root such as `/` or `C:\` intact.
+///
+/// Windows treats `C:\` and `C:\repo\` as directories but not `C:\repo\` and `C:\repo`
+/// as equal strings, and neither does any string comparison, so the notice would fire
+/// on the same project.
+fn trim_trailing_separator(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(std::path::is_separator);
+    if trimmed.is_empty() {
+        // The whole path was separators, so it is a root (`/`, `\\`) with nothing left.
+        return path;
+    }
+    trimmed
+}
+
 /// Public wrapper to render a single frame (used by benchmarks/tools).
 pub fn render_frame(frame: &mut Frame<'_>, state: &dyn TuiState) {
     ui::draw(frame, state);
@@ -1922,8 +1996,9 @@ pub fn prewarm_focused_side_panel(
 #[cfg(test)]
 mod tests {
     use super::{
-        CacheTtlInfo, KvCacheProblemKind, connection_type_icon, detect_kv_cache_problem,
-        keyboard_enhancement_flags, resolve_subscribe_metadata, scheduled_notification_text,
+        CacheTtlInfo, KvCacheProblemKind, connection_type_icon, cross_project_attach_notice,
+        detect_kv_cache_problem, keyboard_enhancement_flags, resolve_subscribe_metadata,
+        scheduled_notification_text,
     };
     use crate::ambient::AmbientStatus;
     use crate::tui::info_widget::AmbientWidgetData;
@@ -1957,6 +2032,63 @@ mod tests {
         assert!(super::cache_expected_warm(Some(&timer)));
         timer.is_estimate = true;
         assert!(!super::cache_expected_warm(Some(&timer)));
+    }
+
+    #[test]
+    fn cross_project_attach_notice_names_both_projects() {
+        let notice = cross_project_attach_notice(
+            Some("/client/project"),
+            Some("/server/project"),
+        )
+        .expect("a session in another project must be reported");
+
+        assert!(
+            notice.contains("/client/project"),
+            "the notice must name the project the user launched in: {notice}"
+        );
+        assert!(
+            notice.contains("/server/project"),
+            "the notice must name the project the session belongs to: {notice}"
+        );
+    }
+
+    #[test]
+    fn cross_project_attach_notice_is_quiet_when_the_projects_agree() {
+        // Same project, including a path that differs only by a trailing separator.
+        assert_eq!(
+            cross_project_attach_notice(Some("/repo"), Some("/repo")),
+            None
+        );
+        assert_eq!(
+            cross_project_attach_notice(Some("/repo/"), Some("/repo")),
+            None
+        );
+        assert_eq!(
+            cross_project_attach_notice(Some("/repo"), Some("/repo/")),
+            None
+        );
+    }
+
+    #[test]
+    fn cross_project_attach_notice_stays_quiet_when_either_side_is_unknown() {
+        // A client that cannot name its own project, or a session that has not been
+        // attributed to one, has no disagreement to report. Claiming a cross-project
+        // attach here would be guessing, and a notice that fires for a normal session
+        // is worse than no notice at all.
+        assert_eq!(cross_project_attach_notice(None, Some("/server/project")), None);
+        assert_eq!(cross_project_attach_notice(Some("/client/project"), None), None);
+        assert_eq!(cross_project_attach_notice(None, None), None);
+    }
+
+    #[test]
+    fn cross_project_attach_notice_tolerates_unresolvable_paths() {
+        // A directory that no longer exists cannot be canonicalized on either side, so
+        // the comparison falls back to the literal strings. Two different literal
+        // strings are still reported; equal ones are not.
+        let gone = std::env::temp_dir().join("jcode-cross-project-notice-missing");
+        let gone = gone.to_string_lossy().to_string();
+        assert_eq!(cross_project_attach_notice(Some(&gone), Some(&gone)), None);
+        assert!(cross_project_attach_notice(Some(&gone), Some("/elsewhere")).is_some());
     }
 
     #[test]
