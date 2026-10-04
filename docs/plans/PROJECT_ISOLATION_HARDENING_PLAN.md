@@ -46,11 +46,44 @@ Workaround used for now: verify each touched module in its own process, for exam
 `cargo test -p jcode-app-core --lib comm_ownership`. A real fix belongs in the test
 harness, not in any isolation task.
 
-- **How the rest of this backlog got verified anyway.** Every task above passes with
-  `--test-threads=1` and a module filter, which is also why the workaround is only a
-  nuisance rather than a correctness risk: a wedged run fails loudly with a timeout
-  instead of reporting a green result. The blocker was left alone deliberately, since
-  it lives in `jcode-base` test harness code and predates every task in this file.
+- **Measured, 2026-10-04, and the earlier guess about it was wrong.**
+  A full `cargo test -p jcode-app-core --lib` was run to see this
+  reproduce. It stalls forever: 341 tests report `ok`, 7 fail, and then 12
+  more are named as "has been running for over 60 seconds" and the
+  process never exits. There is no `test result:` line. libtest has no
+  per-test timeout, so a wedged run does *not* fail loudly and does *not*
+  time out; it hangs until killed, and nothing downstream can read a
+  verdict from it. That is why every task here is verified in its own
+  process rather than by trusting a whole-suite run.
+- **The 7 failures are the known pre-existing ones**, the two
+  `restart_snapshot_tests::arm_auto_restore_*` and the five
+  `target_attach_tests::target_subscribe_*`, and are unrelated to this
+  blocker.
+- **Only 4 of the 12 stalled tests take the lock at all.** The rest,
+  including `assign_next_prefers_worker_with_matching_subsystem_`
+  `metadata`, never call `lock_test_env`, which is what identifies the 12
+  as *waiters* rather than the blocker. The four that do are all in
+  `server/client_state_tests.rs`: three `history_reload_recovery_*`
+  tests, which take the lock on a plain `#[test]` and so block a whole OS
+  thread, and `handle_get_history_busy_`
+  `fresh_session_returns_empty_without_waiting`, which is `#[tokio::test]`
+  and carries an explicit `#[expect(clippy::await_holding_lock)]`.
+- **Mechanism: a blocking lock plus a thread-starved runtime.**
+  `storage.rs:28-31` is a `std::sync::Mutex`. It has 769 call expressions
+  across 188 files in 11 crates, and a static scan finds 222 functions that
+  hold the guard across an `.await`. A std mutex blocks the OS thread that
+  waits on it, so once enough threads are parked inside `lock()`, the tokio
+  worker pool cannot make progress even for tests that never touch the
+  lock, and the run deadlocks rather than merely serializing. The cheap
+  workaround does not help: `--test-threads=1` serializes the *tests*, not
+  the lock, so it deadlocks the same way.
+- **Left undone deliberately.** This is test-harness work in
+  `jcode-base` reaching 11 crates, it predates every task in this file, and
+  it is not an isolation bug. The real fix is to stop holding a blocking
+  lock across an await, either by scoping the `JCODE_HOME` override to a
+  critical section or by replacing the std mutex with a file-based or
+  `tokio::sync` lock. That is a change of that size rather than something to
+  smuggle into an isolation commit.
 
 ---
 
