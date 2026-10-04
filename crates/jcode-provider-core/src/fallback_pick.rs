@@ -21,6 +21,7 @@ fn api_method_is_oauth(api_method: &ModelRouteApiMethod) -> bool {
             | ModelRouteApiMethod::OpenAIOAuth
             | ModelRouteApiMethod::CodeAssistOAuth
             | ModelRouteApiMethod::GrokBuild
+            | ModelRouteApiMethod::ClaudeCode { .. }
     )
 }
 

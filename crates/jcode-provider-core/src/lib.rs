@@ -854,6 +854,12 @@ pub enum RuntimeKey {
     RemoteCatalog,
     Current,
     GrokBuild,
+    /// Claude through the local Claude Code CLI. `instance` is `None` for the
+    /// configured default instance (`claude-code`), else `claude-code:<id>`.
+    ClaudeCode {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<String>,
+    },
     /// Catch-all for unrecognized `api_method` strings.
     ///
     /// This must be a struct variant, not `Other(String)`. Serde's internally
@@ -886,6 +892,9 @@ impl RuntimeKey {
             ModelRouteApiMethod::RemoteCatalog => Self::RemoteCatalog,
             ModelRouteApiMethod::Current => Self::Current,
             ModelRouteApiMethod::GrokBuild => Self::GrokBuild,
+            ModelRouteApiMethod::ClaudeCode { instance } => Self::ClaudeCode {
+                instance: instance.clone(),
+            },
             ModelRouteApiMethod::Other(method) => Self::Other {
                 method: method.clone(),
             },
@@ -913,6 +922,7 @@ impl RuntimeKey {
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build".to_string(),
+            Self::ClaudeCode { instance } => claude_code_api_method(instance.as_deref()),
             Self::Other { method } => method.clone(),
         }
     }
@@ -983,6 +993,7 @@ impl RouteSelection {
             RuntimeKey::Bedrock => format!("bedrock:{model}"),
             RuntimeKey::Antigravity => format!("antigravity:{model}"),
             RuntimeKey::GrokBuild => grok_build_model_spec(model),
+            RuntimeKey::ClaudeCode { .. } => claude_code_model_spec(model),
             RuntimeKey::Gemini
             | RuntimeKey::CodeAssistOAuth
             | RuntimeKey::RemoteCatalog
@@ -998,6 +1009,24 @@ impl RouteSelection {
 pub fn grok_build_model_spec(model: &str) -> String {
     let bare = model.strip_prefix("grok-build:").unwrap_or(model).trim();
     format!("grok-build:{bare}")
+}
+
+/// Claude Code routing spec: `claude-opus-4-8` and `claude-code:claude-opus-4-8`
+/// both become `claude-code:claude-opus-4-8`, so `MultiProvider::set_model`
+/// dispatches to the Claude Code runtime and never to native Claude.
+pub fn claude_code_model_spec(model: &str) -> String {
+    let bare = model.trim();
+    let bare = bare.strip_prefix("claude-code:").unwrap_or(bare).trim();
+    format!("claude-code:{bare}")
+}
+
+/// Route api_method for a Claude Code instance: bare `claude-code` for the
+/// default instance, `claude-code:<id>` otherwise.
+pub fn claude_code_api_method(instance: Option<&str>) -> String {
+    match instance.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => format!("claude-code:{id}"),
+        None => "claude-code".to_string(),
+    }
 }
 
 /// OpenRouter catalog id for a bare model: claude models gain an `anthropic/`
@@ -1026,7 +1055,9 @@ pub enum ModelRouteApiMethod {
     OpenAIOAuth,
     OpenAIApiKey,
     OpenRouter,
-    OpenAiCompatible { profile_id: Option<String> },
+    OpenAiCompatible {
+        profile_id: Option<String>,
+    },
     Copilot,
     Cursor,
     Bedrock,
@@ -1035,6 +1066,10 @@ pub enum ModelRouteApiMethod {
     RemoteCatalog,
     Current,
     GrokBuild,
+    /// Claude Code CLI route. `instance` is `None` for the default instance.
+    ClaudeCode {
+        instance: Option<String>,
+    },
     Other(String),
 }
 
@@ -1053,6 +1088,18 @@ impl ModelRouteApiMethod {
     pub fn parse(value: &str) -> Self {
         let trimmed = value.trim();
         let lower = trimmed.to_ascii_lowercase();
+        // Claude Code routes are checked first so the Claude auth alias table
+        // can never swallow them as native Claude OAuth.
+        if lower == "claude-code" {
+            return Self::ClaudeCode { instance: None };
+        }
+        if lower.starts_with("claude-code:") {
+            // Instance ids are case-sensitive slugs: keep the original casing.
+            let instance = trimmed["claude-code:".len()..].trim();
+            return Self::ClaudeCode {
+                instance: (!instance.is_empty()).then(|| instance.to_string()),
+            };
+        }
         // Dual-auth (Anthropic/OpenAI OAuth-vs-API) tokens share one canonical
         // alias table so the route vocabulary never drifts from the runtime/CLI
         // vocabularies. Anything else falls through to the route-only methods.
@@ -1113,6 +1160,20 @@ impl ModelRouteApiMethod {
         matches!(self, Self::Bedrock)
     }
 
+    pub fn is_claude_code(&self) -> bool {
+        matches!(self, Self::ClaudeCode { .. })
+    }
+
+    /// Instance id of a non-default Claude Code route.
+    pub fn claude_code_instance(&self) -> Option<&str> {
+        match self {
+            Self::ClaudeCode {
+                instance: Some(instance),
+            } => Some(instance.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn matches_openai_compatible_profile(&self, provider_id: &str) -> bool {
         self.profile_id()
             .is_some_and(|profile_id| profile_id.eq_ignore_ascii_case(provider_id))
@@ -1141,6 +1202,7 @@ impl ModelRouteApiMethod {
             Self::RemoteCatalog => "remote-catalog".to_string(),
             Self::Current => "current".to_string(),
             Self::GrokBuild => "grok-build-acp".to_string(),
+            Self::ClaudeCode { .. } => "claude-code".to_string(),
             Self::Other(method) => method
                 .split_once(':')
                 .map(|(method, _)| method)
@@ -1832,6 +1894,56 @@ mod tests {
             }
         );
         assert_eq!(selection.provider_label, "NVIDIA NIM");
+    }
+
+    #[test]
+    fn claude_code_routes_round_trip() {
+        assert_eq!(
+            ModelRouteApiMethod::parse("claude-code"),
+            ModelRouteApiMethod::ClaudeCode { instance: None }
+        );
+        assert_eq!(
+            ModelRouteApiMethod::parse("claude-code:Personal"),
+            ModelRouteApiMethod::ClaudeCode {
+                instance: Some("Personal".to_string())
+            }
+        );
+        // The Claude auth alias table must not swallow Claude Code.
+        assert!(!ModelRouteApiMethod::parse("claude-code").is_anthropic_credential_route());
+        assert_eq!(
+            ModelRouteApiMethod::parse("claude"),
+            ModelRouteApiMethod::ClaudeOAuth
+        );
+        assert!(crate::auth_mode::AuthRoute::parse("claude-code").is_none());
+
+        for (api_method, instance) in [("claude-code", None), ("claude-code:work", Some("work"))] {
+            let selection = RouteSelection::from_model_route(&ModelRoute {
+                model: "claude-opus-4-8".to_string(),
+                provider: "Claude Code".to_string(),
+                api_method: api_method.to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+                usage: None,
+            });
+            assert_eq!(
+                selection.runtime_key,
+                RuntimeKey::ClaudeCode {
+                    instance: instance.map(str::to_string)
+                }
+            );
+            assert_eq!(selection.runtime_key.stable_id(), api_method);
+            assert_eq!(selection.routed_model_spec(), "claude-code:claude-opus-4-8");
+            let json = serde_json::to_value(&selection.runtime_key).expect("serialize");
+            let decoded: RuntimeKey = serde_json::from_value(json).expect("deserialize");
+            assert_eq!(decoded, selection.runtime_key);
+        }
+        assert_eq!(
+            claude_code_model_spec("claude-code:claude-opus-4-8"),
+            "claude-code:claude-opus-4-8"
+        );
+        assert_eq!(claude_code_api_method(Some("work")), "claude-code:work");
+        assert_eq!(claude_code_api_method(None), "claude-code");
     }
 
     #[test]

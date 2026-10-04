@@ -11,6 +11,8 @@ pub enum ActiveProvider {
     Cursor,
     Bedrock,
     OpenRouter,
+    /// Claude through the local Claude Code CLI (`claude-code:` routes).
+    ClaudeCode,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -23,6 +25,8 @@ pub struct ProviderAvailability {
     pub cursor: bool,
     pub bedrock: bool,
     pub openrouter: bool,
+    /// The configured Claude Code binary is on PATH.
+    pub claude_code: bool,
     pub copilot_premium_zero: bool,
 }
 
@@ -37,6 +41,7 @@ impl ProviderAvailability {
             ActiveProvider::Cursor => self.cursor,
             ActiveProvider::Bedrock => self.bedrock,
             ActiveProvider::OpenRouter => self.openrouter,
+            ActiveProvider::ClaudeCode => self.claude_code,
         }
     }
 }
@@ -75,6 +80,7 @@ pub fn parse_provider_hint(value: &str) -> Option<ActiveProvider> {
         "cursor" => Some(ActiveProvider::Cursor),
         "bedrock" | "aws-bedrock" | "aws_bedrock" => Some(ActiveProvider::Bedrock),
         "openrouter" => Some(ActiveProvider::OpenRouter),
+        "claude-code" | "claude_code" | "claudecode" => Some(ActiveProvider::ClaudeCode),
         _ => None,
     }
 }
@@ -89,6 +95,7 @@ pub fn provider_label(provider: ActiveProvider) -> &'static str {
         ActiveProvider::Cursor => "Cursor",
         ActiveProvider::Bedrock => "AWS Bedrock",
         ActiveProvider::OpenRouter => "OpenRouter",
+        ActiveProvider::ClaudeCode => "Claude Code",
     }
 }
 
@@ -102,6 +109,7 @@ pub fn provider_key(provider: ActiveProvider) -> &'static str {
         ActiveProvider::Cursor => "cursor",
         ActiveProvider::Bedrock => "bedrock",
         ActiveProvider::OpenRouter => "openrouter",
+        ActiveProvider::ClaudeCode => "claude-code",
     }
 }
 
@@ -115,6 +123,7 @@ pub fn provider_from_model_key(key: &str) -> Option<ActiveProvider> {
         "cursor" => Some(ActiveProvider::Cursor),
         "bedrock" => Some(ActiveProvider::Bedrock),
         "openrouter" => Some(ActiveProvider::OpenRouter),
+        "claude-code" => Some(ActiveProvider::ClaudeCode),
         _ => None,
     }
 }
@@ -141,6 +150,11 @@ pub fn cli_provider_arg_for_session_key(key: &str) -> Option<&'static str> {
         .split_once(':')
         .map(|(prefix, _rest)| prefix)
         .unwrap_or(normalized.as_str());
+    // Claude Code is a CLI-backed runtime, not a Claude auth mode. Check it
+    // before the dual-auth alias table so it can never resolve to native Claude.
+    if base == "claude-code" {
+        return Some("claude-code");
+    }
     // Dual-auth (Anthropic/OpenAI OAuth-vs-API) keys share one canonical alias
     // table, so the CLI arg never drifts from the route/runtime vocabularies.
     if let Some(route) = crate::auth_mode::AuthRoute::parse(base) {
@@ -163,7 +177,11 @@ pub fn cli_provider_arg_for_session_key(key: &str) -> Option<&'static str> {
 }
 
 pub fn explicit_model_provider_prefix(model: &str) -> Option<(ActiveProvider, &'static str, &str)> {
-    if let Some(rest) = model.strip_prefix("claude-api:") {
+    // `claude-code:` must be checked before every `claude*:` prefix so Claude
+    // Code routes never fall through to the native Anthropic runtime.
+    if let Some(rest) = model.strip_prefix("claude-code:") {
+        Some((ActiveProvider::ClaudeCode, "claude-code:", rest))
+    } else if let Some(rest) = model.strip_prefix("claude-api:") {
         Some((ActiveProvider::Claude, "claude-api:", rest))
     } else if let Some(rest) = model.strip_prefix("claude-oauth:") {
         Some((ActiveProvider::Claude, "claude-oauth:", rest))
@@ -395,6 +413,18 @@ pub fn fallback_sequence(active: ActiveProvider) -> Vec<ActiveProvider> {
             ActiveProvider::Gemini,
             ActiveProvider::Cursor,
         ],
+        // Claude Code is opt-in: it never appears in another provider's
+        // fallback order, and it does not silently fall back to native Claude
+        // (the user chose the official client on purpose).
+        ActiveProvider::ClaudeCode => vec![
+            ActiveProvider::ClaudeCode,
+            ActiveProvider::OpenAI,
+            ActiveProvider::Copilot,
+            ActiveProvider::Gemini,
+            ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
+            ActiveProvider::OpenRouter,
+        ],
     }
 }
 
@@ -470,6 +500,60 @@ mod tests {
         assert_eq!(cli_provider_arg_for_session_key("remote-catalog"), None);
         assert_eq!(cli_provider_arg_for_session_key("current"), None);
         assert_eq!(cli_provider_arg_for_session_key("totally-unknown"), None);
+    }
+
+    #[test]
+    fn claude_code_is_distinct_from_native_claude() {
+        assert_eq!(
+            cli_provider_arg_for_session_key("claude-code"),
+            Some("claude-code")
+        );
+        assert_eq!(
+            cli_provider_arg_for_session_key("claude-code:personal"),
+            Some("claude-code")
+        );
+        assert_eq!(
+            explicit_model_provider_prefix("claude-code:claude-opus-4-8"),
+            Some((
+                ActiveProvider::ClaudeCode,
+                "claude-code:",
+                "claude-opus-4-8"
+            ))
+        );
+        assert_eq!(
+            explicit_model_provider_prefix("claude:claude-opus-4-8"),
+            Some((ActiveProvider::Claude, "claude:", "claude-opus-4-8"))
+        );
+        assert_eq!(
+            parse_provider_hint("claude-code"),
+            Some(ActiveProvider::ClaudeCode)
+        );
+        assert_eq!(provider_key(ActiveProvider::ClaudeCode), "claude-code");
+        assert_eq!(
+            provider_from_model_key("claude-code"),
+            Some(ActiveProvider::ClaudeCode)
+        );
+        // Opt-in only: never a fallback target for other providers.
+        for provider in [
+            ActiveProvider::Claude,
+            ActiveProvider::OpenAI,
+            ActiveProvider::Copilot,
+            ActiveProvider::Antigravity,
+            ActiveProvider::Gemini,
+            ActiveProvider::Cursor,
+            ActiveProvider::Bedrock,
+            ActiveProvider::OpenRouter,
+        ] {
+            assert!(!fallback_sequence(provider).contains(&ActiveProvider::ClaudeCode));
+        }
+        assert!(!fallback_sequence(ActiveProvider::ClaudeCode).contains(&ActiveProvider::Claude));
+        assert_eq!(
+            auto_default_provider(ProviderAvailability {
+                claude_code: true,
+                ..Default::default()
+            }),
+            ActiveProvider::Claude
+        );
     }
 
     #[test]

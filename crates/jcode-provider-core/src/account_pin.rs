@@ -120,16 +120,22 @@ pub enum AccountProviderKind {
     Claude,
     #[serde(rename = "openai")]
     OpenAi,
+    /// Claude Code CLI instances. Labels are instance ids from
+    /// `[provider.claude_code]`, not stored jcode accounts.
+    #[serde(rename = "claude-code")]
+    ClaudeCode,
 }
 
 impl AccountProviderKind {
-    pub const ALL: [AccountProviderKind; 2] = [Self::Claude, Self::OpenAi];
+    pub const ALL: [AccountProviderKind; 3] = [Self::Claude, Self::OpenAi, Self::ClaudeCode];
 
-    /// Stable key used for session persistence and the wire ("claude" | "openai").
+    /// Stable key used for session persistence and the wire
+    /// ("claude" | "openai" | "claude-code").
     pub fn key(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::OpenAi => "openai",
+            Self::ClaudeCode => "claude-code",
         }
     }
 
@@ -137,11 +143,13 @@ impl AccountProviderKind {
         match key.trim().to_ascii_lowercase().as_str() {
             "claude" | "anthropic" => Some(Self::Claude),
             "openai" | "codex" => Some(Self::OpenAi),
+            "claude-code" | "claude_code" | "claudecode" => Some(Self::ClaudeCode),
             _ => None,
         }
     }
 
     /// Infer the provider from an account label prefix (`claude-fox`, `openai-otter`).
+    /// Claude Code instance ids are free-form, so they are never inferred.
     pub fn from_label(label: &str) -> Option<Self> {
         let label = label.trim();
         if label.starts_with("claude-") {
@@ -175,6 +183,25 @@ mod tests {
         assert_eq!(
             AccountProviderKind::from_label("openai-fox"),
             Some(AccountProviderKind::OpenAi)
+        );
+    }
+
+    #[test]
+    fn claude_code_kind_serde() {
+        let kind = AccountProviderKind::ClaudeCode;
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"claude-code\"");
+        assert_eq!(
+            serde_json::from_str::<AccountProviderKind>("\"claude-code\"").unwrap(),
+            kind
+        );
+        assert_eq!(kind.key(), "claude-code");
+        assert_eq!(
+            AccountProviderKind::from_label("claude-code-x"),
+            Some(AccountProviderKind::Claude)
+        );
+        assert_eq!(
+            AccountProviderKind::from_key("claude"),
+            Some(AccountProviderKind::Claude)
         );
     }
 }
