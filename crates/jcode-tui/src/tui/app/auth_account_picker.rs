@@ -409,13 +409,28 @@ impl App {
             "all" => "Claude + OpenAI",
             "claude" => "Claude",
             "openai" => "OpenAI",
+            super::window_account::CLAUDE_CODE_FAMILY => "Claude Code",
             _ => scope_key.as_str(),
         };
 
         let (models, selected) = match scope_key.as_str() {
-            "all" => self.build_all_inline_account_picker(),
+            "all" => {
+                let (mut models, selected) = self.build_all_inline_account_picker();
+                // Claude Code instances join the overview only when configured
+                // explicitly, so users without the mode see no change.
+                if crate::auth::claude_code::settings().instances.is_empty() {
+                    (models, selected)
+                } else {
+                    let (cc, _) = self.build_claude_code_inline_account_picker();
+                    models.extend(cc);
+                    (models, selected)
+                }
+            }
             "claude" => self.build_claude_inline_account_picker(),
             "openai" => self.build_openai_inline_account_picker(),
+            super::window_account::CLAUDE_CODE_FAMILY => {
+                self.build_claude_code_inline_account_picker()
+            }
             _ => unreachable!(),
         };
 
@@ -452,6 +467,9 @@ impl App {
             return match filter.to_ascii_lowercase().as_str() {
                 "claude" | "anthropic" => Some("claude".to_string()),
                 "openai" => Some("openai".to_string()),
+                "claude-code" | "claude_code" => {
+                    Some(super::window_account::CLAUDE_CODE_FAMILY.to_string())
+                }
                 _ => None,
             };
         }
@@ -469,8 +487,71 @@ impl App {
         {
             "claude" => Some("claude".to_string()),
             "openai" => Some("openai".to_string()),
+            super::window_account::CLAUDE_CODE_FAMILY => {
+                Some(super::window_account::CLAUDE_CODE_FAMILY.to_string())
+            }
             _ => None,
         }
+    }
+
+    /// Claude Code CLI instances from `[provider.claude_code]`: one row per
+    /// instance with the email/plan Claude Code cached for its login. Enter
+    /// pins the instance for this window; logins happen in a terminal.
+    fn build_claude_code_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {
+        let family = super::window_account::CLAUDE_CODE_FAMILY;
+        let instances = crate::auth::claude_code::instances();
+        let active = self
+            .window_account_label(family)
+            .unwrap_or_else(crate::auth::claude_code::default_instance_id);
+        let mut models = Vec::with_capacity(instances.len());
+        let mut selected = 0usize;
+        for instance in &instances {
+            let is_active = instance.id == active;
+            if is_active {
+                selected = models.len();
+            }
+            let identity = crate::auth::claude_code::instance_identity(instance);
+            let email = identity
+                .as_ref()
+                .and_then(|identity| identity.email.as_deref())
+                .map(mask_email)
+                .unwrap_or_else(|| "not signed in".to_string());
+            let plan = identity
+                .as_ref()
+                .and_then(|identity| identity.plan.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let home = instance
+                .resolved_home()
+                .map(|home| home.display().to_string())
+                .unwrap_or_else(|| "default login".to_string());
+            models.push(crate::tui::PickerEntry {
+                name: format!("Claude Code · {}", instance.display_label()),
+                options: vec![crate::tui::PickerOption {
+                    provider: "Claude Code".to_string(),
+                    api_method: self.account_row_badge(family, &instance.id).0.to_string(),
+                    available: true,
+                    detail: format!("{} - plan {} - {} - {}", email, plan, instance.id, home),
+                    estimated_reference_cost_micros: None,
+                }],
+                action: crate::tui::PickerAction::Account(
+                    crate::tui::AccountPickerAction::Switch {
+                        provider_id: family.to_string(),
+                        label: instance.id.clone(),
+                    },
+                ),
+                selected_option: 0,
+                is_current: is_active,
+                is_default: false,
+                is_favorite: false,
+                recommended: false,
+                recommendation_rank: usize::MAX,
+                usage_score: 0,
+                old: false,
+                created_date: None,
+                effort: None,
+            });
+        }
+        (models, selected)
     }
 
     fn build_all_inline_account_picker(&self) -> (Vec<crate::tui::PickerEntry>, usize) {

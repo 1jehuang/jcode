@@ -1084,5 +1084,20 @@ mod tests {
         assert_eq!(account_family("claude-oauth"), Some("claude"));
         assert_eq!(account_family("openai"), Some("openai"));
         assert_eq!(account_family("OpenRouter"), None);
+        // Claude Code is its own family, never native Claude.
+        assert_eq!(account_family("claude-code"), Some(CLAUDE_CODE_FAMILY));
+        assert_eq!(account_family("Claude Code"), Some(CLAUDE_CODE_FAMILY));
+        assert_eq!(
+            AccountProviderKind::from_key(CLAUDE_CODE_FAMILY),
+            Some(AccountProviderKind::ClaudeCode)
+        );
+        assert_eq!(
+            stored_default_label(CLAUDE_CODE_FAMILY),
+            Some(crate::auth::claude_code::default_instance_id())
+        );
+        assert!(label_exists(
+            CLAUDE_CODE_FAMILY,
+            &crate::auth::claude_code::default_instance_id()
+        ));
     }
 }

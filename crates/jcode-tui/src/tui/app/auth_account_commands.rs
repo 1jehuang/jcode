@@ -243,6 +243,12 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                     label: value.to_string(),
                 }
             }
+            "default" if provider.id == "claude-code" => {
+                return Some(Err(format!(
+                    "The default Claude Code instance is [provider.claude_code].default_instance in config.toml (currently {}). Use /account claude-code switch <instance> for this window.",
+                    crate::auth::claude_code::default_instance_id()
+                )));
+            }
             "default" if matches!(provider.id, "claude" | "openai") => {
                 if value.is_empty() {
                     return Some(Err(format!(
@@ -255,9 +261,11 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                     label: value.to_string(),
                 }
             }
-            "unpin" if matches!(provider.id, "claude" | "openai") => AccountCommand::Unpin {
-                provider_id: Some(provider.id.to_string()),
-            },
+            "unpin" if matches!(provider.id, "claude" | "openai" | "claude-code") => {
+                AccountCommand::Unpin {
+                    provider_id: Some(provider.id.to_string()),
+                }
+            }
             "remove" | "rm" | "delete" => {
                 if value.is_empty() {
                     return Some(Err(format!(
@@ -336,7 +344,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                 AccountCommand::SetOpenAiCompatDefaultModel(normalize_clearish_value(value))
             }
             other => {
-                if matches!(provider.id, "claude" | "openai") {
+                if matches!(provider.id, "claude" | "openai" | "claude-code") {
                     return Some(Ok(AccountCommand::UseInWindow {
                         provider_id: provider.id.to_string(),
                         label: other.to_string(),
@@ -401,7 +409,7 @@ fn parse_unpin(value: &str) -> Result<AccountCommand, String> {
             Some(kind) => Ok(AccountCommand::Unpin {
                 provider_id: Some(kind.key().to_string()),
             }),
-            None => Err("Usage: /account unpin [claude|openai]".to_string()),
+            None => Err("Usage: /account unpin [claude|openai|claude-code]".to_string()),
         },
     }
 }
@@ -1219,6 +1227,39 @@ mod tests {
         assert!(matches!(
             parse_account_command("/account openai doctor"),
             Some(Ok(AccountCommand::Doctor { provider_id: Some(provider_id) })) if provider_id == "openai"
+        ));
+    }
+
+    #[test]
+    fn parse_claude_code_instance_commands() {
+        assert!(matches!(
+            parse_account_command("/account claude-code switch personal"),
+            Some(Ok(AccountCommand::UseInWindow { provider_id, label }))
+                if provider_id == "claude-code" && label == "personal"
+        ));
+        assert!(matches!(
+            parse_account_command("/account claude-code personal"),
+            Some(Ok(AccountCommand::UseInWindow { provider_id, label }))
+                if provider_id == "claude-code" && label == "personal"
+        ));
+        assert!(matches!(
+            parse_account_command("/account claude-code"),
+            Some(Ok(AccountCommand::OpenOverlay { provider_filter: Some(filter) }))
+                if filter == "claude-code"
+        ));
+        assert!(matches!(
+            parse_account_command("/account claude-code unpin"),
+            Some(Ok(AccountCommand::Unpin { provider_id: Some(provider_id) }))
+                if provider_id == "claude-code"
+        ));
+        assert!(matches!(
+            parse_account_command("/account unpin claude-code"),
+            Some(Ok(AccountCommand::Unpin { provider_id: Some(provider_id) }))
+                if provider_id == "claude-code"
+        ));
+        assert!(matches!(
+            parse_account_command("/account claude-code default personal"),
+            Some(Err(_))
         ));
     }
 

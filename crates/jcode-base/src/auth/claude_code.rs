@@ -70,6 +70,50 @@ pub fn resolve_pin(pin: &AccountPin) -> Option<String> {
     instance(&pin.label).map(|instance| instance.id)
 }
 
+/// Non-secret identity Claude Code caches for an instance's login.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstanceIdentity {
+    pub email: Option<String>,
+    /// Organization / plan type as Claude Code reports it (e.g. `claude_max`).
+    pub plan: Option<String>,
+    pub organization: Option<String>,
+}
+
+/// `.claude.json` of an instance: `<home>/.claude.json` for instances with
+/// their own `CLAUDE_CONFIG_DIR`, else `~/.claude.json`.
+pub fn instance_profile_path(instance: &ClaudeCodeInstanceConfig) -> Option<std::path::PathBuf> {
+    match instance.resolved_home() {
+        Some(home) => Some(home.join(".claude.json")),
+        None => dirs::home_dir().map(|home| home.join(".claude.json")),
+    }
+}
+
+/// Read the cached account profile (`oauthAccount`) of an instance. Only
+/// display fields are read; tokens live elsewhere and are never touched.
+pub fn instance_identity(instance: &ClaudeCodeInstanceConfig) -> Option<InstanceIdentity> {
+    let raw = std::fs::read_to_string(instance_profile_path(instance)?).ok()?;
+    parse_instance_identity(&raw)
+}
+
+fn parse_instance_identity(raw: &str) -> Option<InstanceIdentity> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let account = value.get("oauthAccount")?;
+    let field = |key: &str| {
+        account
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let identity = InstanceIdentity {
+        email: field("emailAddress"),
+        plan: field("organizationType").or_else(|| field("billingType")),
+        organization: field("organizationName"),
+    };
+    (identity != InstanceIdentity::default()).then_some(identity)
+}
+
 /// Command that logs an instance in, for user-facing hints.
 pub fn login_hint(instance: &ClaudeCodeInstanceConfig) -> String {
     let binary = binary();
@@ -89,5 +133,18 @@ mod tests {
         let pin = pin_for_label(&id).expect("default instance");
         assert_eq!(resolve_pin(&pin), Some(id));
         assert!(pin_for_label("definitely-not-configured-xyz").is_err());
+    }
+
+    #[test]
+    fn identity_reads_only_display_fields() {
+        let identity = parse_instance_identity(
+            r#"{"oauthAccount":{"emailAddress":"a@b.c","organizationType":"claude_max","organizationName":"Org"},"other":1}"#,
+        )
+        .expect("identity");
+        assert_eq!(identity.email.as_deref(), Some("a@b.c"));
+        assert_eq!(identity.plan.as_deref(), Some("claude_max"));
+        assert_eq!(identity.organization.as_deref(), Some("Org"));
+        assert_eq!(parse_instance_identity(r#"{"numStartups":3}"#), None);
+        assert_eq!(parse_instance_identity("not json"), None);
     }
 }
