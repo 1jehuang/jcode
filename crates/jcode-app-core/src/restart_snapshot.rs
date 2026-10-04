@@ -186,7 +186,17 @@ pub fn restore_snapshot(exe: &Path) -> Result<RestoreSnapshotResult> {
     let mut outcomes = Vec::new();
 
     for session in &snapshot.sessions {
-        let cwd = resolve_session_cwd(session.working_dir.as_deref());
+        // A session with no recorded project has no directory to restore it in.
+        // Falling back to the daemon's own cwd would reopen that session in an
+        // arbitrary repository, so report it as not launched instead (P2.5).
+        let Some(cwd) = resolve_session_cwd(session.working_dir.as_deref()) else {
+            outcomes.push(RestoreLaunchOutcome {
+                session: session.clone(),
+                launched: false,
+                command: restore_command_display(exe, session),
+            });
+            continue;
+        };
         let context = crate::session_launch::SessionSpawnContext::kind("restart");
         let launched = if session.is_selfdev {
             crate::session_launch::spawn_selfdev_in_new_terminal_with_context(
@@ -215,12 +225,13 @@ pub fn restore_snapshot(exe: &Path) -> Result<RestoreSnapshotResult> {
     Ok(RestoreSnapshotResult { snapshot, outcomes })
 }
 
-fn resolve_session_cwd(configured: Option<&str>) -> PathBuf {
+/// The directory a snapshotted session should be restored in, or `None` when it
+/// recorded none. `None` is never the daemon's cwd: one daemon restores sessions
+/// from many projects, so its own directory is meaningless to all of them (P2.5).
+fn resolve_session_cwd(configured: Option<&str>) -> Option<PathBuf> {
     configured
         .filter(|path| Path::new(path).is_dir())
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn shell_escape(text: &str) -> String {

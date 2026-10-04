@@ -72,9 +72,19 @@ fn create_visible_spawn_session(
     effort_override: Option<&str>,
     selfdev_requested: bool,
 ) -> anyhow::Result<(String, PathBuf)> {
+    // No directory means the spawner has no project, so the worker has none
+    // either. Falling back to the daemon's cwd would launch the window inside
+    // whichever repository happened to start this process (P2.5).
     let cwd = working_dir
+        .filter(|dir| !dir.trim().is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot spawn a session with no working directory: the spawner has no \
+                 project, so there is no directory to open the session in. Pass an explicit \
+                 working_dir, or spawn from a session that has one."
+            )
+        })?;
 
     let mut session = Session::create(None, None);
     session.working_dir = Some(cwd.display().to_string());

@@ -1,6 +1,7 @@
 use super::{
-    AUTO_RESTORE_CRASH_MAX_AGE_HOURS, arm_auto_restore_from_recent_crashes,
-    capture_current_snapshot, clear_snapshot, load_snapshot, save_current_snapshot,
+    AUTO_RESTORE_CRASH_MAX_AGE_HOURS, RestartSnapshot, RestartSnapshotSession,
+    arm_auto_restore_from_recent_crashes, capture_current_snapshot, clear_snapshot, load_snapshot,
+    resolve_session_cwd, save_current_snapshot,
 };
 use crate::session::Session;
 use chrono::Utc;
@@ -176,4 +177,103 @@ fn arm_auto_restore_from_recent_crashes_ignores_old_crashes() {
             .is_none()
     );
     assert!(load_snapshot().is_err());
+}
+
+/// A session with no recorded project has no directory to restore it in. The
+/// daemon's own cwd belongs to whichever project started it, so resolving one
+/// would reopen the session in an unrelated repository (P2.5).
+///
+/// Positive control: a session that *did* record a directory still resolves to
+/// it, so the negative cannot pass because the helper always returns `None`.
+#[test]
+fn resolve_session_cwd_without_a_configured_dir_is_none_not_the_daemon_cwd() {
+    let repo = tempfile::TempDir::new().expect("repo dir");
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    // Point the process cwd at a real repo so the pre-fix fallback would resolve
+    // to it and be observable.
+    std::env::set_current_dir(repo.path()).expect("set cwd");
+
+    assert_eq!(
+        resolve_session_cwd(None),
+        None,
+        "a session with no working dir must not resolve to the daemon cwd: {:?}",
+        repo.path()
+    );
+
+    // Positive control.
+    let configured = tempfile::TempDir::new().expect("configured dir");
+    assert_eq!(
+        resolve_session_cwd(Some(&configured.path().to_string_lossy().to_string())),
+        Some(configured.path().to_path_buf()),
+        "a session that recorded a directory must still resolve to it"
+    );
+
+    // A recorded directory that no longer exists is not silently replaced either.
+    let gone = repo.path().join("removed");
+    std::fs::create_dir_all(&gone).expect("create dir");
+    std::fs::remove_dir_all(&gone).expect("remove dir");
+    assert_eq!(
+        resolve_session_cwd(Some(&gone.to_string_lossy().to_string())),
+        None,
+        "a recorded directory that is gone must not fall back to the daemon cwd"
+    );
+
+    std::env::set_current_dir(prev_cwd).expect("restore cwd");
+}
+
+/// `restore_snapshot` must not launch a projectless session at all. This drives
+/// the real restore loop rather than the helper, per the P1.3 lesson: a helper
+/// test cannot prove the call site consults it.
+#[test]
+fn restore_snapshot_does_not_launch_a_session_with_no_working_dir() {
+    let _guard = TestEnvGuard::new().expect("setup test env");
+
+    let repo = tempfile::TempDir::new().expect("repo dir");
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(repo.path()).expect("set cwd");
+
+    let snapshot = RestartSnapshot {
+        version: 1,
+        created_at: Utc::now(),
+        auto_restore_on_next_start: false,
+        sessions: vec![
+            RestartSnapshotSession {
+                session_id: "session_projectless".to_string(),
+                display_name: "Projectless".to_string(),
+                working_dir: None,
+                is_selfdev: false,
+            },
+            RestartSnapshotSession {
+                session_id: "session_with_dir".to_string(),
+                display_name: "With dir".to_string(),
+                working_dir: Some(repo.path().to_string_lossy().to_string()),
+                is_selfdev: false,
+            },
+        ],
+    };
+    super::write_snapshot(&snapshot).expect("write snapshot");
+
+    let result = super::restore_snapshot(std::path::Path::new("jcode")).expect("restore snapshot");
+
+    let projectless = result
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.session.session_id == "session_projectless")
+        .expect("projectless session outcome");
+    assert!(
+        !projectless.launched,
+        "a session with no working dir must not be launched into the daemon's cwd"
+    );
+
+    let with_dir = result
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.session.session_id == "session_with_dir")
+        .expect("session with dir outcome");
+    assert!(
+        with_dir.launched,
+        "positive control: a session that recorded a directory must still be launched"
+    );
+
+    std::env::set_current_dir(prev_cwd).expect("restore cwd");
 }
