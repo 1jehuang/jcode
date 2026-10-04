@@ -573,6 +573,179 @@ pub async fn revoke_current_key(
     })
 }
 
+/// Usage-billing state for the current period, from `GET /v1/billing`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct BillingStatus {
+    #[serde(default)]
+    pub monthly_hard_cap_cents: u64,
+    #[serde(default)]
+    pub activation: BillingActivation,
+    #[serde(default)]
+    pub promotional_credit: BillingCredit,
+    #[serde(default)]
+    pub period: BillingPeriod,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct BillingActivation {
+    #[serde(default)]
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct BillingCredit {
+    #[serde(default)]
+    pub original_microusd: u64,
+    #[serde(default)]
+    pub remaining_microusd: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct BillingPeriod {
+    #[serde(default)]
+    pub resets_at: Option<String>,
+    #[serde(default)]
+    pub billable_microusd: u64,
+    #[serde(default)]
+    pub remaining_cap_microusd: u64,
+}
+
+impl BillingStatus {
+    pub fn monthly_hard_cap_usd(&self) -> f64 {
+        self.monthly_hard_cap_cents as f64 / 100.0
+    }
+
+    pub fn billable_usd(&self) -> f64 {
+        self.period.billable_microusd as f64 / 1_000_000.0
+    }
+
+    pub fn promotional_credit_usd(&self) -> f64 {
+        self.promotional_credit.remaining_microusd as f64 / 1_000_000.0
+    }
+}
+
+#[derive(Deserialize)]
+struct BillingEnvelope {
+    billing: BillingStatus,
+}
+
+#[derive(Deserialize)]
+struct PortalWire {
+    url: String,
+}
+
+async fn account_response_body(
+    response: reqwest::Response,
+) -> std::result::Result<String, AccountApiError> {
+    let status = response.status();
+    let body = response.text().await.map_err(offline)?;
+    if status.is_success() {
+        return Ok(body);
+    }
+    Err(match status {
+        StatusCode::UNAUTHORIZED => AccountApiError::Unauthorized,
+        StatusCode::FORBIDDEN => AccountApiError::Forbidden,
+        _ => AccountApiError::Http {
+            status: status.as_u16(),
+            code: error_code(&body),
+        },
+    })
+}
+
+/// Fetch usage billing (monthly hard cap, period spend, credit).
+pub async fn fetch_billing_with(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> std::result::Result<BillingStatus, AccountApiError> {
+    let response = client
+        .get(endpoint_url(api_base, "billing"))
+        .bearer_auth(api_key)
+        .timeout(ME_FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(offline)?;
+    let body = account_response_body(response).await?;
+    serde_json::from_str::<BillingEnvelope>(&body)
+        .map(|envelope| envelope.billing)
+        .map_err(|_| AccountApiError::InvalidResponse("malformed /v1/billing JSON"))
+}
+
+/// Set the monthly spending hard cap, in whole cents. Returns the new state.
+pub async fn set_monthly_hard_cap_with(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    cents: u64,
+) -> std::result::Result<BillingStatus, AccountApiError> {
+    let response = client
+        .put(endpoint_url(api_base, "billing/hard-cap"))
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({ "monthly_hard_cap_cents": cents }))
+        .timeout(ME_FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(offline)?;
+    let body = account_response_body(response).await?;
+    serde_json::from_str::<BillingEnvelope>(&body)
+        .map(|envelope| envelope.billing)
+        .map_err(|_| AccountApiError::InvalidResponse("malformed /v1/billing/hard-cap JSON"))
+}
+
+/// Create a short-lived Stripe billing portal session (payment method,
+/// invoices, cancellation). Only `https://` URLs are returned.
+pub async fn billing_portal_url_with(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+) -> std::result::Result<String, AccountApiError> {
+    let response = client
+        .post(endpoint_url(api_base, "billing/portal"))
+        .bearer_auth(api_key)
+        .timeout(DEVICE_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(offline)?;
+    let body = account_response_body(response).await?;
+    let url = serde_json::from_str::<PortalWire>(&body)
+        .map_err(|_| AccountApiError::InvalidResponse("malformed billing portal JSON"))?
+        .url;
+    if !url.starts_with("https://") {
+        return Err(AccountApiError::InvalidResponse(
+            "billing portal URL was not https",
+        ));
+    }
+    Ok(url)
+}
+
+/// How a sign-out finished. Local credentials are always cleared first-class;
+/// remote revocation is best effort.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignOutOutcome {
+    Revoked,
+    AlreadyRevoked,
+    NoCredential,
+    /// Local credentials were cleared but the key could not be revoked.
+    LocalOnly(String),
+}
+
+/// Revoke the current key (best effort) and clear local credentials.
+pub async fn sign_out_current_account(client: &reqwest::Client) -> Result<SignOutOutcome> {
+    let api_key = subscription_catalog::configured_api_key();
+    let remote = match api_key.as_deref() {
+        Some(key) => Some(revoke_current_key(client, &configured_api_base(), key).await),
+        None => None,
+    };
+    subscription_catalog::clear_account_credentials()?;
+    let _ = subscription_catalog::store_cached_tier(None);
+    Ok(match remote {
+        None => SignOutOutcome::NoCredential,
+        Some(Ok(())) => SignOutOutcome::Revoked,
+        Some(Err(AccountApiError::Unauthorized)) => SignOutOutcome::AlreadyRevoked,
+        Some(Err(error)) => SignOutOutcome::LocalOnly(error.to_string()),
+    })
+}
+
 /// Poll `/v1/me` after a successful token exchange until a paid plan becomes
 /// active or a clear terminal/recovery state is reached.
 pub async fn poll_for_paid_activation(
@@ -867,5 +1040,58 @@ mod tests {
             .await
             .expect_err("already revoked");
         assert_eq!(revoke_error, AccountApiError::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn billing_cap_and_portal_parse_and_reject_unsafe_urls() {
+        let billing = r#"{"billing":{"currency":"usd","activation":{"state":"active"},
+            "promotional_credit":{"original_microusd":5000000,"remaining_microusd":2500000},
+            "monthly_hard_cap_cents":5000,
+            "period":{"resets_at":"2026-11-01T00:00:00.000Z","billable_microusd":12340000,"remaining_cap_microusd":37660000}}}"#;
+        let capped = billing.replace("5000,", "10000,");
+        let base = spawn_server(vec![
+            (200, vec![], billing.to_string()),
+            (200, vec![], capped),
+            (
+                200,
+                vec![],
+                r#"{"url":"https://billing.stripe.com/p/session/x"}"#.into(),
+            ),
+            (200, vec![], r#"{"url":"http://evil.example/"}"#.into()),
+            (
+                409,
+                vec![],
+                r#"{"error":{"code":"no_billing_account"}}"#.into(),
+            ),
+        ]);
+        let client = client();
+        let status = fetch_billing_with(&client, &base, "k")
+            .await
+            .expect("billing");
+        assert_eq!(status.monthly_hard_cap_usd(), 50.0);
+        assert!((status.billable_usd() - 12.34).abs() < 1e-9);
+        assert_eq!(status.promotional_credit_usd(), 2.5);
+        assert_eq!(status.activation.state, "active");
+        let updated = set_monthly_hard_cap_with(&client, &base, "k", 10_000)
+            .await
+            .expect("cap");
+        assert_eq!(updated.monthly_hard_cap_cents, 10_000);
+        assert_eq!(
+            billing_portal_url_with(&client, &base, "k")
+                .await
+                .expect("portal"),
+            "https://billing.stripe.com/p/session/x"
+        );
+        assert!(matches!(
+            billing_portal_url_with(&client, &base, "k").await,
+            Err(AccountApiError::InvalidResponse(_))
+        ));
+        assert_eq!(
+            billing_portal_url_with(&client, &base, "k").await,
+            Err(AccountApiError::Http {
+                status: 409,
+                code: Some("no_billing_account".into())
+            })
+        );
     }
 }
