@@ -3430,6 +3430,37 @@ async fn start_processing_message(
         return;
     }
 
+    // Fork: server-side `/<skill> [prompt]` resolution for ACP clients.
+    // The Desktop composer has no skill picker, so a typed `/name` would
+    // otherwise reach the model as plain text. Resolve against the same
+    // registry the CLI repl uses; only registered names are rewritten so
+    // slash-prefixed ordinary text passes through untouched. Must run after
+    // set_remote_active_skill so an explicit client-picked skill wins.
+    let (content, active_skill) = if active_skill.is_none() {
+        match agent.lock().await.resolve_skill_invocation(&content) {
+            Some((name, prompt)) => {
+                crate::logging::info(&format!(
+                    "Resolved slash skill invocation from message: skill={name}"
+                ));
+                let prompt = prompt.unwrap_or_else(|| format!("Activate the {name} skill."));
+                (prompt, Some(name))
+            }
+            None => (content, None),
+        }
+    } else {
+        (content, active_skill)
+    };
+    if let Some(name) = active_skill.clone()
+        && !agent.lock().await.set_remote_active_skill(Some(name))
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Resolved skill is not installed on the server".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
     *state.client_is_processing = true;
     *state.message_id = Some(id);
     *state.session_id = Some(client_session_id.to_string());
