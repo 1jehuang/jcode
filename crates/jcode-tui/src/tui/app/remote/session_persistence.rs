@@ -55,11 +55,47 @@ where
         .as_deref()
         .or(app.resume_session_id.as_deref())
         .unwrap_or(app.session.id.as_str());
+
+    // A remote session the server has not flushed yet (brand new, or idle and
+    // unsaved) has no snapshot on disk, so `Session::load` returns ENOENT.
+    // That is an ordinary state, not a failure: update the in-memory copy and
+    // let the server own the file when it first writes one. Writing a client
+    // shadow copy here would race the authoritative server snapshot.
+    if !crate::session::session_exists(session_id) {
+        update(&mut app.session);
+        return Ok(());
+    }
+
     let mut session = crate::session::Session::load(session_id)?;
     update(&mut session);
     session.save()?;
     app.session = session;
     Ok(())
+}
+
+/// Persist improve/refactor mode without letting a storage failure end the session.
+///
+/// `/improve` and `/refactor` are ordinary slash commands. Propagating an IO
+/// error from here aborts the whole TUI event loop and drops the user back to
+/// the shell, which is a far worse outcome than a mode flag that survives only
+/// in memory. Report the problem and carry on.
+pub(super) fn persist_improve_mode_or_warn(
+    app: &mut App,
+    mode: Option<crate::session::SessionImproveMode>,
+) {
+    if let Err(error) = persist_remote_session_metadata(app, |session| {
+        session.improve_mode = mode;
+    }) {
+        crate::logging::warn(&format!(
+            "Failed to persist improve mode for this session: {}",
+            error
+        ));
+        app.session.improve_mode = mode;
+        app.push_display_message(DisplayMessage::system(format!(
+            "⚠️ Could not save the improve/refactor mode for this session ({}). Continuing for this session only.",
+            error
+        )));
+    }
 }
 
 pub(super) fn reload_marker_active() -> bool {
