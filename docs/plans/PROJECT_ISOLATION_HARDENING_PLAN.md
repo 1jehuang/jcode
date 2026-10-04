@@ -232,7 +232,7 @@ They are also the cheapest to fix, so do them first.
 
 ### P1.1 - MCP shared pool keys entries by server name only
 
-- [ ] **Status:** pending
+- [x] **Status:** done
 - **Where:**
   - `crates/jcode-base/src/mcp/pool.rs:69-73` resolves the pool's config **once**, from
     the daemon's cwd, via `from_default_config`; the daemon initializes it at
@@ -256,6 +256,44 @@ They are also the cheapest to fix, so do them first.
   matches an existing pool entry may still reuse it.
 - **Test:** in `crates/jcode-base/src/mcp/pool.rs` tests, build two pools-worth of config
   for different dirs, connect both, assert two clients and distinct commands.
+
+**Resolution.** Pool entries are keyed by `PoolKey { scope, name, working_dir }`, where
+`scope` is the project scope key and identity is `scope` + `name` only. `working_dir` is
+carried so the pooled child process is spawned in the right directory, but it is excluded
+from `PartialEq`/`Hash` so it can never affect lookup.
+
+The scope key comes from a new shared helper, `crates/jcode-base/src/project_scope.rs`
+(`project_key` / `optional_project_key`). AGENTS.md requires one shared derivation point per
+concern, and the plan already had two incompatible private copies
+(`trim_trailing_separator` in `crates/jcode-tui/src/tui/mod.rs`, unstable `DefaultHasher`
+`project_hash` in `crates/jcode-base/src/goal.rs`). The helper canonicalizes, strips the
+Windows `\\?\` verbatim prefix, normalizes `UNC\` back to `\\server\share`, trims trailing
+separators while preserving a bare root, case-folds on Windows only, and digests with SHA-256.
+It deliberately does **not** reuse `goal.rs`'s `DefaultHasher` hash; that instability is
+tracked separately as P3.1 and folding it in here would have mixed two backlog items.
+
+`optional_project_key(None)` maps to the literal `"none"` bucket and is never resolved to the
+daemon's cwd, per isolation invariant 1. `McpManager` computes its scope from the per-session
+`project_dir` on every call, so the pool is scoped by the same answer the rest of the session
+uses (invariant 3).
+
+Every unscoped pool entry point gained a `_scoped` sibling rather than being changed in place,
+so the single-argument call sites stay readable; `default_scope()` reproduces the previous
+behavior for them. `begin_connect` now compares whole `PoolKey`s, which is the actual bug:
+it previously returned `Connected` for another project's running process.
+`acquire_handles_scoped` filters by scope and `call_tool_scoped` refuses rather than falling
+back to another scope's entry. `disconnect_all_scoped` tears down only one project's processes
+so a session reload cannot yank another project's servers.
+
+**Tests.** Six new tests in `crates/jcode-base/src/mcp/pool.rs`. The fixture is a stdio MCP
+server that reports its own `cwd:pid` through a `whereami` tool, which is what makes
+"two distinct processes" observable rather than inferred. Verified by reverting `PoolKey`
+identity to name-only: `same_server_name_in_two_projects_gets_two_separate_processes`,
+`disconnecting_one_project_leaves_another_projects_process_running`, and
+`ref_counts_separate_projects_that_share_a_server_name` all fail, and pass again once
+restored. Note that `a_session_cannot_acquire_another_projects_server_handle` passes under the
+flattened key too, because the scope filter in `acquire_handles_scoped` independently blocks
+that path; it is a guard against regression rather than a proof of this fix.
 
 ### P1.2 - `session_search` has no default project scope
 
