@@ -103,17 +103,47 @@ under a whole-suite run.
 
 #### Pre-existing failures, recorded and deliberately not fixed here
 
-Unchanged by the work above, and not isolation bugs.
+Baseline measured after both fixes above: **1410 passing, 27 failing, 12
+ignored, finishing in 104.36s**, with zero "has been running for over 60
+seconds" lines. The 12 ignored tests are gated on live credentials or are local
+benchmarks. None of the 27 failures are isolation bugs, and none are touched by
+this work.
 
-- `restart_snapshot_tests::arm_auto_restore_*` (2): `spawn child: Error { kind:
-  NotFound }`.
-- `client_target_attach_tests::target_subscribe_*` (5): "Subscribe working_dir
-  must be an absolute path".
-- `comm_session_tests::coordinator_identity_falls_back_to_persisted_session_when_agent_busy` (1).
-- `socket_tests::inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead` (1).
-- `tests::background_task_wake_runs_live_session_immediately_when_idle` (1).
-- `util::newest_reload_candidate_integration_tests::*` (2): environment-bound,
-  comparing a running daemon build against released versions.
+- `restart_snapshot` (2)
+  - `restart_snapshot::restart_snapshot_tests::arm_auto_restore_from_recent_crashes_captures_dead_active_sessions`
+  - `restart_snapshot::restart_snapshot_tests::arm_auto_restore_from_recent_crashes_ignores_old_crashes`
+- `server::client_lifecycle` (5)
+  - `server::client_lifecycle::target_attach_tests::target_subscribe_busy_live_agent_uses_member_root_without_waiting`
+  - `server::client_lifecycle::target_attach_tests::target_subscribe_live_root_wins_over_stale_persisted_root`
+  - `server::client_lifecycle::target_attach_tests::target_subscribe_preserves_explicit_directory_and_its_validation`
+  - `server::client_lifecycle::target_attach_tests::target_subscribe_uses_live_unsaved_root_without_changing_it`
+  - `server::client_lifecycle::target_attach_tests::target_subscribe_uses_persisted_root_when_no_live_agent_exists`
+- `server::socket_tests` (1)
+  - `server::socket_tests::inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead`
+- `server::tests` (1)
+  - `server::tests::background_task_wake_runs_live_session_immediately_when_idle`
+- `server::util` (4)
+  - `server::util::newest_reload_candidate_integration_tests::freshly_updated_release_daemon_reports_no_phantom_update`
+  - `server::util::newest_reload_candidate_integration_tests::normal_user_daemon_detects_and_targets_update_after_update`
+  - `server::util::newest_reload_candidate_integration_tests::selfdev_daemon_reloads_into_fresh_release_after_update`
+  - `server::util::newest_reload_candidate_integration_tests::selfdev_pin_is_preserved_when_it_is_the_freshest_build`
+- `tool` (13)
+  - `tool::agentgrep::tests::build_find_args_allows_glob_only_search`
+  - `tool::agentgrep::tests::build_grep_args_drops_match_all_glob`
+  - `tool::agentgrep::tests::build_grep_args_includes_scope_flags`
+  - `tool::agentgrep::tests::build_outline_args_accepts_file_field`
+  - `tool::agentgrep::tests::build_smart_args_uses_terms`
+  - `tool::agentgrep::tests::execute_runs_linked_grep`
+  - `tool::agentgrep::tests::execute_runs_linked_grep_when_path_points_to_file`
+  - `tool::desktop_selfdev::tests::custom_test_executes_from_detected_repo_root`
+  - `tool::desktop_selfdev::tests::screenshot_execution_never_discovers_live_instances`
+  - `tool::desktop_selfdev::tests::screenshot_uses_private_script_with_fresh_build_and_target_output`
+  - `tool::replace::tests::collect_files_filters_by_glob_and_skips_git`
+  - `tool::tests::tool_descriptions_stay_under_token_cap`
+  - `tool::tests::tool_parameter_descriptions_stay_under_token_cap`
+- `update` (1)
+  - `update::update_rate_limit::tests::prefers_retry_after_and_clamps`
+
 - `server/headless.rs` drains every `ServerEvent` into a discard task, so `jcode
   run` and ACP sessions can never observe the P3.2 config-change notice (nor any
   other notification). Only the TUI renders `ServerEvent::Notification`. This is
