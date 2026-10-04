@@ -3,8 +3,8 @@
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": 1299,
     "crates/jcode-app-core/src/agent/turn_execution.rs": 1501,
-    "crates/jcode-app-core/src/agent/turn_loops.rs": 1437,
-    "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 2036,
+    "crates/jcode-app-core/src/agent/turn_loops.rs": 1345,
+    "crates/jcode-app-core/src/agent/turn_streaming_mpsc.rs": 1936,
     "crates/jcode-app-core/src/overnight.rs": 1275,
     "crates/jcode-app-core/src/server.rs": 2426,
     "crates/jcode-app-core/src/server/client_actions.rs": 1308,

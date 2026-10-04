@@ -465,11 +465,9 @@ impl Agent {
     /// forever on the same malformed output.
     pub(crate) const MAX_MALFORMED_TOOL_CALL_ROUNDS: u32 = 3;
 
-    /// Stable prefix for the terminal malformed-tool-call failure. The TUI
-    /// keys its auto-poke disable and resume affordances off this exact
-    /// prefix, so it must not change without coordinating the client side.
-    /// Public so the TUI can reference `crate::agent::Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX`
-    /// instead of hardcoding the string.
+    /// Stable prefix for the terminal malformed-tool-call failure, so clients
+    /// can recognise it. Public so they can reference
+    /// `Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX` instead of hardcoding it.
     pub const MALFORMED_TOOL_CALL_ERROR_PREFIX: &str = "Invalid tool calls:";
 
     /// Bounded recovery for tool rounds in which every call failed schema
