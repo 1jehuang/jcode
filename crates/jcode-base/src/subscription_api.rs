@@ -578,6 +578,9 @@ pub async fn revoke_current_key(
 pub struct BillingStatus {
     #[serde(default)]
     pub monthly_hard_cap_cents: u64,
+    /// Monthly plan in dollars, present only for active subscribers.
+    #[serde(default)]
+    pub plan_usd: Option<u64>,
     #[serde(default)]
     pub activation: BillingActivation,
     #[serde(default)]
@@ -716,6 +719,67 @@ pub async fn billing_portal_url_with(
         ));
     }
     Ok(url)
+}
+
+/// Open Stripe Checkout for a new subscription at `plan_usd` dollars a month
+/// (a multiple of $10). Stripe Checkout offers Link and saved cards, so most
+/// people never retype card details. Only `checkout.stripe.com` URLs are
+/// returned.
+pub async fn start_subscription_checkout_with(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    plan_usd: u64,
+) -> std::result::Result<String, AccountApiError> {
+    let response = client
+        .post(endpoint_url(api_base, "billing/subscribe"))
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({ "plan_usd": plan_usd }))
+        .timeout(DEVICE_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(offline)?;
+    let body = account_response_body(response).await?;
+    let url = serde_json::from_str::<PortalWire>(&body)
+        .map_err(|_| AccountApiError::InvalidResponse("malformed checkout JSON"))?
+        .url;
+    if !url.starts_with("https://checkout.stripe.com/") {
+        return Err(AccountApiError::InvalidResponse(
+            "checkout URL was not Stripe Checkout",
+        ));
+    }
+    Ok(url)
+}
+
+/// Result of an in-place plan switch.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PlanChange {
+    pub plan_usd: u64,
+    pub monthly_limit_usd: f64,
+    /// When the new price applies, e.g. "next_invoice".
+    #[serde(default)]
+    pub effective: String,
+}
+
+/// Switch an active subscription to `plan_usd` dollars a month. Uses the
+/// payment method already on the subscription, so nothing is entered.
+pub async fn change_plan_with(
+    client: &reqwest::Client,
+    api_base: &str,
+    api_key: &str,
+    plan_usd: u64,
+) -> std::result::Result<PlanChange, AccountApiError> {
+    let response = client
+        .post(endpoint_url(api_base, "billing/plan"))
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({ "plan_usd": plan_usd }))
+        .timeout(DEVICE_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(offline)?;
+    let body = account_response_body(response).await?;
+    serde_json::from_str(&body)
+        .map_err(|_| AccountApiError::InvalidResponse("malformed plan change JSON"))
 }
 
 /// How a sign-out finished. Local credentials are always cleared first-class;
@@ -1091,6 +1155,51 @@ mod tests {
             Err(AccountApiError::Http {
                 status: 409,
                 code: Some("no_billing_account".into())
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn checkout_and_plan_change_only_accept_safe_replies() {
+        let base = spawn_server(vec![
+            (
+                200,
+                vec![],
+                r#"{"url":"https://checkout.stripe.com/c/pay/x"}"#.into(),
+            ),
+            (
+                200,
+                vec![],
+                r#"{"url":"https://billing.stripe.com/p/x"}"#.into(),
+            ),
+            (
+                200,
+                vec![],
+                r#"{"plan_usd":100,"monthly_limit_usd":1000,"effective":"next_invoice"}"#.into(),
+            ),
+            (409, vec![], r#"{"error":{"code":"not_subscribed"}}"#.into()),
+        ]);
+        let client = client();
+        assert_eq!(
+            start_subscription_checkout_with(&client, &base, "k", 50)
+                .await
+                .expect("checkout"),
+            "https://checkout.stripe.com/c/pay/x"
+        );
+        assert!(matches!(
+            start_subscription_checkout_with(&client, &base, "k", 50).await,
+            Err(AccountApiError::InvalidResponse(_))
+        ));
+        let change = change_plan_with(&client, &base, "k", 100)
+            .await
+            .expect("plan");
+        assert_eq!(change.plan_usd, 100);
+        assert_eq!(change.effective, "next_invoice");
+        assert_eq!(
+            change_plan_with(&client, &base, "k", 100).await,
+            Err(AccountApiError::Http {
+                status: 409,
+                code: Some("not_subscribed".into())
             })
         );
     }
