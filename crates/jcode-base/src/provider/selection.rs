@@ -96,6 +96,7 @@ impl MultiProvider {
             LoginProviderTarget::Bedrock => Some("bedrock"),
             LoginProviderTarget::OpenAiCompatible(profile) => Some(profile.id),
             LoginProviderTarget::Cursor => Some("cursor"),
+            LoginProviderTarget::ClaudeCode => Some("claude-code"),
             LoginProviderTarget::Copilot => Some("copilot"),
             LoginProviderTarget::Gemini => Some("gemini"),
             LoginProviderTarget::Antigravity => Some("antigravity"),

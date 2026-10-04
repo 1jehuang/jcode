@@ -332,6 +332,9 @@ pub async fn run_login_provider(
             LoginProviderTarget::GrokBuild => login_grok_build_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::ClaudeCode => {
+                login_claude_code_instance_flow(account_label).map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::OpenRouter => {
                 login_openrouter_flow().map(|_| LoginFlowOutcome::Completed)
             }
@@ -444,6 +447,87 @@ pub async fn run_login_provider(
     );
     maybe_persist_default_provider_after_login(provider, &options);
     notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
+    Ok(())
+}
+
+/// Resolved `claude auth login` invocation for one Claude Code instance:
+/// (binary, `CLAUDE_CONFIG_DIR` when the instance has its own home, instance id).
+pub(crate) fn claude_code_login_command(
+    settings: &crate::config::ClaudeCodeConfig,
+    account_label: Option<&str>,
+) -> Result<(String, Option<PathBuf>, String)> {
+    let instance_id = account_label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| settings.resolved_default_instance());
+    let Some(instance) = settings.instance(&instance_id) else {
+        let known = settings
+            .effective_instances()
+            .into_iter()
+            .map(|instance| instance.id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "No Claude Code instance '{instance_id}' in [provider.claude_code]. Known instances: {known}. Add it under [[provider.claude_code.instances]] in config.toml first."
+        );
+    };
+    Ok((
+        settings.resolved_binary(),
+        instance.resolved_home(),
+        instance.id,
+    ))
+}
+
+/// `jcode login --provider claude-code [--account <instance>]`: run the
+/// official `claude auth login` for one configured instance. The CLI owns the
+/// resulting credentials; nothing is copied into jcode's auth store.
+fn login_claude_code_instance_flow(account_label: Option<&str>) -> Result<()> {
+    let settings = crate::auth::claude_code::settings();
+    let (binary, home, instance_id) = claude_code_login_command(&settings, account_label)?;
+    anyhow::ensure!(
+        io::stdin().is_terminal(),
+        "`claude auth login` needs an interactive terminal. Run `jcode login --provider claude-code{}` in a terminal.",
+        account_label
+            .map(|label| format!(" --account {label}"))
+            .unwrap_or_default()
+    );
+    anyhow::ensure!(
+        crate::auth::claude_code::command_available(&binary),
+        "Claude Code CLI `{binary}` was not found. Install Claude Code, or set [provider.claude_code].binary / JCODE_CLAUDE_CODE_BIN."
+    );
+    let mut command = std::process::Command::new(&binary);
+    command.args(["auth", "login"]);
+    match &home {
+        Some(home) => {
+            std::fs::create_dir_all(home)
+                .with_context(|| format!("Failed to create {}", home.display()))?;
+            eprintln!(
+                "Signing in Claude Code instance '{instance_id}' (CLAUDE_CONFIG_DIR={})…",
+                home.display()
+            );
+            command.env("CLAUDE_CONFIG_DIR", home);
+        }
+        None => {
+            eprintln!(
+                "Signing in Claude Code instance '{instance_id}' (Claude Code default login)…"
+            );
+            // The default instance uses the CLI's own default home. Never
+            // inherit a CLAUDE_CONFIG_DIR from this shell into it.
+            command.env_remove("CLAUDE_CONFIG_DIR");
+        }
+    }
+    let status = command
+        .status()
+        .with_context(|| format!("Failed to start `{binary} auth login`"))?;
+    anyhow::ensure!(
+        status.success(),
+        "`{binary} auth login` exited with status {status}"
+    );
+    eprintln!(
+        "Claude Code instance '{instance_id}' is signed in. Pick a `Claude Code` model in /model or run with --provider claude-code."
+    );
+    crate::telemetry::record_auth_success("claude-code", "claude_code_cli");
     Ok(())
 }
 

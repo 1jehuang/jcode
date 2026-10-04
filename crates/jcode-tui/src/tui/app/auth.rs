@@ -566,6 +566,19 @@ impl App {
             crate::provider_catalog::LoginProviderTarget::GrokBuild => {
                 self.start_grok_build_login()
             }
+            crate::provider_catalog::LoginProviderTarget::ClaudeCode => {
+                // The Claude Code CLI owns its login and needs an interactive
+                // terminal; jcode never captures or imports its credentials.
+                crate::telemetry::record_auth_surface_blocked(
+                    provider.id,
+                    provider.auth_kind.label(),
+                );
+                self.push_display_message(DisplayMessage::system(
+                    "Claude Code authentication is owned by the Claude Code CLI. In a terminal run `jcode login --provider claude-code` (add `--account <instance>` for a configured instance), then pick a `Claude Code` model in /model."
+                        .to_string(),
+                ));
+                self.set_status_notice("Claude Code: run claude auth login in a terminal");
+            }
             crate::provider_catalog::LoginProviderTarget::Copilot => self.start_copilot_login(),
             crate::provider_catalog::LoginProviderTarget::Gemini => self.start_gemini_login(),
             crate::provider_catalog::LoginProviderTarget::Antigravity => {

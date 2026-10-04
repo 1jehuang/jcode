@@ -1096,6 +1096,22 @@ pub const GROK_BUILD_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     order: LoginProviderSurfaceOrder::new(Some(100), Some(100), Some(100), Some(100), Some(100)),
 };
 
+/// Claude Code mode runs Claude through the official `claude` CLI, which owns
+/// login and tokens. Separate from `claude` (native jcode OAuth): nothing is
+/// imported into jcode's auth store.
+pub const CLAUDE_CODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "claude-code",
+    display_name: "Claude Code (CLI)",
+    auth_kind: LoginProviderAuthKind::Cli,
+    auth_state_key: LoginProviderAuthStateKey::ClaudeCode,
+    auth_status_method: "Claude Code CLI login",
+    aliases: &["claude-code-cli", "claude_code"],
+    menu_detail: "Claude subscription through the official Claude Code CLI",
+    recommended: false,
+    target: LoginProviderTarget::ClaudeCode,
+    order: LoginProviderSurfaceOrder::new(Some(101), Some(101), Some(101), Some(101), Some(101)),
+};
+
 pub const NVIDIA_NIM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "nvidia-nim",
     display_name: "NVIDIA NIM",
@@ -1283,7 +1299,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1325,6 +1341,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
     MINIMAX_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
     GROK_BUILD_LOGIN_PROVIDER,
+    CLAUDE_CODE_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
     META_MUSE_LOGIN_PROVIDER,

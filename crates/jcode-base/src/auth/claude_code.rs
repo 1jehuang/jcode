@@ -21,7 +21,12 @@ pub fn binary() -> String {
 
 /// True when the configured Claude Code binary exists (on PATH or as a path).
 pub fn binary_available() -> bool {
-    crate::auth::command_exists(&binary())
+    command_available(&binary())
+}
+
+/// True when `command` exists on PATH or as a path.
+pub fn command_available(command: &str) -> bool {
+    crate::auth::command_exists(command)
 }
 
 /// Effective instances (implicit `default` when none are configured).

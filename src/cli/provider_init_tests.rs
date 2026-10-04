@@ -44,6 +44,11 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
     assert_eq!(ProviderChoice::GrokBuild.as_arg_value(), "grok-build");
+    assert_eq!(ProviderChoice::ClaudeCode.as_arg_value(), "claude-code");
+    assert_eq!(
+        login_provider_for_choice(&ProviderChoice::ClaudeCode).map(|provider| provider.id),
+        Some("claude-code")
+    );
     assert_eq!(ProviderChoice::XiaomiMimo.as_arg_value(), "xiaomi-mimo");
     assert_eq!(ProviderChoice::MetaMuse.as_arg_value(), "meta-muse");
     assert_eq!(ProviderChoice::Celeris.as_arg_value(), "celeris");

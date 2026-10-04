@@ -406,3 +406,45 @@ fn scoped_concurrent_begin_and_cancel_never_resurrect_pending_state() {
         assert!(persist_pending_login(&path, &scoped_test_record(), true).is_err());
     }
 }
+
+#[test]
+fn claude_code_login_command_resolves_instance_homes() {
+    let settings = crate::config::ClaudeCodeConfig {
+        binary: "/opt/claude".to_string(),
+        default_instance: "work".to_string(),
+        instances: vec![
+            crate::config::ClaudeCodeInstanceConfig {
+                id: "work".to_string(),
+                ..Default::default()
+            },
+            crate::config::ClaudeCodeInstanceConfig {
+                id: "personal".to_string(),
+                home: Some("/tmp/claude-personal-home".to_string()),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os(crate::config::CLAUDE_CODE_BIN_ENV);
+    crate::env::remove_var(crate::config::CLAUDE_CODE_BIN_ENV);
+
+    let (binary, home, id) = claude_code_login_command(&settings, None).unwrap();
+    assert_eq!(binary, "/opt/claude");
+    assert_eq!(home, None, "default instance uses the CLI default login");
+    assert_eq!(id, "work");
+
+    let (_, home, id) = claude_code_login_command(&settings, Some("personal")).unwrap();
+    assert_eq!(
+        home,
+        Some(std::path::PathBuf::from("/tmp/claude-personal-home"))
+    );
+    assert_eq!(id, "personal");
+
+    let err = claude_code_login_command(&settings, Some("ghost")).unwrap_err();
+    assert!(err.to_string().contains("work, personal"), "{err}");
+
+    if let Some(previous) = previous {
+        crate::env::set_var(crate::config::CLAUDE_CODE_BIN_ENV, previous);
+    }
+}

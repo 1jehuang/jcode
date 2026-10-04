@@ -423,6 +423,7 @@ impl AuthStatus {
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
             || self.grok_build == AuthState::Available
+            || self.claude_code == AuthState::Available
             || self.openai_compatible_any == AuthState::Available
     }
 
@@ -460,6 +461,7 @@ impl AuthStatus {
                 ("gemini", self.gemini.label().to_string()),
                 ("cursor", self.cursor.label().to_string()),
                 ("grok_build", self.grok_build.label().to_string()),
+                ("claude_code", self.claude_code.label().to_string()),
             ],
         );
     }
@@ -493,6 +495,7 @@ impl AuthStatus {
             LoginProviderAuthStateKey::Gemini => self.gemini,
             LoginProviderAuthStateKey::Cursor => self.cursor,
             LoginProviderAuthStateKey::GrokBuild => self.grok_build,
+            LoginProviderAuthStateKey::ClaudeCode => self.claude_code,
             LoginProviderAuthStateKey::Google => self.google,
         }
     }
@@ -558,6 +561,7 @@ impl AuthStatus {
                 }
             }
             crate::provider_catalog::LoginProviderTarget::GrokBuild => self.grok_build,
+            crate::provider_catalog::LoginProviderTarget::ClaudeCode => self.claude_code,
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 if crate::provider_catalog::openai_compatible_profile_is_configured(profile) {
                     AuthState::Available
@@ -634,6 +638,13 @@ impl AuthStatus {
                     "Grok CLI subscription login (xAI OIDC, auto-refreshed)".to_string()
                 } else {
                     "not configured (run `jcode login --provider grok-build`)".to_string()
+                }
+            }
+            crate::provider_catalog::LoginProviderTarget::ClaudeCode => {
+                if self.claude_code == AuthState::Available {
+                    "Claude Code CLI installed; its own login is used at request time".to_string()
+                } else {
+                    "Claude Code CLI (`claude`) not found; install it or set [provider.claude_code].binary".to_string()
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
@@ -860,6 +871,21 @@ impl AuthStatus {
                     AuthValidationMethod::PresenceCheck,
                 )
             }
+            crate::provider_catalog::LoginProviderTarget::ClaudeCode => (
+                if state == AuthState::Available {
+                    AuthCredentialSource::LocalCliSession
+                } else {
+                    AuthCredentialSource::None
+                },
+                if state == AuthState::Available {
+                    "Claude Code CLI login (credential remains owned by Claude Code)".to_string()
+                } else {
+                    "Claude Code CLI unavailable".to_string()
+                },
+                AuthExpiryConfidence::Unknown,
+                AuthRefreshSupport::ExternalManaged,
+                AuthValidationMethod::CommandProbe,
+            ),
             crate::provider_catalog::LoginProviderTarget::GrokBuild => (
                 if state == AuthState::Available {
                     AuthCredentialSource::LocalCliSession
@@ -1025,6 +1051,13 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
     });
     record_auth_probe_step(&mut timings, "grok_build", || {
         status.grok_build = if grok_build::has_cached_login() {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        }
+    });
+    record_auth_probe_step(&mut timings, "claude_code", || {
+        status.claude_code = if claude_code::binary_available() {
             AuthState::Available
         } else {
             AuthState::NotConfigured
@@ -1346,6 +1379,21 @@ fn assessment_for_key(
                 AuthValidationMethod::CompositeProbe,
             )
         }
+        LoginProviderAuthStateKey::ClaudeCode => (
+            if state == AuthState::Available {
+                AuthCredentialSource::LocalCliSession
+            } else {
+                AuthCredentialSource::None
+            },
+            if state == AuthState::Available {
+                "Claude Code CLI login".to_string()
+            } else {
+                "Claude Code CLI unavailable".to_string()
+            },
+            AuthExpiryConfidence::Unknown,
+            AuthRefreshSupport::ExternalManaged,
+            AuthValidationMethod::CommandProbe,
+        ),
         LoginProviderAuthStateKey::GrokBuild => (
             if state == AuthState::Available {
                 AuthCredentialSource::LocalCliSession

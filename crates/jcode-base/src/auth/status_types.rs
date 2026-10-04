@@ -48,6 +48,10 @@ pub struct AuthStatus {
     pub cursor: AuthState,
     /// Grok Build CLI is installed. Runtime auth is delegated to its cached login.
     pub grok_build: AuthState,
+    /// Claude Code CLI binary is installed. The CLI owns its login; jcode
+    /// never reads those credentials.
+    #[serde(default)]
+    pub claude_code: AuthState,
     /// Any OpenAI-compatible catalog profile (Cerebras, Groq, ...) has usable
     /// credentials. These have no dedicated field and, since e0796a51c, no
     /// longer count toward the native `openrouter` slot.

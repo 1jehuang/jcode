@@ -818,6 +818,9 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
         "grok-build" => {
             return matches!(api_method, crate::provider::ModelRouteApiMethod::GrokBuild);
         }
+        "claude-code" => {
+            return api_method.is_claude_code();
+        }
         "azure-openai" => {
             // Azure OpenAI reuses the OpenRouter transport (configured via Azure
             // env), so its routes carry the `openrouter` api_method while keeping
@@ -914,6 +917,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "openrouter" => Some("openrouter"),
         "jcode" | "subscription" | "jcode-subscription" => Some("jcode"),
         "grok-build" => Some("grok-build"),
+        "claude-code" | "claude_code" | "claude-code-cli" => Some("claude-code"),
         "bedrock" | "aws-bedrock" | "aws_bedrock" => Some("bedrock"),
         "cursor" => Some("cursor"),
         "copilot" => Some("copilot"),
@@ -1176,6 +1180,7 @@ fn direct_provider_activation(provider_id: &str) -> Option<ProviderActivation> {
         "gemini" => (RuntimeProviderId::Gemini, ActiveProvider::Gemini),
         "antigravity" => (RuntimeProviderId::Antigravity, ActiveProvider::Antigravity),
         "grok-build" => (RuntimeProviderId::GrokBuild, ActiveProvider::OpenRouter),
+        "claude-code" => (RuntimeProviderId::ClaudeCode, ActiveProvider::ClaudeCode),
         _ => return None,
     };
     Some(ProviderActivation::initial(runtime_id, active))
@@ -1202,6 +1207,7 @@ pub fn model_switch_request_for_provider_id(
         Some("openrouter") => format!("openrouter:{}", model),
         Some("jcode") => model.to_string(),
         Some("grok-build") => crate::provider::grok_build_model_spec(model),
+        Some("claude-code") => crate::provider::claude_code_model_spec(model),
         Some("bedrock") => format!("bedrock:{}", model),
         Some("cursor") => format!("cursor:{}", model),
         Some("copilot") => format!("copilot:{}", model),
@@ -1561,6 +1567,9 @@ mod tests {
                 }
                 crate::provider_catalog::LoginProviderTarget::GrokBuild => {
                     Some(("grok-build", "grok-build", "openrouter", "grok-build"))
+                }
+                crate::provider_catalog::LoginProviderTarget::ClaudeCode => {
+                    Some(("claude-code", "claude-code", "claude-code", "claude-code"))
                 }
                 crate::provider_catalog::LoginProviderTarget::Claude => {
                     Some(("claude", "claude", "claude", "claude-oauth"))
