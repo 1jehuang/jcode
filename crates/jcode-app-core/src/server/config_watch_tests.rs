@@ -16,18 +16,39 @@ use crate::env;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
-/// Redirect `JCODE_HOME` at a temp dir for the duration of one test.
+/// Serializes every test that redirects the process-global `JCODE_HOME`.
+///
+/// `JCODE_HOME` and the config path derived from it are process-wide, so two
+/// such tests alive at once means one test's `remove()` unlinks the other
+/// test's config and both watch the wrong file. Nothing here is per-test
+/// recoverable: the failure surfaces as a missing or spurious config-change
+/// report, far from the line that caused it. This mutex is the same one every
+/// other `JCODE_HOME`-touching test in the crate takes.
+///
+/// `TempHome` takes this rather than the lock, so the critical section cannot
+/// be forgotten when a test is added, and so the two-home test below can build
+/// a second home without deadlocking against itself.
+struct TestEnv(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl TestEnv {
+    fn new() -> Self {
+        Self(crate::storage::lock_test_env())
+    }
+}
+
+/// Redirects `JCODE_HOME` at a temp dir for as long as `env` is alive.
 ///
 /// Restores the previous value on drop, including on panic, so a failing
 /// assertion cannot leave the developer's real `~/.jcode` redirected for the
 /// rest of the test binary.
-struct TempHome {
+struct TempHome<'a> {
+    _env: &'a TestEnv,
     _dir: tempfile::TempDir,
     previous: Option<std::ffi::OsString>,
 }
 
-impl TempHome {
-    fn new() -> Self {
+impl<'a> TempHome<'a> {
+    fn new(env: &'a TestEnv) -> Self {
         let dir = tempfile::tempdir().expect("create temp JCODE_HOME");
         let previous = std::env::var_os("JCODE_HOME");
         env::set_var("JCODE_HOME", dir.path());
@@ -35,6 +56,7 @@ impl TempHome {
         // so a stale cache would point these tests at the real config file.
         crate::config::Config::invalidate_cache();
         Self {
+            _env: env,
             _dir: dir,
             previous,
         }
@@ -52,7 +74,7 @@ impl TempHome {
     }
 }
 
-impl Drop for TempHome {
+impl Drop for TempHome<'_> {
     fn drop(&mut self) {
         match &self.previous {
             Some(value) => env::set_var("JCODE_HOME", value),
@@ -94,7 +116,8 @@ fn member(session_id: &str, event_tx: mpsc::UnboundedSender<ServerEvent>) -> Swa
 
 #[test]
 fn a_setting_change_is_reported_and_names_the_key() {
-    let home = TempHome::new();
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
     home.write("[display]\ncentered = false\n");
 
     let mut watch = ConfigWatch::new();
@@ -115,7 +138,8 @@ fn a_setting_change_is_reported_and_names_the_key() {
 
 #[test]
 fn one_edit_is_reported_once_and_not_repeated_on_later_ticks() {
-    let home = TempHome::new();
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
     home.write("[display]\ncentered = false\n");
 
     let mut watch = ConfigWatch::new();
@@ -133,7 +157,8 @@ fn one_edit_is_reported_once_and_not_repeated_on_later_ticks() {
 
 #[test]
 fn the_first_write_of_a_config_that_did_not_exist_is_reported() {
-    let home = TempHome::new();
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
     // No file yet: the first tick has nothing to compare against.
     let mut watch = ConfigWatch::new();
     assert!(matches!(tick(&mut watch), ConfigTick::Unchanged));
@@ -156,7 +181,8 @@ fn the_first_write_of_a_config_that_did_not_exist_is_reported() {
 /// below.
 #[test]
 fn no_reported_summary_carries_runs_of_whitespace() {
-    let home = TempHome::new();
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
     let mut watch = ConfigWatch::new();
     let mut summaries: Vec<String> = Vec::new();
 
@@ -214,7 +240,8 @@ fn no_reported_summary_carries_runs_of_whitespace() {
 }
 #[test]
 fn a_comment_only_edit_is_not_reported() {
-    let home = TempHome::new();
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
     home.write("[display]\ncentered = false\n");
 
     let mut watch = ConfigWatch::new();
@@ -231,7 +258,8 @@ fn a_comment_only_edit_is_not_reported() {
 
 #[test]
 fn a_config_that_stops_parsing_is_reported_as_being_ignored() {
-    let home = TempHome::new();
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
     home.write("[display]\ncentered = false\n");
 
     let mut watch = ConfigWatch::new();
@@ -251,7 +279,11 @@ fn a_config_that_stops_parsing_is_reported_as_being_ignored() {
 
 #[test]
 fn a_moved_config_path_re_baselines_instead_of_reporting_a_phantom_change() {
-    let first = TempHome::new();
+    // This case deliberately lives in two homes at once. Both borrow the same
+    // `TestEnv`, which is why building the second cannot deadlock.
+    let env = TestEnv::new();
+
+    let first = TempHome::new(&env);
     first.write("[display]\ncentered = false\n");
 
     let mut watch = ConfigWatch::new();
@@ -260,7 +292,7 @@ fn a_moved_config_path_re_baselines_instead_of_reporting_a_phantom_change() {
     // A different JCODE_HOME means a different file with unrelated content.
     // Diffing it against the old file's content would report a change that never
     // happened in the new location.
-    let second = TempHome::new();
+    let second = TempHome::new(&env);
     second.write("[gateway]\nport = 9999\n");
 
     assert!(
@@ -275,7 +307,8 @@ fn a_moved_config_path_re_baselines_instead_of_reporting_a_phantom_change() {
 
 #[test]
 fn deleting_the_config_is_reported_and_its_recreation_is_reported_too() {
-    let home = TempHome::new();
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
     home.write("[display]\ncentered = false\n");
 
     let mut watch = ConfigWatch::new();
@@ -308,7 +341,8 @@ fn deleting_the_config_is_reported_and_its_recreation_is_reported_too() {
 /// when some other event arrives, and every `tick` test above would still pass.
 #[tokio::test]
 async fn the_watch_loop_notices_a_change_with_no_other_daemon_activity() {
-    let home = TempHome::new();
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let members = Arc::new(RwLock::new(HashMap::from([(
         "session-a".to_string(),
