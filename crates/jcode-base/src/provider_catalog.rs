@@ -43,6 +43,7 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
         setup_url: profile.setup_url.to_string(),
         default_model: profile.default_model.map(ToString::to_string),
         requires_api_key: profile.requires_api_key,
+        api_protocol: profile.api_protocol,
     };
 
     // MiniMax historically used OPENAI_API_KEY because it exposes an
