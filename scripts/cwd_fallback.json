@@ -5,7 +5,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 46
+          "line": 46,
+          "text": "fn jcode_dir() -> PathBuf { storage::jcode_dir().unwrap_or_else(|_| { dirs::home_dir() .unwrap_or_else(|| PathBuf::from(\".\")) .join(\".jcode\") })"
         }
       ]
     },
@@ -14,7 +15,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 12
+          "line": 12,
+          "text": "fn usage_path() -> PathBuf { crate::storage::jcode_dir() .unwrap_or_else(|_| PathBuf::from(\".\").join(\".jcode\")) .join(\"copilot_usage.json\")"
         }
       ]
     },
@@ -23,7 +25,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 60
+          "line": 60,
+          "text": "fn cache_path() -> PathBuf { crate::storage::jcode_dir() .unwrap_or_else(|_| PathBuf::from(\".\").join(\".jcode\")) .join(\"cache\") .join(CACHE_FILE)"
         }
       ]
     },
@@ -32,7 +35,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 80
+          "line": 80,
+          "text": "fn ledger_path() -> PathBuf { crate::storage::jcode_dir() .unwrap_or_else(|_| PathBuf::from(\".\").join(\".jcode\")) .join(\"provider_activity.json\")"
         }
       ]
     },
@@ -41,7 +45,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 181
+          "line": 205,
+          "text": "fn repo_root() -> PathBuf { let manifest_dir = std::env::var(\"CARGO_MANIFEST_DIR\") .map(PathBuf::from) .unwrap_or_else(|_| PathBuf::from(\".\")); manifest_dir .pa"
         }
       ]
     },
@@ -50,7 +55,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 403
+          "line": 403,
+          "text": "let temp = launcher .parent() .unwrap_or_else(|| Path::new(\".\")) .join(format!( \".{}-launcher-{}\", binary_stem(), std::process::id() ));"
         }
       ]
     },
@@ -59,7 +65,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 51
+          "line": 51,
+          "text": "let old = dst.parent().unwrap_or_else(|| Path::new(\".\")).join(format!( \".jcode-launcher-old-{operation_id}{}\", dst.extension() .map(|extension| format!(\".{}\", e"
         }
       ]
     },
@@ -68,7 +75,8 @@
       "sites": [
         {
           "kind": "cwd-error-swallowed",
-          "line": 860
+          "line": 860,
+          "text": "let dir = std::env::current_dir() .unwrap_or_else(|_| std::env::temp_dir()) .join(\".jcode\") .join(\"generated-images\");"
         }
       ]
     },
@@ -77,11 +85,13 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 360
+          "line": 360,
+          "text": "dirs::home_dir() .unwrap_or_else(|| PathBuf::from(\".\")) .join(\".jcode\") .join(\"cache\") .join(format!(\"{}_models.json\", namespace))"
         },
         {
           "kind": "dot",
-          "line": 559
+          "line": 559,
+          "text": "fn endpoints_cache_path(model: &str) -> PathBuf { let safe_name = model.replace('/', \"__\"); let namespace = configured_cache_namespace(); dirs::home_dir() .unwr"
         }
       ]
     },
@@ -90,11 +100,13 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 215
+          "line": 215,
+          "text": "command .args([OsStr::new(\"api-bridge\"), OsStr::new(\"--api-socket\")]) .arg(&socket_path) .current_dir( options .working_dir .as_deref() .unwrap_or_else(|| Path:"
         },
         {
           "kind": "dot",
-          "line": 693
+          "line": 693,
+          "text": "fn home_dir() -> PathBuf { std::env::var_os(\"HOME\") .map(PathBuf::from) .unwrap_or_else(|| PathBuf::from(\".\"))"
         }
       ]
     },
@@ -103,7 +115,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 335
+          "line": 335,
+          "text": "fn debug_path() -> PathBuf { dirs::config_dir() .unwrap_or_else(|| PathBuf::from(\".\")) .join(\"jcode\") .join(\"visual-debug.txt\")"
         }
       ]
     },
@@ -112,7 +125,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 437
+          "line": 437,
+          "text": "let cwd = crate::session::Session::load(&prepared.session_id) .ok() .and_then(|session| session.working_dir) .map(std::path::PathBuf::from) .filter(|path| path."
         }
       ]
     },
@@ -121,11 +135,13 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 745
+          "line": 745,
+          "text": "let cwd = active_working_dir(app) .filter(|path| path.is_dir()) .or_else(|| std::env::current_dir().ok()) .unwrap_or_else(|| std::path::PathBuf::from(\".\"));"
         },
         {
           "kind": "dot",
-          "line": 810
+          "line": 810,
+          "text": "let cwd = active_working_dir(app) .filter(|path| path.is_dir()) .or_else(|| std::env::current_dir().ok()) .unwrap_or_else(|| std::path::PathBuf::from(\".\"));"
         }
       ]
     },
@@ -134,7 +150,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 743
+          "line": 743,
+          "text": "let recording_dir = dirs::config_dir() .unwrap_or_else(|| std::path::PathBuf::from(\".\")) .join(\"jcode\") .join(\"recordings\");"
         }
       ]
     },
@@ -143,11 +160,13 @@
       "sites": [
         {
           "kind": "cwd-error-swallowed",
-          "line": 2744
+          "line": 2744,
+          "text": "let default_cwd = std::env::current_dir().unwrap_or_default();"
         },
         {
           "kind": "cwd-error-swallowed",
-          "line": 3005
+          "line": 3005,
+          "text": "let cwd = std::env::current_dir().unwrap_or_default();"
         }
       ]
     },
@@ -156,7 +175,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 1957
+          "line": 1957,
+          "text": "pub(crate) fn handle_new_terminal_hotkey(&mut self) { if super::commands_dispatch::ssh_local_action_blocked(self, \"Opening a sibling terminal\") { return; } let "
         }
       ]
     },
@@ -165,7 +185,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 2867
+          "line": 2867,
+          "text": "let cwd = crate::session::Session::load(&new_session_id) .ok() .and_then(|session| session.working_dir) .map(std::path::PathBuf::from) .filter(|path| path.is_di"
         }
       ]
     },
@@ -174,7 +195,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 530
+          "line": 530,
+          "text": ") -> anyhow::Result<bool> { let exe = super::launch_client_executable(); let cwd = repo_dir .map(std::path::Path::to_path_buf) .filter(|path| path.is_dir()) .or"
         }
       ]
     },
@@ -182,8 +204,9 @@
       "reason": "Foreground TUI process spawning a new window for an existing session; the session's own working_dir is not plumbed into this call, which is a known gap tracked in the isolation plan, not a deliberate exemption.",
       "sites": [
         {
-          "kind": "cwd-error-swallowed",
-          "line": 2201
+          "kind": "dot",
+          "line": 2201,
+          "text": "let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(\".\"));"
         }
       ]
     },
@@ -192,7 +215,8 @@
       "sites": [
         {
           "kind": "cwd-error-swallowed",
-          "line": 108
+          "line": 108,
+          "text": "} else { std::env::current_dir().unwrap_or_default().join(expanded)"
         }
       ]
     },
@@ -201,7 +225,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 466
+          "line": 466,
+          "text": "pub fn default_path(name: &str) -> PathBuf { dirs::config_dir() .unwrap_or_else(|| PathBuf::from(\".\")) .join(\"jcode\") .join(\"test-bundles\") .join(format!(\"{}.js"
         }
       ]
     },
@@ -210,7 +235,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 57
+          "line": 57,
+          "text": "fs::create_dir_all( file_path .parent() .unwrap_or_else(|| std::path::Path::new(\".\")),"
         }
       ]
     },
@@ -219,7 +245,8 @@
       "sites": [
         {
           "kind": "dot",
-          "line": 1093
+          "line": 1093,
+          "text": "fn dashboard_views_dir(dashboard_path: &Path) -> PathBuf { let stem = dashboard_path .file_stem() .map(|s| s.to_string_lossy().to_string()) .unwrap_or_else(|| \""
         }
       ]
     }

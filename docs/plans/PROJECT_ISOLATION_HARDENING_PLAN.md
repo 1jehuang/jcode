@@ -1170,7 +1170,7 @@ to the code it protects, not in a separate integration bucket.
   A ratchet that nothing tests is a ratchet that can be quietly broken, and this
   one was: three of the nine revisions above were holes in the *guard* rather than
   in the code it watches, and each shipped with CI green. So the guard is tested
-  like code, in `scripts/test_cwd_fallback_ratchet.py` (28 cases, `python3 -m
+  like code, in `scripts/test_cwd_fallback_ratchet.py` (35 cases, `python3 -m
   unittest`), which CI runs alongside the ratchet itself.
 
   Each case plants a file under a scratch `src/` and runs the **real** script as a
@@ -1333,6 +1333,81 @@ re-running: identical failures at HEAD. Note the `desktop_selfdev` trio fails
 with `os error 1` (`Incorrect function`, mangled as `FunÃ§Ã£o incorreta` in the
 output) from a Windows shell call, consistently, not as a timing flake as
 previously recorded.
+
+---
+
+## The ratchet's own defect: sites were matched by line number
+
+The P5.3 lint shipped green and was wrong in the same direction as its own test
+suite's blind spot. Grandfathered sites in `scripts/cwd_fallback.json` were
+identified by **line number**, so any edit above a recorded site invalidated the
+record and the guard reported a violation that did not exist. Not hypothetically:
+adding 24 lines above `crates/jcode-build-meta/build.rs` turned the ratchet red
+against a legitimate site, in the same commit that added them.
+
+Worse, the recovery path was closed. `--update` is one-directional by design (it
+may only remove sites, so it can never make the budget worse), so a site that had
+merely moved could not be re-recorded by any supported command. The escape hatch
+was a hand edit of the baseline, discoverable only from the message you get for a
+*new* site, not from the failure you actually hit.
+
+Proven in a scratch tree before changing anything, recording the exact line the
+guard reports and confirming green first, so the confound (recording the wrong
+line) was excluded:
+
+| step | code under the site | exit |
+|---|---|---|
+| record what the guard reports | unchanged | 0 |
+| insert one filler line above | **byte-identical** | 1 |
+| `--update` to recover | unchanged | 1, refuses |
+
+### Fix
+
+A site is identified by its `kind` plus its normalized statement text. Whitespace
+*outside* a string literal is dropped rather than collapsed, because joining a
+statement rustfmt split leaves `p .parent()` where the one-liner has
+`p.parent()` -- collapsing alone would still report a phantom violation the next
+time rustfmt chose a different layout for a line nobody edited. Whitespace inside
+a string is kept: `Path::new(" ")` and `Path::new("")` are different code.
+
+`line` stays in the file as a human-readable hint and is refreshed by `--update`,
+but it is no longer load bearing. Content keying does not weaken the guard: a
+*different* fallback in an already-grandfathered file is a new site and is still
+reported, and editing a recorded fallback invalidates its record.
+
+The baseline was migrated by a one-off step rather than by `--update`, on purpose.
+A file is only migrated when it has exactly as many current sites as baseline
+entries, so a file that gained a fallback cannot be absorbed by the migration, and
+a genuine deletion still has to go through `--update`. 27 sites across 23 files,
+count unchanged, and the guard is green on the real repository.
+
+### Two more defects the fix exposed
+
+The migration and the new cases only worked once these were fixed, and both were
+found by the suite rather than by reading:
+
+- **`--update` could not re-record anything at all.** A baseline predating content
+  keying has no `text`, so every one of its sites can never match and each reads
+  as a brand new violation. `load_baseline` now rejects that by name and says why,
+  rather than letting a stale baseline masquerade as a genuine finding.
+- **The scan roots were a module-level global in an imported sibling.** The guard
+  imported `production_rust_files` from `check_panic_budget`, which reads its own
+  `SCAN_ROOTS`. Python caches an import under a bare module name, so whichever
+  copy was imported first won: the suite was order-dependent, every test after the
+  first scanned the first test's already-deleted directory, and the affected tests
+  passed for the wrong reason. `production_rust_files` and `is_test_rust_file` now
+  take the root they are to scan as an argument, and the guard passes its own.
+
+### Verification
+
+Every fix is pinned by a case that fails without it, established by mutation rather
+than by reading. 8 of 8 detected, with the unmutated suite green as the baseline:
+reverting to line keying (4 cases), collapsing instead of stripping whitespace,
+stripping inside strings, ignoring the escaped-quote case, sharing scan roots,
+reaching for the module `REPO_ROOT` again, dropping the no-text validation, and
+letting `--update` add sites. The panic guard's output on the real repository is
+byte-identical before and after the `is_test_rust_file` change, so that refactor is
+behaviour-preserving there.
 
 ---
 

@@ -15,6 +15,13 @@ Policy:
   project's session to read another project's files.
 - Pre-existing sites are tracked individually in `cwd_fallback.json`. They are
   grandfathered, not blessed, and each carries a reason.
+- A site is identified by its *normalized statement text* and `kind`, not by its
+  line number. An earlier version keyed on the line, which meant any edit above a
+  recorded site reported a violation that did not exist, and `--update` (which may
+  only remove) had no way to recover one that had merely moved. The line is kept in
+  the file as a hint for humans and refreshed on `--update`, but it is not load
+  bearing. Content keying still pins the specific code: a *different* fallback in
+  an already-grandfathered file is a new site and stays reported.
 - `--update` is one-directional: it may only *remove* sites, so the budget is
   monotone and this script can never be the thing that makes it worse. Adding a
   site is a hand edit to `cwd_fallback.json` carrying a reason that names why the
@@ -48,6 +55,13 @@ from check_panic_budget import (  # noqa: E402
     brace_delta,
     production_rust_files,
 )
+
+# This guard scans ITS OWN repo root, not the imported module's. `production_rust_files`
+# defaults to that module's `SCAN_ROOTS`, and because Python caches imports under a
+# bare module name the default is whichever copy was imported first -- which in a
+# test suite is some earlier test's throwaway scratch tree, now deleted. Passing
+# the roots explicitly is what makes each run scan the tree it was asked to scan.
+SCAN_ROOTS = (REPO_ROOT / "src", REPO_ROOT / "crates")
 
 BASELINE_FILE = REPO_ROOT / "scripts" / "cwd_fallback.json"
 
@@ -330,7 +344,7 @@ def current_sites() -> dict[str, list[dict[str, Any]]]:
     is only reported once.
     """
     sites: dict[str, list[dict[str, Any]]] = {}
-    for path in production_rust_files():
+    for path in production_rust_files(SCAN_ROOTS):
         rel = path.relative_to(REPO_ROOT).as_posix()
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         keep = set(production_line_numbers(path))
@@ -354,6 +368,54 @@ def current_sites() -> dict[str, list[dict[str, Any]]]:
     return sites
 
 
+def _key(kind: str, text: str) -> str:
+    """The identity of a site: its shape plus its normalized statement.
+
+    Matching on this rather than on the line is what lets an edit above a
+    grandfathered site move it without the guard reporting a violation that does
+    not exist.
+
+    Whitespace OUTSIDE a string literal is dropped, not merely collapsed. Joining a
+    statement that rustfmt split leaves a space before the continuation --
+    `p.parent()` versus `p .parent()` -- so collapsing alone would still report a
+    phantom violation the next time rustfmt chose a different layout for a line
+    nobody edited. Whitespace inside a string is kept, because `Path::new(" ")` and
+    `Path::new("")` are different code and only one of them is a bare cwd.
+    """
+    return kind + "\x00" + _strip_ws_outside_strings(text)
+
+
+def _strip_ws_outside_strings(text: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\" and in_string:
+            out.append(char)
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            out.append(char)
+            continue
+        if not in_string and char.isspace():
+            continue
+        out.append(char)
+    return "".join(out)
+
+
+def _site_key(site: dict[str, Any]) -> str:
+    return _key(site["kind"], site.get("text", ""))
+
+
+def _hit_key(hit: dict[str, Any]) -> str:
+    return _key(hit["kind"], hit["text"])
+
+
 def load_baseline() -> dict[str, Any]:
     if not BASELINE_FILE.exists():
         return {"version": 1, "grandfathered": {}}
@@ -373,6 +435,23 @@ def load_baseline() -> dict[str, Any]:
                 raise SystemExit(
                     f"error: grandfathered site {path} has a site with no line number"
                 )
+            if not isinstance(site.get("kind"), str):
+                raise SystemExit(
+                    f"error: grandfathered site {path} has a site with no kind"
+                )
+            if "text" not in site:
+                # Sites are matched on their statement text now, so a site without
+                # one can never match and every one of them would be reported as a
+                # new violation. Name the real cause instead of letting that read
+                # as a genuine finding.
+                raise SystemExit(
+                    f"error: grandfathered site {path} line {site['line']} has no text. "
+                    "This baseline predates content keying, where sites were matched "
+                    "by line number and any edit above one reported a violation that "
+                    "did not exist. Regenerate it: for each file, run "
+                    "check_cwd_fallback_budget.py --update to drop stale entries, "
+                    "then re-add the still-present sites with the statement text."
+                )
     return data
 
 
@@ -383,7 +462,9 @@ def write_baseline(sites: dict[str, list[dict[str, Any]]], reasons: dict[str, st
         # One entry per file; the reason covers every site listed there.
         payload[path] = {
             "reason": reasons[path],
-            "sites": [{"line": h["line"], "kind": h["kind"]} for h in hits],
+            "sites": [
+                {"line": h["line"], "kind": h["kind"], "text": h["text"]} for h in hits
+            ],
         }
     BASELINE_FILE.write_text(
         json.dumps({"version": 1, "grandfathered": payload}, indent=2, sort_keys=True) + "\n",
@@ -404,22 +485,24 @@ def main() -> int:
             return 0
         print(f"{args.explain}: {entry['reason']}")
         for site in entry.get("sites", []):
-            print(f"  line {site['line']}: {site['kind']}")
+            # The text is the site's real identity; the line is only a hint and
+            # may be out of date if the file has been edited above it.
+            print(f"  line {site['line']}: {site['kind']}  {site.get('text', '(no text)')}")
         return 0
 
     if args.update:
         reasons = {path: entry.get("reason", "") for path, entry in tracked.items()}
         # Only sites this file already grandfathered may survive. Anything else is
         # a site the author would be newly accepting, and that is a hand edit.
-        known: dict[str, set[int]] = {
-            path: {site["line"] for site in entry.get("sites", [])}
+        known: dict[str, set[str]] = {
+            path: {_site_key(site) for site in entry.get("sites", [])}
             for path, entry in tracked.items()
         }
         additions = [
             (path, hit)
             for path, hits in sorted(sites.items())
             for hit in hits
-            if hit["line"] not in known.get(path, set())
+            if _hit_key(hit) not in known.get(path, set())
         ]
         if additions:
             print(
@@ -456,9 +539,9 @@ def main() -> int:
                     f"new process-cwd fallback: {path}:{hit['line']}  {hit['text']}"
                 )
             continue
-        tracked_lines = {site["line"] for site in entry.get("sites", [])}
+        tracked_keys = {_site_key(site) for site in entry.get("sites", [])}
         for hit in hits:
-            if hit["line"] not in tracked_lines:
+            if _hit_key(hit) not in tracked_keys:
                 violations.append(
                     f"process-cwd fallback at unrecorded site: {path}:{hit['line']}  {hit['text']}"
                 )
