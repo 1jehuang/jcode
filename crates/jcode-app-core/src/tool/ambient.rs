@@ -1,7 +1,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::ambient::{
-    AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, ScheduleRequest,
-    ScheduleTarget, ScheduledItem,
+    AmbientCycleResult, AmbientManager, AmbientState, CancelOutcome, CycleStatus, Priority,
+    ScheduleRequest, ScheduleTarget, ScheduledItem,
 };
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::safety::{self, PermissionRequest, PermissionResult, SafetySystem, Urgency};
@@ -750,6 +750,10 @@ struct ScheduleToolInput {
     success_criteria: Option<String>,
     #[serde(default)]
     target: Option<String>,
+    /// Reach schedules created by another session. The opt-out has to be named;
+    /// reaching across sessions is a deliberate act, not a default.
+    #[serde(default)]
+    all_sessions: Option<bool>,
 }
 
 #[async_trait]
@@ -799,6 +803,10 @@ impl Tool for ScheduleTool {
                     "type": "string",
                     "enum": ["resume", "spawn", "ambient"],
                     "description": "Delivery target. Defaults to resuming this session; 'spawn' runs one new child session."
+                },
+                "all_sessions": {
+                    "type": "boolean",
+                    "description": "Explicitly reach schedules created by other sessions for list and cancel. Defaults to false."
                 }
             }
         })
@@ -809,8 +817,8 @@ impl Tool for ScheduleTool {
 
         match params.action.as_deref().unwrap_or("create") {
             "create" => self.execute_create(params, ctx).await,
-            "list" => self.execute_list().await,
-            "cancel" => self.execute_cancel(params).await,
+            "list" => self.execute_list(&params, &ctx).await,
+            "cancel" => self.execute_cancel(params, &ctx).await,
             other => anyhow::bail!(
                 "Invalid action '{}'. Expected one of: create, list, cancel",
                 other
@@ -922,16 +930,43 @@ impl ScheduleTool {
         Ok(ToolOutput::new(summary).with_title(format!("scheduled: {}", task)))
     }
 
-    async fn execute_list(&self) -> Result<ToolOutput> {
+    async fn execute_list(
+        &self,
+        params: &ScheduleToolInput,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
+        let all_sessions = params.all_sessions.unwrap_or(false);
         let manager = AmbientManager::new()?;
-        let mut items: Vec<&ScheduledItem> = manager.queue().items().iter().collect();
+        // One queue file backs every project, so listing is filtered by creator
+        // session. Scope defaults to the caller's own session because the agent
+        // in project A has no business reading project B's pending instructions.
+        let visible: Vec<&ScheduledItem> = manager
+            .queue()
+            .items()
+            .iter()
+            .filter(|item| all_sessions || item.created_by_session == ctx.session_id)
+            .collect();
+        let hidden = manager.queue().len().saturating_sub(visible.len());
+
+        let mut items = visible;
         items.sort_by_key(|item| item.scheduled_for);
 
         if items.is_empty() {
-            return Ok(ToolOutput::new("No scheduled tasks."));
+            let summary = if hidden > 0 {
+                format!(
+                    "No scheduled tasks in this session. {hidden} created by other sessions are hidden; pass all_sessions=true to list them."
+                )
+            } else {
+                "No scheduled tasks.".to_string()
+            };
+            return Ok(ToolOutput::new(summary));
         }
 
-        let mut summary = format!("{} scheduled task(s):", items.len());
+        let mut summary = if all_sessions {
+            format!("{} scheduled task(s) across all sessions:", items.len())
+        } else {
+            format!("{} scheduled task(s) in this session:", items.len())
+        };
         for item in items {
             summary.push('\n');
             summary.push_str(&format_scheduled_item(item));
@@ -940,15 +975,37 @@ impl ScheduleTool {
         Ok(ToolOutput::new(summary).with_title("scheduled tasks"))
     }
 
-    async fn execute_cancel(&self, params: ScheduleToolInput) -> Result<ToolOutput> {
+    async fn execute_cancel(
+        &self,
+        params: ScheduleToolInput,
+        ctx: &ToolContext,
+    ) -> Result<ToolOutput> {
         let id = params
             .schedule_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("schedule_id is required for action=cancel"))?;
+        let all_sessions = params.all_sessions.unwrap_or(false);
 
         let mut manager = AmbientManager::new()?;
-        let Some(item) = manager.cancel_schedule(id)? else {
-            anyhow::bail!("No scheduled task found with id '{}'", id);
+        let item = match manager.cancel_schedule(id, &ctx.session_id)? {
+            CancelOutcome::Removed { item } => item,
+            CancelOutcome::NotOwned { created_by } if all_sessions => {
+                // The caller named the opt-out explicitly, so finish the job here
+                // rather than reporting a refusal it already accepted.
+                manager
+                    .force_cancel_schedule(id)?
+                    .ok_or_else(|| anyhow::anyhow!("No scheduled task found with id '{}'", id))?
+            }
+            CancelOutcome::NotOwned { created_by } => anyhow::bail!(
+                "Scheduled task '{}' was created by session {}, not this session ({}). \
+                 Pass all_sessions=true to act on another session's schedule.",
+                id,
+                created_by,
+                ctx.session_id
+            ),
+            CancelOutcome::NotFound => {
+                anyhow::bail!("No scheduled task found with id '{}'", id)
+            }
         };
         nudge_schedule_runner();
 

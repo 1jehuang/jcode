@@ -401,7 +401,7 @@ what surfaced the dead `all_sessions` opt-out.
 
 ### P1.4 - Schedules are a single global queue with no ownership check
 
-- [ ] **Status:** pending
+- [x] **Status:** done
 - **Where:** `crates/jcode-app-core/src/ambient/paths.rs:20-22` (one
   `~/.jcode/ambient/queue.json` for the whole daemon);
   `crates/jcode-app-core/src/tool/ambient.rs:925-941` (`execute_list` returns every item,
@@ -418,6 +418,41 @@ what surfaced the dead `all_sessions` opt-out.
 - **Acceptance:** `schedule list` from project A shows only A's items; cancelling a
   schedule created by B from A fails.
 - **Test:** two sessions create schedules, assert isolation of list and cancel.
+
+**Resolution.** Ownership moved to the point of mutation rather than being added to
+one caller. `AmbientManager::cancel_schedule` now takes the calling session and returns
+`CancelOutcome` (`Removed` / `NotOwned { created_by }` / `NotFound`), so a check that
+lives in the tool is a check a new caller can skip. It is the only cancel entry point;
+`force_cancel_schedule` is the named escape hatch, documented as usable only by a
+caller that has already established cross-session intent.
+
+Ownership is per *creator* session (`created_by_session`), not per target session. The
+queue is one file for the whole daemon, and the creator is what ties an item to a
+project. Targeting is a separate concern and stays what it was.
+
+`schedule list` filters to the calling session and reports how many items are hidden,
+so a scoped list cannot be mistaken for a global one. `schedule cancel` refuses an id
+created by another session with an error naming the owning session and the opt-out.
+`all_sessions=true` is the single documented opt-out for both actions, matching P1.3's
+`bg all_sessions` so the two tools read the same way.
+
+The ambient agent's own cycle schedule (`tool/ambient.rs:213`, `working_dir: None`) is
+deliberately global and is unchanged. The TUI ambient widget
+(`gather_ambient_info_inner`) still shows every project's queue: that is the user
+looking at their own scheduler, not an agent reaching across projects, so it is out of
+scope for this item and is recorded here as a deliberate decision rather than an
+oversight.
+
+**Tests.** Five, all in `crates/jcode-app-core/src/tool/ambient/tests.rs`, proven to
+fail with their half reverted: removing the list filter fails
+`schedule_list_hides_other_sessions_schedules_by_default`; disabling the manager's
+ownership check fails both `schedule_cancel_rejects_another_sessions_schedule_and_leaves_it_queued`
+and `cancel_schedule_refuses_another_sessions_item_at_the_manager`.
+`all_sessions_opts_into_cancelling_another_sessions_schedule` and
+`a_session_can_still_cancel_its_own_schedule` cover the opt-out and the non-regression
+in the allowed direction. They redirect `JCODE_HOME` to a temp dir under
+`lock_test_env`, and restore it through a drop guard so a failing assertion cannot leak
+a temp home into later tests. 29 `tool::ambient` and 62 `ambient` tests pass.
 
 ---
 
