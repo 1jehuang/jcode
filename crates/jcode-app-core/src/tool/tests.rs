@@ -81,6 +81,92 @@ async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::
         .await;
 }
 
+/// P2.4 / issue #420: the unpooled branch of `register_mcp_tools_for_dir` must
+/// honor `working_dir` just like the pooled branch. It used to call
+/// `McpManager::new()`, which resolves project-local config against the process
+/// cwd -- one arbitrary project in a multi-project daemon -- so a session with
+/// no pool silently read whichever project started the daemon.
+#[tokio::test]
+async fn unpooled_registration_resolves_project_mcp_config_against_working_dir() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+    let _home_guard = TestHomeGuard::new(home.path());
+    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
+
+    std::fs::write(
+        working_dir.path().join(".mcp.json"),
+        r#"{"mcpServers": {"project_only": {"command": "/bin/sh", "args": ["-c", "echo hi"]}}}"#,
+    )
+    .expect("write project-local MCP config");
+
+    let registry = Registry::empty();
+    // No shared pool: this is the branch that used to ignore `working_dir`.
+    registry
+        .register_mcp_tools_for_dir(None, None, None, Some(working_dir.path().to_path_buf()))
+        .await;
+
+    let output = registry
+        .execute(
+            "mcp",
+            serde_json::json!({"action": "list"}),
+            mcp_test_context(working_dir.path()),
+        )
+        .await
+        .expect("mcp list should succeed");
+
+    assert!(
+        output.output.contains("project_only"),
+        "the unpooled manager ignored working_dir and did not load .mcp.json from it; output: {}",
+        output.output
+    );
+}
+
+/// Positive control for the sibling above: the same session, same file layout,
+/// with a pool, must see the same project-local server. Guards against the test
+/// passing because config loading or list rendering changed, rather than
+/// because the unpooled branch stopped skipping `working_dir`.
+#[tokio::test]
+async fn pooled_registration_resolves_project_mcp_config_against_working_dir() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+    let _home_guard = TestHomeGuard::new(home.path());
+    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
+
+    std::fs::write(
+        working_dir.path().join(".mcp.json"),
+        r#"{"mcpServers": {"project_only": {"command": "/bin/sh", "args": ["-c", "echo hi"]}}}"#,
+    )
+    .expect("write project-local MCP config");
+
+    let registry = Registry::empty();
+    let pool = Arc::new(crate::mcp::SharedMcpPool::new(
+        crate::mcp::McpConfig::default(),
+    ));
+    registry
+        .register_mcp_tools_for_dir(
+            None,
+            Some(pool),
+            Some("mcp-pooled-control".to_string()),
+            Some(working_dir.path().to_path_buf()),
+        )
+        .await;
+
+    let output = registry
+        .execute(
+            "mcp",
+            serde_json::json!({"action": "list"}),
+            mcp_test_context(working_dir.path()),
+        )
+        .await
+        .expect("mcp list should succeed");
+
+    assert!(
+        output.output.contains("project_only"),
+        "pooled manager did not load .mcp.json from working_dir; output: {}",
+        output.output
+    );
+}
+
 #[tokio::test]
 async fn mcp_list_remains_available_while_background_connect_is_handshaking() {
     let _env_lock = crate::storage::lock_test_env();

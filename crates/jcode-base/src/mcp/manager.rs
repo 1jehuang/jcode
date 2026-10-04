@@ -118,9 +118,26 @@ impl Drop for OwnedConnectionAttemptGuard {
 }
 
 impl McpManager {
-    /// Create a new manager in owned in-process mode (used by tests and local harnesses).
+    /// Create a new manager in owned in-process mode, resolving project-local
+    /// MCP config against the process cwd.
+    ///
+    /// Only correct where the process cwd *is* the user's project: the `jcode`
+    /// foreground binary and tests. A caller that knows its own project
+    /// directory -- anything running inside the multi-project daemon -- must use
+    /// [`Self::owned_for_dir`] instead, because the daemon's process cwd is
+    /// whichever project happened to start it.
     pub fn new() -> Self {
-        let project_dir = std::env::current_dir().ok();
+        Self::owned_for_dir(std::env::current_dir().ok())
+    }
+
+    /// Create an owned (unpooled) manager resolving project-local MCP config
+    /// against `project_dir` rather than the process cwd.
+    ///
+    /// The owned counterpart of [`Self::with_shared_pool_for_dir`]. Both branches
+    /// of `Registry::register_mcp_tools_for_dir` must resolve config the same
+    /// way, or the same session silently reads a different project's servers
+    /// depending on which branch it took (issue #420).
+    pub fn owned_for_dir(project_dir: Option<std::path::PathBuf>) -> Self {
         Self {
             pool: None,
             pool_handles: RwLock::new(HashMap::new()),
@@ -210,14 +227,12 @@ impl McpManager {
         if let Some(pool) = &self.pool {
             if !shared_servers.is_empty() {
                 let scope = self.project_scope();
-                let (successes, failures) =
-                    pool.connect_all_scoped(&scope).await;
+                let (successes, failures) = pool.connect_all_scoped(&scope).await;
                 total_successes += successes;
                 total_failures.extend(failures);
 
                 // Acquire handles for shared servers only
-                let all_handles =
-                    pool.acquire_handles_scoped(&self.session_id, &scope).await;
+                let all_handles = pool.acquire_handles_scoped(&self.session_id, &scope).await;
                 let shared_names: std::collections::HashSet<&String> =
                     shared_servers.iter().map(|(name, _)| *name).collect();
                 let mut pool_handles = self.pool_handles.write().await;
@@ -370,12 +385,8 @@ impl McpManager {
             if handles.remove(name).is_some() {
                 if let Some(pool) = &self.pool {
                     let scope = self.project_scope();
-                    pool.release_handles_scoped(
-                        &self.session_id,
-                        &[name.to_string()],
-                        &scope,
-                    )
-                    .await;
+                    pool.release_handles_scoped(&self.session_id, &[name.to_string()], &scope)
+                        .await;
                 }
                 return Ok(());
             }

@@ -135,9 +135,11 @@ this work.
   - `tool::agentgrep::tests::build_smart_args_uses_terms`
   - `tool::agentgrep::tests::execute_runs_linked_grep`
   - `tool::agentgrep::tests::execute_runs_linked_grep_when_path_points_to_file`
-  - `tool::desktop_selfdev::tests::custom_test_executes_from_detected_repo_root`
-  - `tool::desktop_selfdev::tests::screenshot_execution_never_discovers_live_instances`
-  - `tool::desktop_selfdev::tests::screenshot_uses_private_script_with_fresh_build_and_target_output`
+  - `tool::desktop_selfdev::tests::*` -- 3 or 4 of 11 per run, **and the set changes every
+    run**. These shell out under a hard 5s timeout on a loaded Windows box, so whichever lose
+    the race are the ones that fail: three consecutive whole-suite runs gave
+    `ooooooFoFFo` / `ooooooFFoFo` / `oooooFooFFF`. Not a stable baseline, so don't diff it by
+    name -- a run reporting 28 instead of 27 app-core failures has not regressed anything.
   - `tool::replace::tests::collect_files_filters_by_glob_and_skips_git`
   - `tool::tests::tool_descriptions_stay_under_token_cap`
   - `tool::tests::tool_parameter_descriptions_stay_under_token_cap`
@@ -728,19 +730,30 @@ shipped unverified.
 
 ### P2.4 - `register_mcp_tools_for_dir` ignores `working_dir` in its no-pool branch (latent)
 
-- [ ] **Status:** pending (not an active bug; see note)
-- **Where:** `crates/jcode-app-core/src/tool/mod.rs:1339-1348`. The `else` branch calls
+- [x] **Status:** done
+- **Where:** `crates/jcode-app-core/src/tool/mod.rs:1339-1348`. The `else` branch called
   `McpManager::new()`, which binds to `std::env::current_dir()`
   (`crates/jcode-base/src/mcp/manager.rs:122-123`), discarding the `working_dir` argument.
-- **Note:** this was re-verified and is **currently inert**. All four daemon call sites
-  pass `Some(mcp_pool)`: `client_session.rs:840` (subscribe), `client_session.rs:1434`
-  and `:1716` (resume), `headless.rs:82`, `server.rs:958`. The bad branch is only
-  reachable by a caller without a pool, and no such caller exists in production today.
-- **Fix:** honor `working_dir` in the `else` branch (there is already a
-  `with_shared_pool_for_dir`; add the owned equivalent taking a dir), and add a test so
-  the trap cannot be walked into later.
-- **Acceptance:** `register_mcp_tools_for_dir(event_tx, None, sid, Some(dir))` loads
-  `.mcp.json` from `dir`.
+- **Was inert when tracked, and was re-verified inert again at fix time.** All five daemon
+  call sites pass `Some(mcp_pool)`: `client_session.rs:1000` (subscribe), `client_session.rs:1669`
+  and `:1951` (resume), `headless.rs:82`, `server.rs:964`. Fixed anyway because the two branches
+  of one constructor call disagreed about where a session's project lives, which is the shape
+  this plan exists to remove.
+- **Fix:** split `McpManager::new()` into `owned_for_dir(project_dir)` (the old body, taking a
+  dir) with `new()` delegating to it via `current_dir()`, and call `owned_for_dir(working_dir)`
+  from the `else` branch. `owned_for_dir` is now the owned counterpart of the existing
+  `with_shared_pool_for_dir`, so the pooled and unpooled branches resolve config the same way.
+- **Remaining `McpManager::new()` callers, deliberately:** the two `jcode-tui`
+  `tui_lifecycle.rs` sites (`:359`, `:791`) are the foreground process, where the process cwd
+  *is* the user's project, and `mcp/manager.rs:700` is inside a test. Production daemon code
+  no longer resolves project-local MCP config from the process cwd by any route.
+- **Acceptance, proven:** `register_mcp_tools_for_dir(event_tx, None, sid, Some(dir))` loads
+  `.mcp.json` from `dir`. `tool::tests::unpooled_registration_resolves_project_mcp_config_against_working_dir`
+  is that assertion; `pooled_registration_resolves_project_mcp_config_against_working_dir` is a
+  positive control on the pooled branch with identical file layout. Reverting only the `else`
+  branch to `McpManager::new()` gives `1 passed; 1 failed` - the unpooled test fails on the
+  missing `project_only` server and the pooled control still passes, so the pair discriminates
+  the branch rather than the config loader or the list rendering.
 
 ### P2.5 - Relative paths and child shells fall back to the daemon cwd
 

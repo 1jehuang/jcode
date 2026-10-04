@@ -1361,7 +1361,10 @@ impl Registry {
                 working_dir,
             )))
         } else {
-            Arc::new(RwLock::new(McpManager::new()))
+            // Honor `working_dir` here too. `McpManager::new()` binds to the
+            // process cwd, which for the daemon is one arbitrary project, so
+            // passing it None would resolve another project's `.mcp.json`.
+            Arc::new(RwLock::new(McpManager::owned_for_dir(working_dir)))
         };
 
         // Register MCP management tool immediately (with registry for dynamic tool registration)
