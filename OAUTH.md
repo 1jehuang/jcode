@@ -115,6 +115,71 @@ The old Claude Code CLI shell-out transport has been removed. Jcode always talks
 to the Anthropic API directly. `--provider claude-subprocess` is accepted as an
 alias for `--provider claude`, and `JCODE_USE_CLAUDE_CLI` is ignored.
 
+### Claude Code mode (opt-in, side by side with native Claude)
+Claude Code mode runs Claude through the official Claude Code CLI (`claude`)
+instead of jcode's own Anthropic transport. It is a separate provider,
+`claude-code`, and it never replaces native Claude: both appear in `/model`, and
+a session picks one per turn.
+
+| | Native Claude (`claude`) | Claude Code mode (`claude-code`) |
+|---|---|---|
+| Transport | jcode calls the Anthropic API directly | jcode drives a long-lived `claude` process (stream-json) |
+| Credentials | `~/.jcode/auth.json` (jcode OAuth or imported) | Owned by Claude Code (`~/.claude` or the instance's `CLAUDE_CONFIG_DIR`); jcode never reads or imports them |
+| Tools | jcode executes its own tools | Claude Code runs its built-in tools; jcode-only tools are offered over an in-process MCP server |
+| Accounts | `claude-<n>` labels in `/account claude` | Instances from `[provider.claude_code]` in `/account claude-code` |
+| Model ids | `claude-opus-4-8`, `claude-oauth:...` | `claude-code:claude-opus-4-8` |
+
+Why use it: the subscription is used by the official Claude Code client itself,
+which is the path Anthropic's consumer terms describe for subscription use.
+Native Claude stays the default and is unchanged.
+
+Enable it:
+
+```toml
+[provider]
+default_provider = "claude-code"   # optional; otherwise pick a Claude Code route in /model
+
+[provider.claude_code]
+binary = "claude"                  # path or name on PATH (env: JCODE_CLAUDE_CODE_BIN)
+permission_mode = "default"        # default | acceptEdits | bypassPermissions | plan | auto
+setting_sources = ["user", "project", "local"]
+expose_jcode_tools = true
+default_instance = "default"
+
+[[provider.claude_code.instances]]
+id = "default"                     # empty home = Claude Code's default login (~/.claude)
+display_name = "Claude (Max)"
+
+[[provider.claude_code.instances]]
+id = "personal"
+display_name = "Claude Personal"
+home = "~/.claude_personal"        # becomes CLAUDE_CONFIG_DIR for this instance
+```
+
+Without a `[provider.claude_code]` table there is one implicit `default`
+instance that uses Claude Code's default login.
+
+Login per instance (interactive terminal required, nothing is copied into jcode):
+
+```bash
+jcode login --provider claude-code                     # default instance: claude auth login
+jcode login --provider claude-code --account personal  # CLAUDE_CONFIG_DIR=~/.claude_personal claude auth login
+```
+
+Use it with `jcode --provider claude-code`, a `Claude Code` route in `/model`, or
+`/model claude-code:claude-opus-4-8`. `/account claude-code` lists the instances
+with the email and plan Claude Code cached for each login; picking one pins it
+for the current window. Each non-default instance also appears in `/model` as
+its own route (`claude-code:<instance>`), so picking a route picks the account.
+
+Limitations (first version):
+- No automatic same-provider failover between Claude Code instances yet.
+- jcode's `/compact` is not used; Claude Code compacts its own context.
+- Banked reset credits, history rewind/fork, Windows `.cmd` shims and Bedrock
+  instances are not supported.
+- Usage windows come from Claude Code's own rate-limit events, so they appear
+  after the first turn of a session.
+
 ## OpenAI / Codex OAuth
 
 ### Login steps

@@ -392,6 +392,7 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 ### Supported built-in login flows
 
 - **Claude** (`jcode login --provider claude`)
+- **Claude Code CLI** (`jcode login --provider claude-code [--account <instance>]`): Claude through the official `claude` binary, side by side with native Claude. See [Claude Code mode](OAUTH.md#claude-code-mode-opt-in-side-by-side-with-native-claude).
 - **OpenAI / ChatGPT / Codex** (`jcode login --provider openai`)
 - **Google Gemini** (`jcode login --provider gemini`)
 - **GitHub Copilot** (`jcode login --provider copilot`)

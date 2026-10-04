@@ -49,6 +49,24 @@ Programmatically, the single source of truth is
 `AuthStatus::assessment_for_provider(descriptor)` in
 `crates/jcode-base/src/auth/mod.rs`, which returns a `ProviderAuthAssessment`.
 
+## Claude Code mode: credentials jcode never holds
+
+`claude-code` is a third, independent way to run Claude. The Claude Code CLI
+owns the login; jcode only spawns `claude` and never reads, refreshes or imports
+its tokens.
+
+| Concept | Login provider id | Where the credential lives |
+|---|---|---|
+| Claude Code, default instance | `claude-code` | Claude Code's default home (`~/.claude`, macOS Keychain) |
+| Claude Code, instance `<id>` with `home` | `claude-code --account <id>` | `CLAUDE_CONFIG_DIR=<home>` for that instance |
+
+"Is Claude Code mode available?" only means the configured binary exists
+(`[provider.claude_code].binary` or `JCODE_CLAUDE_CODE_BIN`). Whether its login
+works is checked by Claude Code: run `claude auth status`, with
+`CLAUDE_CONFIG_DIR=<home>` for non-default instances. A missing native Claude
+login in `~/.jcode/auth.json` says nothing about Claude Code mode, and the other
+way round.
+
 ## Selecting a default via config
 
 `~/.jcode/config.toml`:
@@ -57,6 +75,7 @@ Programmatically, the single source of truth is
 [provider]
 default_provider = "claude"        # Claude subscription (OAuth)
 # default_provider = "anthropic-api" # Claude via direct Anthropic API key
+# default_provider = "claude-code"   # Claude via the local Claude Code CLI
 default_model = "claude-opus-4-8"
 anthropic_reasoning_effort = "xhigh"
 ```
