@@ -716,6 +716,7 @@ jobs:
           fi
 
       - name: Queue Nix binary release metadata update
+        id: nix_release_update
         continue-on-error: true
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -936,4 +937,11 @@ jobs:
         if: always() && steps.discord_announcement.outcome == 'failure'
         run: |
           echo "The release was published, but its Discord announcement could not be queued." >&2
+          exit 1
+
+      - name: Report Nix metadata update queue failure
+        if: always() && steps.nix_release_update.outcome == 'failure'
+        run: |
+          echo "::error::The release was published, but its Nix metadata update could not be queued."
+          echo "Rerun the Update Nix binary release workflow with tag ${GITHUB_REF_NAME}." >> "$GITHUB_STEP_SUMMARY"
           exit 1

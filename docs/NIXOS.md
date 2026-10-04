@@ -119,6 +119,10 @@ The tracked `flake.lock` pins build dependencies for both variants. Update those
 separately with `nix flake update`; publishing a new binary does not require
 changing nixpkgs or flake-utils.
 
+A failed updater dispatch does not interrupt the remaining release publication
+steps, but makes the release job fail at the end with a retry instruction in
+its summary.
+
 Intel macOS uses the separate `nixpkgs-darwin` input on the 26.05 Darwin branch
 because nixpkgs unstable dropped that platform in 26.11. Other systems retain
 the unstable input.
@@ -201,8 +205,10 @@ Per-user configuration is the Home Manager module's job.
 
 ## Limitations
 
-- Linux on `x86_64` is the tested platform. The flake also declares
-  `aarch64-linux`, `x86_64-darwin` and `aarch64-darwin`, but those outputs have
-  not been built or run.
+- `.github/workflows/nix.yml` runs native module checks and installs and launches
+  `jcode-bin` on all four declared systems. It also builds and launches the
+  source package on `x86_64-linux`; source builds on the other three systems
+  remain unverified. Changes to Cargo manifests, Rust sources, embedded docs and
+  assets, scripts, Cargo configuration and Nix packaging trigger these checks.
 - The package follows `nixpkgs-unstable` through `flake.lock`; update it with
   `nix flake update`.

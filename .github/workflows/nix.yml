@@ -3,21 +3,37 @@ name: Nix
 on:
   push:
     paths:
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - crates/**
+      - docs/**
+      - assets/**
+      - scripts/**
+      - .cargo/**
       - flake.nix
       - flake.lock
       - shell.nix
       - nix/**
-      - scripts/*nix_release.py
       - .github/workflows/nix.yml
+      - .github/workflows/release.yml
       - .github/workflows/update-nix-release.yml
   pull_request:
     paths:
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - crates/**
+      - docs/**
+      - assets/**
+      - scripts/**
+      - .cargo/**
       - flake.nix
       - flake.lock
       - shell.nix
       - nix/**
-      - scripts/*nix_release.py
       - .github/workflows/nix.yml
+      - .github/workflows/release.yml
       - .github/workflows/update-nix-release.yml
   workflow_dispatch:
 
