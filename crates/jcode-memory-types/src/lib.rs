@@ -1360,6 +1360,13 @@ pub fn format_relevant_display_prompt(entries: &[MemoryEntry], limit: usize) -> 
 /// standing-instruction content. Facts, entities, and custom categories are
 /// situational and stay on the retrieved (episodic) leg.
 pub fn format_profile_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
+    // P1 char-cap (2026-10-04 audit): entry COUNT is bounded by `limit`
+    // but bytes are not — one 10KB Preference lands verbatim in the cached
+    // static prefix, poisoning prefix reuse session-long. Truncate per
+    // entry at PROFILE_ENTRY_MAX_CHARS with a marker. Deterministic
+    // (position-based cut, no hashing), so reruns are byte-identical and
+    // cache-stable by construction.
+    const PROFILE_ENTRY_MAX_CHARS: usize = 500;
     let mut corrections: Vec<&MemoryEntry> = Vec::new();
     let mut preferences: Vec<&MemoryEntry> = Vec::new();
     for entry in entries {
@@ -1385,7 +1392,14 @@ pub fn format_profile_prompt(entries: &[MemoryEntry], limit: usize) -> Option<St
         }
         output.push_str(&format!("\n## {title}\n"));
         for (idx, item) in items.iter().enumerate() {
-            output.push_str(&format!("{}. {}\n", idx + 1, item.content.trim()));
+            let content = item.content.trim();
+            let shown: String = if content.chars().count() > PROFILE_ENTRY_MAX_CHARS {
+                let kept: String = content.chars().take(PROFILE_ENTRY_MAX_CHARS).collect();
+                format!("{kept}… [truncated]")
+            } else {
+                content.to_string()
+            };
+            output.push_str(&format!("{}. {}\n", idx + 1, shown));
         }
     };
     write_section("Corrections", &corrections);

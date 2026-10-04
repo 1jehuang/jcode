@@ -450,8 +450,22 @@ impl MemoryManager {
                     .map(|(vec, _)| vec)
             })
         {
+            // C1 supersede leg: same journal record as the insert leg below.
+            // A Correction edit that supersedes is the most frequent profile
+            // mutation; without this the static prefix invalidates silently.
+            let is_profile = matches!(
+                entry.category,
+                MemoryCategory::Preference | MemoryCategory::Correction
+            );
+            let entry_id = entry.id.clone();
             let id = graph.add_memory(entry);
             graph.supersede(&id, &stale_id);
+            if is_profile {
+                crate::cache_invalidation::record(
+                    "memory profile",
+                    format!("{entry_id} profile-category supersede"),
+                );
+            }
             return id;
         }
         // C1: profile-affecting writes (Preference/Correction dock in the R5
@@ -916,7 +930,7 @@ impl MemoryManager {
         Self::prefilter_mode() == "hybrid-topk"
     }
 
-    /// Slot-B prefilter top-K (`memory_prefilter_top_k`, default 96),
+    /// Slot-B prefilter top-K (`memory_prefilter_top_k`, default 64),
     /// clamped to [24, 480] at use. Env `JCODE_MEMORY_PREFILTER_TOP_K` wins.
     pub fn prefilter_top_k() -> usize {
         crate::config::config()
@@ -925,14 +939,14 @@ impl MemoryManager {
             .clamp(24, 480)
     }
 
-    /// Slot-B min corpus (`memory_prefilter_min_corpus`, default 96):
+    /// Slot-B min corpus (`memory_prefilter_min_corpus`, default 64):
     /// the stage disengages at or below this many memories.
     /// Env `JCODE_MEMORY_PREFILTER_MIN_CORPUS` wins. Zero/near-zero file
     /// values fall back to the default so the stage cannot spin on tiny sets.
     pub fn prefilter_min_corpus() -> usize {
         let v = crate::config::config().agents.memory_prefilter_min_corpus;
         if v == 0 {
-            return 96;
+            return 64;
         }
         v
     }

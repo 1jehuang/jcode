@@ -791,10 +791,15 @@ fn default_memory_prefilter_mode() -> String {
     "off".to_string()
 }
 fn default_memory_prefilter_top_k() -> usize {
-    96
+    // F1 (2026-10-04 audit): top_k must sit BELOW the legacy 72-cap or
+    // slot-B narrows nothing even when engaged. 64 engages on the common
+    // 65-72 band with modest narrowing; re-tune post-flip per F2.
+    64
 }
 fn default_memory_prefilter_min_corpus() -> usize {
-    96
+    // F1: min_corpus must sit BELOW the 72-cap or post-cap sets (<=72)
+    // always disengage. 64 = slot-B owns the 65+ band the cap can't trim.
+    64
 }
 fn default_memory_prefilter_budget_ms() -> u64 {
     500
