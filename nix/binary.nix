@@ -3,6 +3,7 @@
   stdenvNoCC,
   fetchurl,
   autoPatchelfHook,
+  openssl,
   stdenv,
 }:
 let
@@ -28,7 +29,10 @@ stdenvNoCC.mkDerivation {
 
   sourceRoot = ".";
   nativeBuildInputs = lib.optionals stdenvNoCC.hostPlatform.isLinux [ autoPatchelfHook ];
-  buildInputs = lib.optionals stdenvNoCC.hostPlatform.isLinux [ stdenv.cc.cc.lib ];
+  buildInputs = lib.optionals stdenvNoCC.hostPlatform.isLinux [
+    stdenv.cc.cc.lib
+    openssl
+  ];
   dontBuild = true;
   dontStrip = true;
   dontFixup = stdenvNoCC.hostPlatform.isDarwin;
