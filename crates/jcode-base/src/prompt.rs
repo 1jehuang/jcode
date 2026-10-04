@@ -74,10 +74,14 @@ pub const DEFAULT_SWARM_PROMPT: &str = include_str!("prompt/swarm_prompt.md");
 /// Load the swarm prompt used to steer swarm model routing. Precedence:
 /// project `./.jcode/swarm-prompt.md`, then global `~/.jcode/swarm-prompt.md`,
 /// then the built-in [`DEFAULT_SWARM_PROMPT`].
+///
+/// `working_dir = None` skips the project level entirely; it never falls back to
+/// the process cwd. The daemon serves sessions for many projects from one
+/// process, so a relative lookup here would apply whichever project started it
+/// to every session (P2.2). A session with no workspace root has no project.
 pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
-    let project_dir = working_dir.unwrap_or(Path::new("."));
     let candidates = [
-        Some(project_dir.join(".jcode").join("swarm-prompt.md")),
+        working_dir.map(|dir| dir.join(".jcode").join("swarm-prompt.md")),
         crate::storage::jcode_dir()
             .ok()
             .map(|dir| dir.join("swarm-prompt.md")),

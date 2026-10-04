@@ -23,6 +23,9 @@ mod desktop_selfdev;
 #[path = "agent_tests/compile_remote.rs"]
 mod compile_remote;
 
+#[path = "agent_tests/swarm_prompt.rs"]
+mod swarm_prompt;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,

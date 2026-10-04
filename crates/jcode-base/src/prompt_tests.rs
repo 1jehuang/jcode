@@ -457,6 +457,56 @@ fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
     }
 }
 
+/// P2.2: a session with no working directory must not pick up the swarm prompt
+/// of whichever repository happens to have started the daemon. `None` means
+/// "no project", so the project level is skipped entirely rather than resolved
+/// against the process cwd.
+#[test]
+fn no_working_dir_skips_the_project_swarm_prompt_even_under_a_repo_cwd() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let project = tempfile::tempdir().unwrap();
+    let prompt_dir = project.path().join(".jcode");
+    std::fs::create_dir_all(&prompt_dir).unwrap();
+    std::fs::write(
+        prompt_dir.join("swarm-prompt.md"),
+        "daemon started project routing",
+    )
+    .unwrap();
+    // A global prompt so "no project" is distinguishable from "nothing at all".
+    std::fs::write(temp.path().join("swarm-prompt.md"), "global swarm routing").unwrap();
+
+    let prev_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(project.path()).unwrap();
+
+    let without_working_dir = load_swarm_prompt(None);
+    let with_working_dir = load_swarm_prompt(Some(project.path()));
+
+    std::env::set_current_dir(prev_cwd).unwrap();
+    match prev_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+
+    assert_eq!(
+        without_working_dir, "global swarm routing",
+        "working_dir = None must skip the project level, not resolve it against the process cwd"
+    );
+    assert!(
+        !without_working_dir.contains("daemon started project routing"),
+        "the launching project's prompt leaked into a session with no working dir"
+    );
+    // Positive control: the same call with an explicit dir does find it, so the
+    // assertion above cannot pass just because the prompt is unreadable.
+    assert_eq!(
+        with_working_dir, "daemon started project routing",
+        "a session with a working dir must get its own project's prompt"
+    );
+}
+
 #[test]
 fn test_swarm_prompt_prefers_project_then_global_then_default() {
     let _guard = crate::storage::lock_test_env();

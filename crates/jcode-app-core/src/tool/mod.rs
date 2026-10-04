@@ -7,7 +7,7 @@ mod bg;
 #[cfg(unix)]
 pub(crate) mod bridge_reload;
 mod browser;
-mod communicate;
+pub(crate) mod communicate;
 mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;
@@ -479,11 +479,14 @@ impl Registry {
             "skill_manage",
             skill::SkillTool::new(skills.clone()),
         );
-        // The swarm tool captures the user-editable swarm prompt in its
-        // description. Construct it once per session rather than sharing the
-        // process-wide instance. Existing sessions keep their stable tool
-        // definition (and provider KV cache), while newly created agents see
-        // prompt edits immediately.
+        // The swarm tool's description carries the project swarm prompt, which
+        // is per-session data, so this shared instance holds only the base
+        // description. Each agent's definition builder attaches its own
+        // project's prompt on top (see `Agent::apply_project_swarm_prompt`),
+        // which is also what makes prompt edits visible without a restart.
+        // Do not resolve the prompt here: at registry construction the session's
+        // working directory is not known, and the daemon's cwd belongs to
+        // whichever project happened to start the process (P2.2).
         Self::insert_tool(&mut tools, "swarm", communicate::CommunicateTool::new());
         tools
     }

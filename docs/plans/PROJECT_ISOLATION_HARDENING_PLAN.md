@@ -1,6 +1,6 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1 done)
+Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.2 done)
 Last reviewed: 2026-10-04 (P2.1 shipped)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
@@ -517,29 +517,62 @@ tool and its test untouched, the tool test (`14 passed; 1 failed`). 31 `skill::`
 
 ### P2.2 - Swarm prompt falls back to the daemon cwd, and the production path never passes one
 
-- [ ] **Status:** pending
-- **Where:** `crates/jcode-base/src/prompt.rs:77-78` (`load_swarm_prompt`:
-  `working_dir.unwrap_or(Path::new("."))`).
-- **Production path:** `crates/jcode-app-core/src/tool/mod.rs:487` registers
-  `communicate::CommunicateTool::new()`, which calls `new_for_working_dir(None)`
-  (`crates/jcode-app-core/src/tool/communicate.rs:1827-1829`).
-  `new_for_working_dir` is called only from tests
-  (`crates/jcode-app-core/src/tool/communicate_tests.rs:1140,1142`).
-- **Note:** the comment directly above the registration (`tool/mod.rs:482-486`) says
-  "Construct it once per session rather than sharing the process-wide instance". The code
-  does the opposite: `Registry::new`/`base_tools` take no working directory, so every
-  session gets the swarm prompt resolved against the daemon's cwd. The code contradicts
-  its own stated intent.
-- **Impact:** the `.jcode/swarm-prompt.md` of whichever project launched the daemon is
-  applied to every session's swarm tool; a project's own prompt is ignored when the daemon
-  started elsewhere.
-- **Fix:** thread `working_dir` into `Registry::new`/`base_tools` and construct
-  `CommunicateTool::new_for_working_dir(Some(cwd))` per session. That makes the existing
-  comment true. Alternatively load the prompt lazily from `ToolContext.working_dir`.
-- **Acceptance:** a session in project B sees B's swarm prompt even when the daemon started
-  in project A.
-- **Test:** extend `communicate_tests.rs:1133-1153` to construct the tool through the real
-  registry path with a working dir and assert the project prompt is used.
+- [x] **Status:** done
+- **Where:** `crates/jcode-base/src/prompt.rs` (`load_swarm_prompt`: the project candidate
+  came from `working_dir.unwrap_or(Path::new("."))`).
+- **Production path:** `crates/jcode-app-core/src/tool/mod.rs` registers one shared
+  `communicate::CommunicateTool::new()`, which resolved the prompt against `None`.
+- **Resolution.** `load_swarm_prompt` now maps `None` to no project candidate instead of
+  `.`, so `None` means "no project" and never the process cwd. The per-session value is
+  applied at the single seam every definition passes through,
+  `Agent::build_filtered_tool_definitions_with`, by the new
+  `Agent::apply_project_swarm_prompt`, which replaces the `swarm` description with
+  `CommunicateTool::description_for(self.working_dir())`. The shared tool keeps only
+  `BASE_DESCRIPTION`; the prompt is never captured at construction.
+
+  Threading `working_dir` into `Registry::new` was rejected: one daemon builds one registry
+  for every project, so a per-registry working directory would reintroduce the same
+  cross-project state under a new name, and it would make the registry stale the moment a
+  session's cwd changed. The definition seam already runs per session with the session's
+  cwd in hand, next to the existing `apply_selfdev_tool_surface` transform.
+
+  Two duplicate entry points were collapsed into one. `new_for_working_dir` (the
+  plan's suggested fix, test-only) and a free `swarm_tool_description` both existed
+  alongside `CommunicateTool::description_for`, and the free function was what the seam
+  called. Two public entry points for one concern is how the P1.3 dead opt-out stayed
+  hidden, so `CommunicateTool::description_for` is now the only one. `mod communicate`
+  became `pub(crate)` for the cross-module call.
+
+**Tests.** `crates/jcode-app-core/src/agent_tests/swarm_prompt.rs` drives the real seam
+(`Registry::new` plus `Agent::tool_definitions()`), not the helper, per the P1.3 lesson:
+`each_session_gets_its_own_projects_swarm_prompt_from_one_registry` builds one shared
+registry and two agents rooted at different repos under a process cwd of project A, and
+asserts each sees its own prompt and not A's. That is the acceptance criterion. One in
+`crates/jcode-base/src/prompt_tests.rs`:
+`no_working_dir_skips_the_project_swarm_prompt_even_under_a_repo_cwd` covers
+`load_swarm_prompt(None)` directly, with a `Some(repo)` positive control. Three in
+`communicate_tests.rs` cover the base/sessioning split: the shared tool carries no prompt,
+`description_for(Some(repo))` embeds it, and `description_for(None)` ignores a daemon-cwd
+prompt. The pre-existing `description_includes_swarm_prompt_guidance` asserted the old
+contract (prompt baked in at construction) and was rewritten to the new one rather than
+deleted.
+
+Reverting each half separately: removing the seam call fails both seam tests
+(`0 passed; 2 failed`); restoring the `unwrap_or_else(|| Path::new("."))` fallback fails
+the base test (`38 passed; 1 failed`) and the `None` seam test (`1 passed; 1 failed`), which
+is the correct split, since only that test exercises `None`. 39 `prompt::prompt_tests`, 2
+`agent::tests::swarm_prompt` and 84 `tool::communicate::tests` pass.
+
+**Test note.** `Agent::tool_definitions()` caches the tool snapshot in `locked_tools`, so a
+test that changes the cwd must call `unlock_tools()`, as production does through
+`set_working_dir_for_pending_context`. Without it the seam never re-runs and the `None` case
+reads a stale description.
+
+**Separate finding, not fixed here.** `Session::create` seeds `working_dir` from the
+process cwd (`crates/jcode-base/src/session.rs`, `current_working_dir_string`), so a session
+with `working_dir == None` is not reachable through `Agent::new`. The `None` test therefore
+clears the field after construction. Note that the `Session::set_working_dir`-style
+fallback nearby is a documented deliberate one from P0.3. Worth its own tracked item.
 
 ### P2.3 - System prompt and AGENTS.md share the same fallback
 

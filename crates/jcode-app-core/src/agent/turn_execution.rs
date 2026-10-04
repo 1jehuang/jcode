@@ -657,6 +657,7 @@ impl Agent {
             self.session.is_canary,
             self.is_desktop_selfdev(),
         );
+        Self::apply_project_swarm_prompt(&mut tools, self.working_dir());
         if apply_mcp_exposure {
             self.apply_mcp_tool_exposure(&mut tools);
         }
@@ -739,6 +740,26 @@ impl Agent {
                 tool.description =
                     crate::tool::selfdev::SelfDevTool::description_for(true).to_string();
                 tool.input_schema = crate::tool::selfdev::SelfDevTool::schema_for(true);
+            }
+        }
+    }
+
+    /// Attach this session's project swarm prompt to the `swarm` tool
+    /// description.
+    ///
+    /// The registry shares one `CommunicateTool` across every project, so the
+    /// prompt cannot be resolved when the registry is built: at that point the
+    /// session's working directory is not known, and the daemon's cwd belongs
+    /// to whichever project started it. The session's own cwd is authoritative
+    /// here (P2.2), and `None` resolves to no project prompt rather than the
+    /// process cwd.
+    fn apply_project_swarm_prompt(tools: &mut [ToolDefinition], working_dir: Option<&str>) {
+        let description = crate::tool::communicate::CommunicateTool::description_for(
+            working_dir.map(std::path::Path::new),
+        );
+        for tool in tools.iter_mut() {
+            if tool.name == "swarm" {
+                tool.description = description.clone();
             }
         }
     }
