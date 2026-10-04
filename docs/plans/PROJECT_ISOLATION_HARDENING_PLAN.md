@@ -1,7 +1,8 @@
 # Project Isolation Hardening Plan
 
 Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3, P2.5, P3.1-P3.2 done)
-Last reviewed: 2026-10-04 (P3.2 shipped)
+Last reviewed: 2026-10-04 (P3.2 shipped; whole-suite hang diagnosed and fixed, so
+whole-suite runs are now usable as acceptance evidence)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -29,61 +30,95 @@ See `AGENTS.md` "Project Isolation Invariants" for the rules that apply to every
 Each task lists the exact files, the acceptance criterion that proves the fix, and the
 regression test that must exist before it is marked `done`.
 
-### Known blocker: `cargo test -p jcode-app-core --lib` does not finish
+### Resolved: the whole-suite hang was `read_to_end` against a live named pipe
 
-Not an isolation bug, but it blocks whole-suite verification of every task here.
+`cargo test -p jcode-app-core --lib` used to hang forever. It now finishes, so a
+whole-suite run is usable as the acceptance evidence for every task here. The
+pre-existing red tests listed at the end of this section are unaffected.
 
-`server::comm_control` tests take the process-global env lock
-(`crates/jcode-base/src/storage.rs::lock_test_env`) and hold it across an `.await`. A test
-that wins the lock and then blocks on something else wedges the run: every later
-lock-waiter queues behind it and the suite stops making progress with no error. Which test
-is reported as hung varies between runs (`assign_next_prefers_worker_with_matching_subsystem_metadata`,
-then `assign_task_allows_taking_over_stale_assignment`, then
-`approve_plan_rejects_proposal_that_forms_cycle_with_existing_plan`), which is the
-signature of the *waiters* being reported, not the blocker. Each passes in isolation.
+- **Root cause: `stream_pair()` is a live named-pipe pair on Windows, not an
+  in-memory duplex.** `crates/jcode-transport/src/windows.rs:118-160` builds it
+  from `ServerOptions::create` plus a real `ClientOptions::open`, so the peer is
+  a running server rather than an in-memory buffer that reports end-of-stream.
+  Anything that waits for EOF therefore waits for a close that never arrives.
+- **The hang was in three `peer.read_to_end(&mut bytes)` calls, all in
+  `crates/jcode-app-core/src/server/client_state_tests.rs`.** Replaced by
+  line-based readers that stop at the known event count: `read_one_event`
+  (returns `(ServerEvent, String)`) and `read_n_raw_events` (returns
+  `Vec<(ServerEvent, String)>`). The raw line is returned because one call site
+  asserts on the legacy non-JSON payload shape. Reading a known number of
+  newline-delimited events never needs EOF.
+- **Verified by reverting the whole file to `HEAD` and re-running:** the test
+  binary hangs and never reports a verdict, killed at a 150s cap. With the fix,
+  all 12 tests in the file pass in 1.92s.
+- **A partial revert is not enough to reproduce it**, which is worth recording.
+  Reverting only the 6-event call site to `read_to_end` still passes, because
+  that test drops the writer half before reading and the pipe then does reach
+  EOF. The pattern is therefore defensive against a future change to that
+  ordering rather than the currently firing defect.
+- **All 10 `stream_pair` call sites were surveyed**: only these 3 used
+  `read_to_end`; the other 7 already read a bounded amount.
 
-Workaround used for now: verify each touched module in its own process, for example
-`cargo test -p jcode-app-core --lib comm_ownership`. A real fix belongs in the test
-harness, not in any isolation task.
+#### The two earlier diagnoses were both wrong
 
-- **Measured, 2026-10-04, and the earlier guess about it was wrong.**
-  A full `cargo test -p jcode-app-core --lib` was run to see this
-  reproduce. It stalls forever: 341 tests report `ok`, 7 fail, and then 12
-  more are named as "has been running for over 60 seconds" and the
-  process never exits. There is no `test result:` line. libtest has no
-  per-test timeout, so a wedged run does *not* fail loudly and does *not*
-  time out; it hangs until killed, and nothing downstream can read a
-  verdict from it. That is why every task here is verified in its own
-  process rather than by trusting a whole-suite run.
-- **The 7 failures are the known pre-existing ones**, the two
-  `restart_snapshot_tests::arm_auto_restore_*` and the five
-  `target_attach_tests::target_subscribe_*`, and are unrelated to this
-  blocker.
-- **Only 4 of the 12 stalled tests take the lock at all.** The rest,
-  including `assign_next_prefers_worker_with_matching_subsystem_`
-  `metadata`, never call `lock_test_env`, which is what identifies the 12
-  as *waiters* rather than the blocker. The four that do are all in
-  `server/client_state_tests.rs`: three `history_reload_recovery_*`
-  tests, which take the lock on a plain `#[test]` and so block a whole OS
-  thread, and `handle_get_history_busy_`
-  `fresh_session_returns_empty_without_waiting`, which is `#[tokio::test]`
-  and carries an explicit `#[expect(clippy::await_holding_lock)]`.
-- **Mechanism: a blocking lock plus a thread-starved runtime.**
-  `storage.rs:28-31` is a `std::sync::Mutex`. It has 769 call expressions
-  across 188 files in 11 crates, and a static scan finds 222 functions that
-  hold the guard across an `.await`. A std mutex blocks the OS thread that
-  waits on it, so once enough threads are parked inside `lock()`, the tokio
-  worker pool cannot make progress even for tests that never touch the
-  lock, and the run deadlocks rather than merely serializing. The cheap
-  workaround does not help: `--test-threads=1` serializes the *tests*, not
-  the lock, so it deadlocks the same way.
-- **Left undone deliberately.** This is test-harness work in
-  `jcode-base` reaching 11 crates, it predates every task in this file, and
-  it is not an isolation bug. The real fix is to stop holding a blocking
-  lock across an await, either by scoping the `JCODE_HOME` override to a
-  critical section or by replacing the std mutex with a file-based or
-  `tokio::sync` lock. That is a change of that size rather than something to
-  smuggle into an isolation commit.
+Recorded because the wrong mechanism is still the intuitive one, and the note
+that asserted it is what made a hung run look measured.
+
+- **"A `std::sync::Mutex` held across an `.await` starves the tokio worker
+  pool"** (`storage.rs:28-31`, 769 call expressions across 188 files, 222
+  functions holding the guard across an await). False: `--test-threads=1` also
+  hung, and one thread cannot starve a pool.
+- **"A wedged run fails loudly with a timeout."** It does not. libtest reports
+  only "has been running for over 60 seconds" and then waits forever, with no
+  `test result:` line, so nothing downstream can read a verdict from it.
+- A count in the same note was also wrong: "783 call sites hold it across
+  await" conflated 783 mentions-with-definition against 769 call expressions and
+  222 across-await functions.
+
+#### Follow-on defect this exposed: `config_watch_tests.rs` was not parallel-safe
+
+Making the suite finish is what let the remaining failures be read at all. 34
+appeared, 6 of them P3.2's own config-watch tests, which had never been observed
+under a whole-suite run.
+
+- **Cause:** `TempHome::new` redirects the process-global `JCODE_HOME` and the
+  process-wide cached config path derived from it. Nine of the file's thirteen
+  tests ran in parallel, so one test's `remove()` unlinks another test's config
+  and both watch the wrong path. This file was the only test file in `server/`
+  that mutated `JCODE_HOME` without taking
+  `crate::storage::lock_test_env()`, which every sibling does.
+- **Measured:** 5 of 13 passed in parallel, 13 of 13 passed under
+  `--test-threads=1`. The failures surface far from the cause, as a missing or
+  spurious config-change report.
+- **Fix:** a `TestEnv` guard taken by `TempHome`, so a new test cannot forget
+  it, and passed explicitly to the one test that needs two homes alive at once
+  (`a_moved_config_path_re_baselines_...`) so that case cannot deadlock against
+  itself. 13 of 13 now pass in parallel.
+- **Mutation-verified:** replacing the shared mutex with a private uncontended
+  one returns it to 4 passed / 9 failed. A first attempt at that mutation
+  declared its own `static` mutex inside `TestEnv::new`, which was still shared
+  by all callers and so still serialized the tests: it passed 13 of 13 and
+  proved nothing. The mutation has to remove the mutual exclusion, not merely
+  change which mutex is used.
+
+#### Pre-existing failures, recorded and deliberately not fixed here
+
+Unchanged by the work above, and not isolation bugs.
+
+- `restart_snapshot_tests::arm_auto_restore_*` (2): `spawn child: Error { kind:
+  NotFound }`.
+- `client_target_attach_tests::target_subscribe_*` (5): "Subscribe working_dir
+  must be an absolute path".
+- `comm_session_tests::coordinator_identity_falls_back_to_persisted_session_when_agent_busy` (1).
+- `socket_tests::inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead` (1).
+- `tests::background_task_wake_runs_live_session_immediately_when_idle` (1).
+- `util::newest_reload_candidate_integration_tests::*` (2): environment-bound,
+  comparing a running daemon build against released versions.
+- `server/headless.rs` drains every `ServerEvent` into a discard task, so `jcode
+  run` and ACP sessions can never observe the P3.2 config-change notice (nor any
+  other notification). Only the TUI renders `ServerEvent::Notification`. This is
+  a missed notice, not a cross-project leak.
+
 
 ---
 
