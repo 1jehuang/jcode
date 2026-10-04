@@ -189,6 +189,11 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     active_skill: Option<String>,
+    /// Whether a leading `/skill` in `content` should resolve server-side.
+    /// False for internally generated turns (idle soft-interrupt payloads),
+    /// whose text is not user input and must never be reinterpreted as a
+    /// slash command.
+    resolve_skill: bool,
 }
 
 struct ProcessingState<'a> {
@@ -1280,6 +1285,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         active_skill,
+                        resolve_skill: true,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1372,6 +1378,9 @@ pub(super) async fn handle_client(
                             images,
                             system_reminder: None,
                             active_skill: None,
+                            // Interrupt payloads are not user input; never
+                            // reinterpret a leading `/name` as a skill.
+                            resolve_skill: false,
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -3397,6 +3406,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         active_skill,
+        resolve_skill,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -3436,7 +3446,9 @@ async fn start_processing_message(
     // registry the CLI repl uses; only registered names are rewritten so
     // slash-prefixed ordinary text passes through untouched. Must run after
     // set_remote_active_skill so an explicit client-picked skill wins.
-    let (content, active_skill) = if active_skill.is_none() {
+    // Internally generated turns (idle soft-interrupt payloads) opt out via
+    // resolve_skill=false: their text is not user input.
+    let (content, active_skill) = if active_skill.is_none() && resolve_skill {
         match agent.lock().await.resolve_skill_invocation(&content) {
             Some((name, prompt)) => {
                 crate::logging::info(&format!(
