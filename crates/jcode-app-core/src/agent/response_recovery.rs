@@ -1,5 +1,15 @@
 use super::*;
 
+/// A tool call that failed schema validation, kept so the correction and
+/// terminal error can repeat exactly what the model did wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MalformedToolCallInfo {
+    /// Tool name exactly as the model sent it.
+    pub(crate) name: String,
+    /// The validation error that was returned to the model as the tool result.
+    pub(crate) error: String,
+}
+
 impl Agent {
     fn parse_text_wrapped_tool_call(
         text: &str,
@@ -445,5 +455,702 @@ impl Agent {
                 self.persist_session_best_effort("truncated tool-call repair");
             }
         }
+    }
+
+    /// Cap on consecutive tool rounds in which *every* call failed schema
+    /// validation (e.g. a model repeatedly emitting `null` arguments, as
+    /// reported for GLM-5.3 calling `write`/`bash`, apologizing, then doing it
+    /// again). Rounds below the cap get a schema-guided correction; the round
+    /// at the cap ends the turn with an actionable error instead of spending
+    /// forever on the same malformed output.
+    pub(crate) const MAX_MALFORMED_TOOL_CALL_ROUNDS: u32 = 3;
+
+    /// Stable prefix for the terminal malformed-tool-call failure. The TUI
+    /// keys its auto-poke disable and resume affordances off this exact
+    /// prefix, so it must not change without coordinating the client side.
+    /// Public so the TUI can reference `crate::agent::Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX`
+    /// instead of hardcoding the string.
+    pub const MALFORMED_TOOL_CALL_ERROR_PREFIX: &str = "Invalid tool calls:";
+
+    /// Bounded recovery for tool rounds in which every call failed schema
+    /// validation. Shared by the blocking and streaming mpsc turn loops so
+    /// the behavior cannot drift.
+    ///
+    /// Semantics:
+    /// - A round with at least one valid (executable) tool call resets the
+    ///   consecutive-round counter: the model is not stuck in a
+    ///   validation-only loop, and the per-call error results already carry
+    ///   the feedback for any malformed sibling call.
+    /// - A validation-only round (no valid calls) increments the counter and,
+    ///   below the cap, injects a user-role system reminder repeating each
+    ///   validation error plus the failing tool's expected input schema. The
+    ///   invalid tool_use blocks and error tool results stay in history and
+    ///   null arguments are never executed or fabricated.
+    /// - On the second consecutive validation-only round the provider session
+    ///   state is reset once per streak, so the next request resends full
+    ///   context instead of continuing a possibly corrupted server-side
+    ///   session.
+    /// - At [`Agent::MAX_MALFORMED_TOOL_CALL_ROUNDS`] consecutive rounds the
+    ///   turn fails with a terminal error starting with
+    ///   [`Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX`] and actionable guidance.
+    pub(crate) fn handle_malformed_tool_round(
+        &mut self,
+        invalid: &[MalformedToolCallInfo],
+        executed_valid_call: bool,
+        consecutive_rounds: &mut u32,
+        tools: &[ToolDefinition],
+    ) -> Result<()> {
+        if invalid.is_empty() {
+            if executed_valid_call {
+                *consecutive_rounds = 0;
+            }
+            return Ok(());
+        }
+        if executed_valid_call {
+            *consecutive_rounds = 0;
+            return Ok(());
+        }
+
+        *consecutive_rounds = consecutive_rounds.saturating_add(1);
+        let last_error = invalid
+            .last()
+            .map(|call| call.error.as_str())
+            .unwrap_or("malformed tool call");
+
+        if *consecutive_rounds >= Self::MAX_MALFORMED_TOOL_CALL_ROUNDS {
+            logging::warn(&format!(
+                "Malformed tool-call round {}/{} ({} invalid call(s), last: {}); ending turn",
+                consecutive_rounds,
+                Self::MAX_MALFORMED_TOOL_CALL_ROUNDS,
+                invalid.len(),
+                last_error
+            ));
+            return Err(anyhow::anyhow!(
+                "{}",
+                Self::malformed_tool_call_terminal_error(
+                    self.provider.model(),
+                    *consecutive_rounds,
+                    last_error
+                )
+            ));
+        }
+
+        // The first correction did not help; reset provider session state
+        // once per streak so the next request resends full context.
+        if *consecutive_rounds == 2 && self.provider_session_id.is_some() {
+            logging::warn(
+                "Malformed tool calls repeated despite correction; resetting provider session state",
+            );
+            self.reset_provider_session();
+        }
+
+        logging::warn(&format!(
+            "Tool round had {} malformed call(s) (validation-only round {}/{}); injecting schema-guided correction",
+            invalid.len(),
+            consecutive_rounds,
+            Self::MAX_MALFORMED_TOOL_CALL_ROUNDS
+        ));
+        self.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                // User-role system reminder so transcript renderers hide the
+                // synthetic recovery instruction, matching the empty-response
+                // recovery message style.
+                text: Self::malformed_tool_call_correction(invalid, tools),
+                cache_control: None,
+            }],
+        );
+        self.session.save()?;
+        Ok(())
+    }
+
+    /// System reminder correcting malformed tool calls: repeats each
+    /// validation error and the failing tool's expected input schema so the
+    /// model can re-issue the call without guessing.
+    pub(crate) fn malformed_tool_call_correction(
+        invalid: &[MalformedToolCallInfo],
+        tools: &[ToolDefinition],
+    ) -> String {
+        let mut lines = String::from(
+            "<system-reminder>Your previous tool call(s) were rejected as malformed and nothing was executed:\n",
+        );
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for call in invalid {
+            let key = (call.name.clone(), call.error.clone());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            lines.push_str(&format!("- {}\n", call.error));
+            match tools.iter().find(|tool| tool.name == call.name) {
+                Some(definition) => lines.push_str(&format!(
+                    "  Re-issue '{}' with arguments that are a single JSON object matching this input schema: {}\n",
+                    call.name,
+                    malformed_tool_schema_excerpt(&definition.input_schema)
+                )),
+                None => lines.push_str(&format!(
+                    "  '{}' is not an available tool; check the tool name against the available tools.\n",
+                    call.name
+                )),
+            }
+        }
+        lines.push_str("Do not send null arguments and do not repeat the same malformed call. Emit each tool call with its complete JSON object of arguments.</system-reminder>");
+        lines
+    }
+
+    /// Actionable terminal error once the malformed-round cap is reached.
+    /// The message starts with [`Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX`].
+    pub(crate) fn malformed_tool_call_terminal_error(
+        model: impl std::fmt::Display,
+        consecutive_rounds: u32,
+        last_error: &str,
+    ) -> String {
+        format!(
+            "{prefix} model '{model}' repeatedly emitted malformed tool calls (null or non-object arguments) for {rounds} consecutive rounds (last error: {last_error}). Nothing was executed in those rounds and the turn was stopped to avoid endless retries. Re-send your message to try again, or switch models with /model.",
+            prefix = Self::MALFORMED_TOOL_CALL_ERROR_PREFIX,
+            model = model,
+            rounds = consecutive_rounds,
+            last_error = last_error,
+        )
+    }
+}
+
+/// Compact, correction-focused schema excerpt for the malformed-call reminder.
+///
+/// Leads with the `required` field names and a compact `property:type` list.
+/// Serializing the raw schema and truncating it would cut off `required`,
+/// which usually sits at the end and is exactly the part a model emitting
+/// null arguments needs to see to fix the call.
+fn malformed_tool_schema_excerpt(schema: &serde_json::Value) -> String {
+    const MAX_PROPERTY_CHARS: usize = 400;
+
+    let object = schema.as_object();
+    let required = object
+        .and_then(|map| map.get("required"))
+        .and_then(|value| value.as_array())
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let properties = object
+        .and_then(|map| map.get("properties"))
+        .and_then(|value| value.as_object());
+
+    let property_types = |budget: usize| -> String {
+        let mut listed = Vec::new();
+        let mut used = 0usize;
+        let mut overflow = 0usize;
+        for (name, definition) in properties.into_iter().flatten() {
+            let kind = definition
+                .get("type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("?");
+            let entry = format!("{name}:{kind}");
+            if used + entry.len() > budget && !listed.is_empty() {
+                overflow += 1;
+                continue;
+            }
+            used += entry.len();
+            listed.push(entry);
+        }
+        let mut out = listed.join(", ");
+        if overflow > 0 {
+            out.push_str(&format!(", ...({overflow} more)"));
+        }
+        out
+    };
+
+    let mut parts = Vec::new();
+    if !required.is_empty() {
+        parts.push(format!("required: {}", required.join(", ")));
+    }
+    let property_list = property_types(MAX_PROPERTY_CHARS);
+    if !property_list.is_empty() {
+        parts.push(format!("properties: {property_list}"));
+    }
+    if parts.is_empty() {
+        // Nothing recognizable (or a bare/non-object schema): fall back to
+        // the serialized schema with a hard cap.
+        let full = schema.to_string();
+        const MAX_FULL_CHARS: usize = 600;
+        if full.chars().count() > MAX_FULL_CHARS {
+            let truncated: String = full.chars().take(MAX_FULL_CHARS).collect();
+            format!("{truncated}...(truncated)")
+        } else {
+            full
+        }
+    } else {
+        parts.join("; ")
+    }
+}
+
+#[cfg(test)]
+mod malformed_tool_call_recovery_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
+
+    type ExecLog = Arc<Mutex<Vec<Value>>>;
+    type SessionLog = Arc<Mutex<Vec<Option<String>>>>;
+
+    /// Scripted provider: each `complete` call pops one scripted round from
+    /// the queue, recording the `resume_session_id` it was handed. Running out
+    /// of rounds panics, which makes unbounded-loop regressions fail loudly.
+    #[derive(Clone)]
+    struct MalformedScriptProvider {
+        rounds: Arc<Mutex<Vec<Vec<StreamEvent>>>>,
+        session_ids: SessionLog,
+    }
+
+    #[async_trait]
+    impl Provider for MalformedScriptProvider {
+        async fn complete(
+            &self,
+            _: &[Message],
+            _: &[ToolDefinition],
+            _: &str,
+            resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            self.session_ids
+                .lock()
+                .unwrap()
+                .push(resume_session_id.map(str::to_string));
+            let mut queue = self.rounds.lock().unwrap();
+            let events = queue
+                .first()
+                .expect("scripted rounds exhausted: turn made an unbounded request")
+                .clone();
+            queue.remove(0);
+            Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+        }
+        fn name(&self) -> &str {
+            "malformed-script-test"
+        }
+        fn model(&self) -> String {
+            "glm-test".into()
+        }
+        fn supports_compaction(&self) -> bool {
+            false
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    struct CaptureTool(ExecLog);
+    #[async_trait]
+    impl crate::tool::Tool for CaptureTool {
+        fn name(&self) -> &str {
+            "capture"
+        }
+        fn description(&self) -> &str {
+            "Capture test input"
+        }
+        fn parameters_schema(&self) -> Value {
+            json!({"type":"object","properties":{"value":{"type":"boolean"}},"required":["value"]})
+        }
+        async fn execute(
+            &self,
+            input: Value,
+            _: crate::tool::ToolContext,
+        ) -> Result<crate::tool::ToolOutput> {
+            self.0.lock().unwrap().push(input);
+            Ok(crate::tool::ToolOutput::new("ok"))
+        }
+    }
+
+    /// A round whose single tool call has null arguments: the streamed
+    /// fragments fail JSON parsing, which is exactly how the reported
+    /// GLM-5.3 null-argument `write`/`bash` calls reach the agent.
+    fn malformed_round(id: &str, session: Option<&str>) -> Vec<StreamEvent> {
+        let mut events = vec![
+            StreamEvent::ToolUseStart {
+                id: id.into(),
+                name: "capture".into(),
+            },
+            StreamEvent::ToolInputDeltaFor {
+                id: id.into(),
+                delta: "{definitely not json".into(),
+            },
+            StreamEvent::ToolUseEndFor { id: id.into() },
+        ];
+        if let Some(session) = session {
+            events.push(StreamEvent::SessionId(session.into()));
+        }
+        events.push(StreamEvent::MessageEnd {
+            stop_reason: Some("tool_use".into()),
+        });
+        events
+    }
+
+    fn valid_round(id: &str, value: bool, session: Option<&str>) -> Vec<StreamEvent> {
+        let mut events = vec![
+            StreamEvent::ToolUseStart {
+                id: id.into(),
+                name: "capture".into(),
+            },
+            StreamEvent::ToolInputDeltaFor {
+                id: id.into(),
+                delta: format!("{{\"value\":{value}}}"),
+            },
+            StreamEvent::ToolUseEndFor { id: id.into() },
+        ];
+        if let Some(session) = session {
+            events.push(StreamEvent::SessionId(session.into()));
+        }
+        events.push(StreamEvent::MessageEnd {
+            stop_reason: Some("tool_use".into()),
+        });
+        events
+    }
+
+    /// One malformed plus one valid capture call in a single round.
+    fn mixed_round(bad_id: &str, good_id: &str) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::ToolUseStart {
+                id: bad_id.into(),
+                name: "capture".into(),
+            },
+            StreamEvent::ToolInputDeltaFor {
+                id: bad_id.into(),
+                delta: "{broken".into(),
+            },
+            StreamEvent::ToolUseEndFor { id: bad_id.into() },
+            StreamEvent::ToolUseStart {
+                id: good_id.into(),
+                name: "capture".into(),
+            },
+            StreamEvent::ToolInputDeltaFor {
+                id: good_id.into(),
+                delta: "{\"value\":true}".into(),
+            },
+            StreamEvent::ToolUseEndFor { id: good_id.into() },
+            StreamEvent::MessageEnd {
+                stop_reason: Some("tool_use".into()),
+            },
+        ]
+    }
+
+    fn final_text_round() -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            },
+        ]
+    }
+
+    async fn scripted_agent(rounds: Vec<Vec<StreamEvent>>) -> (Agent, SessionLog, ExecLog) {
+        let session_ids: SessionLog = Arc::new(Mutex::new(Vec::new()));
+        let exec_log: ExecLog = Arc::new(Mutex::new(Vec::new()));
+        let provider: Arc<dyn Provider> = Arc::new(MalformedScriptProvider {
+            rounds: Arc::new(Mutex::new(rounds)),
+            session_ids: Arc::clone(&session_ids),
+        });
+        let registry = Registry::empty();
+        registry
+            .register(
+                "capture".into(),
+                Arc::new(CaptureTool(Arc::clone(&exec_log))),
+            )
+            .await;
+        let mut agent = Agent::new(provider, registry);
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "test".into(),
+                cache_control: None,
+            }],
+        );
+        (agent, session_ids, exec_log)
+    }
+
+    fn correction_reminders(agent: &Agent) -> Vec<String> {
+        agent
+            .session
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. }
+                    if text.starts_with(
+                        "<system-reminder>Your previous tool call(s) were rejected as malformed",
+                    ) =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn null_tool_use_count(agent: &Agent) -> usize {
+        agent
+            .session
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(|block| matches!(block, ContentBlock::ToolUse { input, .. } if input.is_null()))
+            .count()
+    }
+
+    fn error_tool_result_count(agent: &Agent) -> usize {
+        agent
+            .session
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult {
+                        is_error: Some(true),
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    async fn run_scripted_turn(agent: &mut Agent, streaming: bool) -> Result<()> {
+        if streaming {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            agent.run_turn_streaming_mpsc(tx).await
+        } else {
+            agent.run_turn(false).await.map(|_| ())
+        }
+    }
+
+    #[test]
+    fn schema_excerpt_leads_with_required_and_compact_types() {
+        let write_like = json!({
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "o".repeat(1000)},
+                "content": {"type": "string", "description": "o".repeat(1000)}
+            },
+            "required": ["file_path", "content"]
+        });
+        let excerpt = malformed_tool_schema_excerpt(&write_like);
+        assert!(
+            excerpt.starts_with("required: file_path, content"),
+            "required must lead the excerpt, got: {excerpt}"
+        );
+        assert!(excerpt.contains("file_path:string"));
+        assert!(excerpt.contains("content:string"));
+        assert!(
+            !excerpt.contains("oooo"),
+            "long descriptions must be dropped for compactness, got: {excerpt}"
+        );
+
+        // A schema with far more properties than the budget still lists the
+        // first fields and marks the overflow instead of hiding everything.
+        let mut properties = serde_json::Map::new();
+        for index in 0..60u32 {
+            properties.insert(format!("field_{index:02}"), json!({"type": "string"}));
+        }
+        let many_properties = json!({"type": "object", "properties": properties});
+        let excerpt = malformed_tool_schema_excerpt(&many_properties);
+        assert!(excerpt.starts_with("properties: "), "got: {excerpt}");
+        assert!(excerpt.contains("field_00"), "got: {excerpt}");
+        assert!(
+            excerpt.contains("...("),
+            "overflow marker expected: {excerpt}"
+        );
+
+        let bare = json!({"type": "object"});
+        assert_eq!(
+            malformed_tool_schema_excerpt(&bare),
+            "{\"type\":\"object\"}"
+        );
+    }
+
+    #[test]
+    fn correction_includes_expected_schema_and_unknown_tool_note() {
+        let tools = vec![ToolDefinition::new(
+            "capture",
+            "Capture test input",
+            json!({"type":"object","properties":{"value":{"type":"boolean"}},"required":["value"]}),
+        )];
+        let invalid = vec![MalformedToolCallInfo {
+            name: "capture".into(),
+            error: "Invalid tool call for 'capture': arguments must be a JSON object, got null."
+                .into(),
+        }];
+        let reminder = Agent::malformed_tool_call_correction(&invalid, &tools);
+        assert!(reminder.starts_with("<system-reminder>"));
+        assert!(reminder.ends_with("</system-reminder>"));
+        assert!(reminder.contains("nothing was executed"));
+        assert!(reminder.contains("arguments must be a JSON object"));
+        assert!(reminder.contains("required: value"));
+        assert!(reminder.contains("value:boolean"));
+        assert!(reminder.contains("Do not send null arguments"));
+
+        let unknown = vec![MalformedToolCallInfo {
+            name: "ghost".into(),
+            error: "Invalid tool call for 'ghost': arguments must be a JSON object, got null."
+                .into(),
+        }];
+        let reminder = Agent::malformed_tool_call_correction(&unknown, &tools);
+        assert!(reminder.contains("'ghost' is not an available tool"));
+    }
+
+    #[test]
+    fn terminal_error_keeps_stable_prefix_and_actionable_guidance() {
+        let message = Agent::malformed_tool_call_terminal_error(
+            "glm-5.3",
+            3,
+            "Invalid tool call for 'write': arguments must be a JSON object, got null.",
+        );
+        assert!(message.starts_with(Agent::MALFORMED_TOOL_CALL_ERROR_PREFIX));
+        assert!(message.starts_with("Invalid tool calls:"));
+        assert!(message.contains("glm-5.3"));
+        assert!(message.contains("3 consecutive rounds"));
+        assert!(message.contains("arguments must be a JSON object"));
+        assert!(message.contains("Re-send your message"));
+        assert!(message.contains("/model"));
+    }
+
+    #[tokio::test]
+    async fn consecutive_malformed_rounds_terminate_the_turn_with_stable_prefix() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        for streaming in [false, true] {
+            let (mut agent, session_ids, exec_log) = scripted_agent(vec![
+                malformed_round("m1", Some("sess-1")),
+                malformed_round("m2", Some("sess-1")),
+                malformed_round("m3", Some("sess-1")),
+                // A fourth round exists in the script; requesting it would
+                // prove the loop is unbounded.
+                malformed_round("m4", None),
+            ])
+            .await;
+
+            let error = run_scripted_turn(&mut agent, streaming)
+                .await
+                .expect_err("terminal failure once the malformed cap is reached");
+            let message = error.to_string();
+            assert!(
+                message.starts_with("Invalid tool calls:"),
+                "stable prefix missing (streaming={streaming}): {message}"
+            );
+            assert!(message.contains("glm-test"), "got: {message}");
+            assert!(message.contains("3 consecutive rounds"), "got: {message}");
+            assert!(
+                message.contains("arguments must be a JSON object, got null."),
+                "got: {message}"
+            );
+            assert!(message.contains("/model"), "got: {message}");
+
+            // Bounded spend: exactly one request per malformed round, and the
+            // fourth scripted round is never requested.
+            assert_eq!(
+                session_ids.lock().unwrap().len(),
+                Agent::MAX_MALFORMED_TOOL_CALL_ROUNDS as usize,
+                "streaming={streaming}"
+            );
+            // The provider session id carried by round 3 is None: it was
+            // reset once after the second validation-only round failed.
+            assert_eq!(
+                *session_ids.lock().unwrap(),
+                vec![None, Some("sess-1".into()), None],
+                "streaming={streaming}"
+            );
+
+            // Null arguments were never executed and never fabricated.
+            assert!(exec_log.lock().unwrap().is_empty(), "streaming={streaming}");
+            // The invalid tool_use blocks and their error tool results stay
+            // in history so the transcript and any resume stay consistent.
+            assert_eq!(null_tool_use_count(&agent), 3, "streaming={streaming}");
+            assert_eq!(error_tool_result_count(&agent), 3, "streaming={streaming}");
+            // Two schema-guided correction attempts were injected before the
+            // terminal round.
+            let reminders = correction_reminders(&agent);
+            assert_eq!(reminders.len(), 2, "streaming={streaming}");
+            assert!(reminders[0].contains("capture"), "streaming={streaming}");
+            assert!(
+                reminders[0].contains("required: value"),
+                "streaming={streaming}"
+            );
+            assert!(
+                reminders[0].contains("single JSON object"),
+                "streaming={streaming}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_tool_calls_reset_the_malformed_round_bound() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        for streaming in [false, true] {
+            let (mut agent, _session_ids, exec_log) = scripted_agent(vec![
+                malformed_round("m1", None),
+                malformed_round("m2", None),
+                valid_round("v1", true, None),
+                malformed_round("m3", None),
+                malformed_round("m4", None),
+                valid_round("v2", false, None),
+                final_text_round(),
+            ])
+            .await;
+
+            run_scripted_turn(&mut agent, streaming)
+                .await
+                .expect("turn completes: malformed streaks never reach the cap");
+
+            // Only the valid calls executed, with the exact arguments the
+            // model sent: nothing null was executed, nothing fabricated.
+            assert_eq!(
+                *exec_log.lock().unwrap(),
+                vec![json!({"value": true}), json!({"value": false})],
+                "streaming={streaming}"
+            );
+            // One correction per validation-only round (two streaks of two).
+            assert_eq!(
+                correction_reminders(&agent).len(),
+                4,
+                "streaming={streaming}"
+            );
+            assert_eq!(null_tool_use_count(&agent), 4, "streaming={streaming}");
+            assert_eq!(error_tool_result_count(&agent), 4, "streaming={streaming}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_round_counts_as_progress_and_resets_the_bound() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        // Round 2 is mixed (one malformed + one valid call): it must not
+        // count toward the validation-only streak, and its valid call resets
+        // the streak. If it counted, rounds 1-4 would hit the cap of 3 and
+        // the turn would fail.
+        let (mut agent, _session_ids, exec_log) = scripted_agent(vec![
+            malformed_round("m1", None),
+            mixed_round("bad", "good"),
+            malformed_round("m2", None),
+            malformed_round("m3", None),
+            final_text_round(),
+        ])
+        .await;
+
+        agent
+            .run_turn(false)
+            .await
+            .expect("mixed rounds must not exhaust the malformed bound");
+
+        // Only the valid call in the mixed round executed.
+        assert_eq!(*exec_log.lock().unwrap(), vec![json!({"value": true})]);
+        // Corrections were injected after rounds 1, 3, and 4 - none after the
+        // mixed round.
+        let reminders = correction_reminders(&agent);
+        assert_eq!(reminders.len(), 3);
+        assert!(reminders[0].contains("capture"));
+        // Four malformed calls total (rounds 1, 2, 3, 4) all have their error
+        // tool results preserved in history.
+        assert_eq!(null_tool_use_count(&agent), 4);
+        assert_eq!(error_tool_result_count(&agent), 4);
     }
 }
