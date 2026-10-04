@@ -310,7 +310,7 @@ impl Tool for SessionSearchTool {
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Only sessions whose working directory matches this path prefix (case-insensitive). Defaults to this session's own working directory. Pass \"*\" to search all projects."
+                    "description": "Working directory prefix, case-insensitive. Defaults to this session's own. Pass \"*\" for all projects."
                 },
                 "limit": {
                     "type": "integer",

@@ -533,7 +533,7 @@ impl Tool for BgTool {
                 "task_ids": { "type": "array", "items": {"type":"string"}, "description": "Task IDs for multi-task wait/status." },
                 "latest": { "type": "boolean", "description": "Use latest matching task when task_id is omitted." },
                 "session_only": { "type": "boolean", "description": "Restrict list/implicit selection to current session. Defaults to true." },
-                "all_sessions": { "type": "boolean", "description": "Explicitly reach across sessions for list/cleanup and task ids owned by another session. Defaults to false." },
+                "all_sessions": { "type": "boolean", "description": "Explicitly reach across sessions for list/cleanup and task ids owned by another. Defaults to false." },
                 "status_filter": {
                     "anyOf": [
                         { "type": "string" },

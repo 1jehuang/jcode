@@ -34,7 +34,7 @@ const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
 const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
-    "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
+    "Run a cmd.exe command (compatibility name `bash`), using cmd.exe syntax.";
 
 #[cfg(unix)]
 fn shell_single_quote(value: &str) -> String {
