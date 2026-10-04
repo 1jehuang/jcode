@@ -148,7 +148,11 @@ pub fn reload_process_alive(pid: u32) -> bool {
     // This used to be an unconditional `true` stub, which was a real
     // product bug, not a test-only one: every nonzero pid reported alive,
     // so `ReloadWaitStatus::Failed` was unreachable on Windows and a reload
-    // whose process died mid-wait hung at `Waiting` forever.
+    // whose process died mid-wait was never classified as failed. The TUI
+    // then spun on `Waiting` indefinitely: on Windows
+    // `wait_for_reload_handoff_event` is a fixed 100ms sleep, and the
+    // reconnect loop around it retries with growing backoff and no attempt
+    // cap, so it re-read the same stale `Starting` marker forever.
     #[cfg(not(unix))]
     {
         crate::platform::is_process_running(pid)
@@ -773,7 +777,94 @@ mod tests {
     // `server::socket_tests`. The tests below intentionally cover only the
     // gaps not exercised there: stale-marker cleanup, Failed-marker
     // preservation, corrupt-marker tolerance, and the dead last-known-pid
-    // fallback.
+    // fallback. The two that drive `write_reload_state` itself close the one gap
+    // `socket_tests` leaves open: it fabricates its dead pid with a direct
+    // `ReloadState { .. }.write()`, so it never exercises the pid that the
+    // production writer actually records.
+
+    // Real-path coverage for the liveness check: go through the production
+    // marker writer, the way `server::reload` writes a real reload marker,
+    // rather than hand-constructing a `ReloadState`.
+    //
+    // `write_reload_state` records *this* process's pid. A live self pid is
+    // the `Waiting` verdict, so asserting `Waiting { pid: Some(our_own_pid) }`
+    // proves the writer and reader agree on the same pid end to end: if the
+    // writer's pid did not reach the reader, this would fall through to
+    // `Failed` (liveness says our own pid is dead) or `Idle`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn real_reload_marker_writer_pid_reaches_liveness_check_as_waiting() {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_runtime_dir(temp.path());
+        clear_reload_marker();
+
+        write_reload_state(
+            "real-writer-request",
+            "real-writer-hash",
+            ReloadPhase::Starting,
+            None,
+        );
+
+        // The writer's own pid is what a real in-process reload would record.
+        assert_eq!(
+            ReloadState::load().expect("marker written by write_reload_state").pid,
+            std::process::id(),
+            "write_reload_state must record the writing process's pid"
+        );
+
+        let socket_path = temp.path().join("missing.sock");
+        let status =
+            inspect_reload_wait_status(&socket_path, Duration::from_secs(30), None).await;
+        assert_eq!(
+            status,
+            ReloadWaitStatus::Waiting {
+                pid: Some(std::process::id())
+            },
+            "a real Starting marker naming a live pid must read back as Waiting"
+        );
+    }
+
+    // Companion to the above: the same production writer, with the writer's
+    // process gone, must not strand the client at `Waiting`.
+    //
+    // `write_reload_state` cannot record a dead pid (it always uses the live
+    // caller's own pid), so the realistic dead-pid marker is the one a real
+    // *dying* daemon leaves behind: it wrote `Starting` on the way out and
+    // exited before publishing `SocketReady` or `Failed`. Reconstructing that
+    // exact on-disk state, then reading it through `inspect_reload_wait_status`,
+    // is the state the TUI reconnect loop has to classify. Before the Windows
+    // liveness fix this returned `Waiting` and the loop re-read it forever.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn starting_marker_left_by_a_dead_daemon_is_not_reported_as_waiting() {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::set_runtime_dir(temp.path());
+        clear_reload_marker();
+
+        // Reproduce the on-disk state a real dying daemon leaves: a `Starting`
+        // marker naming its own pid, written by the production writer.
+        write_reload_state(
+            "dying-daemon-request",
+            "dying-daemon-hash",
+            ReloadPhase::Starting,
+            None,
+        );
+        let mut state = ReloadState::load().expect("marker written by write_reload_state");
+        // Swap in a genuinely dead pid: this process wrote the marker and is
+        // now standing in for a daemon that has since exited.
+        state.pid = spawn_and_reap_dead_pid();
+        state.write();
+
+        let socket_path = temp.path().join("missing.sock");
+        let status =
+            inspect_reload_wait_status(&socket_path, Duration::from_secs(30), None).await;
+        assert!(
+            matches!(status, ReloadWaitStatus::Failed(Some(_))),
+            "a Starting marker whose pid is dead must not keep the client Waiting, got {status:?}"
+        );
+    }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
