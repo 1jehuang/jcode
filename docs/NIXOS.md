@@ -8,6 +8,8 @@ The repository ships a flake that covers both halves of the Nix story:
   outside Nix.
 - `packages.default` is a reproducible, sandboxed release build for people who
   want jcode managed by Nix rather than by `scripts/install.sh`.
+- `packages.jcode-bin` installs a hash-pinned official release binary without
+  compiling Rust. Both packages install the same `bin/jcode` command.
 - `homeManagerModules.default` and `nixosModules.default` install the package
   and can generate `~/.jcode/config.toml` from a Nix attribute set.
 - `checks` cover the configuration conversion described below.
@@ -66,6 +68,60 @@ smoke tests the installed binary with `jcode --version`.
 `nix flake check` runs the checks in `nix/checks.nix`. It does not build the
 package, so run `nix build .#` as well when changing anything the binary depends
 on.
+
+## Installing a release binary
+
+```sh
+nix build .#jcode-bin
+nix run .#jcode-bin -- --version
+nix profile install .#jcode-bin
+```
+
+The binary package supports `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`
+and `aarch64-darwin`. `nix/release.json` pins the release tag and the SHA256 of
+each archive. Linux executables are patched to use the Nix loader and libraries;
+the portable archive's launcher is replaced by the actual executable. Darwin
+binaries are installed without stripping or modifying their signatures. Each
+native build checks the installed command's version.
+
+`jcode` and `default` still compile the checked-out sources. Their version comes
+from `Cargo.toml`, while `jcode-bin` follows the pinned public release. These
+versions can differ. Install one variant, not both, since their commands collide.
+
+To choose the binary in either the Home Manager or NixOS module, override the
+existing package option:
+
+```nix
+programs.jcode.package = inputs.jcode.packages.${pkgs.stdenv.hostPlatform.system}.jcode-bin;
+```
+
+### Release updates
+
+After publishing a release and its assets, `release.yml` explicitly dispatches
+`update-nix-release.yml`. A separate `release: published` trigger covers releases
+published manually; that event alone is insufficient for publications made with
+`GITHUB_TOKEN`. The updater accepts only public stable releases with all four
+archives and valid entries in `SHA256SUMS`, and refuses version downgrades.
+
+The workflow updates `nix/release.json`, validates the flake and binary package,
+and proposes a pull request against the default branch. It does not merge the
+pull request, rewrite release tags, or update `flake.lock`. Repository settings
+must allow GitHub Actions to create pull requests. Updates only reach flake
+consumers after the pull request is merged and their own flake input is updated.
+
+Pull requests created with `GITHUB_TOKEN` do not trigger other pull-request
+workflows. Nix validation runs before the PR is created; if branch protection
+requires the general CI checks, a maintainer must close and reopen the PR with a
+human account after the latest bot update. The updater's validation does not
+replace required PR checks; wait for those checks before merging.
+
+The tracked `flake.lock` pins build dependencies for both variants. Update those
+separately with `nix flake update`; publishing a new binary does not require
+changing nixpkgs or flake-utils.
+
+Intel macOS uses the separate `nixpkgs-darwin` input on the 26.05 Darwin branch
+because nixpkgs unstable dropped that platform in 26.11. Other systems retain
+the unstable input.
 
 ## Home Manager
 

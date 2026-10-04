@@ -715,6 +715,13 @@ jobs:
             echo "Release ${GITHUB_REF_NAME} is already public; leaving it public."
           fi
 
+      - name: Queue Nix binary release metadata update
+        continue-on-error: true
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run update-nix-release.yml --ref "$DEFAULT_BRANCH" -f "tag=${GITHUB_REF_NAME}"
+
       # Releases created with GITHUB_TOKEN do not trigger `release: published`,
       # but workflow_dispatch is allowed. Queue the dedicated, per-tag
       # announcement workflow without letting Discord block package publishing.

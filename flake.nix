@@ -3,6 +3,7 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -10,6 +11,7 @@
     {
       self,
       nixpkgs,
+      nixpkgs-darwin,
       flake-utils,
     }:
     let
@@ -217,7 +219,10 @@
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        # Unstable no longer evaluates on Intel macOS as of nixpkgs 26.11.
+        packageSet = if system == "x86_64-darwin" then nixpkgs-darwin else nixpkgs;
+        pkgs = import packageSet { inherit system; };
+        jcode-bin = pkgs.callPackage ./nix/binary.nix { };
 
         # build.rs wants what `git log -1 --format=%ci` prints. Nix gives the
         # commit time as YYYYMMDDHHMMSS in UTC, or nothing for a dirty tree.
@@ -328,7 +333,7 @@
       in
       {
         packages = {
-          inherit jcode;
+          inherit jcode jcode-bin;
           default = jcode;
         };
 
@@ -338,12 +343,19 @@
           meta.description = "Run the jcode coding agent";
         };
 
+        apps.jcode-bin = {
+          type = "app";
+          program = "${jcode-bin}/bin/jcode";
+          meta.description = "Run the official jcode release binary";
+        };
+
         devShells.default = import ./shell.nix { inherit pkgs; };
 
         formatter = pkgs.nixfmt;
 
         checks = import ./nix/checks.nix {
           inherit pkgs;
+          packages = self.packages.${system};
           module = homeManagerModule;
           inherit nixosModule;
         };

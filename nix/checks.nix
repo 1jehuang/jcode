@@ -1,5 +1,6 @@
 {
   pkgs,
+  packages,
   module,
   nixosModule,
 }:
@@ -137,6 +138,26 @@ let
       throw "TEST FAILED: ${name}";
 in
 {
+  jcode-source-default = check "source-default" (
+    packages.default == packages.jcode && packages.default.pname == "jcode"
+  );
+
+  jcode-binary-home-manager = check "binary-home-manager" (
+    lib.elem packages.jcode-bin
+      (evalConfig {
+        enable = true;
+        package = packages.jcode-bin;
+      }).home.packages
+  );
+
+  jcode-binary-nixos = check "binary-nixos" (
+    lib.elem packages.jcode-bin
+      (nixosEval {
+        enable = true;
+        package = packages.jcode-bin;
+      }).environment.systemPackages
+  );
+
   # The whole point of the module: settings must survive the round trip
   # Nix -> TOML -> Nix unchanged.
   jcode-config-roundtrip = check "roundtrip" (
