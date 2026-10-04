@@ -69,7 +69,16 @@ pub(super) fn load_dropped_image(path: &std::path::Path) -> Option<(String, Vec<
     if !has_image_extension(path) {
         return None;
     }
-    let data = std::fs::read(path).ok()?;
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(error) => {
+            crate::logging::info(&format!(
+                "Dropped image {} could not be read, inserting the path instead: {error}",
+                path.display()
+            ));
+            return None;
+        }
+    };
     match crate::image_normalize::normalize_image_bytes(data) {
         Ok(image) => Some((image.media_type.to_string(), image.data)),
         Err(reason) => {
