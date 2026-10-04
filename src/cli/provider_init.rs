@@ -25,8 +25,8 @@ use crate::external_auth::{
 pub enum ProviderChoice {
     Jcode,
     /// Native Claude (Anthropic OAuth/API). `claude-subprocess` is kept as a
-    /// hidden alias for old scripts; the Claude Code CLI subprocess transport
-    /// has been removed.
+    /// hidden alias for old scripts. To run turns through the installed Claude
+    /// Code CLI instead, use `claude-code`.
     #[value(alias = "claude-subprocess")]
     Claude,
     #[value(alias = "claude-api", alias = "anthropic-key", alias = "claude-key")]
