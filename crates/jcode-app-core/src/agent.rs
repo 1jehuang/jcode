@@ -886,13 +886,6 @@ impl Agent {
     /// nothing and only adds noise.
     const TOOL_RESULT_CLEAR_MIN_CHARS: usize = 200;
 
-    /// Preview lines substituted into the send view for an offloaded result
-    /// (LangChain Deep Agents shape: path reference + first-N-lines preview;
-    /// the model re-reads the file with existing tools when it needs more).
-    const TOOL_RESULT_OFFLOAD_PREVIEW_LINES: usize = 10;
-    /// Hard cap on the substituted preview so the substitution itself never
-    /// becomes a context hog on single-line-megablob outputs.
-    const TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS: usize = 500;
     /// Max chars per offload chunk (§3 of phase1/01-masking-spec): results
     /// over the floor split into line-preserving chunks of at most this
     /// size so each masked unit stays coherent (ChunkKV mechanism).
@@ -921,26 +914,6 @@ impl Agent {
             .collect();
         let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
         format!("{kept}_{}", &hash[..8])
-    }
-
-    /// First-N-lines preview of an offloaded result, capped at
-    /// `TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS` so a 10-line wall of minified
-    /// JSON still cannot blow the substitution budget.
-    pub(crate) fn offload_preview(content: &str) -> String {
-        let first = content
-            .lines()
-            .take(Self::TOOL_RESULT_OFFLOAD_PREVIEW_LINES)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if first.chars().count() > Self::TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS {
-            let truncated: String = first
-                .chars()
-                .take(Self::TOOL_RESULT_OFFLOAD_PREVIEW_MAX_CHARS)
-                .collect();
-            format!("{truncated}...(truncated)")
-        } else {
-            first
-        }
     }
 
     /// Split content into line-preserving chunks of at most
@@ -975,24 +948,6 @@ impl Agent {
         } else {
             cue
         }
-    }
-
-    /// Write a cleared tool result to its session-scoped offload file
-    /// (`<jcode_dir>/sessions/offloaded/<session>/<tool>_<hash>.txt`), full
-    /// original bytes under a small deterministic header (no timestamps, so
-    /// rewrites are byte-identical). Returns the absolute path plus the
-    /// preview for the send-view substitution, or `None` on any I/O failure —
-    /// the caller falls back to the lossy stub, so offload can never break a
-    /// send.
-    fn offload_tool_result(
-        session_id: &str,
-        tool_use_id: &str,
-        tool_name: Option<&str>,
-        content: &str,
-    ) -> Option<(PathBuf, String)> {
-        Self::offload_chunk_result(session_id, tool_use_id, tool_name, content, None).map(
-            |(path, preview, _)| (path, preview),
-        )
     }
 
     /// Chunk-aware offload (§3): split content into chunks, write one file
@@ -1591,10 +1546,15 @@ impl Agent {
         );
         self.fire_session_lifecycle_hook("session_end", "close");
         // R3 episode recorder: scan the closing transcript for high-signal
-        // correction/preference/procedure patterns and persist episodes for
-        // future rule proposals. Fail-open (records nothing on any error),
-        // zero behavior change otherwise.
-        Self::record_transcript_episodes(&self.session.messages, &self.session.id);
+        // correction/preference patterns and persist episodes for future
+        // rule proposals. Fail-open (records nothing on any error), zero
+        // behavior change otherwise. Automation sessions (hook-spawned
+        // historians, parented workers) are skipped: they are not user
+        // behavior, and their tool loops + prompt boilerplate are exactly
+        // the noise the recorder must not learn from (2026-10-04 audit).
+        if self.session.hook_trigger.is_none() && self.session.parent_id.is_none() {
+            Self::record_transcript_episodes(&self.session.messages, &self.session.id);
+        }
     }
 
     /// Session-end episode scan (R3 wiring). Extracts user text + assistant

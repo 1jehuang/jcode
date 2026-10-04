@@ -786,26 +786,6 @@ fn tool_result_offload_sanitizes_adversarial_ids() {
 }
 
 #[test]
-fn tool_result_offload_preview_first_lines_capped() {
-    // Deep Agents shape: first 10 lines stay oriented without the full cost.
-    let content = (1..=15)
-        .map(|i| format!("line{i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let preview = Agent::offload_preview(&content);
-    assert_eq!(preview.lines().count(), 10);
-    assert!(preview.starts_with("line1\n"), "got: {preview}");
-    assert!(preview.ends_with("line10"), "got: {preview}");
-    // A single megablob line cannot blow the substitution budget.
-    let blob = "x".repeat(2000);
-    let preview = Agent::offload_preview(&blob);
-    assert_eq!(preview.chars().count(), 500 + "...(truncated)".len());
-    assert!(preview.ends_with("...(truncated)"), "got tail");
-    // Short content passes through untouched.
-    assert_eq!(Agent::offload_preview("a\nb"), "a\nb");
-}
-
-#[test]
 fn pressure_band_edges_fire_once_and_rearm() {
     use crate::agent::Agent;
     assert_eq!(Agent::pressure_band_for_usage(0.74, 0), None);

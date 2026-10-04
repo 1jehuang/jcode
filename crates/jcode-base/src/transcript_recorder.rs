@@ -6,13 +6,18 @@
 //! Phase-2 wordsmithing. Every pattern requires an explicit marker phrase;
 //! casual "no", "thanks", "wrong file?" never match.
 //!
-//! Patterns (all case-insensitive, user-role text only):
-//! - Correction: "that's wrong", "no, ... should be", "you got X wrong",
-//!   "actually, ...", "not X, Y" corrections with explicit replacement.
-//! - Preference: "always ...", "never ...", "from now on ...", "prefer ...",
-//!   "don't ... again".
-//! - Procedure: repeated identical tool-call sequences (>=3 same-name calls
-//!   in a row) — a multi-step way worth proposing as a rule.
+//! Noise history (2026-10-04, 2,474-episode audit): three compounding
+//! defects flooded the buffer — triple-append on every re-close, tool/hook
+//! boilerplate matching preference markers, and procedure runs of one tool
+//! name carrying zero actionable content. Fixes, in audit order:
+//! - P0-1 idempotency: `already_recorded` skips sessions already present.
+//! - P0-3 user-authored-only gate: skip system-reminder blocks and long
+//!   tool-description-shaped texts before marker matching.
+//! - P0-2 procedure drop: `scan_tool_runs` stays only as a shim returning
+//!   nothing; same-name runs never become standing rules (no goal, no
+//!   context, no prescription). Kept (not deleted) so the call site and old
+//!   tests read as intent, and a future heterogeneous-sequence detector has
+//!   a home.
 //! Fail-open everywhere: I/O errors, missing dirs, and empty transcripts
 //! record nothing and change nothing.
 
@@ -20,6 +25,12 @@ use crate::transcript_rules::{Episode, RuleBuffer, RuleKind, RuleScope};
 
 /// On-disk file name for the episode buffer under `~/.jcode/rules/`.
 pub const BUFFER_FILE_NAME: &str = "rule-buffer.json";
+
+/// User-role texts at or above this char count are never user-authored:
+/// they are pasted tool-description JSON, system-reminder walls, or audit
+/// boilerplate. Real corrections/preferences are short; the audit's top
+/// noise trigger lived inside a 38KB system-reminder block.
+pub const MAX_USER_AUTHORED_TEXT_CHARS: usize = 2000;
 
 /// Correction markers: explicit wrongness + replacement signal. Each must
 /// appear as a substring (case-insensitive) in user text. Bare "no" or
@@ -54,11 +65,16 @@ const PREFERENCE_MARKERS: &[&str] = &[
     "remember to never",
 ];
 
-/// Minimum tool-call run length to propose a procedure episode.
-const PROCEDURE_RUN_LEN: usize = 3;
-
 /// Scan user text messages for episodes. Returns episodes in transcript
 /// order. Pure function — no I/O, no globals.
+///
+/// P0-3 user-authored-only gate: skip texts that cannot be the user's own
+/// words — `<system-reminder>` blocks (MCP tool descriptions ride inside
+/// them under the user role) and texts at/over
+/// [`MAX_USER_AUTHORED_TEXT_CHARS`] (pasted JSON/schema walls, audit
+/// boilerplate). The audit's top noise trigger (fetch tool description,
+/// "never use focus", 10/10 sessions) dies here; short user corrections
+/// and preferences pass through.
 pub fn scan_user_text(
     user_texts: &[String],
     session_id: &str,
@@ -66,6 +82,9 @@ pub fn scan_user_text(
 ) -> Vec<Episode> {
     let mut episodes = Vec::new();
     for text in user_texts {
+        if !is_user_authored(text) {
+            continue;
+        }
         let lower = text.to_lowercase();
         if let Some(trigger) = first_correction_trigger(&lower) {
             episodes.push(Episode::now(
@@ -84,6 +103,21 @@ pub fn scan_user_text(
         }
     }
     episodes
+}
+
+/// True when a user-role text could be the user's own words. Rejects the
+/// two shapes the audit proved are machine text wearing the user role:
+/// `<system-reminder>` blocks (hook/tool injections) and long pasted walls
+/// (tool-description JSON, `input_schema` shapes, audit boilerplate).
+/// Char count (not bytes): CJK-heavy pastes must not slip under a byte cap.
+fn is_user_authored(text: &str) -> bool {
+    if text.contains("<system-reminder>") {
+        return false;
+    }
+    if text.contains("input_schema") {
+        return false;
+    }
+    text.chars().count() < MAX_USER_AUTHORED_TEXT_CHARS
 }
 
 /// The sentence containing the first correction marker, clipped to the
@@ -123,46 +157,33 @@ fn clip_sentence(text: &str, pos: usize) -> String {
     text[start..end.min(text.len())].trim().to_string()
 }
 
-/// Scan assistant tool-call name sequences for procedure runs: >=3
-/// consecutive calls with the same tool name. Returns one episode per run
-/// (trigger = "run of N <tool> calls"). Pure function.
+/// Scan assistant tool-call name sequences for procedure runs.
+///
+/// P0-2 DROP (2026-10-04 audit): same-name runs never record. A trigger of
+/// "run of N bash calls" names no goal, no context, no prescription — it
+/// can never become a standing rule, so identical triggers recur across
+/// every session by construction and deterministically trip the N>=3
+/// promotion bar. The audit: 96.1% of a 2,474-episode buffer was this
+/// channel. A future heterogeneous-sequence detector (A→B→C, a real "way
+/// of doing something") belongs here; until then this returns nothing.
+/// Signature kept so the call site reads as intent and old tests pin it.
 pub fn scan_tool_runs(
-    tool_names: &[String],
-    session_id: &str,
-    scope: RuleScope,
+    _tool_names: &[String],
+    _session_id: &str,
+    _scope: RuleScope,
 ) -> Vec<Episode> {
-    let mut episodes = Vec::new();
-    if tool_names.len() < PROCEDURE_RUN_LEN {
-        return episodes;
-    }
-    let mut run_name = &tool_names[0];
-    let mut run_len = 1usize;
-    let mut flush = |name: &str, len: usize, out: &mut Vec<Episode>| {
-        if len >= PROCEDURE_RUN_LEN {
-            out.push(Episode::now(
-                RuleKind::Procedure,
-                scope,
-                session_id,
-                &format!("run of {len} {name} calls"),
-            ));
-        }
-    };
-    for name in &tool_names[1..] {
-        if name == run_name {
-            run_len += 1;
-        } else {
-            flush(run_name, run_len, &mut episodes);
-            run_name = name;
-            run_len = 1;
-        }
-    }
-    flush(run_name, run_len, &mut episodes);
-    episodes
+    Vec::new()
 }
 
 /// Load the persisted buffer, append `episodes`, save back. Fail-open:
 /// any I/O or parse error keeps the old file (or nothing) and reports
 /// `Ok(0)`. Returns the number of episodes appended.
+///
+/// P0-1 idempotency: a session that already contributed is skipped whole.
+/// Episodes are transcript-deterministic (same input rescans to the same
+/// output), so a re-close appends only duplicates — the audit's mega-session
+/// held 3.1x its transcript via three closes. Fail-open: an unreadable
+/// buffer records (better a possible dup than a lost correction).
 pub fn append_episodes(episodes: &[Episode]) -> usize {
     if episodes.is_empty() {
         return 0;
@@ -172,6 +193,13 @@ pub fn append_episodes(episodes: &[Episode]) -> usize {
         None => return 0,
     };
     let mut buffer = load_buffer(&path).unwrap_or_default();
+    let session_id = episodes
+        .first()
+        .map(|episode| episode.session_id.as_str())
+        .unwrap_or("");
+    if already_recorded(&buffer, session_id) {
+        return 0;
+    }
     for episode in episodes {
         buffer.record(episode.clone());
     }
@@ -179,6 +207,13 @@ pub fn append_episodes(episodes: &[Episode]) -> usize {
         return 0;
     }
     episodes.len()
+}
+
+/// True when the buffer already holds episodes for this session (any kind).
+/// Mixed-session batches never occur (one scan = one session), so the
+/// first episode's session id represents the batch.
+fn already_recorded(buffer: &RuleBuffer, session_id: &str) -> bool {
+    !session_id.is_empty() && !buffer.episodes_for_session(session_id).is_empty()
 }
 
 /// Resolve `~/.jcode/rules/rule-buffer.json`. `None` when the home dir
@@ -266,36 +301,75 @@ mod tests {
     }
 
     #[test]
-    fn tool_run_of_three_proposes_procedure() {
-        let names = vec![
-            "read".to_string(),
-            "read".to_string(),
-            "read".to_string(),
-        ];
-        let got = scan_tool_runs(&names, "s1", project());
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].kind, RuleKind::Procedure);
-    }
-
-    #[test]
-    fn tool_run_of_two_proposes_nothing() {
-        let names = vec!["read".to_string(), "read".to_string()];
-        let got = scan_tool_runs(&names, "s1", project());
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn mixed_tool_sequence_finds_only_real_runs() {
-        let names = vec![
+    fn same_name_runs_record_nothing_p0_2_drop() {
+        // P0-2: any same-name run (3, 6, 10) records nothing — the trigger
+        // carries no actionable content, so it can never become a rule.
+        for name in ["read", "bash", "bg", "mcp_call"] {
+            let names = vec![name.to_string(); 10];
+            assert!(
+                scan_tool_runs(&names, "s1", project()).is_empty(),
+                "{name} runs must not record"
+            );
+        }
+        let mixed = vec![
             "read".to_string(),
             "bash".to_string(),
             "bash".to_string(),
             "bash".to_string(),
             "read".to_string(),
         ];
-        let got = scan_tool_runs(&names, "s1", project());
+        assert!(scan_tool_runs(&mixed, "s1", project()).is_empty());
+    }
+
+    #[test]
+    fn system_reminder_and_long_texts_are_not_user_authored() {
+        // P0-3: the audit's top noise shape — fetch tool-description text
+        // (with a "never" marker) inside a system-reminder wall — is skipped.
+        let reminder = format!(
+            "<system-reminder>\n{}\n</system-reminder>",
+            "misses drop content the page's own ctrl-f would find \
+             (focus is semantic, not literal) — never use focus when the \
+             full content is the deliverable"
+        );
+        assert!(!is_user_authored(&reminder));
+        assert!(scan_user_text(&[reminder], "s1", project()).is_empty());
+        // Long pasted walls (tool JSON / audit boilerplate) are skipped even
+        // without a reminder tag.
+        let long = format!("please always do this. {}", "x".repeat(3000));
+        assert!(!is_user_authored(&long));
+        assert!(scan_user_text(&[long], "s1", project()).is_empty());
+        // Short genuine user text still passes.
+        assert!(is_user_authored("From now on always use fish shell."));
+    }
+
+    #[test]
+    fn short_correction_and_preference_still_fire() {
+        // P0-3 must not kill the channels the design needs: the audit's 3
+        // genuine corrections + short preferences keep working.
+        let texts = vec!["i meant our fork, that's wrong".to_string()];
+        let got = scan_user_text(&texts, "s1", project());
         assert_eq!(got.len(), 1);
-        assert!(got[0].trigger.contains("bash"));
+        assert_eq!(got[0].kind, RuleKind::Correction);
+        let texts = vec!["never force-push to main".to_string()];
+        let got = scan_user_text(&texts, "s1", project());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, RuleKind::Preference);
+    }
+
+    #[test]
+    fn already_recorded_session_skips_second_append() {
+        // P0-1: same session twice → second batch contributes nothing.
+        let mut buffer = RuleBuffer::new();
+        buffer.record(Episode::now(
+            RuleKind::Correction,
+            project(),
+            "s-dup",
+            "that's wrong",
+        ));
+        assert!(already_recorded(&buffer, "s-dup"));
+        assert!(!already_recorded(&buffer, "s-fresh"));
+        assert!(!already_recorded(&buffer, ""));
+        assert!(!already_recorded(&RuleBuffer::new(), "s-dup"));
     }
 
     #[test]
