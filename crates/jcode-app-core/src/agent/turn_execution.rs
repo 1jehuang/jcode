@@ -214,9 +214,7 @@ impl Agent {
             let snippet: String = text.chars().take(LAST_TEXT_LIMIT).collect();
             event = event.field("LAST_ASSISTANT_TEXT", snippet);
         }
-        if let Some(usage) =
-            turn_token_usage_after(&self.session.messages, start_message_index)
-        {
+        if let Some(usage) = turn_token_usage_after(&self.session.messages, start_message_index) {
             event = event
                 .field("INPUT_TOKENS", usage.input_tokens.to_string())
                 .field("OUTPUT_TOKENS", usage.output_tokens.to_string());
@@ -234,7 +232,6 @@ impl Agent {
         }
         crate::hooks::dispatch_observer(event);
     }
-
 
     /// Clear conversation history
     pub fn clear(&mut self) {
@@ -1495,7 +1492,6 @@ impl Agent {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TurnTokenUsage {
     input_tokens: u64,
@@ -1525,8 +1521,12 @@ fn turn_token_usage_after(
         };
 
         saw_usage = true;
-        usage.input_tokens = usage.input_tokens.saturating_add(message_usage.input_tokens);
-        usage.output_tokens = usage.output_tokens.saturating_add(message_usage.output_tokens);
+        usage.input_tokens = usage
+            .input_tokens
+            .saturating_add(message_usage.input_tokens);
+        usage.output_tokens = usage
+            .output_tokens
+            .saturating_add(message_usage.output_tokens);
 
         if let Some(value) = message_usage.cache_read_input_tokens {
             usage.cache_read_input_tokens = Some(
