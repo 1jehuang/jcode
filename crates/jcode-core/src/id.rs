@@ -277,7 +277,7 @@ fn select_available_session_name(
     cursor: &AtomicUsize,
     mut after_candidate: impl FnMut(usize),
 ) -> &'static str {
-    let word = (0..SESSION_NAMES.len())
+    (0..SESSION_NAMES.len())
         .find_map(|_| {
             let idx = cursor.fetch_add(1, Ordering::Relaxed) % SESSION_NAMES.len();
             let (word, _) = SESSION_NAMES[idx];
@@ -297,9 +297,7 @@ fn select_available_session_name(
         .unwrap_or_else(|| {
             let idx = cursor.fetch_add(1, Ordering::Relaxed) % SESSION_NAMES.len();
             SESSION_NAMES[idx].0
-        });
-
-    word
+        })
 }
 
 /// Try to extract the memorable name from a session ID
