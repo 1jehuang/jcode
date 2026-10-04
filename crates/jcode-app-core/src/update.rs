@@ -138,17 +138,28 @@ fn source_build_repo_dir() -> Result<PathBuf> {
 }
 
 pub fn should_auto_update() -> bool {
-    if std::env::var("JCODE_NO_AUTO_UPDATE").is_ok() {
+    should_auto_update_with(
+        std::env::var("JCODE_NO_AUTO_UPDATE").is_ok(),
+        is_release_build(),
+        || std::env::current_exe().ok(),
+        crate::logging::info,
+    )
+}
+
+fn should_auto_update_with(
+    disabled: bool,
+    release_build: bool,
+    current_exe: impl FnOnce() -> Option<PathBuf>,
+    log_skip_reason: impl FnOnce(&str),
+) -> bool {
+    if disabled || !release_build {
         return false;
     }
 
-    if !is_release_build() {
-        return false;
-    }
-
-    if let Ok(exe) = std::env::current_exe()
-        && is_inside_git_repo(&exe)
+    if let Some(exe) = current_exe()
+        && let Some(reason) = auto_update_git_repo_skip_reason(&exe)
     {
+        log_skip_reason(reason);
         return false;
     }
 
@@ -187,6 +198,12 @@ fn is_inside_git_repo(path: &std::path::Path) -> bool {
         dir = d.parent();
     }
     false
+}
+
+fn auto_update_git_repo_skip_reason(path: &std::path::Path) -> Option<&'static str> {
+    is_inside_git_repo(path).then_some(
+        "Automatic update check skipped because the running executable is inside a Git repository. Rebuild this checkout executable, or run `jcode update` and relaunch with the installed `jcode` launcher.",
+    )
 }
 
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
@@ -1356,6 +1373,38 @@ mod tests {
     #[test]
     fn test_should_auto_update_dev_build() {
         assert!(!should_auto_update());
+    }
+
+    #[test]
+    fn git_managed_auto_update_skip_logs_actionable_explanation() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let managed_root = temp.path().join("managed");
+        let bin_dir = managed_root.join("bin");
+        std::fs::create_dir_all(managed_root.join(".git")).expect("create git marker");
+        std::fs::create_dir_all(&bin_dir).expect("create bin directory");
+
+        let executable = bin_dir.join("jcode");
+        let mut logged = Vec::new();
+        assert!(!should_auto_update_with(
+            false,
+            true,
+            || Some(executable),
+            |message| logged.push(message.to_owned()),
+        ));
+        assert_eq!(logged.len(), 1, "the skip reason should be logged once");
+        assert!(logged[0].contains("Automatic update check skipped"));
+        assert!(logged[0].contains("Rebuild this checkout executable"));
+        assert!(logged[0].contains("run `jcode update` and relaunch with the installed"));
+
+        let standalone = temp.path().join("standalone/jcode");
+        let mut unexpected_logs = Vec::new();
+        assert!(should_auto_update_with(
+            false,
+            true,
+            || Some(standalone),
+            |message| unexpected_logs.push(message.to_owned()),
+        ));
+        assert!(unexpected_logs.is_empty());
     }
 
     #[test]
