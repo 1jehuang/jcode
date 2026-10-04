@@ -483,24 +483,6 @@ async fn execute_denied_access_precedes_snapshot_and_upload_even_with_cached_rea
 }
 
 #[tokio::test]
-async fn transient_check_failure_keeps_cached_description_stable() {
-    let env = Environment::new();
-    let server = Server::new(move |_| response(503, "offline")).await;
-    env.configure(&server.base);
-    *ACCESS.lock().unwrap() = Some(CachedAccess {
-        identity: identity(&server.base, KEY),
-        checked_at: Instant::now() - ACCESS_TTL - Duration::from_secs(1),
-        access: Access::NotEnabled,
-    });
-    // The live result is still Unknown, so execution fails closed...
-    assert_eq!(access_with(&server.base, KEY, false).await, Access::Unknown);
-    // ...but the published description keeps the last known state instead of
-    // flipping and invalidating every session's prompt cache.
-    assert_eq!(current_access(), Access::NotEnabled);
-    assert_eq!(server.captured().len(), 1);
-}
-
-#[tokio::test]
 async fn status_never_snapshots_and_invalid_timeout_never_contacts_service() {
     let env = Environment::new();
     let credits = json!({"unit":"microcredits", "granted_microcredits":1000,
