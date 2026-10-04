@@ -1412,13 +1412,10 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
     // the real in-tree producer.
     let payload = {
         let mut value = serde_json::to_value(&request).expect("serialize request");
-        value
-            .as_object_mut()
-            .expect("request object")
-            .insert(
-                super::super::comm_auth::CAPABILITY_FIELD.to_string(),
-                serde_json::Value::String(super::super::comm_auth::mint("not-in-swarm")),
-            );
+        value.as_object_mut().expect("request object").insert(
+            super::super::comm_auth::CAPABILITY_FIELD.to_string(),
+            serde_json::Value::String(super::super::comm_auth::mint("not-in-swarm")),
+        );
         serde_json::to_string(&value).expect("serialize request") + "\n"
     };
     client_writer

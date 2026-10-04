@@ -613,7 +613,9 @@ fn apply_or_defer_subscribe_working_dir(
                 // is creation-only, and a target attachment reports the attaching
                 // client's project, not this session's.
                 let accepted = match agent_guard.working_dir() {
-                    Some(existing) => session_working_dir_for_client(Some(existing), Some(&accepted), false),
+                    Some(existing) => {
+                        session_working_dir_for_client(Some(existing), Some(&accepted), false)
+                    }
                     None => Some(accepted),
                 };
                 if let Some(accepted) = accepted {
@@ -632,7 +634,8 @@ fn apply_or_defer_subscribe_working_dir(
             None => {
                 if let Some(current) = agent_guard.working_dir()
                     && current != working_dir
-                    && let Some(reason) = subscribe_working_dir_refusal_reason(current, working_dir, home.as_deref())
+                    && let Some(reason) =
+                        subscribe_working_dir_refusal_reason(current, working_dir, home.as_deref())
                 {
                     log_ignored_subscribe_working_dir(session_id, current, working_dir, reason);
                 }
@@ -687,7 +690,8 @@ fn apply_or_defer_subscribe_working_dir(
             None => {
                 if let Some(current) = agent_guard.working_dir()
                     && current != working_dir
-                    && let Some(reason) = subscribe_working_dir_refusal_reason(current, &working_dir, home.as_deref())
+                    && let Some(reason) =
+                        subscribe_working_dir_refusal_reason(current, &working_dir, home.as_deref())
                 {
                     log_ignored_subscribe_working_dir(&session_id, current, &working_dir, reason);
                 }
@@ -785,8 +789,7 @@ pub(super) async fn handle_subscribe(
             .try_lock()
             .ok()
             .and_then(|agent_guard| agent_guard.working_dir().map(str::to_string));
-        let bound_dir =
-            session_working_dir_for_client(existing_dir.as_deref(), Some(dir), true);
+        let bound_dir = session_working_dir_for_client(existing_dir.as_deref(), Some(dir), true);
         if bound_dir.as_deref() != Some(dir) {
             crate::logging::warn(&format!(
                 "Ignoring subscribe working_dir {} for session {}: the session is already bound to {} (a client-reported directory is creation-only)",
@@ -1495,8 +1498,11 @@ pub(super) async fn handle_resume_session(
     };
     if let (Some(target), Some(subscriber)) = (
         bound_working_dir.as_deref(),
-        working_dir_override.map(str::trim).filter(|dir| !dir.is_empty()),
-    ) && super::util::canonicalize_or(target.into()) != super::util::canonicalize_or(subscriber.into())
+        working_dir_override
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty()),
+    ) && super::util::canonicalize_or(target.into())
+        != super::util::canonicalize_or(subscriber.into())
     {
         crate::logging::warn(&format!(
             "Preserving session {} working_dir {target}: a subscriber in {subscriber} attached to it (cross-project attach)",

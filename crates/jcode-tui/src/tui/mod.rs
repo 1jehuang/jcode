@@ -2036,11 +2036,8 @@ mod tests {
 
     #[test]
     fn cross_project_attach_notice_names_both_projects() {
-        let notice = cross_project_attach_notice(
-            Some("/client/project"),
-            Some("/server/project"),
-        )
-        .expect("a session in another project must be reported");
+        let notice = cross_project_attach_notice(Some("/client/project"), Some("/server/project"))
+            .expect("a session in another project must be reported");
 
         assert!(
             notice.contains("/client/project"),
@@ -2075,8 +2072,14 @@ mod tests {
         // attributed to one, has no disagreement to report. Claiming a cross-project
         // attach here would be guessing, and a notice that fires for a normal session
         // is worse than no notice at all.
-        assert_eq!(cross_project_attach_notice(None, Some("/server/project")), None);
-        assert_eq!(cross_project_attach_notice(Some("/client/project"), None), None);
+        assert_eq!(
+            cross_project_attach_notice(None, Some("/server/project")),
+            None
+        );
+        assert_eq!(
+            cross_project_attach_notice(Some("/client/project"), None),
+            None
+        );
         assert_eq!(cross_project_attach_notice(None, None), None);
     }
 

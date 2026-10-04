@@ -61,7 +61,11 @@ struct PoolKey {
 
 impl PoolKey {
     fn new(scope: String, name: impl Into<String>) -> Self {
-        Self { scope, name: name.into(), working_dir: None }
+        Self {
+            scope,
+            name: name.into(),
+            working_dir: None,
+        }
     }
 
     /// Build a key that also remembers the directory the child should run in.
@@ -152,7 +156,6 @@ impl SharedMcpPool {
         self.connect_all_scoped(&self.default_scope()).await
     }
 
-
     /// Connect to all configured servers, filing every entry under `scope`.
     pub async fn connect_all_scoped(&self, scope: &str) -> (usize, Vec<(String, String)>) {
         let config = self.config.read().await;
@@ -173,11 +176,8 @@ impl SharedMcpPool {
             let server_config = server_config.clone();
             // The pool's own config was resolved from `config_dir`, so that is
             // the only directory a config-only entry can be spawned in.
-            let key = PoolKey::with_dir(
-                scope.to_string(),
-                name.clone(),
-                self.config_dir.as_deref(),
-            );
+            let key =
+                PoolKey::with_dir(scope.to_string(), name.clone(), self.config_dir.as_deref());
             connect_futures.push(async move {
                 let result = self.ensure_connected(key.clone(), server_config).await;
                 (key, result)
@@ -206,7 +206,13 @@ impl SharedMcpPool {
         }
 
         if successes == 0 {
-            successes = self.handles.read().await.keys().filter(|k| k.scope == scope).count();
+            successes = self
+                .handles
+                .read()
+                .await
+                .keys()
+                .filter(|k| k.scope == scope)
+                .count();
         }
 
         (successes, failures)
@@ -217,9 +223,9 @@ impl SharedMcpPool {
     ///
     /// Prefer [`Self::connect_server_scoped`] from a session path.
     pub async fn connect_server(&self, name: &str, config: &McpServerConfig) -> Result<()> {
-        self.connect_server_scoped(&self.default_scope(), name, config).await
+        self.connect_server_scoped(&self.default_scope(), name, config)
+            .await
     }
-
 
     /// Connect a specific server, filing the entry under `scope`.
     pub async fn connect_server_scoped(
@@ -294,12 +300,15 @@ impl SharedMcpPool {
         }
     }
 
-
     /// Disconnect only the servers connected under `scope`.
     pub async fn disconnect_all_scoped(&self, scope: &str) {
         let doomed: Vec<PoolKey> = {
             let handles = self.handles.read().await;
-            handles.keys().filter(|key| key.scope == scope).cloned().collect()
+            handles
+                .keys()
+                .filter(|key| key.scope == scope)
+                .cloned()
+                .collect()
         };
         for key in doomed {
             self.disconnect_server_scoped(scope, &key.name).await;
@@ -352,7 +361,8 @@ impl SharedMcpPool {
     /// Decrements reference counts.
     pub async fn release_handles(&self, session_id: &str, server_names: &[String]) {
         let scope = self.default_scope();
-        self.release_handles_in_dir(session_id, server_names, &scope).await;
+        self.release_handles_in_dir(session_id, server_names, &scope)
+            .await;
     }
 
     /// Release handles counted against `scope`.
@@ -362,15 +372,11 @@ impl SharedMcpPool {
         server_names: &[String],
         scope: &str,
     ) {
-        self.release_handles_in_dir(session_id, server_names, scope).await;
+        self.release_handles_in_dir(session_id, server_names, scope)
+            .await;
     }
 
-    async fn release_handles_in_dir(
-        &self,
-        session_id: &str,
-        server_names: &[String],
-        scope: &str,
-    ) {
+    async fn release_handles_in_dir(&self, session_id: &str, server_names: &[String], scope: &str) {
         let mut refs = self.ref_counts.lock().await;
         for name in server_names {
             if let Some(count) = refs.get_mut(&PoolKey::new(scope.to_string(), name.clone())) {
@@ -390,12 +396,20 @@ impl SharedMcpPool {
     /// Get a handle for a specific server in this pool's default scope.
     pub async fn get_handle(&self, name: &str) -> Option<McpHandle> {
         let scope = self.default_scope();
-        self.handles.read().await.get(&PoolKey::new(scope, name.to_string())).cloned()
+        self.handles
+            .read()
+            .await
+            .get(&PoolKey::new(scope, name.to_string()))
+            .cloned()
     }
 
     /// Get a handle for a specific server in `scope`.
     pub async fn get_handle_scoped(&self, scope: &str, name: &str) -> Option<McpHandle> {
-        self.handles.read().await.get(&PoolKey::new(scope.to_string(), name.to_string())).cloned()
+        self.handles
+            .read()
+            .await
+            .get(&PoolKey::new(scope.to_string(), name.to_string()))
+            .cloned()
     }
 
     /// Get all available tools from all connected servers
@@ -419,7 +433,11 @@ impl SharedMcpPool {
     /// Get list of connected server names within `scope`.
     pub async fn connected_servers_scoped(&self, scope: &str) -> Vec<String> {
         let handles = self.handles.read().await;
-        handles.keys().filter(|key| key.scope == scope).map(|key| key.name.clone()).collect()
+        handles
+            .keys()
+            .filter(|key| key.scope == scope)
+            .map(|key| key.name.clone())
+            .collect()
     }
 
     /// Call a tool on a specific server
@@ -792,8 +810,12 @@ for line in sys.stdin:
     async fn begin_connect_deduplicates_concurrent_attempts() {
         let pool = Arc::new(SharedMcpPool::new(McpConfig::default()));
 
-        let first = pool.begin_connect(&PoolKey::new("scope".to_string(), "demo")).await;
-        let second = pool.begin_connect(&PoolKey::new("scope".to_string(), "demo")).await;
+        let first = pool
+            .begin_connect(&PoolKey::new("scope".to_string(), "demo"))
+            .await;
+        let second = pool
+            .begin_connect(&PoolKey::new("scope".to_string(), "demo"))
+            .await;
 
         let first_notify = match first {
             ConnectAttempt::Leader(notify) => notify,
@@ -926,7 +948,10 @@ for line in sys.stdin:
         // A second connect in the same project must reuse the entry, not spawn
         // a duplicate: sharing within a project is the pool's whole purpose.
         let (second_successes, second_failures) = pool.connect_all_scoped(&scope).await;
-        assert!(second_failures.is_empty(), "second connect failed: {second_failures:?}");
+        assert!(
+            second_failures.is_empty(),
+            "second connect failed: {second_failures:?}"
+        );
         assert_eq!(
             second_successes, 1,
             "the pool must still report the server as available"
@@ -1003,7 +1028,9 @@ for line in sys.stdin:
         pool.disconnect_all_scoped(&scope_a).await;
 
         assert!(
-            pool.acquire_handles_scoped("session-a", &scope_a).await.is_empty(),
+            pool.acquire_handles_scoped("session-a", &scope_a)
+                .await
+                .is_empty(),
             "project A's server should be gone"
         );
         let survivors = pool.acquire_handles_scoped("session-b", &scope_b).await;

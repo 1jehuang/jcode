@@ -16,7 +16,6 @@ use super::client_lifecycle_logging::{
     ServerRequestLifecycleFields, interrupt_request_log_fields, request_payload_summary,
     request_type_from_line, request_type_is_read_only, server_request_lifecycle_fields,
 };
-use super::comm_auth::{comm_claimed_session, reject_unauthorized_comm};
 use super::client_lightweight_control::{
     LightweightControlContext, handle_lightweight_control_request, parse_swarm_spawn_mode,
 };
@@ -27,6 +26,7 @@ use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
 };
 use super::client_writer::write_direct_event;
+use super::comm_auth::{comm_claimed_session, reject_unauthorized_comm};
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
     handle_client_debug_command, handle_client_debug_response, handle_comm_assign_next,

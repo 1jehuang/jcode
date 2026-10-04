@@ -1237,12 +1237,12 @@ pub(super) async fn handle_resume_all_sessions(
 fn working_dir_in_scope(session_dir: Option<&str>, caller_dir: Option<&str>) -> bool {
     match (session_dir, caller_dir) {
         (Some(session), Some(caller)) => {
-            super::util::canonicalize_or(session.into()) == super::util::canonicalize_or(caller.into())
+            super::util::canonicalize_or(session.into())
+                == super::util::canonicalize_or(caller.into())
         }
         _ => true,
     }
 }
-
 
 pub(super) fn handle_compact(
     id: u64,

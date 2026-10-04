@@ -491,7 +491,12 @@ fn cross_project_attach_shows_the_user_which_project_the_session_belongs_to() {
         .display_messages
         .iter()
         .find(|m| m.content.contains("/server/project"))
-        .unwrap_or_else(|| panic!("no notice card names the session project; got: {:#?}", app.display_messages));
+        .unwrap_or_else(|| {
+            panic!(
+                "no notice card names the session project; got: {:#?}",
+                app.display_messages
+            )
+        });
     assert!(
         card.content.contains("/client/project"),
         "the notice must name the project the user launched in: {}",

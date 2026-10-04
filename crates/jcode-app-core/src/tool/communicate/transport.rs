@@ -61,9 +61,9 @@ fn encode_request_with_capability(request: &Request) -> Result<String> {
         return Ok(serde_json::to_string(request)?);
     };
     let mut value = serde_json::to_value(request)?;
-    let object = value.as_object_mut().ok_or_else(|| {
-        anyhow::anyhow!("Comm request did not serialize to a JSON object")
-    })?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Comm request did not serialize to a JSON object"))?;
     object.insert(
         crate::server::CAPABILITY_FIELD.to_string(),
         Value::String(crate::server::mint(&claimed)),

@@ -58,7 +58,10 @@ fn capability_from_line_reads_the_envelope_field() {
 
 #[test]
 fn capability_from_line_is_none_when_absent_or_malformed() {
-    assert_eq!(capability_from_line(r#"{"type":"comm_share","id":1}"#), None);
+    assert_eq!(
+        capability_from_line(r#"{"type":"comm_share","id":1}"#),
+        None
+    );
     assert_eq!(capability_from_line("not json"), None);
     // A non-string capability is ignored rather than trusted.
     assert_eq!(
@@ -121,11 +124,10 @@ fn comm_claimed_session_covers_every_comm_variant() {
     // Enumerates the variant names by reading `wire.rs` rather than listing a
     // sample: a hand-written list only proves the variants someone remembered
     // are covered, which is exactly the case this test exists to catch.
-    let wire = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../jcode-protocol/src/wire.rs");
-    let source = std::fs::read_to_string(&wire).unwrap_or_else(|error| {
-        panic!("cannot read {}: {error}", wire.display())
-    });
+    let wire =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../jcode-protocol/src/wire.rs");
+    let source = std::fs::read_to_string(&wire)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", wire.display()));
     let start = source
         .find("pub enum Request {")
         .expect("Request enum not found in wire.rs");
@@ -144,8 +146,7 @@ fn comm_claimed_session_covers_every_comm_variant() {
                 .chars()
                 .take_while(char::is_ascii_alphanumeric)
                 .collect();
-            name.starts_with("Comm")
-                .then_some(name)
+            name.starts_with("Comm").then_some(name)
         })
         .collect();
     assert!(
@@ -192,7 +193,10 @@ fn subscribed_caller_owns_its_own_session() {
     let claim = CommClaim {
         claimed: "session-a",
     };
-    assert_eq!(claim.authorize_subscribed("session-a"), CommSessionAuth::Owned);
+    assert_eq!(
+        claim.authorize_subscribed("session-a"),
+        CommSessionAuth::Owned
+    );
 }
 
 #[test]
@@ -233,12 +237,18 @@ fn one_shot_caller_cannot_replay_capability_across_sessions() {
         claim.authorize_one_shot(Some(&mint("session-a"))),
         CommSessionAuth::Unauthenticated
     );
-    assert!(!claim.authorize_one_shot(Some(&mint("session-a"))).is_owned());
+    assert!(
+        !claim
+            .authorize_one_shot(Some(&mint("session-a")))
+            .is_owned()
+    );
 }
 
 #[test]
 fn one_shot_caller_without_capability_is_rejected() {
-    let claim = CommClaim { claimed: "session-a" };
+    let claim = CommClaim {
+        claimed: "session-a",
+    };
     assert_eq!(
         claim.authorize_one_shot(None),
         CommSessionAuth::Unauthenticated

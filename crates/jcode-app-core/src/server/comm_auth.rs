@@ -247,10 +247,7 @@ impl<'a> CommClaim<'a> {
 }
 
 /// Authorize a `Comm*` request arriving on a subscribed connection.
-pub(crate) fn authorize_subscribed(
-    claimed: &str,
-    client_session_id: &str,
-) -> CommSessionAuth {
+pub(crate) fn authorize_subscribed(claimed: &str, client_session_id: &str) -> CommSessionAuth {
     if claimed == client_session_id {
         CommSessionAuth::Owned
     } else {

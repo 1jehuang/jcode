@@ -22,8 +22,8 @@
 
 use super::comm_auth::{CAPABILITY_FIELD, mint};
 use crate::message::{Message, ToolDefinition};
-use crate::provider::{EventStream, Provider};
 use crate::protocol::{Request, ServerEvent};
+use crate::provider::{EventStream, Provider};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
@@ -168,13 +168,10 @@ fn spawn_server(
 fn encode(request: &Request, capability: Option<&str>) -> String {
     let mut value = serde_json::to_value(request).expect("serialize request");
     if let Some(capability) = capability {
-        value
-            .as_object_mut()
-            .expect("request object")
-            .insert(
-                CAPABILITY_FIELD.to_string(),
-                serde_json::Value::String(capability.to_string()),
-            );
+        value.as_object_mut().expect("request object").insert(
+            CAPABILITY_FIELD.to_string(),
+            serde_json::Value::String(capability.to_string()),
+        );
     }
     serde_json::to_string(&value).expect("serialize request") + "\n"
 }
