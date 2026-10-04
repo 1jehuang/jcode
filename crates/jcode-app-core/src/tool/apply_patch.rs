@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use similar::{ChangeTag, TextDiff};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const FILE_TOUCH_PREVIEW_MAX_LINES: usize = 6;
 const FILE_TOUCH_PREVIEW_MAX_BYTES: usize = 240;
@@ -110,17 +110,27 @@ impl Tool for ApplyPatchTool {
         // Capture whole-file states, including move destinations and AddFile
         // overwrites. Diff the final state so repeated hunks share one coordinate
         // system and failed operations cannot produce a speculative preview.
-        let _locks = super::file_lock::lock_all(hunks.iter().flat_map(|hunk| {
+        // Resolve every path the patch names before touching the filesystem. The
+        // old per-site resolution meant a relative path with no session working
+        // directory silently landed in the daemon's own directory, and a failure
+        // on a late hunk could arrive after earlier hunks had already written.
+        // Resolving once, up front, makes the check atomic per invocation.
+        let mut resolved_paths: std::collections::HashMap<&str, PathBuf> =
+            std::collections::HashMap::new();
+        for hunk in &hunks {
             let (path, destination) = match hunk {
                 PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => (path, None),
                 PatchHunk::UpdateFile { path, move_to, .. } => (path, move_to.as_ref()),
             };
-            std::iter::once(path)
-                .chain(destination)
-                .map(|path| ctx.resolve_path(Path::new(path)))
-                .collect::<Vec<_>>()
-        }))
-        .await;
+            for path in std::iter::once(path).chain(destination) {
+                let path: &String = path;
+                if !resolved_paths.contains_key(path.as_str()) {
+                    let resolved = ctx.resolve_path(Path::new(path))?;
+                    resolved_paths.insert(path.as_str(), resolved);
+                }
+            }
+        }
+        let _locks = super::file_lock::lock_all(resolved_paths.values().cloned()).await;
         let mut before = std::collections::BTreeMap::new();
         for hunk in &hunks {
             let (path, destination) = match hunk {
@@ -129,8 +139,10 @@ impl Tool for ApplyPatchTool {
             };
             for path in std::iter::once(path).chain(destination) {
                 if !before.contains_key(path) {
-                    let resolved = ctx.resolve_path(Path::new(path));
-                    before.insert(path.clone(), super::file_diff::snapshot(&resolved).await);
+                    let resolved = resolved_paths
+                        .get(path.as_str())
+                        .expect("every hunk path was resolved above");
+                    before.insert(path.clone(), super::file_diff::snapshot(resolved).await);
                 }
             }
         }
@@ -141,7 +153,9 @@ impl Tool for ApplyPatchTool {
         for hunk in &hunks {
             match hunk {
                 PatchHunk::AddFile { path, contents } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
+                    let resolved = resolved_paths
+                        .get(path.as_str())
+                        .expect("every hunk path was resolved above");
                     if let Some(parent) = resolved.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -172,12 +186,14 @@ impl Tool for ApplyPatchTool {
                     }
                 }
                 PatchHunk::DeleteFile { path } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
-                    // `resolve_path` passes absolute paths through unchanged, so
-                    // a patch can name any file on disk. The bash gate does not
-                    // cover this path, so apply the same absolute deny here
-                    // (#604). Only the catastrophic tier: ordinary file deletes
-                    // are this tool's normal job.
+                    let resolved = resolved_paths
+                        .get(path.as_str())
+                        .expect("every hunk path was resolved above");
+                    // `resolve_path` accepts absolute paths as given, so a patch
+                    // can name any file on disk. The bash gate does not cover
+                    // this path, so apply the same absolute deny here (#604).
+                    // Only the catastrophic tier: ordinary file deletes are
+                    // this tool's normal job.
                     let risk_ctx =
                         jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
                     if jcode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
@@ -216,12 +232,16 @@ impl Tool for ApplyPatchTool {
                     move_to,
                     chunks,
                 } => {
-                    let resolved = ctx.resolve_path(Path::new(path));
-                    match apply_update_chunks(&resolved, chunks).await {
+                    let resolved = resolved_paths
+                        .get(path.as_str())
+                        .expect("every hunk path was resolved above");
+                    match apply_update_chunks(resolved, chunks).await {
                         Ok((old_contents, new_contents)) => {
                             let diff = generate_diff_summary(&old_contents, &new_contents);
                             if let Some(dest) = move_to {
-                                let dest_resolved = ctx.resolve_path(Path::new(dest));
+                                let dest_resolved = resolved_paths
+                                    .get(dest.as_str())
+                                    .expect("every hunk destination was resolved above");
                                 if let Some(parent) = dest_resolved.parent() {
                                     tokio::fs::create_dir_all(parent).await?;
                                 }
@@ -340,7 +360,12 @@ impl Tool for ApplyPatchTool {
             for path in before.keys() {
                 after.insert(
                     path.clone(),
-                    super::file_diff::snapshot(&ctx.resolve_path(Path::new(path))).await,
+                    super::file_diff::snapshot(
+                        resolved_paths
+                            .get(path.as_str())
+                            .expect("every snapshotted path was resolved above"),
+                    )
+                    .await,
                 );
             }
             let mut combined = std::collections::BTreeSet::new();

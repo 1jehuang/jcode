@@ -151,7 +151,7 @@ impl Tool for ReplaceTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ReplaceInput = serde_json::from_value(input)?;
         let matcher = Matcher::new(&params)?;
-        let root = ctx.resolve_path(Path::new(params.path.as_deref().unwrap_or(".")));
+        let root = ctx.resolve_path(Path::new(params.path.as_deref().unwrap_or(".")))?;
         anyhow::ensure!(root.exists(), "Path not found: {}", root.display());
 
         let files = {

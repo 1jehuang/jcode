@@ -138,13 +138,33 @@ impl ToolContext {
         }
     }
 
-    pub fn resolve_path(&self, path: &Path) -> PathBuf {
+    /// Resolve a path the agent supplied, relative to the session's project.
+    ///
+    /// A relative path needs a project to be relative *to*. When the session has
+    /// no `working_dir` there is no such base, and returning the path unchanged
+    /// would let the operating system resolve it against the daemon's own
+    /// current directory, i.e. whichever repository happened to start this
+    /// process. One daemon serves sessions for many projects, so that is a
+    /// cross-project read or write, not a harmless default (P2.5).
+    ///
+    /// Absolute paths are always accepted; they name a location outright.
+    ///
+    /// This returns a `Result` rather than a best-effort `PathBuf` so the silent
+    /// passthrough cannot be reintroduced by a caller that forgets to check:
+    /// there is deliberately no non-`Result` sibling of this method.
+    pub fn resolve_path(&self, path: &Path) -> Result<PathBuf> {
         if path.is_absolute() {
-            path.to_path_buf()
-        } else if let Some(ref base) = self.working_dir {
-            base.join(path)
-        } else {
-            path.to_path_buf()
+            return Ok(path.to_path_buf());
+        }
+        match &self.working_dir {
+            Some(base) => Ok(base.join(path)),
+            None => Err(anyhow::anyhow!(
+                "cannot use the relative path `{}`: this session has no working directory, so \
+                 there is no project directory to resolve it against. Resolving it here would \
+                 use the daemon's directory instead, which belongs to a different project. \
+                 Pass an absolute path, or give the session a working directory.",
+                path.display()
+            )),
         }
     }
 }

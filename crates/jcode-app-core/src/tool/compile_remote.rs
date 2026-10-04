@@ -424,7 +424,7 @@ impl Tool for CompileRemoteTool {
             bail!("{}", access.description());
         }
         let (base, key) = credentials.expect("verified access requires credentials");
-        let root = ctx.resolve_path(Path::new(input.path.as_deref().unwrap_or(".")));
+        let root = ctx.resolve_path(Path::new(input.path.as_deref().unwrap_or(".")))?;
         let snapshot = source::snapshot(&root).await?;
         let request_id = format!(
             "{:x}",

@@ -1942,3 +1942,169 @@ async fn bash_refuses_to_run_without_a_working_dir_instead_of_using_the_daemon_c
 
     std::env::set_current_dir(prev_cwd).expect("restore cwd");
 }
+
+/// A relative path with no session working directory must not be resolved
+/// against the daemon's own directory.
+///
+/// This drives the real tools rather than `resolve_path` itself: a test of the
+/// helper would pass even if a call site stopped propagating its error, which is
+/// the half that actually regresses. The process cwd is pointed at a directory
+/// holding a file with the exact name the tools are asked to write, so a silent
+/// fallback would succeed and overwrite it, and the assertions below would have
+/// to notice that.
+#[tokio::test]
+async fn relative_paths_are_refused_without_a_working_dir_instead_of_using_the_daemon_cwd() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    let daemon_repo = tempfile::TempDir::new().expect("daemon repo dir");
+    std::fs::write(
+        daemon_repo.path().join("victim.txt"),
+        "belongsto the daemon project",
+    )
+    .expect("seed daemon-side file");
+    std::env::set_current_dir(daemon_repo.path()).expect("set cwd");
+
+    let target = tempfile::TempDir::new().expect("target dir");
+    let mut ctx = ToolContext {
+        session_id: "p25d-session".to_string(),
+        message_id: "p25d-msg".to_string(),
+        tool_call_id: "p25d-call".to_string(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+
+    // --- write: the smallest tool that both resolves and mutates. ---
+    let error = crate::tool::write::WriteTool::new()
+        .execute(
+            serde_json::json!({"file_path": "victim.txt", "content": "overwritten"}),
+            ctx.clone(),
+        )
+        .await
+        .expect_err("write must refuse a relative path with no session working dir");
+    let message = error.to_string();
+    assert!(
+        message.contains("working directory") && message.contains("victim.txt"),
+        "the write error must name both the problem and the path, got: {message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(daemon_repo.path().join("victim.txt")).expect("read"),
+        "belongsto the daemon project",
+        "the daemon-side file must be untouched: the path resolved against the daemon cwd"
+    );
+
+    // --- read: the same resolution, on the read side. ---
+    let error = crate::tool::read::ReadTool::new()
+        .execute(serde_json::json!({"file_path": "victim.txt"}), ctx.clone())
+        .await
+        .expect_err("read must refuse a relative path with no session working dir");
+    assert!(
+        error.to_string().contains("working directory"),
+        "got: {error}"
+    );
+
+    // --- apply_patch: resolves once up front, so a bad path in any hunk must
+    // stop the whole patch before it writes anything. ---
+    let error = crate::tool::apply_patch::ApplyPatchTool::new()
+        .execute(
+            serde_json::json!({"patch_text": "*** Begin Patch\n*** Add File: victim.txt\n+overwritten\n*** End Patch"}),
+            ctx.clone(),
+        )
+        .await
+        .expect_err("apply_patch must refuse a relative path with no session working dir");
+    assert!(
+        error.to_string().contains("working directory"),
+        "got: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(daemon_repo.path().join("victim.txt")).expect("read"),
+        "belongsto the daemon project",
+        "apply_patch must not have written through the daemon cwd"
+    );
+
+    // --- Positive control. With a working dir set, the same relative write
+    // succeeds and lands in that directory, proving the refusals above came
+    // from the missing working dir and not from the path being unusable. ---
+    ctx.working_dir = Some(target.path().to_path_buf());
+    crate::tool::write::WriteTool::new()
+        .execute(
+            serde_json::json!({"file_path": "victim.txt", "content": "written"}),
+            ctx,
+        )
+        .await
+        .expect("positive control: a session with a working dir can still write");
+    assert_eq!(
+        std::fs::read_to_string(target.path().join("victim.txt")).expect("read"),
+        "written",
+        "the positive control must land in the session's directory"
+    );
+
+    std::env::set_current_dir(prev_cwd).expect("restore cwd");
+}
+
+/// `apply_patch` must not partially apply: a patch whose *second* hunk has an
+/// unresolvable path must leave the first hunk's file unwritten.
+///
+/// The single up-front resolution pass is what makes this true. Resolving per
+/// hunk instead would write the first file and only then fail, leaving the
+/// project in a state neither the agent nor the user asked for.
+#[tokio::test]
+async fn apply_patch_writes_nothing_when_any_path_in_the_patch_is_unresolvable() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    let daemon_repo = tempfile::TempDir::new().expect("daemon repo dir");
+    std::env::set_current_dir(daemon_repo.path()).expect("set cwd");
+
+    let target = tempfile::TempDir::new().expect("target dir");
+    let ctx = ToolContext {
+        session_id: "p25d-atomic".to_string(),
+        message_id: "p25d-msg".to_string(),
+        tool_call_id: "p25d-call".to_string(),
+        // No working dir: both hunks are relative, and must both be refused.
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+
+    crate::tool::apply_patch::ApplyPatchTool::new()
+        .execute(
+            serde_json::json!({"patch_text": "*** Begin Patch\n*** Add File: first.txt\n+one\n*** Add File: second.txt\n+two\n*** End Patch"}),
+            ctx.clone(),
+        )
+        .await
+        .expect_err("a patch naming unresolvable paths must be refused");
+
+    for name in ["first.txt", "second.txt"] {
+        assert!(
+            !daemon_repo.path().join(name).exists(),
+            "{name} must not exist in the daemon directory"
+        );
+        assert!(
+            !target.path().join(name).exists(),
+            "{name} must not exist anywhere: the patch was never partially applied"
+        );
+    }
+
+    // Positive control: the same two-hunk patch with a working dir writes both.
+    let mut ok_ctx = ctx;
+    ok_ctx.working_dir = Some(target.path().to_path_buf());
+    crate::tool::apply_patch::ApplyPatchTool::new()
+        .execute(
+            serde_json::json!({"patch_text": "*** Begin Patch\n*** Add File: first.txt\n+one\n*** Add File: second.txt\n+two\n*** End Patch"}),
+            ok_ctx,
+        )
+        .await
+        .expect("positive control: a session with a working dir can still patch");
+    assert!(
+        target.path().join("first.txt").exists(),
+        "first hunk applied"
+    );
+    assert!(
+        target.path().join("second.txt").exists(),
+        "second hunk applied"
+    );
+
+    std::env::set_current_dir(prev_cwd).expect("restore cwd");
+}

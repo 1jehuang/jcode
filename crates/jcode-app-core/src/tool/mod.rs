@@ -669,6 +669,19 @@ impl Registry {
         crate::util::estimate_tokens(s)
     }
 
+    /// Render a tool-supplied path for a lifecycle field.
+    ///
+    /// A path that cannot be resolved is shown as such. The tempting fallback is
+    /// the path as written, but that is exactly what `resolve_path` used to hand
+    /// back and the OS then resolved against the daemon's directory, so the field
+    /// would name a file in whichever repository started this process.
+    fn resolved_display(ctx: &ToolContext, path: &std::path::Path) -> String {
+        match ctx.resolve_path(path) {
+            Ok(resolved) => resolved.display().to_string(),
+            Err(_) => format!("{} (unresolved)", path.display()),
+        }
+    }
+
     fn tool_lifecycle_fields(
         phase: &str,
         requested_name: &str,
@@ -715,7 +728,7 @@ impl Registry {
                 if let Some(path) = object.get(key).and_then(Value::as_str) {
                     touched_paths.push(format!(
                         "{key}:{}",
-                        ctx.resolve_path(std::path::Path::new(path)).display()
+                        Self::resolved_display(ctx, std::path::Path::new(path))
                     ));
                 }
             }
@@ -723,7 +736,7 @@ impl Registry {
                 for path in paths.iter().filter_map(Value::as_str).take(8) {
                     touched_paths.push(format!(
                         "paths:{}",
-                        ctx.resolve_path(std::path::Path::new(path)).display()
+                        Self::resolved_display(ctx, std::path::Path::new(path))
                     ));
                 }
             }

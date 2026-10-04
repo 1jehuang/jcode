@@ -1,7 +1,7 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3 done)
-Last reviewed: 2026-10-04 (P2.3 shipped)
+Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3, P2.5 done)
+Last reviewed: 2026-10-04 (P2.5 shipped)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -640,17 +640,43 @@ shipped unverified.
 
 ### P2.5 - Relative paths and child shells fall back to the daemon cwd
 
-- [ ] **Status:** pending
-- **Where:** `crates/jcode-tool-core/src/lib.rs:141-149` (`resolve_path` passes relative
+- [x] **Status:** done (a/b/c in `051428883`/`659ecad04`, d here)
+- **Where:** `crates/jcode-tool-core/src/lib.rs` (`resolve_path` passed relative
   paths through as-is when there is no working dir);
-  `crates/jcode-app-core/src/tool/bash.rs:1025-1027` sets the child's cwd only when
-  `ctx.working_dir` is `Some` (background at `:1406`);
-  `crates/jcode-app-core/src/ambient/.../restart_snapshot.rs:218-225` and
-  `server/comm_session.rs:77` fall back to `std::env::current_dir()`.
+  `crates/jcode-app-core/src/tool/bash.rs` sets the child's cwd only when
+  `ctx.working_dir` is `Some`;
+  `crates/jcode-app-core/src/ambient/.../restart_snapshot.rs` and
+  `server/comm_session.rs` fell back to `std::env::current_dir()`.
 - **Fix:** error with a clear message instead of silently using the process cwd, or
   require the session to have a working dir before it may use relative paths.
 - **Acceptance:** a session with no cwd calling `read("notes.md")` gets an actionable
   error, not the daemon's file.
+- **Shipped in four parts:**
+  - **a** `resolve_session_cwd` returns `Option`, and `restore_snapshot` reports
+    `launched: false` rather than launching in the daemon directory.
+  - **b** `create_visible_spawn_session` refuses to spawn with no working dir
+    instead of opening a window in the daemon's project.
+  - **c** `BashTool::execute` refuses once for all three spawn paths (foreground,
+    detached, background) rather than inheriting the daemon cwd per site.
+  - **d** `ToolContext::resolve_path` now returns `Result` and errors on a relative
+    path with no working dir. It has deliberately **no non-`Result` sibling**, so the
+    compiler forces all 22 call sites in 13 files to deal with the refusal rather
+    than leaving the silent passthrough available to the next caller. Notable
+    per-site decisions:
+    - `apply_patch` resolves every path the patch names **before touching disk**.
+      Resolving per hunk would let earlier hunks write before a later hunk failed,
+      so an unresolvable path anywhere now aborts the whole patch. That atomicity
+      has its own test.
+    - `patch` reports an unresolvable path against its own patch, matching how it
+      already reports an apply failure, rather than abandoning the whole invocation.
+    - agentgrep's ranking helpers (`normalize_context_path`, `file_modified_at`)
+      drop an unresolvable path with `.ok()?`. Their output is a label used to rank
+      hits, never a path that gets opened, and the search root the agent actually
+      asked for is resolved and checked separately. Losing one ranking hint is the
+      right degradation for a hint; resolving against the daemon cwd is not.
+    - `Registry::resolved_display` records an unresolvable path as
+      `"<path> (unresolved)"` for lifecycle telemetry instead of naming a file in
+      whichever repository started the daemon.
 
 ---
 

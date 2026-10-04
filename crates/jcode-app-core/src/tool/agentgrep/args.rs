@@ -10,17 +10,17 @@ fn resolved_search_scope(
     path: Option<&str>,
     file: Option<&str>,
     glob: Option<&str>,
-) -> ResolvedSearchScope {
+) -> Result<ResolvedSearchScope> {
     // `file` scopes grep/find to one exact file when `path` is absent.
     let path = path.or(file);
     let Some(path) = path else {
-        return ResolvedSearchScope {
+        return Ok(ResolvedSearchScope {
             root: None,
             glob: normalized_agentgrep_glob_owned(glob),
-        };
+        });
     };
 
-    let resolved = resolve_path_arg(ctx, path);
+    let resolved = resolve_path_arg(ctx, path)?;
     if resolved.is_file() {
         let root = resolved
             .parent()
@@ -30,16 +30,16 @@ fn resolved_search_scope(
         let glob = resolved
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
-        return ResolvedSearchScope {
+        return Ok(ResolvedSearchScope {
             root: Some(root),
             glob,
-        };
+        });
     }
 
-    ResolvedSearchScope {
+    Ok(ResolvedSearchScope {
         root: Some(resolved.display().to_string()),
         glob: normalized_agentgrep_glob_owned(glob),
-    }
+    })
 }
 
 pub(super) fn build_grep_args(params: &AgentGrepInput, ctx: &ToolContext) -> Result<GrepArgs> {
@@ -52,7 +52,7 @@ pub(super) fn build_grep_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
         params.path.as_deref(),
         params.file.as_deref(),
         params.glob.as_deref(),
-    );
+    )?;
     Ok(GrepArgs {
         query,
         regex: params.regex.unwrap_or(false),
@@ -85,7 +85,7 @@ pub(super) fn build_find_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
         params.path.as_deref(),
         params.file.as_deref(),
         params.glob.as_deref(),
-    );
+    )?;
     Ok(FindArgs {
         query_parts: query.split_whitespace().map(ToOwned::to_owned).collect(),
         file_type: params.file_type.clone(),
@@ -112,7 +112,7 @@ pub(super) fn build_outline_args(
     // so the file argument is not joined onto it (for example,
     // ".../todo.rs/.../todo.rs").
     if let Some(path) = params.path.as_deref() {
-        let resolved = resolve_path_arg(ctx, path);
+        let resolved = resolve_path_arg(ctx, path)?;
         if resolved.is_file() {
             return Ok(OutlineArgs {
                 file: resolved.display().to_string(),
@@ -151,7 +151,7 @@ pub(super) fn build_smart_args_and_query(
         params.path.as_deref(),
         params.file.as_deref(),
         params.glob.as_deref(),
-    );
+    )?;
 
     let args = SmartArgs {
         terms,
@@ -232,7 +232,8 @@ fn parse_full_region_mode(value: Option<&str>) -> Result<FullRegionMode> {
 }
 
 fn resolved_root_string(ctx: &ToolContext, path: Option<&str>) -> Option<String> {
-    path.map(|path| resolve_path_arg(ctx, path).display().to_string())
+    path.and_then(|path| resolve_path_arg(ctx, path).ok())
+        .map(|p| p.display().to_string())
 }
 
 pub(super) fn resolve_search_root(ctx: &ToolContext, path: Option<&str>) -> Result<PathBuf> {

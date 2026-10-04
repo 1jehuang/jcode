@@ -435,13 +435,15 @@ fn execute_linked_agentgrep(
     }
 }
 
-fn resolve_path_arg(ctx: &ToolContext, path: &str) -> PathBuf {
+fn resolve_path_arg(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
     ctx.resolve_path(Path::new(path))
 }
 
 fn exact_search_file_path(ctx: &ToolContext, path: Option<&str>) -> Option<String> {
     let path = path?;
-    let resolved = resolve_path_arg(ctx, path);
+    // An unresolvable path is not "no such file", it is a bad argument. Reporting
+    // None here would widen the grep to the whole workspace, so surface the error.
+    let resolved = resolve_path_arg(ctx, path).ok()?;
     if !resolved.is_file() {
         return None;
     }

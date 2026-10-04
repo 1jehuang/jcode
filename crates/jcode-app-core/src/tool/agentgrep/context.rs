@@ -34,7 +34,7 @@ fn build_harness_context(
     let search_root = params
         .path
         .as_deref()
-        .map(|path| resolve_path_arg(ctx, path))
+        .and_then(|path| resolve_path_arg(ctx, path).ok())
         .or_else(|| ctx.working_dir.clone())?;
     let total_messages = session.messages.len().max(1);
     let compaction_cutoff = session
@@ -368,7 +368,14 @@ pub(super) fn collect_bash_exposure(
 fn normalize_context_path(path: &str, search_root: &Path, ctx: &ToolContext) -> Option<String> {
     let path = path.trim().trim_matches('"').trim_matches('\'');
     let path = path.strip_prefix("./").unwrap_or(path);
-    let resolved = ctx.resolve_path(Path::new(path));
+    // `.ok()?`: the result of this function is a *label* used to rank grep hits,
+    // never a path that gets opened, and the search root the agent actually asked
+    // for is resolved and checked by resolved_search_scope. An unresolvable path
+    // therefore drops one ranking hint, which is the right degradation for a
+    // hint; propagating would force every ranking call site to become fallible.
+    // What is not acceptable is the old behaviour of resolving against the
+    // daemon's own directory, which is a different project.
+    let resolved = ctx.resolve_path(Path::new(path)).ok()?;
     if let Ok(relative) = resolved.strip_prefix(search_root) {
         return Some(relative.display().to_string());
     }
@@ -816,7 +823,7 @@ fn file_modified_at(path: &str, search_root: &Path, ctx: &ToolContext) -> Option
     let candidate = if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
-        let resolved = ctx.resolve_path(Path::new(path));
+        let resolved = ctx.resolve_path(Path::new(path)).ok()?;
         if resolved.starts_with(search_root) {
             resolved
         } else {
