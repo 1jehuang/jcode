@@ -484,7 +484,6 @@ async fn run_command(root: &Path, spec: CommandSpec, timeout: u64) -> Result<Too
     command.args(&spec.args);
     #[cfg(windows)]
     if let Some(raw) = &spec.raw {
-        use std::os::windows::process::CommandExt;
         command.raw_arg(raw);
     }
     #[cfg(not(windows))]
