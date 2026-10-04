@@ -207,6 +207,10 @@ pub fn register_external_provider_runtimes() {
         || std::sync::Arc::new(jcode_provider_grok_build_runtime::GrokBuildProvider::new()),
     );
     crate::provider::external::register_external_provider(
+        crate::provider::external::CLAUDE_CODE_RUNTIME,
+        || std::sync::Arc::new(jcode_provider_claude_code_runtime::ClaudeCodeProvider::new()),
+    );
+    crate::provider::external::register_external_provider(
         crate::provider::external::GEMINI_RUNTIME,
         || std::sync::Arc::new(jcode_provider_gemini_runtime::GeminiProvider::new()),
     );

@@ -2604,6 +2604,9 @@ impl Provider for MultiProvider {
                 .and_then(|provider| provider.reasoning_effort()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.reasoning_effort()),
             ActiveProvider::Copilot => self.copilot_provider().and_then(|o| o.reasoning_effort()),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .and_then(|o| o.reasoning_effort()),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
                 .and_then(|o| o.reasoning_effort()),
@@ -2624,6 +2627,10 @@ impl Provider for MultiProvider {
             ActiveProvider::Copilot => self
                 .copilot_provider()
                 .ok_or_else(|| anyhow::anyhow!("Copilot provider not available"))?
+                .set_reasoning_effort(effort),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .ok_or_else(|| anyhow::anyhow!("Claude Code provider not available"))?
                 .set_reasoning_effort(effort),
             ActiveProvider::OpenRouter => self
                 .active_openrouter_execution_provider()
@@ -2653,6 +2660,10 @@ impl Provider for MultiProvider {
                 Some(provider) => provider.available_efforts(),
                 None => vec![],
             },
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.available_efforts())
+                .unwrap_or_default(),
             _ => vec![],
         }
     }

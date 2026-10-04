@@ -3162,6 +3162,7 @@ dependencies = [
  "jcode-harness-api-server",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
+ "jcode-provider-claude-code-runtime",
  "jcode-provider-copilot-runtime",
  "jcode-provider-core",
  "jcode-provider-cursor-runtime",
@@ -3709,6 +3710,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "jcode-provider-claude-code-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "jcode-base",
+ "jcode-message-types",
+ "jcode-provider-core",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "uuid",
 ]
 
 [[package]]
