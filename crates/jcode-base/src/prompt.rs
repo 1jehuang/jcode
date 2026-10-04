@@ -12,10 +12,14 @@ pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 ///
 /// This is a *replacement* hook. To merely add guidance on top of the default,
 /// use `.jcode/prompt-overlay.md` instead.
+//////
+/// `working_dir = None` skips the project level entirely; it never falls back to
+/// the process cwd. The daemon serves sessions for many projects from one
+/// process, so a relative lookup here would apply whichever project started it
+/// to every session (P2.3). A session with no workspace root has no project.
 pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
-    let project_dir = working_dir.unwrap_or(Path::new("."));
     let candidates = [
-        Some(project_dir.join(".jcode").join("system-prompt.md")),
+        working_dir.map(|dir| dir.join(".jcode").join("system-prompt.md")),
         crate::storage::jcode_dir()
             .ok()
             .map(|dir| dir.join("system-prompt.md")),
@@ -477,7 +481,8 @@ pub fn build_system_prompt_full_with_capabilities(
         parts.push(selfdev_prompt);
     }
 
-    // Add AGENTS.md instructions with tracking (from working_dir or cwd)
+    // Add AGENTS.md instructions with tracking. `None` loads the global file
+    // only, never the daemon's cwd (P2.3).
     let (md_content, md_info) = load_agents_md_files_from_dir(working_dir);
     if let Some(content) = md_content {
         parts.push(content);
@@ -951,8 +956,10 @@ fn same_canonical_path(first: &Path, second: &Path) -> bool {
     }
 }
 
+/// `project_dir` is the session's workspace root. `None` means the session has
+/// no project, so only the global AGENTS.md is considered (P2.3).
 fn load_agents_md_files_from_dirs(
-    project_dir: &Path,
+    project_dir: Option<&Path>,
     global_agents_md: Option<&Path>,
 ) -> (Option<String>, ContextInfo) {
     let mut contents = vec![];
@@ -971,8 +978,10 @@ fn load_agents_md_files_from_dirs(
         }
     };
 
-    let project_agents_md = project_dir.join("AGENTS.md");
-    if let Some((content, size)) = load_file(&project_agents_md, "Project Instructions (AGENTS.md)")
+    let project_agents_md = project_dir.map(|dir| dir.join("AGENTS.md"));
+    if let Some((content, size)) = project_agents_md
+        .as_deref()
+        .and_then(|path| load_file(path, "Project Instructions (AGENTS.md)"))
     {
         info.has_project_agents_md = true;
         info.project_agents_md_chars = size;
@@ -982,8 +991,10 @@ fn load_agents_md_files_from_dirs(
     // Canonical file identity handles cwd=$HOME as well as symlinked aliases.
     // If either file is absent or cannot be resolved, loading below remains the
     // source of truth and simply skips unreadable files.
-    let global_duplicates_project = global_agents_md
-        .is_some_and(|global_agents_md| same_canonical_path(&project_agents_md, global_agents_md));
+    let global_duplicates_project = match (project_agents_md.as_deref(), global_agents_md) {
+        (Some(project), Some(global)) => same_canonical_path(project, global),
+        _ => false,
+    };
 
     if !global_duplicates_project
         && let Some(global_agents_md) = global_agents_md
@@ -1003,10 +1014,16 @@ fn load_agents_md_files_from_dirs(
 }
 
 /// Load AGENTS.md files from a specific working directory.
+//////
+/// `working_dir = None` skips the project level entirely; it never falls back to
+/// the process cwd. The daemon serves sessions for many projects from one
+/// process, so a relative lookup here would apply whichever project started it
+/// to every session (P2.3). A session with no workspace root has no project.
 pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, ContextInfo) {
-    let project_dir = working_dir.unwrap_or(Path::new("."));
     let global_agents_md = crate::storage::user_home_path("AGENTS.md").ok();
-    load_agents_md_files_from_dirs(project_dir, global_agents_md.as_deref())
+    // With no project there is no project AGENTS.md; the global one still
+    // applies, so skip the project half rather than reading a relative path.
+    load_agents_md_files_from_dirs(working_dir, global_agents_md.as_deref())
 }
 
 /// Load optional prompt overlay markdown from ~/.jcode/ and ./.jcode/
@@ -1026,18 +1043,19 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
         }
     };
 
-    let project_dir = working_dir.unwrap_or(Path::new("."));
-    let project_overlay = project_dir.join(".jcode").join("prompt-overlay.md");
-    if let Some((content, size)) = load_file(
-        &project_overlay,
-        "Project Prompt Overlay (.jcode/prompt-overlay.md)",
-    ) {
+    let project_overlay = working_dir.map(|dir| dir.join(".jcode").join("prompt-overlay.md"));
+    if let Some((content, size)) = project_overlay
+        .as_deref()
+        .and_then(|path| load_file(path, "Project Prompt Overlay (.jcode/prompt-overlay.md)"))
+    {
         total_chars += size;
         contents.push(content);
     }
 
     if let Ok(global_overlay) = crate::storage::jcode_dir().map(|dir| dir.join("prompt-overlay.md"))
-        && !same_canonical_path(&project_overlay, &global_overlay)
+        && project_overlay
+            .as_deref()
+            .is_none_or(|project| !same_canonical_path(project, &global_overlay))
         && let Some((content, size)) = load_file(
             &global_overlay,
             "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
@@ -1071,19 +1089,21 @@ fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<St
         }
     };
 
-    let project_dir = working_dir.unwrap_or(Path::new("."));
-    let project_preferred_tools = project_dir.join(".jcode").join("preferred-tools.md");
-    if let Some((content, size)) = load_file(
-        &project_preferred_tools,
-        "Project Preferred Tools (.jcode/preferred-tools.md)",
-    ) {
+    let project_preferred_tools =
+        working_dir.map(|dir| dir.join(".jcode").join("preferred-tools.md"));
+    if let Some((content, size)) = project_preferred_tools
+        .as_deref()
+        .and_then(|path| load_file(path, "Project Preferred Tools (.jcode/preferred-tools.md)"))
+    {
         total_chars += size;
         contents.push(content);
     }
 
     if let Ok(global_preferred_tools) =
         crate::storage::jcode_dir().map(|dir| dir.join("preferred-tools.md"))
-        && !same_canonical_path(&project_preferred_tools, &global_preferred_tools)
+        && project_preferred_tools
+            .as_deref()
+            .is_none_or(|project| !same_canonical_path(project, &global_preferred_tools))
         && let Some((content, size)) = load_file(
             &global_preferred_tools,
             "Global Preferred Tools (~/.jcode/preferred-tools.md)",

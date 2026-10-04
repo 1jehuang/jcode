@@ -1,7 +1,7 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.2 done)
-Last reviewed: 2026-10-04 (P2.1 shipped)
+Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1-P2.3 done)
+Last reviewed: 2026-10-04 (P2.3 shipped)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -576,7 +576,7 @@ fallback nearby is a documented deliberate one from P0.3. Worth its own tracked 
 
 ### P2.3 - System prompt and AGENTS.md share the same fallback
 
-- [ ] **Status:** pending
+- [x] **Status:** done
 - **Where:** `crates/jcode-base/src/prompt.rs:15-16` (`load_base_system_prompt`) and
   `:1002-1003` (`load_agents_md_files_from_dir`), both using
   `working_dir.unwrap_or(Path::new("."))`.
@@ -585,6 +585,42 @@ fallback nearby is a documented deliberate one from P0.3. Worth its own tracked 
 - **Fix:** when `working_dir` is `None`, skip project-level candidates (`AGENTS.md`,
   project `system-prompt.md`) and use global/default only.
 - **Acceptance:** a session with no cwd does not receive another project's AGENTS.md.
+
+The fallback appeared at **four** sites, not two. `load_base_system_prompt`,
+`load_agents_md_files_from_dir`, `load_prompt_overlay_files_from_dir`, and
+`load_preferred_tools_files_from_dir` all resolved `None` to `Path::new(".")`, and a
+`git grep` for the pattern now returns nothing repo-wide. The project half of each is
+now an `Option<PathBuf>` built with `working_dir.map(..)`, so `None` yields no project
+candidate at all. `load_agents_md_files_from_dirs` changed signature from `&Path` to
+`Option<&Path>`; its six test call sites were wrapped in `Some(..)`.
+
+The global-vs-project dedup was the subtler half. With `None` there is no project file
+to duplicate, so suppressing the global one would have been a new bug introduced by the
+fix. All three guards had to change shape, not just the path lookup: the two overlay
+guards became `project_x.as_deref().is_none_or(|p| !same_canonical_path(p, &global_x))`
+(was `!same_canonical_path(&project_x, &global_x)`), and the AGENTS.md guard's
+`match` now answers `_ => false` for a missing project rather than treating `None` as a
+match.
+
+**Tests.** `crates/jcode-base/src/prompt_tests.rs` gains three:
+
+- `no_working_dir_loads_no_project_prompt_files_even_under_a_repo_cwd` builds a repo
+  holding all four files, points the **process cwd** at it so a relative fallback would
+  be found, then asserts none of the four leak into a `None`-built prompt. It re-asserts
+  all four *do* appear under `Some(repo)`, so the negative cannot pass vacuously.
+- `no_working_dir_still_loads_the_global_agents_md` holds the other half of the
+  contract: the global `~/AGENTS.md` is shared by every project and must still apply.
+- `no_working_dir_does_not_suppress_the_global_overlay_or_preferred_tools` covers the two
+  `is_none_or` guards.
+
+**Revert proof.** Each of the four sites was reverted individually; each time
+`prompt_tests` went `41 passed; 1 failed` on the aggregate leak test. The three dedup
+guards do not survive a site revert (a plain revert leaves a `None`-shaped
+`PathBuf`, so the old `same_canonical_path(&project_x, ..)` code still compiles and
+behaves the same), so they were proven by mutation instead: `is_none_or` -> `is_some_and`
+and `match _ => false` -> `_ => true`, which failed exactly the two global-suppression
+tests, `40 passed; 2 failed`. Without that second pass these three guards would have
+shipped unverified.
 
 ### P2.4 - `register_mcp_tools_for_dir` ignores `working_dir` in its no-pool branch (latent)
 
