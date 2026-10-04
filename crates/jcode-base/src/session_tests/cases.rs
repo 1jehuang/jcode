@@ -43,6 +43,23 @@ fn derive_session_provider_key_prefers_runtime_identity_over_transport() {
 }
 
 #[test]
+fn derive_session_provider_key_maps_claude_code_name() {
+    let _lock = lock_env();
+    let _runtime = EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER");
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _active = EnvVarGuard::remove("JCODE_ACTIVE_PROVIDER");
+
+    assert_eq!(
+        derive_session_provider_key("Claude Code").as_deref(),
+        Some("claude-code")
+    );
+    assert_eq!(
+        derive_session_provider_key("Claude").as_deref(),
+        Some("claude")
+    );
+}
+
+#[test]
 fn derive_session_provider_key_falls_back_to_openrouter_namespace() {
     let _lock = lock_env();
     let _runtime = EnvVarGuard::remove("JCODE_RUNTIME_PROVIDER");

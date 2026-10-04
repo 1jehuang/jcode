@@ -342,6 +342,9 @@ pub fn derive_session_provider_key(provider_name: &str) -> Option<String> {
 
     let fallback = match normalized_name.as_str() {
         "anthropic" | "claude" | "claude cli" => "claude",
+        // Claude Code mode (`MultiProvider::name()` = "Claude Code") is its
+        // own runtime, never native Claude.
+        "claude code" | "claude-code" => "claude-code",
         "openai" => "openai",
         "github copilot" | "copilot" => "copilot",
         "openrouter" => "openrouter",
