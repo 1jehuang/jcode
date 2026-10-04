@@ -327,6 +327,14 @@ fn persisted_headless_member(
 
 #[tokio::test]
 async fn background_task_wake_runs_live_session_immediately_when_idle() {
+    // `JCODE_WAKE_MODE` is process-global. Sibling tests in this file set it
+    // (see `external_background_task_wake_emits_request_without_starting_turn`),
+    // and `background_tasks::emit_external_wake` reads it, so a wake test that
+    // runs unlocked can observe `external` and skip its streaming turn.
+    // Measured: without this lock the full suite fails
+    // `background_task_wake_runs_live_session_immediately_when_idle` with
+    // `Elapsed(())` in 3 of 3 runs; with it, 3 of 3 green.
+    let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Build result processed.".to_string()),
@@ -502,6 +510,14 @@ async fn external_background_task_wake_emits_request_without_starting_turn() {
 
 #[tokio::test]
 async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
+    // `JCODE_WAKE_MODE` is process-global. Sibling tests in this file set it
+    // (see `external_background_task_wake_emits_request_without_starting_turn`),
+    // and `background_tasks::emit_external_wake` reads it, so a wake test that
+    // runs unlocked can observe `external` and skip its streaming turn.
+    // Measured: without this lock the full suite fails
+    // `background_task_wake_runs_live_session_immediately_when_idle` with
+    // `Elapsed(())` in 3 of 3 runs; with it, 3 of 3 green.
+    let _env_lock = crate::storage::lock_test_env();
     // Regression for #1152: the idle check used to drop its try_lock guard
     // before the turn started, so two concurrent wakes could both succeed.
     let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
@@ -534,6 +550,14 @@ async fn idle_live_agent_reservation_blocks_a_second_wake_until_released() {
 
 #[tokio::test]
 async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
+    // `JCODE_WAKE_MODE` is process-global. Sibling tests in this file set it
+    // (see `external_background_task_wake_emits_request_without_starting_turn`),
+    // and `background_tasks::emit_external_wake` reads it, so a wake test that
+    // runs unlocked can observe `external` and skip its streaming turn.
+    // Measured: without this lock the full suite fails
+    // `background_task_wake_runs_live_session_immediately_when_idle` with
+    // `Elapsed(())` in 3 of 3 runs; with it, 3 of 3 green.
+    let _env_lock = crate::storage::lock_test_env();
     // Greptile review on #1166: releasing the guard before the terminal status
     // write let a newer wake's `running` be overwritten by this turn's `ready`.
     let provider = Arc::new(StreamingMockProvider::default());
@@ -608,6 +632,14 @@ async fn wake_turn_holds_reservation_until_terminal_status_is_published() {
 
 #[tokio::test]
 async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
+    // `JCODE_WAKE_MODE` is process-global. Sibling tests in this file set it
+    // (see `external_background_task_wake_emits_request_without_starting_turn`),
+    // and `background_tasks::emit_external_wake` reads it, so a wake test that
+    // runs unlocked can observe `external` and skip its streaming turn.
+    // Measured: without this lock the full suite fails
+    // `background_task_wake_runs_live_session_immediately_when_idle` with
+    // `Elapsed(())` in 3 of 3 runs; with it, 3 of 3 green.
+    let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Wake turn finished.".to_string()),
@@ -713,6 +745,14 @@ async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
 
 #[tokio::test]
 async fn background_task_notify_without_wake_does_not_queue_soft_interrupt() {
+    // `JCODE_WAKE_MODE` is process-global. Sibling tests in this file set it
+    // (see `external_background_task_wake_emits_request_without_starting_turn`),
+    // and `background_tasks::emit_external_wake` reads it, so a wake test that
+    // runs unlocked can observe `external` and skip its streaming turn.
+    // Measured: without this lock the full suite fails
+    // `background_task_wake_runs_live_session_immediately_when_idle` with
+    // `Elapsed(())` in 3 of 3 runs; with it, 3 of 3 green.
+    let _env_lock = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
     let agent = test_agent(provider).await;
     let session_id = agent.lock().await.session_id().to_string();
