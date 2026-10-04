@@ -92,6 +92,7 @@ pub(super) fn account_label_prefix(kind: AccountProviderKind) -> &'static str {
     match kind {
         AccountProviderKind::Claude => "claude",
         AccountProviderKind::OpenAi => "openai",
+        AccountProviderKind::ClaudeCode => "claude-code",
     }
 }
 
@@ -99,6 +100,7 @@ pub(super) fn account_kind_display(kind: AccountProviderKind) -> &'static str {
     match kind {
         AccountProviderKind::Claude => "Claude",
         AccountProviderKind::OpenAi => "OpenAI",
+        AccountProviderKind::ClaudeCode => "Claude Code",
     }
 }
 
@@ -144,6 +146,11 @@ pub(super) fn stored_accounts(kind: AccountProviderKind) -> Vec<(String, Option<
                 (account.label, identity)
             })
             .collect(),
+        // Claude Code instances come from config; the CLI owns the logins.
+        AccountProviderKind::ClaudeCode => crate::auth::claude_code::instance_ids()
+            .into_iter()
+            .map(|id| (id, None))
+            .collect(),
     }
 }
 
@@ -161,6 +168,7 @@ pub(super) fn default_account_label(kind: AccountProviderKind) -> Option<String>
     match kind {
         AccountProviderKind::Claude => crate::auth::claude::active_account_label(),
         AccountProviderKind::OpenAi => crate::auth::codex::active_account_label(),
+        AccountProviderKind::ClaudeCode => Some(crate::auth::claude_code::default_instance_id()),
     }
 }
 
@@ -235,6 +243,7 @@ fn account_fingerprint(kind: AccountProviderKind, label: &str) -> Option<String>
             .iter()
             .find(|account| account.label == label)
             .and_then(crate::auth::codex::account_identity),
+        AccountProviderKind::ClaudeCode => None,
     }
 }
 

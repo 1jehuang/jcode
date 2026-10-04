@@ -78,6 +78,7 @@ impl FakeAccountRuntime {
         let model = match kind {
             AccountProviderKind::Claude => "claude-opus-4-6",
             AccountProviderKind::OpenAi => "gpt-5.4",
+            AccountProviderKind::ClaudeCode => "claude-opus-4-6",
         };
         Arc::new(Self {
             kind,
@@ -96,6 +97,7 @@ impl FakeAccountRuntime {
         match self.kind {
             AccountProviderKind::Claude => crate::auth::claude::active_account_label(),
             AccountProviderKind::OpenAi => crate::auth::codex::active_account_label(),
+            AccountProviderKind::ClaudeCode => None,
         }
         .unwrap_or_else(|| "default".to_string())
     }
@@ -165,6 +167,7 @@ impl Provider for FakeAccountRuntime {
         match self.kind {
             AccountProviderKind::Claude => "anthropic",
             AccountProviderKind::OpenAi => "openai",
+            AccountProviderKind::ClaudeCode => "claude-code",
         }
     }
 
@@ -221,6 +224,7 @@ fn account_session(
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),

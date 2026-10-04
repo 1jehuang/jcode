@@ -240,6 +240,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     append_gemini_routes(provider, &mut routes);
     append_antigravity_routes(provider, &mut routes);
     append_cursor_routes(provider, &mut routes);
+    append_claude_code_routes(provider, &mut routes);
     append_bedrock_routes(provider, &mut routes);
 
     let has_openrouter_transport = provider.openrouter_provider().is_some();
@@ -601,6 +602,82 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
             });
         }
     }
+}
+
+/// Claude Code CLI routes: one per configured instance per known Claude model.
+/// The default instance uses the bare `claude-code` api method, other
+/// instances `claude-code:<id>`, so picking a route also picks the account.
+fn append_claude_code_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) {
+    let Some(claude_code) = provider.claude_code_provider() else {
+        return;
+    };
+    routes.extend(claude_code_routes_for(
+        &crate::auth::claude_code::settings(),
+        &claude_code_model_ids(claude_code.as_ref()),
+    ));
+}
+
+/// Models offered for Claude Code: the runtime's own catalog when it has one
+/// (from the CLI init handshake), else jcode's known Anthropic ids.
+fn claude_code_model_ids(claude_code: &dyn Provider) -> Vec<String> {
+    let from_runtime: Vec<String> = claude_code
+        .available_models_display()
+        .into_iter()
+        .map(|model| {
+            model
+                .strip_prefix("claude-code:")
+                .unwrap_or(&model)
+                .trim()
+                .to_string()
+        })
+        .filter(|model| !model.is_empty())
+        .collect();
+    if from_runtime.is_empty() {
+        known_anthropic_model_ids()
+    } else {
+        from_runtime
+    }
+}
+
+/// Provider label for a Claude Code instance route.
+pub(crate) fn claude_code_route_provider_label(
+    settings: &crate::config::ClaudeCodeConfig,
+    instance: &crate::config::ClaudeCodeInstanceConfig,
+) -> String {
+    match instance.display_name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ if settings.is_default_instance(&instance.id) => "Claude Code".to_string(),
+        _ => format!("Claude Code ({})", instance.id),
+    }
+}
+
+pub(crate) fn claude_code_routes_for(
+    settings: &crate::config::ClaudeCodeConfig,
+    models: &[String],
+) -> Vec<ModelRoute> {
+    let mut routes = Vec::new();
+    for instance in settings.effective_instances() {
+        let api_method = jcode_provider_core::claude_code_api_method(
+            (!settings.is_default_instance(&instance.id)).then_some(instance.id.as_str()),
+        );
+        let provider_label = claude_code_route_provider_label(settings, &instance);
+        let detail = match instance.resolved_home() {
+            Some(home) => format!("Claude Code CLI, CLAUDE_CONFIG_DIR={}", home.display()),
+            None => "Claude Code CLI, default login".to_string(),
+        };
+        for model in models {
+            routes.push(ModelRoute {
+                model: model.clone(),
+                provider: provider_label.clone(),
+                api_method: api_method.clone(),
+                available: true,
+                detail: detail.clone(),
+                usage: None,
+                cheapness: None,
+            });
+        }
+    }
+    routes
 }
 
 /// AWS Bedrock models and inference profiles, including the

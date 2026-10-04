@@ -23,6 +23,7 @@ impl MultiProvider {
         match kind {
             jcode_provider_core::AccountProviderKind::Claude => self.anthropic_provider(),
             jcode_provider_core::AccountProviderKind::OpenAi => self.openai_provider(),
+            jcode_provider_core::AccountProviderKind::ClaudeCode => self.claude_code_provider(),
         }
     }
 
@@ -49,6 +50,13 @@ impl MultiProvider {
 
     pub(super) fn cursor_provider(&self) -> Option<Arc<dyn Provider>> {
         self.cursor
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(super) fn claude_code_provider(&self) -> Option<Arc<dyn Provider>> {
+        self.claude_code
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -85,6 +93,7 @@ impl MultiProvider {
             ActiveProvider::Antigravity => self.antigravity_provider().is_some(),
             ActiveProvider::Gemini => self.gemini_provider().is_some(),
             ActiveProvider::Cursor => self.cursor_provider().is_some(),
+            ActiveProvider::ClaudeCode => self.claude_code_provider().is_some(),
             ActiveProvider::Bedrock => self.bedrock_provider().is_some(),
             // The OpenRouter slot executes through the *active* runtime: a
             // direct OpenAI-compatible profile when one is active, else real

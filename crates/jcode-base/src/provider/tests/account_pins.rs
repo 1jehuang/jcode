@@ -59,7 +59,11 @@ impl Provider for PinAwareStubRuntime {
     fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
         (kind == self.kind).then(|| self.pin.get()).flatten()
     }
-    fn set_account_pin(&self, kind: AccountProviderKind, pin: Option<AccountPin>) -> anyhow::Result<()> {
+    fn set_account_pin(
+        &self,
+        kind: AccountProviderKind,
+        pin: Option<AccountPin>,
+    ) -> anyhow::Result<()> {
         if kind == self.kind {
             self.pin.set(pin);
         }
@@ -86,12 +90,17 @@ impl Provider for PinAwareStubRuntime {
 
 fn multi_provider_with_pin_aware_runtimes() -> MultiProvider {
     MultiProvider {
-        anthropic: RwLock::new(Some(Arc::new(PinAwareStubRuntime::anthropic()) as Arc<dyn Provider>)),
-        openai: RwLock::new(Some(Arc::new(PinAwareStubRuntime::openai()) as Arc<dyn Provider>)),
+        anthropic: RwLock::new(Some(
+            Arc::new(PinAwareStubRuntime::anthropic()) as Arc<dyn Provider>
+        )),
+        openai: RwLock::new(Some(
+            Arc::new(PinAwareStubRuntime::openai()) as Arc<dyn Provider>
+        )),
         copilot_api: RwLock::new(None),
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -131,7 +140,10 @@ fn multiprovider_fork_copies_pins_new_session_fork_does_not() {
         session
             .set_account_pin(AccountProviderKind::OpenAi, Some(ofox.clone()))
             .unwrap();
-        assert_eq!(session.account_pin(AccountProviderKind::Claude), Some(fox.clone()));
+        assert_eq!(
+            session.account_pin(AccountProviderKind::Claude),
+            Some(fox.clone())
+        );
         assert_eq!(
             session
                 .resolved_account_label(AccountProviderKind::OpenAi)
@@ -140,8 +152,14 @@ fn multiprovider_fork_copies_pins_new_session_fork_does_not() {
         );
 
         let continued = session.fork();
-        assert_eq!(continued.account_pin(AccountProviderKind::Claude), Some(fox.clone()));
-        assert_eq!(continued.account_pin(AccountProviderKind::OpenAi), Some(ofox.clone()));
+        assert_eq!(
+            continued.account_pin(AccountProviderKind::Claude),
+            Some(fox.clone())
+        );
+        assert_eq!(
+            continued.account_pin(AccountProviderKind::OpenAi),
+            Some(ofox.clone())
+        );
 
         // The copy is a value: unpinning the fork leaves the session pinned.
         continued

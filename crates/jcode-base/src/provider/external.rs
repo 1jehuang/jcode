@@ -39,6 +39,10 @@ pub const OPENAI_RUNTIME: &str = "openai";
 /// Registry key for the Grok Build (Grok CLI subscription) HTTP runtime.
 pub const GROK_BUILD_RUNTIME: &str = "grok-build";
 
+/// Registry key for the Claude Code CLI runtime (Claude through the official
+/// `claude` binary, side by side with the native Anthropic runtime).
+pub const CLAUDE_CODE_RUNTIME: &str = "claude-code";
+
 /// Construction spec for the OpenRouter / OpenAI-compatible runtime family.
 /// Unlike the other providers, one concrete runtime type serves several
 /// distinct identities (the real OpenRouter aggregator, a pinned OpenRouter

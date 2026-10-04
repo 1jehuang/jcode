@@ -51,6 +51,7 @@ input = ["text"]
             antigravity: RwLock::new(None),
             gemini: RwLock::new(None),
             cursor: RwLock::new(None),
+            claude_code: RwLock::new(None),
             bedrock: RwLock::new(None),
             openrouter: RwLock::new(None),
             openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),

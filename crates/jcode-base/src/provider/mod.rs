@@ -357,6 +357,10 @@ pub struct MultiProvider {
     /// `jcode-provider-cursor-runtime` and is instantiated through
     /// `external::instantiate_external_provider`.
     cursor: RwLock<Option<Arc<dyn Provider>>>,
+    /// Claude Code CLI runtime (Claude through the official `claude` binary).
+    /// Present when the configured binary exists. Held as `dyn Provider`: the
+    /// runtime lives downstream in `jcode-provider-claude-code-runtime`.
+    claude_code: RwLock<Option<Arc<dyn Provider>>>,
     /// AWS Bedrock provider (native Converse/ConverseStream, IAM/SigV4)
     bedrock: RwLock<Option<Arc<bedrock::BedrockProvider>>>,
     /// OpenRouter API provider
@@ -501,6 +505,7 @@ impl MultiProvider {
             ("ag", self.antigravity_provider().is_some()),
             ("ge", self.gemini_provider().is_some()),
             ("cu", self.cursor_provider().is_some()),
+            ("cc", self.claude_code_provider().is_some()),
             ("be", self.bedrock_provider().is_some()),
             ("or", self.openrouter_provider().is_some()),
         ]
@@ -1275,6 +1280,17 @@ impl MultiProvider {
                 self.set_active_provider(ActiveProvider::Cursor);
                 Ok(())
             }
+            ActiveProvider::ClaudeCode => {
+                let Some(claude_code) = self.claude_code_provider() else {
+                    anyhow::bail!(
+                        "Claude Code is not available. Install the Claude Code CLI (`claude`) or set [provider.claude_code].binary."
+                    );
+                };
+                let model = jcode_provider_core::strip_own_model_prefix(model, "claude-code:");
+                claude_code.set_model(model)?;
+                self.set_active_provider(ActiveProvider::ClaudeCode);
+                Ok(())
+            }
             ActiveProvider::Bedrock => {
                 let Some(bedrock) = self.bedrock_provider() else {
                     anyhow::bail!(
@@ -1574,6 +1590,18 @@ impl MultiProvider {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cursor);
         }
 
+        if self.claude_code_provider().is_none()
+            && crate::auth::claude_code::binary_available()
+            && let Some(claude_code) =
+                external::instantiate_external_provider(external::CLAUDE_CODE_RUNTIME)
+        {
+            crate::logging::info("Hot-initialized Claude Code provider after login");
+            *self
+                .claude_code
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claude_code);
+        }
+
         let already_has_bedrock = self.bedrock_provider().is_some();
         if !already_has_bedrock && bedrock::BedrockProvider::has_credentials() {
             crate::logging::info("Hot-initialized AWS Bedrock provider after login");
@@ -1755,6 +1783,7 @@ impl MultiProvider {
             ActiveProvider::Antigravity => "antigravity",
             ActiveProvider::Gemini => "gemini",
             ActiveProvider::Cursor => "cursor",
+            ActiveProvider::ClaudeCode => "claude-code",
             ActiveProvider::Bedrock => "bedrock",
             ActiveProvider::OpenRouter => {
                 if let Some(openrouter) = self.active_openrouter_execution_provider()
@@ -1795,6 +1824,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Antigravity => self.antigravity_provider(),
             ActiveProvider::Gemini => self.gemini_provider(),
             ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::ClaudeCode => self.claude_code_provider(),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|provider| provider as Arc<dyn Provider>),
@@ -1850,6 +1880,7 @@ impl Provider for MultiProvider {
             ActiveProvider::Antigravity => "Antigravity",
             ActiveProvider::Gemini => "Gemini",
             ActiveProvider::Cursor => "Cursor",
+            ActiveProvider::ClaudeCode => "Claude Code",
             ActiveProvider::Bedrock => "Bedrock",
             ActiveProvider::OpenRouter => "OpenRouter",
         }
@@ -1898,6 +1929,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.model())
                 .unwrap_or_else(|| "composer-2.5".to_string()),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.model())
+                .unwrap_or_else(|| jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string()),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|o| o.model())
@@ -1968,6 +2003,7 @@ impl Provider for MultiProvider {
                 match kind {
                     AccountProviderKind::Claude => "Anthropic",
                     AccountProviderKind::OpenAi => "OpenAI",
+                    AccountProviderKind::ClaudeCode => "Claude Code",
                 }
             )),
         }
@@ -2077,6 +2113,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|provider| provider.supports_image_input())
                 .unwrap_or(false),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|provider| provider.supports_image_input())
+                .unwrap_or(false),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|provider| provider.supports_image_input())
@@ -2113,6 +2153,17 @@ impl Provider for MultiProvider {
         let requested_model = model.trim();
         if requested_model.is_empty() {
             anyhow::bail!("Model cannot be empty");
+        }
+
+        // Claude Code routes run through the official CLI runtime. Intercept
+        // the prefix before profile/named-provider resolution so it can never
+        // land on native Claude or a same-named compatible profile.
+        if let Some(target_model) = requested_model.strip_prefix("claude-code:") {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("Claude Code model cannot be empty");
+            }
+            return self.set_model_on_provider(ActiveProvider::ClaudeCode, target_model);
         }
 
         if let Some(target_model) = requested_model.strip_prefix("grok-build:") {
@@ -2256,6 +2307,22 @@ impl Provider for MultiProvider {
             return self.set_model_on_jcode_subscription(&selection.model);
         }
 
+        // A Claude Code route names an instance (account) as well as a model:
+        // switch the instance for this session first, then the model.
+        if let RuntimeKey::ClaudeCode { instance } = &selection.runtime_key {
+            let target = instance
+                .clone()
+                .unwrap_or_else(crate::auth::claude_code::default_instance_id);
+            let current = self
+                .account_pin(AccountProviderKind::ClaudeCode)
+                .map(|pin| pin.label)
+                .unwrap_or_else(crate::auth::claude_code::default_instance_id);
+            if current != target {
+                let pin = crate::auth::claude_code::pin_for_label(&target)?;
+                self.set_account_pin(AccountProviderKind::ClaudeCode, Some(pin))?;
+            }
+        }
+
         // Routing-prefix policy lives once in RouteSelection::routed_model_spec
         // so this orchestrator and every single-runtime provider agree on the
         // spec string. set_model then dispatches it to the right sub-provider.
@@ -2296,6 +2363,10 @@ impl Provider for MultiProvider {
                 .unwrap_or_default(),
             ActiveProvider::Cursor => self
                 .cursor_provider()
+                .map(|cursor| cursor.available_models_for_switching())
+                .unwrap_or_default(),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
                 .map(|cursor| cursor.available_models_for_switching())
                 .unwrap_or_default(),
             ActiveProvider::Bedrock => self
@@ -2516,6 +2587,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.handles_tools_internally())
                 .unwrap_or(false),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.handles_tools_internally())
+                .unwrap_or(false),
             ActiveProvider::Bedrock => false, // jcode executes Bedrock tool calls
             ActiveProvider::OpenRouter => false, // jcode executes tools
         }
@@ -2624,6 +2699,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|c| c.available_service_tiers())
                 .unwrap_or_default(),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|c| c.available_service_tiers())
+                .unwrap_or_default(),
             _ => vec![],
         }
     }
@@ -2700,6 +2779,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.supports_compaction())
                 .unwrap_or(false),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.supports_compaction())
+                .unwrap_or(false),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|o| o.uses_jcode_compaction())
@@ -2732,6 +2815,10 @@ impl Provider for MultiProvider {
                 .unwrap_or(false),
             ActiveProvider::Cursor => self
                 .cursor_provider()
+                .map(|o| o.uses_jcode_compaction())
+                .unwrap_or(false),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
                 .map(|o| o.uses_jcode_compaction())
                 .unwrap_or(false),
             ActiveProvider::Bedrock => false,
@@ -2820,6 +2907,9 @@ impl Provider for MultiProvider {
                     Err(anyhow::anyhow!("Cursor provider unavailable"))
                 }
             }
+            ActiveProvider::ClaudeCode => Err(anyhow::anyhow!(
+                "Claude Code compacts its own context; jcode native compaction is not available"
+            )),
             ActiveProvider::Bedrock => Err(anyhow::anyhow!(
                 "AWS Bedrock does not support native compaction"
             )),
@@ -2892,6 +2982,10 @@ impl Provider for MultiProvider {
                 .cursor_provider()
                 .map(|o| o.context_window())
                 .unwrap_or(DEFAULT_CONTEXT_LIMIT),
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
+                .map(|o| o.context_window())
+                .unwrap_or(DEFAULT_CONTEXT_LIMIT),
             ActiveProvider::Bedrock => self
                 .bedrock_provider()
                 .map(|o| o.context_window())
@@ -2942,6 +3036,9 @@ impl Provider for MultiProvider {
         } else {
             None
         };
+        // Each fork gets independent Claude Code child state (its own
+        // process and session), carrying the instance and model over.
+        let claude_code_provider = self.claude_code_provider().map(|provider| provider.fork());
         let bedrock_provider = if self.bedrock_provider().is_some() {
             Some(Arc::new(bedrock::BedrockProvider::new()))
         } else {
@@ -2965,6 +3062,7 @@ impl Provider for MultiProvider {
             antigravity: RwLock::new(antigravity_provider),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
+            claude_code: RwLock::new(claude_code_provider),
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
@@ -3037,6 +3135,11 @@ impl Provider for MultiProvider {
             // ran locally.
             ActiveProvider::Cursor => self
                 .cursor_provider()
+                .and_then(|provider| provider.native_result_sender()),
+            // Claude Code calls jcode tools through its SDK MCP bridge and
+            // waits for results on the runtime's channel.
+            ActiveProvider::ClaudeCode => self
+                .claude_code_provider()
                 .and_then(|provider| provider.native_result_sender()),
             ActiveProvider::Bedrock => None,
             ActiveProvider::OpenRouter => None,

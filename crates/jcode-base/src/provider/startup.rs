@@ -102,6 +102,9 @@ impl MultiProvider {
             .auth_status()
             .assessment_for_provider(crate::provider_catalog::CURSOR_LOGIN_PROVIDER)
             .is_available();
+        // Claude Code mode is available when the configured binary exists. The
+        // CLI owns its own login, so jcode cannot (and must not) inspect it.
+        let has_claude_code_binary = auth::claude_code::binary_available();
         let has_bedrock_creds = bedrock::BedrockProvider::has_credentials();
         let has_openrouter_creds = openrouter::has_credentials();
 
@@ -174,6 +177,12 @@ impl MultiProvider {
             None
         };
 
+        let claude_code_provider = if has_claude_code_binary {
+            external::instantiate_external_provider(external::CLAUDE_CODE_RUNTIME)
+        } else {
+            None
+        };
+
         let bedrock_provider = if has_bedrock_creds {
             Some(Arc::new(bedrock::BedrockProvider::new()))
         } else {
@@ -229,6 +238,7 @@ impl MultiProvider {
             cursor: cursor_provider.is_some(),
             bedrock: bedrock_provider.is_some(),
             openrouter: openrouter.is_some(),
+            claude_code: claude_code_provider.is_some(),
             copilot_premium_zero,
         };
         let mut active = Self::auto_default_provider(availability);
@@ -282,7 +292,7 @@ impl MultiProvider {
                 }
             } else {
                 crate::logging::warn(&format!(
-                    "Unknown default_provider '{}' in config (expected: claude|openai|copilot|antigravity|gemini|cursor|bedrock|openrouter or an OpenAI-compatible profile such as deepseek|comtegra|zai|openai-compatible)",
+                    "Unknown default_provider '{}' in config (expected: claude|claude-code|openai|copilot|antigravity|gemini|cursor|bedrock|openrouter or an OpenAI-compatible profile such as deepseek|comtegra|zai|openai-compatible)",
                     pref
                 ));
             }
@@ -295,6 +305,7 @@ impl MultiProvider {
             antigravity: RwLock::new(antigravity_provider),
             gemini: RwLock::new(gemini_provider),
             cursor: RwLock::new(cursor_provider),
+            claude_code: RwLock::new(claude_code_provider),
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),

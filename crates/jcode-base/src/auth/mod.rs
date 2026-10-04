@@ -4,6 +4,7 @@ pub mod active_method;
 pub mod antigravity;
 pub mod azure;
 pub mod claude;
+pub mod claude_code;
 pub mod codex;
 mod commands;
 pub mod copilot;

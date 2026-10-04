@@ -73,6 +73,7 @@ fn billing_failover_test_provider() -> MultiProvider {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -294,7 +295,9 @@ fn failing_sibling_offers_the_next_sibling_instead_of_ending_failover() {
                 .expect("prompt for B");
             assert_eq!(prompt.to_provider, "prof-b:glm-5.3");
 
-            provider.set_model(&prompt.to_provider).expect("switch to B");
+            provider
+                .set_model(&prompt.to_provider)
+                .expect("switch to B");
             let err = run(&provider).expect_err("B fails before any output");
             let prompt = crate::provider::parse_failover_prompt_message(&err.to_string())
                 .unwrap_or_else(|| {
@@ -309,7 +312,9 @@ fn failing_sibling_offers_the_next_sibling_instead_of_ending_failover() {
                 "a failing sibling must not be announced as a success: {notices}"
             );
 
-            provider.set_model(&prompt.to_provider).expect("switch to C");
+            provider
+                .set_model(&prompt.to_provider)
+                .expect("switch to C");
             assert_eq!(run(&provider).expect("C answers"), "hello from B");
             assert_eq!(c_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
             for profile in ["prof-a", "prof-b", "prof-c"] {
@@ -347,7 +352,9 @@ fn every_sibling_failing_surfaces_the_last_error() {
             .expect_err("A is out of credit");
         let prompt =
             crate::provider::parse_failover_prompt_message(&err.to_string()).expect("prompt");
-        provider.set_model(&prompt.to_provider).expect("switch to B");
+        provider
+            .set_model(&prompt.to_provider)
+            .expect("switch to B");
         let err = rt
             .block_on(async {
                 let stream = provider.complete(&messages, &[], "", None).await?;
@@ -356,7 +363,10 @@ fn every_sibling_failing_surfaces_the_last_error() {
             .expect_err("B fails and nothing is left");
         let text = format!("{err:#}");
         assert!(crate::provider::parse_failover_prompt_message(&text).is_none());
-        assert!(text.contains("401") && text.contains("bad key on b"), "{text}");
+        assert!(
+            text.contains("401") && text.contains("bad key on b"),
+            "{text}"
+        );
         crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-a");
         crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-b");
     });
@@ -470,4 +480,3 @@ id = "glm-5.3"
         crate::provider::models::clear_provider_unavailable_for_account("openai-compatible:prof-a");
     });
 }
-

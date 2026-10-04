@@ -216,6 +216,7 @@ fn test_multi_provider_with_openai() -> MultiProvider {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(None),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1018,6 +1019,7 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         antigravity: RwLock::new(None),
         gemini: RwLock::new(None),
         cursor: RwLock::new(Some(test_cursor_runtime())),
+        claude_code: RwLock::new(None),
         bedrock: RwLock::new(None),
         openrouter: RwLock::new(None),
         openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
@@ -1210,6 +1212,7 @@ include!("tests/billing_failover.rs");
 include!("tests/account_failover.rs");
 include!("tests/catalog_subscription.rs");
 include!("tests/account_pins.rs");
+include!("tests/claude_code.rs");
 
 /// Rendering the route catalog must never schedule network work.
 ///

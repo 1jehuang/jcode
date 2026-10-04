@@ -788,5 +788,8 @@ fn test_clear_all_provider_unavailability_also_clears_claude_marker() {
     let leftover = provider_unavailability_detail_for_account("claude");
     crate::auth::claude::set_active_account_override(None);
     clear_claude_provider_unavailability_for_account_label(Some("default"));
-    assert!(leftover.is_none(), "stale Claude marker survived: {leftover:?}");
+    assert!(
+        leftover.is_none(),
+        "stale Claude marker survived: {leftover:?}"
+    );
 }
