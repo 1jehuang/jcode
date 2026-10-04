@@ -581,7 +581,8 @@ fn ssh_inline_picker_filter_and_escape_match_local_navigation() {
         }
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.filter, "claude");
-        assert_eq!(picker.filtered.len(), 2);
+        // Claude (OAuth), Anthropic API key and the Claude Code CLI mode.
+        assert_eq!(picker.filtered.len(), 3);
         app.handle_ssh_login_key(KeyCode::Esc, KeyModifiers::NONE, None);
         assert!(
             app.inline_interactive_state
