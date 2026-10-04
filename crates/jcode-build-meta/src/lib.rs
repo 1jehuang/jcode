@@ -123,9 +123,167 @@ pub fn is_release_build() -> bool {
     option_env!("JCODE_RELEASE_BUILD").is_some() || runtime_release_semver().is_some()
 }
 
+/// Resolve one build-metadata value: env var, then a metadata file, then a git
+/// command.
+///
+/// A set-but-empty env var counts as *absent*. `set JCODE_BUILD_GIT_HASH=` in a
+/// build script, and a stale variable left in a CI environment, both set the
+/// variable to the empty string, and `std::env::var` reports that as present.
+/// Treating it as present short-circuits the metadata file and the git fallback;
+/// the original code filtered the emptiness only on the chain's *result*, by
+/// which point the chain had already committed to the empty value, so the binary
+/// was stamped `(unknown)`. That is worse than a stale hash: the publish gate in
+/// `jcode_build_support::validate_binary_version_matches_source_report` ends up
+/// with no hash at all to compare against.
+///
+/// Probed on this tree before the fix: unset -> `c023d8053`, set-to-empty ->
+/// `unknown`, set-correct -> `c023d8053`.
+///
+/// `build.rs` carries the same rule inline for its own use and cannot call this:
+/// cargo compiles a build script against `[build-dependencies]` only, so its own
+/// crate's lib is not in scope there, and cargo does not run `#[cfg(test)]` tests
+/// inside a build script at all. The two copies are why this one has tests.
+pub fn resolve_build_value(
+    env_name: &str,
+    metadata_lookup: impl FnOnce() -> Option<String>,
+    git_lookup: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    fn present(value: Option<String>) -> Option<String> {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    match present(std::env::var(env_name).ok()) {
+        Some(value) => Some(value),
+        None => present(metadata_lookup()).or_else(|| present(git_lookup())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_release_semver;
+    use super::{parse_release_semver, resolve_build_value};
+    use std::sync::Mutex;
+
+    // `set_var` is process-global and unsafe under edition 2024, so every case
+    // that touches the environment takes this lock and the calls are wrapped.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env(name: &str, value: Option<&str>, f: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var(name).ok();
+        // SAFETY: the lock above is the only thing in this process that mutates
+        // the environment while these tests run.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        f();
+        // SAFETY: as above, and single-threaded under the lock.
+        unsafe {
+            match previous {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    const RESOLVE_ENV: &str = "JCODE_TEST_BUILD_RESOLUTION";
+
+    #[test]
+    fn env_var_wins_when_set() {
+        with_env(RESOLVE_ENV, Some("from-env"), || {
+            assert_eq!(
+                resolve_build_value(
+                    RESOLVE_ENV,
+                    || Some("from-meta".into()),
+                    || Some("from-git".into()),
+                ),
+                Some("from-env".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn falls_back_to_metadata_when_env_unset() {
+        with_env(RESOLVE_ENV, None, || {
+            assert_eq!(
+                resolve_build_value(
+                    RESOLVE_ENV,
+                    || Some("from-meta".into()),
+                    || Some("from-git".into()),
+                ),
+                Some("from-meta".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn falls_back_to_git_when_env_and_metadata_unset() {
+        with_env(RESOLVE_ENV, None, || {
+            assert_eq!(
+                resolve_build_value(RESOLVE_ENV, || None, || Some("from-git".into())),
+                Some("from-git".to_string())
+            );
+        });
+    }
+
+    /// The regression. An empty env var is set-but-absent, so it must not
+    /// shadow the git fallback. Before the fix this returned `Some("")` and the
+    /// built binary reported `(unknown)`.
+    #[test]
+    fn empty_env_var_does_not_shadow_the_git_fallback() {
+        with_env(RESOLVE_ENV, Some(""), || {
+            assert_eq!(
+                resolve_build_value(RESOLVE_ENV, || None, || Some("from-git".into())),
+                Some("from-git".to_string()),
+                "a set-but-empty {} must fall through to git, not win the chain",
+                RESOLVE_ENV
+            );
+        });
+    }
+
+    #[test]
+    fn whitespace_only_env_var_does_not_shadow_the_fallback() {
+        with_env(RESOLVE_ENV, Some("   \t"), || {
+            assert_eq!(
+                resolve_build_value(RESOLVE_ENV, || None, || Some("from-git".into())),
+                Some("from-git".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn env_var_is_trimmed() {
+        with_env(RESOLVE_ENV, Some("  from-env  "), || {
+            assert_eq!(
+                resolve_build_value(RESOLVE_ENV, || None, || None),
+                Some("from-env".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn empty_metadata_does_not_shadow_git_either() {
+        with_env(RESOLVE_ENV, None, || {
+            assert_eq!(
+                resolve_build_value(RESOLVE_ENV, || Some("".into()), || Some("from-git".into())),
+                Some("from-git".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn all_sources_empty_yields_none() {
+        with_env(RESOLVE_ENV, Some(""), || {
+            assert_eq!(
+                resolve_build_value(RESOLVE_ENV, || Some("".into()), || Some("".into())),
+                None
+            );
+        });
+    }
 
     #[test]
     fn runtime_release_semver_accepts_only_three_numeric_components() {

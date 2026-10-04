@@ -262,17 +262,39 @@ fn commits_since_base_tag(base_version: (u32, u32, u32)) -> Option<u32> {
     out.trim().parse::<u32>().ok()
 }
 
+/// Resolve one git-derived value: env var, then the metadata file, then git.
+///
+/// Empty counts as absent. `set JCODE_BUILD_GIT_HASH=` in a build script, and a
+/// stale variable left in a CI environment, both set the variable to the empty
+/// string, and `std::env::var` reports that as *present*. Treating it as present
+/// short-circuited both the metadata file and the git fallback, and the caller
+/// only filtered the emptiness on this chain's RESULT -- by which point the chain
+/// had committed to the empty value -- so the binary was stamped `(unknown)`.
+/// That is worse than a stale hash: the publish gate in
+/// `jcode_build_support::validate_binary_version_matches_source_report` has no
+/// hash at all to compare against.
+///
+/// Probed on this tree before the fix: unset -> `c023d8053`, set-to-empty ->
+/// `unknown`, set-correct -> `c023d8053`.
+///
+/// The equivalent rule is mirrored as `jcode_build_meta::resolve_build_value`
+/// with unit tests, because cargo does not run `#[cfg(test)]` inside a build
+/// script and so this function can only be exercised by a full rebuild.
 fn env_or_metadata_or_git<const N: usize>(
     repo_root: &Path,
     env_name: &str,
     metadata_key: &str,
     git_args: [&str; N],
 ) -> Option<String> {
-    std::env::var(env_name)
-        .ok()
-        .or_else(|| metadata_value(metadata_key))
-        .or_else(|| git_output(repo_root, git_args))
-        .map(|value| value.trim().to_string())
+    fn present(value: Option<String>) -> Option<String> {
+        value
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    present(std::env::var(env_name).ok())
+        .or_else(|| present(metadata_value(metadata_key)))
+        .or_else(|| present(git_output(repo_root, git_args)))
 }
 
 fn git_output<const N: usize>(repo_root: &Path, args: [&str; N]) -> Option<String> {
