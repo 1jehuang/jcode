@@ -2291,7 +2291,9 @@ fn conifer_context_fallback_yields_to_live_and_disk_catalog_without_remapping_al
 
 #[test]
 fn explicit_cached_context_window_precedes_zai_family_fallback() {
-    let model = "glm-5.3-issue-1087";
+    // GLM-5.1 keeps a 200K static guess (GLM-5.2/5.3 moved to 1M in 083df8805),
+    // so the cached 1M window conflicts with it as the regression requires.
+    let model = "glm-5.1-issue-1087";
     jcode_base::provider::populate_context_limits(HashMap::from([(model.to_string(), 1_000_000)]));
     let provider = OpenRouterProvider {
         model: Arc::new(RwLock::new(model.to_string())),
