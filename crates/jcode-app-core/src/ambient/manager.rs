@@ -134,10 +134,17 @@ impl AmbientManager {
             });
         }
 
-        let removed = self.queue.remove_by_id(id)?;
-        Ok(CancelOutcome::Removed {
-            item: Box::new(removed.unwrap()),
-        })
+        // Ownership is checked above, but this method is reachable from any
+        // `CancelOutcome` construction path, and `remove_by_id` only answers
+        // `None` for an ID that is not in the queue. Keep the removal visible and
+        // drop the value instead of `unwrap`: panicking here would take down a
+        // daemon that owns every session, over one schedule id.
+        match self.queue.remove_by_id(id)? {
+            Some(item) => Ok(CancelOutcome::Removed {
+                item: Box::new(item),
+            }),
+            None => Ok(CancelOutcome::NotFound),
+        }
     }
 
     /// Remove an item by ID with no ownership check.

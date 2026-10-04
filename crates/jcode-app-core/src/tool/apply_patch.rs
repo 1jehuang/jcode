@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use similar::{ChangeTag, TextDiff};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const FILE_TOUCH_PREVIEW_MAX_LINES: usize = 6;
@@ -67,6 +68,47 @@ fn is_unified_diff(text: &str) -> bool {
     false
 }
 
+/// Resolve every path a patch names, up front, before anything is touched.
+///
+/// The old per-site resolution meant a relative path with no session working
+/// directory silently landed in the daemon's own directory, and a failure on a
+/// late hunk could arrive after earlier hunks had already written. Resolving
+/// once, up front, makes the check atomic per invocation.
+///
+/// The use sites look paths up with the same string they were resolved under, so
+/// a miss in [`resolved_hunk_path`] is a bug here rather than bad input. It still
+/// returns an error rather than panicking: this tool takes its paths from model
+/// text, so an abort here would take down the daemon that owns every session.
+fn resolve_hunk_paths<'a>(
+    ctx: &ToolContext,
+    hunks: &'a [PatchHunk],
+) -> Result<HashMap<&'a str, PathBuf>> {
+    let mut resolved_paths = HashMap::new();
+    for hunk in hunks {
+        let (path, destination) = match hunk {
+            PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => (path, None),
+            PatchHunk::UpdateFile { path, move_to, .. } => (path, move_to.as_ref()),
+        };
+        for path in std::iter::once(path).chain(destination) {
+            if !resolved_paths.contains_key(path.as_str()) {
+                let resolved = ctx.resolve_path(Path::new(path))?;
+                resolved_paths.insert(path.as_str(), resolved);
+            }
+        }
+    }
+    Ok(resolved_paths)
+}
+
+/// Look up a path [`resolve_hunk_paths`] was supposed to have resolved.
+fn resolved_hunk_path<'a>(
+    resolved_paths: &'a HashMap<&str, PathBuf>,
+    path: &str,
+) -> Result<&'a PathBuf> {
+    resolved_paths
+        .get(path)
+        .ok_or_else(|| anyhow::anyhow!("apply_patch: patch path was never resolved: {path}"))
+}
+
 #[async_trait]
 impl Tool for ApplyPatchTool {
     fn name(&self) -> &str {
@@ -110,26 +152,7 @@ impl Tool for ApplyPatchTool {
         // Capture whole-file states, including move destinations and AddFile
         // overwrites. Diff the final state so repeated hunks share one coordinate
         // system and failed operations cannot produce a speculative preview.
-        // Resolve every path the patch names before touching the filesystem. The
-        // old per-site resolution meant a relative path with no session working
-        // directory silently landed in the daemon's own directory, and a failure
-        // on a late hunk could arrive after earlier hunks had already written.
-        // Resolving once, up front, makes the check atomic per invocation.
-        let mut resolved_paths: std::collections::HashMap<&str, PathBuf> =
-            std::collections::HashMap::new();
-        for hunk in &hunks {
-            let (path, destination) = match hunk {
-                PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => (path, None),
-                PatchHunk::UpdateFile { path, move_to, .. } => (path, move_to.as_ref()),
-            };
-            for path in std::iter::once(path).chain(destination) {
-                let path: &String = path;
-                if !resolved_paths.contains_key(path.as_str()) {
-                    let resolved = ctx.resolve_path(Path::new(path))?;
-                    resolved_paths.insert(path.as_str(), resolved);
-                }
-            }
-        }
+        let resolved_paths = resolve_hunk_paths(&ctx, &hunks)?;
         let _locks = super::file_lock::lock_all(resolved_paths.values().cloned()).await;
         let mut before = std::collections::BTreeMap::new();
         for hunk in &hunks {
@@ -139,9 +162,7 @@ impl Tool for ApplyPatchTool {
             };
             for path in std::iter::once(path).chain(destination) {
                 if !before.contains_key(path) {
-                    let resolved = resolved_paths
-                        .get(path.as_str())
-                        .expect("every hunk path was resolved above");
+                    let resolved = resolved_hunk_path(&resolved_paths, path)?;
                     before.insert(path.clone(), super::file_diff::snapshot(resolved).await);
                 }
             }
@@ -153,9 +174,7 @@ impl Tool for ApplyPatchTool {
         for hunk in &hunks {
             match hunk {
                 PatchHunk::AddFile { path, contents } => {
-                    let resolved = resolved_paths
-                        .get(path.as_str())
-                        .expect("every hunk path was resolved above");
+                    let resolved = resolved_hunk_path(&resolved_paths, path)?;
                     if let Some(parent) = resolved.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
@@ -186,9 +205,7 @@ impl Tool for ApplyPatchTool {
                     }
                 }
                 PatchHunk::DeleteFile { path } => {
-                    let resolved = resolved_paths
-                        .get(path.as_str())
-                        .expect("every hunk path was resolved above");
+                    let resolved = resolved_hunk_path(&resolved_paths, path)?;
                     // `resolve_path` accepts absolute paths as given, so a patch
                     // can name any file on disk. The bash gate does not cover
                     // this path, so apply the same absolute deny here (#604).
@@ -232,16 +249,12 @@ impl Tool for ApplyPatchTool {
                     move_to,
                     chunks,
                 } => {
-                    let resolved = resolved_paths
-                        .get(path.as_str())
-                        .expect("every hunk path was resolved above");
+                    let resolved = resolved_hunk_path(&resolved_paths, path)?;
                     match apply_update_chunks(resolved, chunks).await {
                         Ok((old_contents, new_contents)) => {
                             let diff = generate_diff_summary(&old_contents, &new_contents);
                             if let Some(dest) = move_to {
-                                let dest_resolved = resolved_paths
-                                    .get(dest.as_str())
-                                    .expect("every hunk destination was resolved above");
+                                let dest_resolved = resolved_hunk_path(&resolved_paths, dest)?;
                                 if let Some(parent) = dest_resolved.parent() {
                                     tokio::fs::create_dir_all(parent).await?;
                                 }
@@ -360,12 +373,7 @@ impl Tool for ApplyPatchTool {
             for path in before.keys() {
                 after.insert(
                     path.clone(),
-                    super::file_diff::snapshot(
-                        resolved_paths
-                            .get(path.as_str())
-                            .expect("every snapshotted path was resolved above"),
-                    )
-                    .await,
+                    super::file_diff::snapshot(resolved_hunk_path(&resolved_paths, path)?).await,
                 );
             }
             let mut combined = std::collections::BTreeSet::new();

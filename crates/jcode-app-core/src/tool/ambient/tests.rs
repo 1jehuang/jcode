@@ -704,6 +704,82 @@ fn cancel_schedule_refuses_another_sessions_item_at_the_manager() {
     assert!(manager.queue().is_empty());
 }
 
+/// Every outcome `cancel_schedule` can return, in one pass.
+///
+/// The owner check, the missing-id check and the removal are three separate
+/// decisions over the same queue, and a caller can reach any of them in any
+/// order. This pins the whole table so a refactor cannot start aborting the
+/// daemon on one of them: a schedule id is model-supplied text, so a panic in
+/// the queue would take down every session the daemon owns, not just the one
+/// that named the id.
+#[test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state"
+)]
+fn cancel_schedule_returns_every_outcome_without_aborting() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = HomeGuard::install(temp.path());
+
+    let mut manager = AmbientManager::new().expect("ambient manager");
+    let id = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            context: "owned".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Session {
+                session_id: "project_a".to_string(),
+            },
+            created_by_session: "project_a".to_string(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule should succeed");
+
+    // 1. An id that was never scheduled: refused as missing, not as an error.
+    assert!(
+        matches!(
+            manager
+                .cancel_schedule("no-such-id", "project_a")
+                .expect("cancel"),
+            CancelOutcome::NotFound
+        ),
+        "an unknown id must report NotFound"
+    );
+
+    // 2. Someone else's item: refused on ownership, and kept.
+    assert!(
+        matches!(
+            manager.cancel_schedule(&id, "project_b").expect("cancel"),
+            CancelOutcome::NotOwned { .. }
+        ),
+        "another session's item must be refused"
+    );
+    assert_eq!(manager.queue().len(), 1, "a refused cancel keeps the item");
+
+    // 3. The owner's own item: removed, and reported as removed with the item.
+    match manager.cancel_schedule(&id, "project_a").expect("cancel") {
+        CancelOutcome::Removed { item } => assert_eq!(item.context, "owned"),
+        other => panic!("the owner must get Removed, got {other:?}"),
+    }
+    assert!(manager.queue().is_empty(), "a successful cancel empties it");
+
+    // 4. Cancelling the same id again is the missing-id case, not a second
+    //    removal and not an abort.
+    assert!(
+        matches!(
+            manager.cancel_schedule(&id, "project_a").expect("cancel"),
+            CancelOutcome::NotFound
+        ),
+        "a second cancel of a removed id must report NotFound"
+    );
+}
+
 #[test]
 fn test_schedule_tool_schema_avoids_top_level_combinators() {
     let tool = ScheduleTool::new();

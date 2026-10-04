@@ -79,6 +79,10 @@ impl ScheduledQueue {
     }
 
     /// Remove a scheduled item by ID, persisting the queue when found.
+    ///
+    /// Returns `None` only when no item has that ID. If the item was removed but
+    /// the queue could not be persisted, the removal is still reported through the
+    /// `Err`, so a caller never sees `Ok(None)` for an item it just took out.
     pub fn remove_by_id(&mut self, id: &str) -> Result<Option<ScheduledItem>> {
         let Some(index) = self.items.iter().position(|item| item.id == id) else {
             return Ok(None);
