@@ -1336,6 +1336,79 @@ previously recorded.
 
 ---
 
+## Four ratchets are red, and CI has been red with them
+
+Recorded in the previous session as "red at HEAD on stale baselines". That was
+one third right, and the wrong third mattered.
+
+The other four guards -- panic-prone usage, swallowed errors, code size, and test
+size -- all exit 1 at HEAD, and `.github/workflows/ci.yml` runs each of them
+unconditionally in the `quality` job (no `if:`, no `continue-on-error`), so
+`master`'s quality job fails. That is not a local-only observation.
+
+They are not red because of Windows line endings, which was the obvious
+alternative. 1214 of 1254 `.rs` files in this checkout are CRLF, so the
+comparison is meaningful rather than theoretical: a `core.autocrlf=false`
+worktree of the same commit produces byte-identical output from all four guards.
+
+They were all green at `84c10f3cd` (2026-07-17, *"sync guardrail baselines and
+recognize cfg(all(test, ...)) blocks"*), with these measured outputs:
+
+| guard | measured at `84c10f3cd` |
+| --- | --- |
+| panic-prone | `total=43 files=17` |
+| swallowed-error | `total=3037 files=460` |
+| code size | `tracked=100 threshold=1200LOC no oversized-file regressions` |
+| test size | `tracked=36 threshold=1200LOC` |
+
+So the ratchets work. They broke 7 to 10 days later, and stayed broken. Bisected
+first-red commits, each of which touched no baseline:
+
+| guard | last green | first red | subject |
+| --- | --- | --- | --- |
+| swallowed-error | `3bbf0af74` 2026-07-24 | `c8649bdf6` 2026-07-24 | `fix(models): stop new models resolving to the 200K...` |
+| code size | `1ce99fa35` 2026-07-24 | `4d83969d3` 2026-07-24 | `fix(openai): stop max-effort reasoning turns tripp...` |
+| test size | `8102ae84c` 2026-07-24 | `f0809663c` 2026-07-24 | `tui: collapse empty todo tool results instead of '...' |
+| panic-prone | `a39be8a2d` 2026-07-26 | `cb44c735d` 2026-07-26 | `Merge remote-tracking branch 'origin/discovery/fro...` |
+
+Current drift, by category of finding:
+
+| guard | findings | breakdown |
+| --- | --- | --- |
+| panic-prone | 44 | 41 new sites, 2 files grew, 1 total (`77 -> 173`) |
+| swallowed-error | 136 | 69 files grew, 62 new sites, 5 totals |
+| code size | 102 | 85 files grew, 17 new oversized files |
+| test size | 43 | 32 files grew, 11 new oversized files |
+
+The largest single offenders are `server/client_lifecycle.rs`
+(3282 -> 3917 LOC), `turn_streaming_mpsc.rs` (1730 -> 2035), and
+`agent_tests.rs` (1760 -> 3000).
+
+### Retracting the earlier "never worked" claim
+
+An earlier reading of this work said these four ratchets had been red since they
+were introduced, because `ff0af9e19` -- the last commit to touch three of the
+four baselines -- left them red. That generalises from one commit to the whole
+history without checking it, and `84c10f3cd` is a counterexample: all four were
+green there. `ff0af9e19` did have a real defect (it deleted desktop entries
+while leaving `total` at its pre-split value, so the totals no longer matched
+the per-file maps), but that was a broken intermediate state that the later sync
+repaired, not a permanently dead ratchet.
+
+### What this does not say
+
+Nothing here claims the drift is acceptable. It is 4 months of unchecked growth,
+and the honest options are all expensive: shrink the code back under the
+baselines, or re-baseline deliberately and hold the line from a stated point.
+Refreshing a baseline to today's numbers is not a fix, because it makes all of
+this growth permanent and invisible to the ratchet. That decision is a product
+call and is deliberately left open rather than decided here.
+
+What is established is the mechanism: the ratchets are wired correctly, they
+were green, and four commits on 2026-07-24 and 2026-07-26 turned them red
+without anyone re-baselining. The gap is in the process, not in the tooling, and
+that is what the next step has to close.
+
 ## The ratchet's own defect: sites were matched by line number
 
 The P5.3 lint shipped green and was wrong in the same direction as its own test
