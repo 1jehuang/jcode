@@ -1499,12 +1499,41 @@ impl BackgroundTaskManager {
             .removed_files)
     }
 
-    /// Clean up old task files, skipping running tasks and optionally filtering by status.
+    /// Clean up old task files across every session.
+    ///
+    /// Callers serving a single session should prefer `cleanup_filtered_for_session`;
+    /// this global sweep is correct for daemon maintenance, not for a tool call.
     pub async fn cleanup_filtered(
         &self,
         max_age_hours: u64,
         status_filter: &std::collections::HashSet<&str>,
         dry_run: bool,
+    ) -> Result<BackgroundCleanupResult> {
+        self.cleanup_filtered_scoped(max_age_hours, status_filter, dry_run, None)
+            .await
+    }
+
+    /// Clean up old task files owned by one session.
+    ///
+    /// Output files whose status cannot be read are left alone. Losing a status
+    /// read must not turn into deleting another session's transcript.
+    pub async fn cleanup_filtered_for_session(
+        &self,
+        max_age_hours: u64,
+        status_filter: &std::collections::HashSet<&str>,
+        dry_run: bool,
+        session_id: &str,
+    ) -> Result<BackgroundCleanupResult> {
+        self.cleanup_filtered_scoped(max_age_hours, status_filter, dry_run, Some(session_id))
+            .await
+    }
+
+    async fn cleanup_filtered_scoped(
+        &self,
+        max_age_hours: u64,
+        status_filter: &std::collections::HashSet<&str>,
+        dry_run: bool,
+        session_scope: Option<&str>,
     ) -> Result<BackgroundCleanupResult> {
         let mut result = BackgroundCleanupResult {
             matched_files: 0,
@@ -1552,6 +1581,17 @@ impl BackgroundTaskManager {
                     }
                 } else if !status_filter.is_empty() {
                     continue;
+                }
+
+                // Session scoping happens after the status read so a file whose
+                // status is missing is never attributed to the wrong session.
+                if let Some(scope) = session_scope {
+                    let owned = associated_status
+                        .as_ref()
+                        .is_some_and(|status| status.session_id == scope);
+                    if !owned {
+                        continue;
+                    }
                 }
 
                 result.matched_files += 1;

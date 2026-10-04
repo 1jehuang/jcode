@@ -56,9 +56,14 @@ struct BgInput {
     /// Use the latest matching task when task_id is omitted
     #[serde(default)]
     latest: Option<bool>,
-    /// Restrict implicit selection/listing to this session. Defaults to false for list and true for implicit selection.
+    /// Restrict implicit selection/listing to this session. Defaults to true for every action, including list.
     #[serde(default)]
     session_only: Option<bool>,
+    /// Explicitly reach across sessions: `list`, `cleanup`, and task ids that
+    /// belong to another session. Defaults to false. Naming another session's
+    /// task id without this is an error, not a silent cross-project action.
+    #[serde(default)]
+    all_sessions: Option<bool>,
     /// Status filter, either a string or array of strings: running/completed/failed/superseded/terminal/all
     #[serde(default)]
     status_filter: Option<Value>,
@@ -349,12 +354,53 @@ async fn filtered_tasks(
     default_session_only: bool,
 ) -> Vec<background::TaskStatusFile> {
     let mut tasks = manager.list().await;
-    let session_only = params.session_only.unwrap_or(default_session_only);
+    // `all_sessions` is the documented cross-session opt-out. It has to widen the
+    // filter, not just skip the ownership check, or the schema promises a listing
+    // it does not deliver.
+    let session_only = !params.all_sessions.unwrap_or(false)
+        && params.session_only.unwrap_or(default_session_only);
     let filter = parse_status_filter(params.status_filter.as_ref());
     tasks.retain(|task| {
         (!session_only || task.session_id == ctx.session_id) && task_matches_filter(task, &filter)
     });
     tasks
+}
+
+/// Reject task ids owned by a different session unless the caller opted in.
+///
+/// An explicitly named `task_id` used to be returned verbatim, so any session
+/// that learned or guessed an id could cancel, tail, or wait on another
+/// project's task. Isolation invariant 3 requires the ownership check to sit in
+/// the default path, with the opt-out named rather than implied.
+async fn assert_task_ownership(
+    manager: &background::BackgroundTaskManager,
+    ctx: &ToolContext,
+    params: &BgInput,
+    task_ids: &[String],
+) -> Result<()> {
+    if params.all_sessions.unwrap_or(false) || task_ids.is_empty() {
+        return Ok(());
+    }
+
+    let tasks = manager.list().await;
+    for task_id in task_ids {
+        // An unknown id is left for the action itself to report as not found.
+        // Inventing an ownership error for a typo would send the caller looking
+        // for a session that does not exist.
+        let Some(task) = tasks.iter().find(|task| &task.task_id == task_id) else {
+            continue;
+        };
+        if task.session_id != ctx.session_id {
+            return Err(anyhow::anyhow!(
+                "Task {} belongs to session {}, not this session ({}). Pass all_sessions=true to act across sessions.",
+                task_id,
+                task.session_id,
+                ctx.session_id
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 async fn resolve_task_ids(
@@ -373,9 +419,11 @@ async fn resolve_task_ids(
                 task_ids.len()
             ));
         }
+        assert_task_ownership(manager, ctx, params, task_ids).await?;
         return Ok(task_ids.to_vec());
     }
     if let Some(task_id) = params.task_id.clone() {
+        assert_task_ownership(manager, ctx, params, std::slice::from_ref(&task_id)).await?;
         return Ok(vec![task_id]);
     }
 
@@ -484,7 +532,8 @@ impl Tool for BgTool {
                 "task_id": { "type": "string", "description": "Task ID." },
                 "task_ids": { "type": "array", "items": {"type":"string"}, "description": "Task IDs for multi-task wait/status." },
                 "latest": { "type": "boolean", "description": "Use latest matching task when task_id is omitted." },
-                "session_only": { "type": "boolean", "description": "Restrict list/implicit selection to current session." },
+                "session_only": { "type": "boolean", "description": "Restrict list/implicit selection to current session. Defaults to true." },
+                "all_sessions": { "type": "boolean", "description": "Explicitly reach across sessions for list/cleanup and task ids owned by another session. Defaults to false." },
                 "status_filter": {
                     "anyOf": [
                         { "type": "string" },
@@ -515,7 +564,7 @@ impl Tool for BgTool {
 
         match action.as_str() {
             "list" => {
-                let tasks = filtered_tasks(manager, &ctx, &params, false).await;
+                let tasks = filtered_tasks(manager, &ctx, &params, true).await;
                 if tasks.is_empty() {
                     return Ok(ToolOutput::new("No matching background tasks found.")
                         .with_title("bg list"));
@@ -645,12 +694,24 @@ impl Tool for BgTool {
                 let max_age = params.max_age_hours.unwrap_or(24);
                 let filter = parse_status_filter(params.status_filter.as_ref());
                 let dry_run = params.dry_run.unwrap_or(false);
-                let result = manager.cleanup_filtered(max_age, &filter, dry_run).await?;
+                let all_sessions = params.all_sessions.unwrap_or(false);
+                let result = if all_sessions {
+                    manager.cleanup_filtered(max_age, &filter, dry_run).await?
+                } else {
+                    manager
+                        .cleanup_filtered_for_session(max_age, &filter, dry_run, &ctx.session_id)
+                        .await?
+                };
                 Ok(ToolOutput::new(format!(
-                    "{} {} old task files (older than {} hours). Skipped {} running task file(s).",
+                    "{} {} old task files (older than {} hours){}. Skipped {} running task file(s).",
                     if dry_run { "Would remove" } else { "Removed" },
                     result.removed_files,
                     max_age,
+                    if all_sessions {
+                        " across all sessions"
+                    } else {
+                        " in this session"
+                    },
                     result.skipped_running_files
                 ))
                 .with_title("bg cleanup")
@@ -861,6 +922,239 @@ impl Tool for BgTool {
 mod tests {
     use super::*;
     use anyhow::{Result, anyhow};
+    use jcode_base::background::{BackgroundTaskManager, TaskStatusFile};
+
+    /// Enough entropy that a test writing into the shared global task dir cannot
+    /// collide with another test or with a real daemon task.
+    fn unique_suffix() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{}-{}", std::process::id(), nanos)
+    }
+
+    /// Write one live task status file into `manager`'s output dir.
+    fn write_owned_task(
+        manager: &BackgroundTaskManager,
+        session: &str,
+        task_id: &str,
+    ) -> Result<()> {
+        let status = TaskStatusFile {
+            task_id: task_id.to_string(),
+            tool_name: "swarm".to_string(),
+            display_name: None,
+            session_id: session.to_string(),
+            status: BackgroundTaskStatus::Running,
+            exit_code: None,
+            error: None,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            duration_secs: None,
+            pid: None,
+            owner_pid: None,
+            owner_instance: None,
+            detached: false,
+            notify: false,
+            wake: false,
+            progress: None,
+            event_history: Vec::new(),
+            stall_wake_seconds: None,
+        };
+        let path = manager.status_path_for(task_id);
+        std::fs::write(&path, serde_json::to_string_pretty(&status)?)?;
+        Ok(())
+    }
+
+    /// A manager whose status files live in a temp dir, plus one task id owned
+    /// by `owner`. Every test needs a task that belongs to some *other* session,
+    /// which is the whole point.
+    fn owned_task_fixture() -> Result<(tempfile::TempDir, BackgroundTaskManager, String)> {
+        let tmp = tempfile::tempdir()?;
+        let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+        let task_id = "task-from-another-session".to_string();
+        write_owned_task(&manager, "session-a", &task_id)?;
+        Ok((tmp, manager, task_id))
+    }
+
+    /// Same idea, but written into the real global task dir so `execute` can
+    /// reach it. Returns the task id; the caller is responsible for the session
+    /// id being unique, which keeps the row findable and un-claimable.
+    fn owned_task_for(session: &str, task_id: &str) -> Result<String> {
+        let manager = background::global();
+        write_owned_task(manager, session, task_id)?;
+        Ok(task_id.to_string())
+    }
+
+    fn params_for(json: serde_json::Value) -> Result<BgInput> {
+        Ok(serde_json::from_value(json)?)
+    }
+
+    fn ctx_for(session: &str) -> ToolContext {
+        ToolContext {
+            session_id: session.to_string(),
+            message_id: "msg".to_string(),
+            tool_call_id: "call".to_string(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: super::super::ToolExecutionMode::AgentTurn,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_rejects_another_sessions_task() -> Result<()> {
+        let (_tmp, manager, task_id) = owned_task_fixture()?;
+        let params = params_for(json!({ "action": "cancel", "task_id": task_id }))?;
+
+        let err = resolve_task_ids(&manager, &ctx_for("session-b"), &params, "cancel", false)
+            .await
+            .expect_err("another session's task must not be resolvable");
+
+        let message = err.to_string();
+        assert!(
+            message.contains(&task_id) && message.contains("session-a"),
+            "error must name the task and its owning session, got: {message}"
+        );
+        assert!(
+            message.contains("all_sessions=true"),
+            "error must name the explicit opt-out, got: {message}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn all_sessions_opts_into_another_sessions_task() -> Result<()> {
+        let (_tmp, manager, task_id) = owned_task_fixture()?;
+        let params =
+            params_for(json!({ "action": "cancel", "task_id": task_id, "all_sessions": true }))?;
+
+        let resolved =
+            resolve_task_ids(&manager, &ctx_for("session-b"), &params, "cancel", false).await?;
+        assert_eq!(resolved, vec![task_id]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_session_may_still_use_its_own_task() -> Result<()> {
+        let (_tmp, manager, task_id) = owned_task_fixture()?;
+        let params = params_for(json!({ "action": "cancel", "task_id": task_id }))?;
+
+        let resolved =
+            resolve_task_ids(&manager, &ctx_for("session-a"), &params, "cancel", false).await?;
+        assert_eq!(resolved.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unknown_task_id_is_left_for_the_action_to_report() {
+        // A typo should say "not found", not invent a session-ownership error
+        // that sends the caller hunting for a session that does not exist.
+        let (_tmp, manager, _) = owned_task_fixture().expect("fixture");
+        let params =
+            params_for(json!({ "action": "cancel", "task_id": "no-such-task" })).expect("params");
+
+        let resolved = resolve_task_ids(&manager, &ctx_for("session-b"), &params, "cancel", false)
+            .await
+            .expect("unknown ids pass through to the action");
+        assert_eq!(resolved, vec!["no-such-task".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn task_ids_bulk_is_also_ownership_checked() -> Result<()> {
+        let (_tmp, manager, task_id) = owned_task_fixture()?;
+        let params = params_for(json!({ "action": "wait", "task_ids": [task_id] }))?;
+
+        let err = resolve_task_ids(&manager, &ctx_for("session-b"), &params, "wait", true)
+            .await
+            .expect_err("bulk ids must be ownership checked too");
+        assert!(err.to_string().contains("session-a"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_defaults_to_the_calling_session() -> Result<()> {
+        let (_tmp, manager, task_id) = owned_task_fixture()?;
+        let params = params_for(json!({ "action": "list" }))?;
+
+        let for_other = filtered_tasks(&manager, &ctx_for("session-b"), &params, true).await;
+        assert!(
+            for_other.is_empty(),
+            "list must not show another session's task by default"
+        );
+
+        let for_owner = filtered_tasks(&manager, &ctx_for("session-a"), &params, true).await;
+        assert_eq!(for_owner.len(), 1);
+        assert_eq!(for_owner[0].task_id, task_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_only_false_opts_back_out_of_list_scoping() -> Result<()> {
+        let (_tmp, manager, task_id) = owned_task_fixture()?;
+        let params = params_for(json!({ "action": "list", "session_only": false }))?;
+
+        let tasks = filtered_tasks(&manager, &ctx_for("session-b"), &params, true).await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, task_id);
+        Ok(())
+    }
+
+    /// The call site is what regressed, so bind this to `execute` rather than to
+    /// `filtered_tasks`: a unit test on the helper cannot tell a correct helper
+    /// from a call site that stopped using it.
+    #[tokio::test]
+    async fn list_execute_does_not_leak_another_sessions_tasks_by_default() -> Result<()> {
+        let session = format!("p13-exec-{}", unique_suffix());
+        let task_id = owned_task_for(&format!("{session}-owner"), &unique_suffix())?;
+
+        let other = BgTool::new()
+            .execute(
+                json!({ "action": "list" }),
+                ctx_for(&format!("{session}-other")),
+            )
+            .await?;
+        assert!(
+            !other.output.contains(&task_id),
+            "list leaked another session's task id: {}",
+            other.output
+        );
+
+        let opt_out = BgTool::new()
+            .execute(
+                json!({ "action": "list", "all_sessions": true }),
+                ctx_for(&format!("{session}-other")),
+            )
+            .await?;
+        assert!(
+            opt_out.output.contains(&task_id),
+            "all_sessions=true is the documented opt-out and must still show it"
+        );
+        let _ = std::fs::remove_file(background::global().status_path_for(&task_id));
+        Ok(())
+    }
+
+    /// `all_sessions` is documented on list/cleanup and on named task ids. Check
+    /// it is genuinely cross-action, so a future refactor cannot quietly limit it
+    /// to one of the two.
+    #[tokio::test]
+    async fn all_sessions_widens_any_session_filtered_lookup() -> Result<()> {
+        let (_tmp, manager, task_id) = owned_task_fixture()?;
+        let params = params_for(json!({ "all_sessions": true }))?;
+
+        for default in [true, false] {
+            let tasks = filtered_tasks(&manager, &ctx_for("session-b"), &params, default).await;
+            assert_eq!(
+                tasks.len(),
+                1,
+                "all_sessions must widen the lookup even when the action's own \
+                 default scopes to the session (default_session_only={default})"
+            );
+            assert_eq!(tasks[0].task_id, task_id);
+        }
+        Ok(())
+    }
 
     #[test]
     fn status_filter_schema_any_of_branches_have_types() -> Result<()> {

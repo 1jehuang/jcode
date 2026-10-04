@@ -343,7 +343,7 @@ fails `star_is_the_explicit_opt_out_for_cross_project_recall`. All pass again on
 
 ### P1.3 - `bg` background tasks have no ownership enforcement
 
-- [ ] **Status:** pending
+- [x] **Status:** done
 - **Where:** `crates/jcode-app-core/src/tool/bg.rs`
   - `resolve_task_ids` (`:360-407`) returns explicit `task_id`/`task_ids` verbatim at
     `:376` and `:379`, skipping the session filter entirely.
@@ -357,6 +357,47 @@ fails `star_is_the_explicit_opt_out_for_cross_project_recall`. All pass again on
   error naming the ownership mismatch.
 - **Test:** create a task in session A, call `bg cancel` from session B, assert the task
   is still running.
+
+**Resolution.** Three independent halves, each with its own regression test.
+
+*Ownership on named task ids.* `assert_task_ownership` (`crates/jcode-app-core/src/tool/bg.rs`)
+runs inside `resolve_task_ids`, so it covers both the single `task_id` and the bulk `task_ids`
+form for every action that resolves an id. A task whose `session_id` differs from
+`ctx.session_id` is rejected with an error naming the task, its owning session, the calling
+session, and the opt-out. An id that matches no task is deliberately passed through so the
+action itself reports "not found": inventing an ownership error for a typo would send the
+caller hunting for a session that does not exist.
+
+*The opt-out is named and real.* `all_sessions` (default `false`) is the single documented
+opt-out for crossing sessions. It widens the session filter in `filtered_tasks` as well as
+skipping the ownership check. That second part was a real defect found while writing the test:
+the flag was documented on `list` and `cleanup`, but `filtered_tasks` only ever read
+`session_only`, so `all_sessions=true` silently did nothing to a listing. The schema promises
+a listing it did not deliver, which is exactly the undocumented permissive behavior this
+plan exists to remove.
+
+*Default scoping.* `list` now defaults to session-scoped, and `cleanup` routes through the new
+`BackgroundTaskManager::cleanup_filtered_for_session` unless `all_sessions=true`.
+`cleanup_filtered` keeps its global behavior and its doc comment now says so: it is daemon
+maintenance, not a tool call. The session filter in `cleanup_filtered_scoped` is applied
+*after* the status read, so a task file whose status cannot be parsed is never attributed to
+the wrong session and never deleted by another session's cleanup.
+
+**Tests.** Eight new tests, four in `crates/jcode-base/src/background/tests.rs` and four in
+`bg.rs`, each proven to fail with its half reverted:
+`session_scoped_cleanup_leaves_other_sessions_task_files_alone`,
+`global_cleanup_still_sweeps_every_session` and
+`session_scoped_cleanup_ignores_files_whose_status_cannot_be_read`;
+`cancel_rejects_another_sessions_task`, `task_ids_bulk_is_also_ownership_checked`,
+`list_defaults_to_the_calling_session`, `all_sessions_widens_any_session_filtered_lookup`,
+and `list_execute_does_not_leak_another_sessions_tasks_by_default`.
+
+One note on how those were verified. The first version of the list test called
+`filtered_tasks` directly and it passed even after the call site's default was reverted: a
+correct helper is indistinguishable from a call site that stopped using it. The test was
+rewritten to drive `BgTool::execute`, writing a uniquely named task file into the real global
+task dir, which is the only level that actually observes the dispatch. The same rewrite is
+what surfaced the dead `all_sessions` opt-out.
 
 ### P1.4 - Schedules are a single global queue with no ownership check
 
@@ -566,11 +607,11 @@ to the code it protects, not in a separate integration bucket.
 
 - [ ] **Session ownership:** a client cannot act on another session's id (P0.1).
 - [x] **Cwd binding:** a session created in dir B, attached from dir A, keeps dir B (P0.3).
-- [ ] **Pool isolation:** same-named shared servers with different configs do not share a
+- [x] **Pool isolation:** same-named shared servers with different configs do not share a
   process (P1.1).
-- [ ] **Search scoping:** `session_search` with no `working_dir` returns only the current
+- [x] **Search scoping:** `session_search` with no `working_dir` returns only the current
   project (P1.2).
-- [ ] **Task ownership:** `bg cancel` from another session is rejected (P1.3).
+- [x] **Task ownership:** `bg cancel` from another session is rejected (P1.3).
 - [ ] **No-cwd sessions:** with `working_dir: None`, no project skills, no project AGENTS.md,
   no project swarm prompt, and relative paths error (P2.1, P2.2, P2.3, P2.5).
 - [ ] **Project key stability:** two spellings of one path hash identically (P3.1).
