@@ -1116,3 +1116,15 @@ fn kimi_usage_explicit_weekly_window_beats_summary() {
     assert!((limits[0].usage_percent - 72.0).abs() < 0.01);
     assert_eq!(limits[0].resets_at.as_deref(), Some("2026-10-09T00:00:00Z"));
 }
+
+#[test]
+fn cursor_plan_usage_report_keeps_membership_without_usage_fields() {
+    // Native logins can receive membership info without planUsage fields;
+    // the plan label is still reported instead of falling back to the
+    // API-key probe.
+    let json = serde_json::json!({"membershipType": "pro"});
+    let report = provider_fetch::cursor_plan_usage_report(&json);
+    assert_eq!(report.provider_name, "Cursor Pro");
+    assert!(report.limits.is_empty());
+    assert!(report.error.is_none());
+}

@@ -206,6 +206,7 @@ async fn fetch_compatible_profile_report(
     let source_key = format!("openai-compatible:{}", profile.id);
     let mut extra_info = Vec::new();
     let mut limits: Vec<UsageLimit> = Vec::new();
+    let mut error: Option<String> = None;
 
     match profile.id {
         "deepseek" => {
@@ -234,8 +235,9 @@ async fn fetch_compatible_profile_report(
                 match fetch_kimi_usage_limits(&api_key).await {
                     Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
                     Ok(_) => {
-                        extra_info
-                            .push(("Usage".to_string(), "no quota windows returned".to_string()));
+                        // Unknown capacity must not look healthy in the
+                        // usage overlay, so report it as an error.
+                        error = Some("no quota windows returned".to_string());
                     }
                     Err(e) => {
                         extra_info.push(("Usage".to_string(), format!("unavailable ({})", e)))
@@ -285,6 +287,7 @@ async fn fetch_compatible_profile_report(
         provider_name: format!("{} (API key)", profile.display_name),
         limits,
         extra_info,
+        error,
         ..Default::default()
     };
     attach_activity(&mut report, &source_key);
