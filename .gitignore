@@ -29,3 +29,8 @@ captures/
 /.agents/
 /.claude/skills/
 /skills-lock.json
+
+# Swarm/agent artifact output written into the repo root by relative paths.
+# These are scratch reports, not source: keeping them untracked stops them from
+# marking every self-dev build dirty.
+/artifacts/
