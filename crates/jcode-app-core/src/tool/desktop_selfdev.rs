@@ -193,6 +193,14 @@ fn command_spec(
 fn reject_symlink_components(path: &Path) -> Result<()> {
     let mut current = PathBuf::new();
     for component in path.components() {
+        // A Windows drive prefix is not a filesystem entry. `canonicalize`
+        // returns a verbatim path ("\\?\C:\..."), and pushing only the Prefix
+        // component yields the bare drive "\\?\C:", which Windows rejects with
+        // ERROR_INVALID_FUNCTION. Skip it so the walk starts at the root
+        // directory; every real component after it is still checked.
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
         current.push(component);
         match std::fs::symlink_metadata(&current) {
             Ok(meta) if meta.file_type().is_symlink() => {

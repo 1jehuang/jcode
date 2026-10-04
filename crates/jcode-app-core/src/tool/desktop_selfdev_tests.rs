@@ -125,6 +125,48 @@ fn screenshot_rejects_symlink_destination() {
     assert!(command_spec(root.path(), &input("screenshot"), "debug", None).is_err());
 }
 
+// The symlink test above is Unix-only, so nothing covered the walk on Windows,
+// where it failed outright. `checkout()` canonicalizes its tempdir, and on
+// Windows that yields a verbatim "\?\C:\..." path. Pushing a Prefix
+// component on its own yields the bare drive "\?\C:", which
+// `symlink_metadata` rejects with ERROR_INVALID_FUNCTION ("Funcao incorreta.
+// (os error 1)"), so every screenshot and custom test failed there.
+#[test]
+fn repo_walk_accepts_a_canonicalized_repo_root() {
+    let root = checkout();
+    assert!(
+        reject_symlink_components(root.path()).is_ok(),
+        "canonicalized repo root must be walkable"
+    );
+    // ...and a path whose leaf does not exist yet, as for a screenshot target.
+    assert!(
+        reject_symlink_components(&root.path().join("target/desktop.png")).is_ok(),
+        "missing leaf must stay tolerated"
+    );
+    // The exemption is only for the prefix: every real component is still
+    // checked. This is the property the walk exists to enforce.
+    if let Ok(link) = symlink_dir(&root) {
+        let error = reject_symlink_components(&link).unwrap_err().to_string();
+        assert!(error.contains("symlink"), "{error}");
+    }
+}
+
+/// Creates `root/target` as a symlink to `root` and returns the link path.
+#[cfg(unix)]
+fn symlink_dir(root: &tempfile::TempDir) -> std::io::Result<PathBuf> {
+    let link = root.path().join("target");
+    std::os::unix::fs::symlink(root.path(), &link)?;
+    Ok(link)
+}
+
+/// Windows needs the symlink privilege, so "cannot create" means skipped.
+#[cfg(windows)]
+fn symlink_dir(root: &tempfile::TempDir) -> std::io::Result<PathBuf> {
+    let link = root.path().join("target");
+    std::os::windows::fs::symlink_dir(root.path(), &link)?;
+    Ok(link)
+}
+
 #[test]
 fn ambiguous_instances_and_foreign_executables_are_rejected() {
     let error = choose_instance(vec![
