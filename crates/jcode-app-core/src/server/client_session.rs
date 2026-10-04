@@ -527,7 +527,23 @@ fn apply_or_defer_subscribe_working_dir(
             working_dir,
             home.as_deref(),
         ) {
-            Some(accepted) => agent_guard.set_working_dir(&accepted),
+            Some(accepted) => {
+                // An existing project directory always wins over a client-reported
+                // one. See `session_working_dir_for_client`: a client's directory
+                // is creation-only, and a target attachment reports the attaching
+                // client's project, not this session's.
+                let accepted = match agent_guard.working_dir() {
+                    Some(existing) => session_working_dir_for_client(Some(existing), Some(&accepted), false),
+                    None => Some(accepted),
+                };
+                if let Some(accepted) = accepted {
+                    agent_guard.set_working_dir(&accepted);
+                } else if let Some(current) = agent_guard.working_dir()
+                    && current != working_dir
+                {
+                    log_ignored_subscribe_working_dir(session_id, current, working_dir);
+                }
+            }
             None => {
                 if let Some(current) = agent_guard.working_dir()
                     && current != working_dir
@@ -550,11 +566,30 @@ fn apply_or_defer_subscribe_working_dir(
             home.as_deref(),
         ) {
             Some(accepted) => {
-                agent_guard.set_working_dir(&accepted);
-                crate::logging::info(&format!(
-                    "Applied deferred subscribe working directory for session {}",
-                    session_id
-                ));
+                // Same rule as the synchronous branch above. Without it the guard
+                // would hold only while the session was idle and quietly lapse
+                // mid-turn, which is exactly when a desktop attaches to a live
+                // session.
+                let accepted = match agent_guard.working_dir() {
+                    Some(existing) => {
+                        session_working_dir_for_client(Some(existing), Some(&accepted), false)
+                    }
+                    None => Some(accepted),
+                };
+                match accepted {
+                    Some(accepted) => {
+                        agent_guard.set_working_dir(&accepted);
+                        crate::logging::info(&format!(
+                            "Applied deferred subscribe working directory for session {}",
+                            session_id
+                        ));
+                    }
+                    None => {
+                        if let Some(current) = agent_guard.working_dir() {
+                            log_ignored_subscribe_working_dir(&session_id, current, &working_dir);
+                        }
+                    }
+                }
             }
             None => {
                 if let Some(current) = agent_guard.working_dir()
@@ -646,17 +681,48 @@ pub(super) async fn handle_subscribe(
     .await;
 
     if let Some(ref dir) = subscribe_working_dir {
+        // A client-reported directory never re-pins a session that already has
+        // one. The desktop sends a Subscribe with its own cwd straight after a
+        // target-aware resume, so honoring it here would undo the directory the
+        // resume just preserved and move a session into the attaching client's
+        // project. `apply_or_defer_subscribe_working_dir` applies the same
+        // decision, so the agent and the swarm/mcp resolution below agree.
+        let existing_dir = agent
+            .try_lock()
+            .ok()
+            .and_then(|agent_guard| agent_guard.working_dir().map(str::to_string));
+        let bound_dir =
+            session_working_dir_for_client(existing_dir.as_deref(), Some(dir), true);
+        if bound_dir.as_deref() != Some(dir) {
+            crate::logging::warn(&format!(
+                "Ignoring subscribe working_dir {} for session {}: the session is already bound to {} (a client-reported directory is creation-only)",
+                dir,
+                client_session_id,
+                existing_dir.as_deref().unwrap_or("<unset>"),
+            ));
+        }
         apply_or_defer_subscribe_working_dir(agent, dir, client_session_id);
 
-        // Swarm grouping must use the *bound* directory, not the raw report, or
-        // a home-dir subscribe would still re-key the session's swarm even
-        // though its agent stayed in the project (issue #481).
+        // Swarm grouping must use the *bound* directory, not the raw report, or a
+        // subscribe would re-key the session's swarm even though its agent stayed
+        // put. Two rules decide that bound directory and they must be applied
+        // together: a reported home directory never displaces an established
+        // project (issue #481), and a client-reported directory never displaces an
+        // existing one at all (creation-only). Applying only the home rule here
+        // left the swarm keyed to the attaching client's project while the
+        // session's own tools ran in its own.
         let bound_dir = {
             let current = agent
                 .try_lock()
                 .ok()
                 .and_then(|guard| guard.working_dir().map(str::to_string));
-            effective_subscribe_working_dir(current.as_deref(), dir, dirs::home_dir().as_deref())
+            let after_home_rule = effective_subscribe_working_dir(
+                current.as_deref(),
+                dir,
+                dirs::home_dir().as_deref(),
+            );
+            session_working_dir_for_client(current.as_deref(), Some(&after_home_rule), false)
+                .unwrap_or(after_home_rule)
         };
         let new_path = PathBuf::from(&bound_dir);
         let mut old_swarm_id: Option<String> = None;
@@ -1193,6 +1259,55 @@ async fn claim_live_target_agent(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Decide which working directory a client-reported directory may bind an
+/// existing session to.
+///
+/// This is the working-dir counterpart of the rule the request handler already
+/// applies to a system prompt: "overrides are creation-only. In particular, never
+/// apply one to a target attachment." The system-prompt path got that rule; the
+/// working-dir path did not, so a client attaching to a session could still move
+/// it.
+///
+/// The rule is scoped to session *creation* on purpose. `create_working_dir`
+/// distinguishes the two cases: at creation the reported directory is the only
+/// description of the project the user is working in and must be adopted, while a
+/// directory reported later describes whichever client happened to reconnect. A
+/// client cannot deliberately retarget an existing session's project, because the
+/// wire protocol has no request that means "move this session to another project"
+/// (the only requests carrying a `working_dir` are Subscribe, CommSpawn, and
+/// spawn-agent, and all three either create a session or attach to one). Making a
+/// deliberate project move possible later means adding an explicit request for it,
+/// not letting an ordinary reconnect imply one.
+///
+/// A session belongs to a project. A client's directory describes the project
+/// that *client* is sitting in, not the project the session belongs to.
+/// Overwriting re-points that session's bash and file tools, its project-local
+/// MCP config, its memory scope, and its swarm grouping at the client's project,
+/// so a later message in the original project would read and write the wrong tree
+/// while the header still showed the original path.
+///
+/// The session's stored directory therefore wins whenever it has one. A client's
+/// directory is adopted only when the session has none to lose, which is the
+/// creation case (including remote continuation, where the client has no local
+/// copy of the session it is resuming).
+///
+/// Both sides are canonicalized before comparing, so a symlinked checkout, a
+/// `..` segment, or a Windows short/long path pair is recognized as the same
+/// project instead of looking like a cross-project attach.
+fn session_working_dir_for_client(
+    session_dir: Option<&str>,
+    client_dir: Option<&str>,
+    create_working_dir: bool,
+) -> Option<String> {
+    let session = session_dir.map(str::trim).filter(|dir| !dir.is_empty());
+    let client = client_dir.map(str::trim).filter(|dir| !dir.is_empty());
+    match (session, client) {
+        (Some(session), _) => Some(session.to_string()),
+        (None, Some(client)) if create_working_dir => Some(client.to_string()),
+        (None, _) => None,
+    }
+}
+
 pub(super) async fn handle_resume_session(
     id: u64,
     session_id: String,
@@ -1261,6 +1376,39 @@ pub(super) async fn handle_resume_session(
         client_connections,
     )
     .await;
+
+    // Resolve the directory this resume will bind to ONCE, and use that single
+    // answer for every consumer below (the restored session, project-local MCP
+    // resolution, and the swarm member). Two subsystems choosing different answers
+    // is the isolation bug: the agent could stay in project B while MCP discovery
+    // ran against project A.
+    //
+    // The target's own directory is read without blocking on the agent mutex: a
+    // generating target owns its lock, and awaiting it here would deadlock the
+    // attach behind a model turn. Fall back to the on-disk copy for a session that
+    // is not live in memory.
+    let bound_working_dir = {
+        let target_dir = live_target_agent
+            .as_ref()
+            .and_then(|live| live.try_lock().ok())
+            .and_then(|agent_guard| agent_guard.working_dir().map(str::to_string))
+            .or_else(|| {
+                crate::session::Session::load_startup_stub(&session_id)
+                    .ok()
+                    .and_then(|session| session.working_dir)
+            });
+        session_working_dir_for_client(target_dir.as_deref(), working_dir_override, false)
+    };
+    if let (Some(target), Some(subscriber)) = (
+        bound_working_dir.as_deref(),
+        working_dir_override.map(str::trim).filter(|dir| !dir.is_empty()),
+    ) && super::util::canonicalize_or(target.into()) != super::util::canonicalize_or(subscriber.into())
+    {
+        crate::logging::warn(&format!(
+            "Preserving session {} working_dir {target}: a subscriber in {subscriber} attached to it (cross-project attach)",
+            session_id
+        ));
+    }
 
     if let Some(live_target_agent) = live_target_agent.as_ref() {
         let old_session_id = client_session_id.clone();
@@ -1419,17 +1567,10 @@ pub(super) async fn handle_resume_session(
         // working dir, not the server process cwd (issue #420).
         // Do not block on the agent lock here: the target agent may be busy
         // mid-turn (lock held), and awaiting it would deadlock the resume.
-        let mcp_working_dir = working_dir_override.map(PathBuf::from).or_else(|| {
-            live_target_agent
-                .try_lock()
-                .ok()
-                .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
-                .or_else(|| {
-                    crate::session::Session::load_startup_stub(&session_id)
-                        .ok()
-                        .and_then(|session| session.working_dir.map(PathBuf::from))
-                })
-        });
+        // Must agree with the directory the restore above just bound, or the
+        // session's tools and its project-local MCP config resolve against
+        // different projects.
+        let mcp_working_dir = bound_working_dir.clone().map(PathBuf::from);
         registry
             .register_mcp_tools_for_dir(
                 Some(client_event_tx.clone()),
@@ -1582,7 +1723,7 @@ pub(super) async fn handle_resume_session(
     let (result, is_canary) = {
         let mut agent_guard = agent.lock().await;
         let result =
-            agent_guard.restore_session_with_working_dir(&session_id, working_dir_override);
+            agent_guard.restore_session_with_working_dir(&session_id, bound_working_dir.as_deref());
         if *client_selfdev {
             agent_guard.set_canary("self-dev");
         }

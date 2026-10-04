@@ -1236,18 +1236,13 @@ pub(super) async fn handle_resume_all_sessions(
 /// strict: project B never matches a caller in project A.
 fn working_dir_in_scope(session_dir: Option<&str>, caller_dir: Option<&str>) -> bool {
     match (session_dir, caller_dir) {
-        (Some(session), Some(caller)) => canonical_dir(session) == canonical_dir(caller),
+        (Some(session), Some(caller)) => {
+            super::util::canonicalize_or(session.into()) == super::util::canonicalize_or(caller.into())
+        }
         _ => true,
     }
 }
 
-/// Canonicalize a directory path, falling back to the literal path when it
-/// cannot be canonicalized (a session's directory can be deleted while the
-/// session stays alive).
-fn canonical_dir(path: &str) -> std::path::PathBuf {
-    let path = std::path::PathBuf::from(path);
-    std::fs::canonicalize(&path).unwrap_or(path)
-}
 
 pub(super) fn handle_compact(
     id: u64,
