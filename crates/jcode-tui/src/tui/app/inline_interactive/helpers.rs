@@ -127,6 +127,9 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
         crate::provider::ModelRouteApiMethod::GrokBuild => {
             crate::provider::grok_build_model_spec(&bare_name)
         }
+        crate::provider::ModelRouteApiMethod::ClaudeCode { .. } => {
+            crate::provider::claude_code_model_spec(&bare_name)
+        }
         crate::provider::ModelRouteApiMethod::ClaudeOAuth => {
             format!("claude-oauth:{}", bare_name)
         }

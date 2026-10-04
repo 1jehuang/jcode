@@ -65,6 +65,24 @@ fn stored_accounts(kind: AccountProviderKind) -> Vec<(String, Option<String>)> {
                 (account.label, identity)
             })
             .collect(),
+        // Claude Code instances come from `[provider.claude_code]`. They only
+        // count as "stored accounts" when configured explicitly, so sessions
+        // without Claude Code mode do not grow a Claude Code account row.
+        AccountProviderKind::ClaudeCode => {
+            if crate::config::config()
+                .provider
+                .claude_code
+                .instances
+                .is_empty()
+            {
+                Vec::new()
+            } else {
+                crate::auth::claude_code::instance_ids()
+                    .into_iter()
+                    .map(|id| (id, None))
+                    .collect()
+            }
+        }
     }
 }
 
@@ -82,6 +100,7 @@ pub fn pin_for_label(kind: AccountProviderKind, label: &str) -> Result<AccountPi
     match kind {
         AccountProviderKind::Claude => crate::auth::claude::pin_for_label(label),
         AccountProviderKind::OpenAi => crate::auth::codex::pin_for_label(label),
+        AccountProviderKind::ClaudeCode => crate::auth::claude_code::pin_for_label(label),
     }
 }
 
@@ -95,6 +114,7 @@ pub fn resolve_pin(kind: AccountProviderKind, pin: &AccountPin) -> Option<String
     match kind {
         AccountProviderKind::Claude => crate::auth::claude::resolve_pin(pin),
         AccountProviderKind::OpenAi => crate::auth::codex::resolve_pin(pin),
+        AccountProviderKind::ClaudeCode => crate::auth::claude_code::resolve_pin(pin),
     }
 }
 
@@ -143,6 +163,7 @@ pub fn default_label(kind: AccountProviderKind) -> Option<String> {
                 .filter(|label| auth.openai_accounts.iter().any(|a| &a.label == label))
                 .or_else(|| auth.openai_accounts.first().map(|a| a.label.clone()))
         }
+        AccountProviderKind::ClaudeCode => Some(crate::auth::claude_code::default_instance_id()),
     }
 }
 
@@ -174,6 +195,12 @@ pub fn set_default_label(kind: AccountProviderKind, label: &str) -> Result<()> {
             )?;
             crate::auth::codex::save_auth_file(&auth)?;
         }
+        AccountProviderKind::ClaudeCode => {
+            anyhow::bail!(
+                "The default Claude Code instance is set by [provider.claude_code].default_instance in config.toml (currently '{}'); use /account claude-code switch {label} to pin this session",
+                crate::auth::claude_code::default_instance_id()
+            );
+        }
     }
     // Keep the auto-switch order in step when this provider is the configured
     // default route. Another provider's default route keeps its place.
@@ -195,6 +222,7 @@ pub fn provider_display(kind: AccountProviderKind) -> &'static str {
     match kind {
         AccountProviderKind::Claude => "Claude",
         AccountProviderKind::OpenAi => "OpenAI",
+        AccountProviderKind::ClaudeCode => "Claude Code",
     }
 }
 
@@ -203,6 +231,7 @@ pub fn runtime_provider_name(kind: AccountProviderKind) -> &'static str {
     match kind {
         AccountProviderKind::Claude => "anthropic",
         AccountProviderKind::OpenAi => "openai",
+        AccountProviderKind::ClaudeCode => "claude-code",
     }
 }
 

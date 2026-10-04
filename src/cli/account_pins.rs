@@ -51,6 +51,23 @@ fn stored(kind: crate::auth::AccountProviderKind) -> Vec<(String, Option<String>
             .into_iter()
             .map(|a| (a.label, a.email))
             .collect(),
+        // Only explicitly configured Claude Code instances are addressable,
+        // so a bare `--account default` keeps its old meaning.
+        crate::auth::AccountProviderKind::ClaudeCode => {
+            if crate::config::config()
+                .provider
+                .claude_code
+                .instances
+                .is_empty()
+            {
+                Vec::new()
+            } else {
+                crate::auth::claude_code::instance_ids()
+                    .into_iter()
+                    .map(|id| (id, None))
+                    .collect()
+            }
+        }
     }
 }
 
@@ -95,7 +112,7 @@ fn resolve_one(value: &str) -> Result<(String, String)> {
             known_labels_hint()
         ),
         _ => bail!(
-            "--account {value} matches both a Claude and an OpenAI account. Use its label (claude-… or openai-…)."
+            "--account {value} matches accounts of more than one provider. Use its unique label (claude-…, openai-…, or a Claude Code instance id)."
         ),
     }
 }
@@ -113,6 +130,9 @@ pub fn apply_to_provider(
         let pin = match kind {
             crate::auth::AccountProviderKind::Claude => crate::auth::claude::pin_for_label(label)?,
             crate::auth::AccountProviderKind::OpenAi => crate::auth::codex::pin_for_label(label)?,
+            crate::auth::AccountProviderKind::ClaudeCode => {
+                crate::auth::claude_code::pin_for_label(label)?
+            }
         };
         provider.set_account_pin(kind, Some(pin))?;
         // One-shot processes may also use the process-local override
@@ -125,6 +145,8 @@ pub fn apply_to_provider(
             crate::auth::AccountProviderKind::OpenAi => {
                 crate::auth::codex::set_active_account_override(Some(label.clone()))
             }
+            // Claude Code instances live in config; the pin alone selects one.
+            crate::auth::AccountProviderKind::ClaudeCode => {}
         }
     }
     Ok(())

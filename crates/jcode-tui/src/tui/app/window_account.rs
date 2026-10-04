@@ -10,10 +10,17 @@ use super::*;
 use crate::protocol::SessionAccountInfo;
 use jcode_provider_core::{AccountPin, AccountProviderKind};
 
-/// Provider family key ("claude" | "openai") for a provider/login name.
+/// Provider family key ("claude" | "openai" | "claude-code") for a
+/// provider/login name.
 pub(crate) fn account_family(provider: &str) -> Option<&'static str> {
     let normalized = provider.trim().to_ascii_lowercase();
-    if normalized.starts_with("claude") || normalized.starts_with("anthropic") {
+    // Claude Code instances are a separate family: check before `claude*`.
+    if matches!(
+        normalized.as_str(),
+        "claude-code" | "claude_code" | "claudecode" | "claude code"
+    ) {
+        Some(CLAUDE_CODE_FAMILY)
+    } else if normalized.starts_with("claude") || normalized.starts_with("anthropic") {
         Some("claude")
     } else if normalized.starts_with("openai") || matches!(normalized.as_str(), "codex" | "chatgpt")
     {
@@ -22,6 +29,9 @@ pub(crate) fn account_family(provider: &str) -> Option<&'static str> {
         None
     }
 }
+
+/// Family key of Claude Code CLI instances (`[provider.claude_code]`).
+pub(crate) const CLAUDE_CODE_FAMILY: &str = "claude-code";
 
 /// Stored default account label for a family: the stored active account,
 /// else the first account. Ignores any runtime override.
@@ -39,6 +49,7 @@ pub(crate) fn stored_default_label(family: &str) -> Option<String> {
                 .filter(|label| auth.openai_accounts.iter().any(|a| &a.label == label))
                 .or_else(|| auth.openai_accounts.first().map(|a| a.label.clone()))
         }
+        CLAUDE_CODE_FAMILY => Some(crate::auth::claude_code::default_instance_id()),
         _ => None,
     }
 }
@@ -60,6 +71,7 @@ fn resolve_local_pin(kind: AccountProviderKind, pin: &AccountPin) -> Option<Stri
     match kind {
         AccountProviderKind::Claude => crate::auth::claude::resolve_pin(pin),
         AccountProviderKind::OpenAi => crate::auth::codex::resolve_pin(pin),
+        AccountProviderKind::ClaudeCode => crate::auth::claude_code::resolve_pin(pin),
     }
 }
 
@@ -73,6 +85,7 @@ fn label_exists(family: &str, label: &str) -> bool {
             .unwrap_or_default()
             .iter()
             .any(|a| a.label == label),
+        CLAUDE_CODE_FAMILY => crate::auth::claude_code::instance(label).is_some(),
         _ => false,
     }
 }
@@ -89,6 +102,7 @@ fn stored_labels(family: &str) -> Vec<String> {
             .into_iter()
             .map(|a| a.label)
             .collect(),
+        CLAUDE_CODE_FAMILY => crate::auth::claude_code::instance_ids(),
         _ => Vec::new(),
     }
 }
@@ -97,6 +111,7 @@ fn family_display(family: &str) -> &'static str {
     match family {
         "claude" => "Claude",
         "openai" => "OpenAI",
+        CLAUDE_CODE_FAMILY => "Claude Code",
         _ => "provider",
     }
 }
@@ -474,10 +489,10 @@ impl App {
         });
         crate::auth::AuthStatus::invalidate_cache();
         self.set_context_limit_and_sync_budget(self.provider.context_window());
-        let held = if family == "claude" {
-            "anthropic"
-        } else {
-            "openai"
+        let held = match family {
+            "claude" => "anthropic",
+            CLAUDE_CODE_FAMILY => CLAUDE_CODE_FAMILY,
+            _ => "openai",
         };
         self.release_rate_limit_hold_after_credentials_changed(Some(held));
         Ok(())
@@ -544,6 +559,12 @@ impl App {
         let result = match family {
             "claude" => crate::auth::claude::set_active_account(label),
             "openai" => crate::auth::codex::set_active_account(label),
+            CLAUDE_CODE_FAMILY => {
+                return Err(format!(
+                    "the default Claude Code instance comes from [provider.claude_code].default_instance in config.toml (currently {}); use /account claude-code switch {label} for this window",
+                    crate::auth::claude_code::default_instance_id()
+                ));
+            }
             _ => return Err(format!("{family} has no stored accounts")),
         };
         result.map_err(|e| e.to_string())?;
@@ -633,7 +654,7 @@ impl App {
             AccountCommand::Unpin { provider_id } => {
                 let families: Vec<&str> = match provider_id.as_deref().and_then(account_family) {
                     Some(family) => vec![family],
-                    None => vec!["claude", "openai"],
+                    None => vec!["claude", "openai", CLAUDE_CODE_FAMILY],
                 };
                 let mut lines = Vec::new();
                 for family in families {
@@ -933,6 +954,7 @@ impl App {
         )];
         let pool = crate::auth::account_pool::AccountPool::load();
         for family in ["claude", "openai"] {
+            // Claude Code instances do not rotate (no automatic failover yet).
             let labels = stored_labels(family);
             if labels.is_empty() {
                 continue;
