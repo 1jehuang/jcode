@@ -1,7 +1,7 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1, P0.2, P0.3, P0.4 done)
-Last reviewed: 2026-10-04 (commit `0d34e73f3`)
+Status: **in_progress** (P0.1-P0.4, P1.1-P1.4, P2.1 done)
+Last reviewed: 2026-10-04 (P2.1 shipped)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -462,7 +462,7 @@ a temp home into later tests. 29 `tool::ambient` and 62 `ambient` tests pass.
 
 ### P2.1 - Project skills overlay falls back to the daemon cwd
 
-- [ ] **Status:** pending
+- [x] **Status:** done
 - **Where:** `crates/jcode-base/src/skill.rs:325-328` (`project_local_dir`:
   `working_dir.map(|dir| dir.join(&path)).unwrap_or(path)`, where `path` is the *relative*
   `.jcode/skills`), reached from `load_project_overlay` (`:294-302`) via
@@ -482,6 +482,38 @@ a temp home into later tests. 29 `tool::ambient` and 62 `ambient` tests pass.
   rename those so the distinction is visible at the call site.
 - **Acceptance:** a session with no working dir lists no project skills, even when the
   daemon was started inside a repo that has `.jcode/skills`.
+
+**Resolution.** The decision moved to the point of the read instead of being pushed onto
+callers. `load_project_local_dirs` now early-returns when `working_dir` is `None`, so
+`None` means "no project overlay" everywhere below it, and `project_local_dir` takes a
+non-optional `&Path` so the process cwd can only be reached by a caller that supplies it
+deliberately. Two callers genuinely want process scope: the CLI startup memory provider
+(`src/cli/startup.rs`) and the matching test (`crates/jcode-base/src/memory_tests.rs`),
+because memory retrieval is deliberately process-scoped. Both now pass
+`std::env::current_dir()` explicitly, each with a comment saying so, which means the code
+matches the comment instead of relying on a fallback the caller never asked for.
+
+`SkillRegistry::load()` was `load_for_working_dir(None)`, had no callers
+(`shared_registry`/`shared_snapshot` use `load_global()`), and existed only to provide
+that fallback, so it is deleted rather than left as a second entry point with different
+scope. The stale doc comments on `load_for_working_dir` and `load_project_overlay` that
+promised a process-cwd fallback were corrected in the same change, per the comment-intent
+rule.
+
+**Tests.** Two in `crates/jcode-base/src/skill.rs`:
+`no_working_dir_loads_no_project_skills_even_under_a_repo_cwd` points the process cwd at a
+temp repo that *does* have `.jcode/skills` and asserts that `load_project_overlay(None)`,
+`load_for_working_dir(None)` and `effective_for_working_dir(_, None)` all omit it, then
+re-asserts with `Some(repo)` as a positive control so it cannot pass vacuously; and
+`no_working_dir_skips_every_project_local_skill_convention` covers `.jcode`, `.agents` and
+`.claude`. One in `crates/jcode-app-core/src/tool/skill.rs`:
+`skill_tool_with_no_working_dir_does_not_list_daemon_cwd_project_skills` drives
+`SkillTool::execute` with `ctx.working_dir = None` for both `list` and `load`. That test
+binds to the tool call site rather than the helper, because the P1.3 regression showed a
+helper test does not prove the call site uses the helper. Reverting the guard and the
+permissive `project_local_dir` fails both base tests (`29 passed; 2 failed`) and, with the
+tool and its test untouched, the tool test (`14 passed; 1 failed`). 31 `skill::`, 44
+`memory::tests` and 15 `tool::skill::` tests pass.
 
 ### P2.2 - Swarm prompt falls back to the daemon cwd, and the production path never passes one
 

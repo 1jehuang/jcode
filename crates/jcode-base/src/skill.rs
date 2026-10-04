@@ -242,11 +242,6 @@ impl SkillRegistry {
             .unwrap_or_default()
     }
 
-    /// Load skills from all standard locations
-    pub fn load() -> Result<Self> {
-        Self::load_for_working_dir(None)
-    }
-
     /// Load only the shared global skill sources: Claude Code plugin installs,
     /// `~/.jcode/skills/`, and `~/.agents/skills/`.
     ///
@@ -289,8 +284,8 @@ impl SkillRegistry {
     ///
     /// Loaded fresh from disk on access so edits are visible without daemon
     /// restarts and two sessions in different repositories never see each
-    /// other's project skills. `working_dir = None` resolves against the
-    /// process cwd (single-process CLI mode).
+    /// other's project skills. `working_dir = None` yields an empty overlay: a
+    /// session with no workspace root has no project.
     pub fn load_project_overlay(working_dir: Option<&Path>) -> Result<Self> {
         let mut overlay = Self::default();
         overlay.load_project_local_dirs(working_dir)?;
@@ -314,20 +309,38 @@ impl SkillRegistry {
         effective
     }
 
-    /// Load skills from all standard locations, with project-local locations
-    /// resolved against an optional active session working directory.
+    /// Load global skills plus, when `working_dir` is `Some`, that project's
+    /// local skills. `None` yields global skills only; it never falls back to
+    /// the process cwd (see [`Self::load_project_local_dirs`]).
     pub fn load_for_working_dir(working_dir: Option<&Path>) -> Result<Self> {
         let mut registry = Self::load_global()?;
         registry.load_project_local_dirs(working_dir)?;
         Ok(registry)
     }
 
-    fn project_local_dir(working_dir: Option<&Path>, name: &str) -> PathBuf {
-        let path = Path::new(name).join("skills");
-        working_dir.map(|dir| dir.join(&path)).unwrap_or(path)
+    /// Project-local skill directory for a workspace root.
+    ///
+    /// Takes a non-optional directory on purpose. The daemon is long-lived and
+    /// serves sessions for many projects, so "no workspace root" must never
+    /// degrade into a lookup relative to the process cwd, which would load
+    /// whichever repository happened to start it. A caller that genuinely
+    /// wants the process cwd has to pass it in, visibly.
+    fn project_local_dir(working_dir: &Path, name: &str) -> PathBuf {
+        working_dir.join(name).join("skills")
     }
 
+    /// Merge this project's `.jcode/skills/`, `.agents/skills/`, and
+    /// `.claude/skills/` into this registry.
+    ///
+    /// `working_dir = None` loads **no** project skills. Falling back to the
+    /// process cwd would hand a session with no workspace root another
+    /// project's skills, because the daemon is long-lived and its startup
+    /// directory is arbitrary (P2.1). Such a caller gets global skills only.
     fn load_project_local_dirs(&mut self, working_dir: Option<&Path>) -> Result<()> {
+        let Some(working_dir) = working_dir else {
+            return Ok(());
+        };
+
         // Load from ./.jcode/skills/ (project-local jcode skills)
         let local_jcode = Self::project_local_dir(working_dir, ".jcode");
         if local_jcode.exists() {
@@ -1255,6 +1268,92 @@ mod tests {
         assert_eq!(count, 1);
         assert!(counted_registry.contains("valid"));
         assert!(!counted_registry.contains("malformed"));
+    }
+
+    /// A session with no workspace root must not pick up the skills of
+    /// whichever project happens to have started the daemon.
+    ///
+    /// The process cwd is deliberately pointed at a repository that *does* have
+    /// `.jcode/skills`, so this fails under the old
+    /// `unwrap_or(relative_path)` fallback. `Some(...)` is asserted in the same
+    /// test so the assertion cannot pass vacuously.
+    #[test]
+    fn no_working_dir_loads_no_project_skills_even_under_a_repo_cwd() {
+        let _env = crate::storage::lock_test_env();
+        let repo = tempfile::tempdir().expect("tempdir");
+        write_test_skill(repo.path(), ".jcode", "daemon-project-skill");
+
+        let old_cwd = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(repo.path()).expect("set current dir");
+
+        // The cwd fallback under test: relative `.jcode/skills` from the daemon's
+        // directory. This is what a `working_dir: None` session must not do.
+        assert!(
+            repo.path()
+                .join(".jcode/skills/daemon-project-skill/SKILL.md")
+                .exists(),
+            "test must run inside a repo that really has this project skill"
+        );
+
+        let overlay = SkillRegistry::load_project_overlay(None).expect("load overlay");
+        let registry = SkillRegistry::load_for_working_dir(None).expect("load skills");
+        let effective = SkillRegistry::effective_for_working_dir(&SkillRegistry::default(), None);
+
+        let same_dir =
+            SkillRegistry::load_project_overlay(Some(repo.path())).expect("load overlay");
+
+        std::env::set_current_dir(old_cwd).expect("restore current dir");
+
+        assert!(
+            overlay.get("daemon-project-skill").is_none(),
+            "None working_dir must not read .jcode/skills from the process cwd"
+        );
+        assert!(
+            registry.get("daemon-project-skill").is_none(),
+            "None working_dir must not read .jcode/skills from the process cwd"
+        );
+        assert!(
+            effective.get("daemon-project-skill").is_none(),
+            "effective skills for a session with no cwd must not include another \
+             project's skills"
+        );
+
+        // Positive control: the same lookup does find it when the workspace root
+        // is named. Without this, the assertions above would also pass if the
+        // loader were simply broken.
+        assert_eq!(
+            same_dir
+                .get("daemon-project-skill")
+                .map(|skill| skill.path.clone()),
+            Some(
+                repo.path()
+                    .join(".jcode/skills/daemon-project-skill/SKILL.md")
+            ),
+            "naming the workspace root must still load that project's skills"
+        );
+    }
+
+    /// `None` means "no project", for every project-local convention, not just
+    /// `.jcode`.
+    #[test]
+    fn no_working_dir_skips_every_project_local_skill_convention() {
+        let _env = crate::storage::lock_test_env();
+        let repo = tempfile::tempdir().expect("tempdir");
+        write_test_skill(repo.path(), ".jcode", "jcode-convention");
+        write_test_skill(repo.path(), ".agents", "agents-convention");
+        write_test_skill(repo.path(), ".claude", "claude-convention");
+
+        let old_cwd = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(repo.path()).expect("set current dir");
+        let overlay = SkillRegistry::load_project_overlay(None).expect("load overlay");
+        std::env::set_current_dir(old_cwd).expect("restore current dir");
+
+        for name in ["jcode-convention", "agents-convention", "claude-convention"] {
+            assert!(
+                overlay.get(name).is_none(),
+                "{name} leaked in from the daemon cwd"
+            );
+        }
     }
 
     #[test]

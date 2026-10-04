@@ -90,15 +90,20 @@ pub async fn run() -> Result<()> {
     // entries from registered providers, and skill (the higher layer that
     // depends on MemoryEntry) registers its registry->memory adapter here.
     // The shared snapshot holds global skills only; memory retrieval is
-    // process-scoped, so compose the project overlay from the process cwd
-    // (issue #457 keeps session overlays out of the shared registry).
+    // deliberately process-scoped, so compose the project overlay from the
+    // process cwd, passed explicitly (issue #457 keeps session overlays out of
+    // the shared registry; P2.1 removed the implicit None fallback). The
+    // session-scoped path for skills is the agent/tool path, not this one.
     crate::memory::register_synthetic_entry_provider(|| {
         let global = crate::skill::SkillRegistry::shared_snapshot();
-        crate::skill::SkillRegistry::effective_for_working_dir(&global, None)
-            .list()
-            .into_iter()
-            .map(|skill| skill.as_memory_entry())
-            .collect()
+        crate::skill::SkillRegistry::effective_for_working_dir(
+            &global,
+            std::env::current_dir().ok().as_deref(),
+        )
+        .list()
+        .into_iter()
+        .map(|skill| skill.as_memory_entry())
+        .collect()
     });
 
     // Invert the legacy server -> tui dependency: the TUI session picker owns
