@@ -1814,7 +1814,18 @@ impl App {
             if self.final_response_todo_fingerprint == todo_fingerprint {
                 // Check before timed reviews and deferred digests too: neither
                 // elapsed time nor a stale observation starts a new todo cycle.
-                return false;
+                //
+                // But an unchanged fingerprint is only proof of being FINISHED
+                // when nothing is still open. An agent that claimed completion
+                // and then sat on the same list - rewriting it every turn while
+                // carrying the same incomplete items forward - is stalled, and
+                // this early exit suppressed the stall ladder for exactly that
+                // case, so auto-poke looked armed and never fired again. Only
+                // take the exit when the plan is genuinely closed.
+                let still_open = todos.iter().any(super::commands::is_incomplete_poke_todo);
+                if !still_open {
+                    return false;
+                }
             }
             self.final_response_todo_fingerprint = None;
             self.todo_final_response_requested = false;
