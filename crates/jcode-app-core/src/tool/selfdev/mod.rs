@@ -477,6 +477,47 @@ impl Drop for BuildLockGuard {
 #[derive(Default)]
 pub struct SelfDevTool;
 
+/// The checked-out commit, in the same SHORT form the publish gate compares
+/// against, or None when there is no repository to ask.
+///
+/// Two ways to get this wrong, both of which have shipped here:
+///
+/// 1. A full 40-character hash. `validate_binary_version_matches_source_report`
+///    (`jcode-build-support/src/lib.rs`) compares the embedded hash against
+///    `source_state.rs`'s own `rev-parse --short HEAD` with `!=`, so a full hash
+///    can never match and every build is refused with a message that reads like
+///    a build failure.
+/// 2. An empty string, which `jcode_build_meta::present` collapses to None.
+///    That rule is the same one 22909eb7a fixed in the build script's own copy,
+///    and it is reused here rather than reimplemented: a second copy of
+///    "blank means absent" would be a third thing to keep in step.
+///
+/// So: ask git for the short form, and let `present` decide what blank means.
+///
+/// On the blank rule specifically: the delegation here is not separately
+/// testable, and that is deliberate rather than an oversight. Replacing
+/// `present(x)` with an inline `Some(x.trim())` is an EQUIVALENT mutant over
+/// this function's reachable inputs, because the two differ only on blank
+/// output, which no git invocation produces (outside a repository git exits 128
+/// and the early return fires first; probed). A test that claimed to catch it
+/// would be asserting on an unreachable arm. The rule itself is tested once, in
+/// `jcode_build_meta`, and mutating it there fails 5 tests.
+fn short_git_hash(repo_dir: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()?;
+
+    // Outside a repository git exits 128 with empty stdout, so this early
+    // return fires before the blank check ever matters. Probed, not assumed.
+    if !output.status.success() {
+        return None;
+    }
+
+    jcode_build_meta::present(Some(String::from_utf8_lossy(&output.stdout).to_string()))
+}
+
 impl SelfDevTool {
     pub fn new() -> Self {
         Self

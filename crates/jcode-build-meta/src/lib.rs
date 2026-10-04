@@ -123,6 +123,17 @@ pub fn is_release_build() -> bool {
     option_env!("JCODE_RELEASE_BUILD").is_some() || runtime_release_semver().is_some()
 }
 
+/// A build value that is actually present: trimmed, and blank is None.
+///
+/// `None` and `Some("")` are different answers and callers get this wrong. A
+/// `Some("")` short-circuits the fallbacks behind it, so a variable that was
+/// merely set-but-empty wins over a real value that was available.
+pub fn present(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Resolve one build-metadata value: env var, then a metadata file, then a git
 /// command.
 ///
@@ -148,12 +159,6 @@ pub fn resolve_build_value(
     metadata_lookup: impl FnOnce() -> Option<String>,
     git_lookup: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
-    fn present(value: Option<String>) -> Option<String> {
-        value
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-
     match present(std::env::var(env_name).ok()) {
         Some(value) => Some(value),
         None => present(metadata_lookup()).or_else(|| present(git_lookup())),
@@ -162,12 +167,31 @@ pub fn resolve_build_value(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_release_semver, resolve_build_value};
+    use super::{parse_release_semver, present, resolve_build_value};
     use std::sync::Mutex;
 
     // `set_var` is process-global and unsafe under edition 2024, so every case
     // that touches the environment takes this lock and the calls are wrapped.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// `present` is where "blank means absent" now lives, and it is reached
+    /// from two crates. Test it directly rather than through a caller.
+    ///
+    /// The selfdev caller cannot cover it: outside a repository `git rev-parse`
+    /// exits 128, so `short_git_hash` returns before trimming and the blank arm
+    /// is unreachable there. Probed, and recorded as a mutation that went
+    /// undetected because no test could have failed.
+    #[test]
+    fn present_treats_blank_as_absent_and_trims() {
+        assert_eq!(present(None), None);
+        assert_eq!(present(Some(String::new())), None);
+        assert_eq!(present(Some("   ".to_string())), None);
+        assert_eq!(present(Some("\t\n".to_string())), None);
+        assert_eq!(
+            present(Some("  f41aa86ab  ".to_string())),
+            Some("f41aa86ab".to_string())
+        );
+    }
 
     fn with_env(name: &str, value: Option<&str>, f: impl FnOnce()) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());

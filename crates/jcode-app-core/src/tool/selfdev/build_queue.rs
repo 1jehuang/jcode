@@ -101,6 +101,44 @@ export -f cargo
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Export the commit identity so `jcode-build-meta`'s
+        // `rerun-if-env-changed=JCODE_BUILD_GIT_HASH` fires and the embedded
+        // hash tracks HEAD.
+        //
+        // `dev_cargo.sh` exports these itself on Unix, but
+        // `paths::selfdev_build_command_for_target` skips that wrapper on Windows
+        // (`if wrapper.is_file() && !is_windows`, so `bash` cannot resolve to
+        // WSL). With nothing exported, the env trigger never fires, the build
+        // script does not re-run, and the binary keeps whatever hash an earlier
+        // commit stamped -- so the publish gate refuses with a message that
+        // looks like a build failure rather than a stale artifact.
+        //
+        // Probed on Windows: HEAD at 22909eb7a, binary still reporting
+        // `c023d8053`, `cargo build` returning 0 in 1.5s without re-running the
+        // build script. Forcing the script to re-run produced
+        // `22909eb7a`, which is what this restores.
+        //
+        // Only the variables that are actually obtainable are set. An empty
+        // value would be worse than an absent one: `jcode_build_meta::
+        // resolve_build_value` now treats empty as absent, but a caller that
+        // predates that would short-circuit its own git fallback and stamp
+        // `(unknown)`.
+        if let Some(hash) = short_git_hash(&repo_dir) {
+            cmd.env("JCODE_BUILD_GIT_HASH", hash);
+        }
+        if let Ok(date) = std::process::Command::new("git")
+            .current_dir(&repo_dir)
+            .args(["log", "-1", "--format=%cI"])
+            .output()
+        {
+            if date.status.success() {
+                let value = String::from_utf8_lossy(&date.stdout).trim().to_string();
+                if !value.is_empty() {
+                    cmd.env("JCODE_BUILD_GIT_DATE", value);
+                }
+            }
+        }
+
         let mut child = cmd
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn build command: {}", e))?;

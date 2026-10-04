@@ -1230,6 +1230,112 @@ to the code it protects, not in a separate integration bucket.
 
 ---
 
+## Build provenance: the embedded git hash (follow-on from the reload blocker)
+
+Not a project-isolation item, but it shipped while closing P5.3 and it is
+recorded here because the same "green CI, broken gate" pattern showed up again.
+
+`jcode-build-meta`'s `build.rs` declares
+`rerun-if-env-changed=JCODE_BUILD_GIT_HASH` but deliberately omits `.git/HEAD`.
+`paths::selfdev_build_command_for_target` skips `dev_cargo.sh` on Windows
+(`if wrapper.is_file() && !is_windows`), and `dev_cargo.sh` is what exports
+`JCODE_BUILD_GIT_HASH`. So on Windows nothing exported it, the env trigger never
+fired, the build script did not re-run, and the binary kept an older commit's
+hash.
+
+Probed rather than inferred: HEAD `22909eb7a`, binary still reporting
+`c023d8053`, plain `cargo build` returning 0 in 1.5s without re-running the build
+script. Forcing the script to re-run produced `22909eb7a`. `f41aa86ab` retracted
+`build.rs`'s claim that this lag is "a cosmetic `--version` detail" -- it is the
+hash the publish gate compares.
+
+The fix exports the short hash and date from the single spawn choke point in
+`build_queue::stream_build_command`.
+
+### Two binding gaps found while proving the tests
+
+The first version of the tests passed against a helper with its blank-check
+deleted. Both gaps were real, and neither was visible from the passing run.
+
+| mutation | what happened | resolution |
+|---|---|---|
+| `present()` loses its blank check | **undetected** -- `git rev-parse` exits 128 outside a repo, so `short_git_hash` returned before ever trimming. The blank arm was unreachable, so no test could fail | lifted `present` out of `resolve_build_value` to a `pub fn` in `jcode-build-meta` and reused it from the selfdev caller. The rule is now tested once, at the level where it is reachable: mutating it there fails 5 tests |
+| `rev-parse HEAD` instead of `--short` | detected by the headline case | the length range `7..=40` was replaced with an exact comparison against `git rev-parse --short HEAD` plus an explicit `assert_ne!` against the full hash. The range accepted a full 40-character hash, which is the exact bug the function exists to prevent |
+
+A third mutation, replacing `present(x)` with an inline `Some(x.trim())`, is
+MISSED and left that way: it is an equivalent mutant over the helper's reachable
+inputs, since the two differ only on blank output, which no git invocation
+produces. Recorded in the helper's doc comment rather than papered over with a
+test that asserts on an unreachable arm.
+
+### Why the first reload after this fix still failed
+
+The reload immediately after `8e31a2d8d` was refused:
+
+    Refusing to publish target/selfdev/jcode.exe as 8e31a2d8d:
+    binary was built from git hash 22909eb7a, but source state is 8e31a2d8d
+
+The gate's complaint was already the improved one -- a real hash, not
+`(unknown)` -- so the export was working. The binary was still two commits
+behind because of self-hosting bootstrap, not a caching limitation.
+
+The daemon performing that reload was `c023d8053`, which predates the export, so
+*that daemon exported nothing*. Without the variable set, `build.rs` had no
+trigger and did not re-run, so the binary kept the hash from whenever it was last
+compiled -- `22909eb7a`, from a `cargo test` run. The running daemon had to run
+the new code before the new code could stamp the new hash.
+
+The mechanism was worth isolating rather than guessing at. Probed by varying only
+the environment between builds:
+
+| `JCODE_BUILD_GIT_HASH` | `build-meta` recompiled | binary reports |
+|---|---|---|
+| `aaaa1111` | yes, 25.6s | `(aaaa1111)` |
+| `bbbb2222` | yes, 26.7s | `(bbbb2222)` |
+| unset | yes, 26.9s | `(9135fa0df)`, via the git fallback |
+| `9135fa0df` | yes, 23.5s | `(9135fa0df)` |
+
+Cargo honours `rerun-if-env-changed` exactly as the build script declares. Every
+change to the value forces the re-run, and the embedded hash follows it.
+
+An earlier draft of this section claimed the opposite -- that a `git commit`
+cannot change the environment, so the fingerprint could never be invalidated and
+the hash would drift indefinitely. That was wrong, and it was falsified by the
+next reload: after amending the commit to `9135fa0df`, the reload succeeded
+without any manual intervention, which cannot happen if `build.rs` is never
+re-executed. The claim was inferred from a single observation of the first
+failure rather than tested, which is the mistake the probe above exists to
+prevent.
+
+The `dirty` marker behaved the same way: it cleared on its own once the build
+script actually re-ran, so the stale `(dirty)` in the first reload was the same
+single cause and not a second one.
+
+### A file damaged mid-change
+
+Restoring `selfdev/tests.rs` from HEAD to undo a mutation also discarded the
+in-flight tests, and a follow-up splice deleted `create_test_context` outright.
+Caught by a structural comparison against HEAD, not by a failing build: the
+resulting compile errors all pointed at *other* tests, which read as unrelated
+breakage. Both files were restored byte-exactly and the work re-applied in a
+single insert with an assert on every anchor.
+
+### State
+
+Verified: `jcode-build-meta` 10/10; `selfdev::tests::short_git*` 3/3 clean and
+failing under both mutations; full `jcode-app-core --lib` 1422 passed / 27 failed,
+the same 27 as the pre-existing baseline, with none in `tool::selfdev` or
+`jcode-build-meta`; `cargo fmt` back to the pre-existing 25-hunk baseline with
+zero collateral.
+
+The 27 are unrelated and pre-existing, confirmed by stashing this change and
+re-running: identical failures at HEAD. Note the `desktop_selfdev` trio fails
+with `os error 1` (`Incorrect function`, mangled as `FunÃ§Ã£o incorreta` in the
+output) from a Windows shell call, consistently, not as a timing flake as
+previously recorded.
+
+---
+
 ## Explicitly out of scope
 
 - Path confinement for tools (P4, by design).
