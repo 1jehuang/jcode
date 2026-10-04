@@ -63,7 +63,8 @@ pub fn build_transcript_for_extraction(messages: &[crate::message::Message]) -> 
                 | crate::message::ContentBlock::ReasoningTrace { .. }
                 | crate::message::ContentBlock::AnthropicThinking { .. }
                 | crate::message::ContentBlock::OpenAIReasoning { .. }
-                | crate::message::ContentBlock::ToolReference { .. } => {}
+                | crate::message::ContentBlock::ToolReference { .. }
+                | crate::message::ContentBlock::ProviderNative { .. } => {}
                 crate::message::ContentBlock::Image { .. } => {
                     transcript.push_str("[Image]\n");
                 }

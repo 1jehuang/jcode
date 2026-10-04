@@ -5,6 +5,9 @@ use jcode_provider_core::anthropic_map_tool_name_for_oauth as map_tool_name_for_
 use serde::Serialize;
 use serde_json::{Value, json};
 
+mod history_repair;
+use history_repair::*;
+
 /// Claude Code billing attribution text observed in the official CLI's system
 /// prompt blocks.
 pub const OAUTH_BILLING_HEADER: &str = "cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;";
@@ -31,6 +34,23 @@ pub fn format_messages_with_tools(
     is_oauth: bool,
     api_tools: &[ApiTool],
 ) -> Vec<ApiMessage> {
+    format_messages_with_native(messages, is_oauth, api_tools, false)
+}
+
+/// Like [`format_messages_with_tools`], additionally controlling how stored
+/// provider-native blocks ([`ContentBlock::ProviderNative`]) are sent.
+///
+/// With `native_replay`, Anthropic server tool blocks (`server_tool_use`,
+/// `web_search_tool_result`) are replayed verbatim, which the API requires for
+/// their encrypted payloads. Without it (the server tool is not attached to this
+/// request, or the block came from another provider) they are downgraded to a
+/// plain-text summary so the conversation stays valid.
+pub fn format_messages_with_native(
+    messages: &[Message],
+    is_oauth: bool,
+    api_tools: &[ApiTool],
+    native_replay: bool,
+) -> Vec<ApiMessage> {
     use std::collections::HashSet;
     let available: HashSet<&str> = api_tools.iter().map(|tool| tool.name.as_str()).collect();
     // Pre-pass: drop duplicate tool_results for the same tool_use_id.
@@ -43,7 +63,24 @@ pub fn format_messages_with_tools(
     // synthetic placeholder result, then the real result lands moments later,
     // and the conversation is permanently unsendable. Prefer the real output
     // over the synthetic placeholder, and otherwise keep the first occurrence.
-    let messages = &dedupe_tool_results(messages);
+    // Repair persisted provider-native Anthropic server-tool history before replay.
+    // Ordinary ToolUse blocks already have a synthetic-result repair below, but
+    // server_tool_use / web_search_tool_result pairs are stored as ProviderNative
+    // blocks and therefore need their own recovery path.
+    let repaired_messages = repair_dangling_anthropic_server_tools(messages);
+    // A duplicated run of history (for example a journal replayed on top of a
+    // snapshot that already contained it, #1632) repeats `tool_use` ids. Only
+    // the first copy can be answered, so drop the repeats before results are
+    // deduplicated; otherwise the second copy is sent with no result after it.
+    let repaired_messages = dedupe_tool_uses(&repaired_messages);
+    let messages = &dedupe_tool_results(&repaired_messages);
+    // Anthropic requires every tool_use to be answered in the very next
+    // message. A tool whose result was persisted later (after another turn was
+    // written in between, e.g. a reload or a scheduled-task wake-up while tools
+    // were still running) leaves the call unanswered where it matters and its
+    // result stranded later on, and the request 400s permanently. Move such
+    // results up to directly follow their call.
+    let messages = &hoist_late_tool_results(messages);
 
     // First pass: collect all tool_use IDs and tool_result IDs
     let mut tool_use_ids: HashSet<String> = HashSet::new();
@@ -82,7 +119,7 @@ pub fn format_messages_with_tools(
             Role::Assistant => "assistant",
         };
 
-        let mut content = format_content_blocks(&msg.content, is_oauth);
+        let mut content = format_content_blocks_with_native(&msg.content, is_oauth, native_replay);
         apply_tool_references(&mut content, &msg.content, is_oauth, &available);
 
         if !content.is_empty() {
@@ -163,6 +200,9 @@ pub fn format_messages_with_tools(
         }
     }
 
+    rewrite_orphaned_tool_results(&mut merged);
+    answer_unpaired_tool_uses(&mut merged);
+
     // Anthropic rejects a request whose final message is an assistant turn on
     // models that do not support assistant prefill ("This model does not support
     // assistant message prefill. The conversation must end with a user message.").
@@ -171,7 +211,14 @@ pub fn format_messages_with_tools(
     // user content and delivers its continuation as a system reminder, leaving the
     // transcript ending on the interrupted assistant turn. Repair the shape at the
     // last formatting step. See issue #600.
-    if merged.last().is_some_and(|last| last.role == "assistant") {
+    //
+    // Exception: a turn that stopped with `pause_turn` mid server-tool use must
+    // be resent exactly as-is so the API can resume it. Those turns end on an
+    // assistant message carrying raw server tool blocks.
+    if merged
+        .last()
+        .is_some_and(|last| last.role == "assistant" && !is_paused_server_tool_turn(last))
+    {
         jcode_logging::warn(
             "[anthropic] Conversation ended with an assistant message; appending a \
              continuation user turn to avoid a model prefill rejection (400)",
@@ -245,183 +292,62 @@ pub fn format_messages_with_tools(
     merged
 }
 
-/// Fold `ContentBlock::ToolReference` blocks into their tool_result.
-///
-/// The API rejects a tool_result that mixes `tool_reference` blocks with any
-/// other content, so the referencing tool_result carries only references; its
-/// original text moves to a sibling text block right after the tool_results,
-/// keeping them contiguous. Only references to tools in this request's
-/// catalog are emitted.
-fn apply_tool_references(
-    content: &mut Vec<ApiContentBlock>,
-    blocks: &[ContentBlock],
-    is_oauth: bool,
-    available: &std::collections::HashSet<&str>,
-) {
-    use std::collections::HashMap;
-    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
-    for block in blocks {
-        if let ContentBlock::ToolReference {
-            tool_use_id,
-            tool_name,
-        } = block
-        {
-            let name = if is_oauth {
-                map_tool_name_for_oauth(tool_name)
-            } else {
-                tool_name.clone()
-            };
-            if !available.contains(name.as_str()) {
-                continue;
-            }
-            let entry = refs.entry(sanitize_tool_id(tool_use_id)).or_default();
-            if !entry.contains(&name) {
-                entry.push(name);
-            }
-        }
-    }
-    if refs.is_empty() {
-        return;
-    }
-    let mut moved_text: Vec<ApiContentBlock> = Vec::new();
-    for block in content.iter_mut() {
-        let ApiContentBlock::ToolResult {
-            tool_use_id,
-            content: result_content,
-            ..
-        } = block
-        else {
-            continue;
-        };
-        let Some(names) = refs.remove(tool_use_id.as_str()) else {
-            continue;
-        };
-        let previous = std::mem::replace(
-            result_content,
-            ToolResultContent::Blocks(
-                names
-                    .into_iter()
-                    .map(|tool_name| ToolResultContentBlock::ToolReference { tool_name })
-                    .collect(),
-            ),
-        );
-        let texts: Vec<String> = match previous {
-            ToolResultContent::Text(text) => vec![text],
-            ToolResultContent::Blocks(blocks) => blocks
-                .into_iter()
-                .filter_map(|b| match b {
-                    ToolResultContentBlock::Text { text } => Some(text),
-                    _ => None,
-                })
-                .collect(),
-        };
-        for text in texts.into_iter().filter(|t| !t.trim().is_empty()) {
-            moved_text.push(ApiContentBlock::Text {
-                text,
-                cache_control: None,
-            });
-        }
-    }
-    if moved_text.is_empty() {
-        return;
-    }
-    let insert_at = content
-        .iter()
-        .rposition(|b| matches!(b, ApiContentBlock::ToolResult { .. }))
-        .map_or(0, |i| i + 1);
-    content.splice(insert_at..insert_at, moved_text);
-}
-
-/// Returns true when a tool_result body is one of the synthetic placeholders
-/// injected by the missing tool-output repair paths rather than real output.
-fn is_placeholder_tool_result(content: &str, is_error: Option<bool>) -> bool {
-    is_error.unwrap_or(false)
-        && (content.contains(TOOL_OUTPUT_MISSING_TEXT)
-            || content.contains("[Session interrupted before tool execution completed]"))
-}
-
-/// Remove duplicate `tool_result` blocks so each `tool_use_id` is answered
-/// exactly once, preferring real output over a synthetic placeholder.
-/// Messages left with no content at all are dropped by the caller's
-/// `!content.is_empty()` guard.
-fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
-    use std::collections::HashMap;
-
-    // Winner position per tool_use_id: the first real result if one exists,
-    // otherwise the first occurrence at all.
-    let mut winner: HashMap<&str, (usize, usize)> = HashMap::new();
-    let mut winner_is_real: HashMap<&str, bool> = HashMap::new();
-    let mut duplicate_seen = false;
-
-    for (mi, msg) in messages.iter().enumerate() {
-        for (bi, block) in msg.content.iter().enumerate() {
-            let ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } = block
-            else {
-                continue;
-            };
-            let real = !is_placeholder_tool_result(content, *is_error);
-            match winner_is_real.get(tool_use_id.as_str()) {
-                None => {
-                    winner.insert(tool_use_id, (mi, bi));
-                    winner_is_real.insert(tool_use_id, real);
-                }
-                Some(false) if real => {
-                    // Upgrade a placeholder winner to the real output.
-                    winner.insert(tool_use_id, (mi, bi));
-                    winner_is_real.insert(tool_use_id, true);
-                    duplicate_seen = true;
-                }
-                Some(_) => duplicate_seen = true,
-            }
-        }
-    }
-
-    if !duplicate_seen {
-        return messages.to_vec();
-    }
-
-    let dropped = std::cell::Cell::new(0usize);
-    let out: Vec<Message> = messages
-        .iter()
-        .enumerate()
-        .map(|(mi, msg)| {
-            let mut msg = msg.clone();
-            let mut bi = 0usize;
-            msg.content.retain(|block| {
-                let index = bi;
-                bi += 1;
-                let ContentBlock::ToolResult { tool_use_id, .. } = block else {
-                    return true;
-                };
-                let keep = winner.get(tool_use_id.as_str()) == Some(&(mi, index));
-                if !keep {
-                    dropped.set(dropped.get() + 1);
-                }
-                keep
-            });
-            msg
-        })
-        .collect();
-
-    if dropped.get() > 0 {
-        jcode_logging::warn(&format!(
-            "[anthropic] Dropped {} duplicate tool_result block(s); each tool_use_id may be \
-             answered only once",
-            dropped.get()
-        ));
-    }
-    out
-}
-
 /// Convert our ContentBlock to Anthropic API format
 pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<ApiContentBlock> {
+    format_content_blocks_with_native(blocks, is_oauth, false)
+}
+
+/// True when an assistant message ends on a raw server tool block, i.e. the
+/// shape of a provider-native turn paused with `pause_turn`. Anthropic resumes
+/// such a turn when it is resent as-is. A turn that searched and then went on to
+/// produce text (e.g. interrupted mid-answer) ends on that text instead, and
+/// still needs the continuation user turn to avoid a prefill rejection.
+fn is_paused_server_tool_turn(message: &ApiMessage) -> bool {
+    matches!(message.content.last(), Some(ApiContentBlock::Raw(_)))
+}
+
+/// See [`format_messages_with_native`] for the meaning of `native_replay`.
+pub fn format_content_blocks_with_native(
+    blocks: &[ContentBlock],
+    is_oauth: bool,
+    native_replay: bool,
+) -> Vec<ApiContentBlock> {
     let mut result: Vec<ApiContentBlock> = Vec::new();
+    // Inputs of server tool calls seen so far, so a downgraded result can name
+    // the query that produced it.
+    let mut native_call_inputs: std::collections::HashMap<String, Value> =
+        std::collections::HashMap::new();
     for block in blocks {
         match block {
+            ContentBlock::ProviderNative { provider, item } => {
+                use jcode_message_types::provider_native;
+                let display = provider_native::provider_native_display(provider, item);
+                if let Some(display) = &display
+                    && display.output.is_none()
+                    && let Some(input) = &display.input
+                {
+                    native_call_inputs.insert(display.id.clone(), input.clone());
+                }
+                let is_anthropic_block = provider == provider_native::PROVIDER_NATIVE_ANTHROPIC
+                    && item
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(provider_native::is_anthropic_server_tool_block);
+                if native_replay && is_anthropic_block {
+                    result.push(ApiContentBlock::Raw(item.clone()));
+                } else if let Some(text) = provider_native::provider_native_text_fallback(
+                    provider,
+                    item,
+                    display
+                        .as_ref()
+                        .and_then(|display| native_call_inputs.get(&display.id)),
+                ) {
+                    result.push(ApiContentBlock::Text {
+                        text,
+                        cache_control: None,
+                    });
+                }
+            }
             ContentBlock::Text { text, .. } => {
                 // A text block that immediately follows an image-bearing tool_result is the
                 // "[Attached image associated with the preceding tool result: ...]" label
@@ -721,7 +647,7 @@ pub struct ApiRequest {
     pub system: Option<ApiSystem>,
     pub messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tools: Option<Vec<ApiTool>>,
+    pub tools: Option<Vec<ApiToolParam>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<ApiMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1002,6 +928,11 @@ pub enum ApiContentBlock {
     Thinking { thinking: String, signature: String },
     #[serde(rename = "image")]
     Image { source: ApiImageSource },
+    /// Provider-native block sent back exactly as the API produced it
+    /// (`server_tool_use`, `web_search_tool_result`). Its own `type` field is
+    /// kept, and its encrypted payloads must not be touched.
+    #[serde(untagged)]
+    Raw(Value),
 }
 
 #[derive(Serialize, Clone)]
@@ -1041,6 +972,28 @@ pub struct ApiTool {
     pub cache_control: Option<CacheControlParam>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub defer_loading: bool,
+}
+
+/// One entry of the request `tools` array: a client tool jcode executes, or an
+/// Anthropic server tool (e.g. `web_search_20250305`) the API executes itself.
+#[derive(Serialize, Clone)]
+#[serde(untagged)]
+pub enum ApiToolParam {
+    Custom(ApiTool),
+    Server(Value),
+}
+
+/// Build the request `tools` array. Server tools go right after the eager client
+/// tools (behind the tool-cache breakpoint) and before any deferred tools, so
+/// loading or unloading deferred tools never shifts them. Returns `None` when
+/// there are no tools at all.
+pub fn request_tools(custom: Vec<ApiTool>, server: Vec<Value>) -> Option<Vec<ApiToolParam>> {
+    let (eager, deferred): (Vec<ApiTool>, Vec<ApiTool>) =
+        custom.into_iter().partition(|tool| !tool.defer_loading);
+    let mut out: Vec<ApiToolParam> = eager.into_iter().map(ApiToolParam::Custom).collect();
+    out.extend(server.into_iter().map(ApiToolParam::Server));
+    out.extend(deferred.into_iter().map(ApiToolParam::Custom));
+    (!out.is_empty()).then_some(out)
 }
 
 #[cfg(test)]
@@ -1354,6 +1307,10 @@ mod duplicate_tool_result_tests;
 #[cfg(test)]
 #[path = "wedge_fixture_check.rs"]
 mod wedge_fixture_check;
+
+#[cfg(test)]
+#[path = "native_web_search_repair_tests.rs"]
+mod native_web_search_repair_tests;
 
 #[cfg(test)]
 #[path = "deferred_tools_tests.rs"]

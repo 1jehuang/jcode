@@ -19,6 +19,28 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
     "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
 }
 
+/// Hint for a request the server answered with an error status. The network
+/// is working (a response came back), so connectivity advice would mislead:
+/// point at the key, the account balance, or the model instead.
+fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
+    let endpoint_hint = local_endpoint_troubleshooting_hint(api_base, model);
+    let is_local = !endpoint_hint.starts_with("Hint: check network");
+    match status {
+        401 | 403 => {
+            "Hint: the provider rejected the API key. Check that the key is valid and allowed to use this model, or switch to another provider with /model."
+        }
+        402 => {
+            "Hint: this is a billing limit, not a network problem. The key's balance or token allowance is used up: raise the limit or top up in the provider's dashboard, use another key, or switch to another provider with /model."
+        }
+        // Local servers (Ollama, LM Studio) answer 404 for a model that is
+        // not installed or loaded, which their own hint already explains.
+        404 if !is_local => {
+            "Hint: the endpoint or model was not found. Check that the base URL includes the API version (usually /v1) and that the model exists on the provider."
+        }
+        _ => endpoint_hint,
+    }
+}
+
 // ============================================================================
 // SSE Stream Parser
 // ============================================================================
@@ -225,7 +247,7 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        let hint = local_endpoint_troubleshooting_hint(&api_base, &model);
+        let hint = http_status_hint(status.as_u16(), &api_base, &model);
         return Err(jcode_provider_core::retry_after::error_with_retry_after(
             format!(
                 "OpenAI-compatible chat request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\n{}",
@@ -400,5 +422,30 @@ mod tests {
         assert!(is_retryable_error(
             "chat request failed\n  status: 429 unknown\n  response: {}"
         ));
+    }
+
+    /// A 402 means the server answered: the hint must name the billing limit,
+    /// not send the user to check their network.
+    #[test]
+    fn status_hint_names_billing_for_402_not_network() {
+        let hint = http_status_hint(402, "https://apiduck.servepics.com/v1", "glm-5.3");
+        assert!(hint.contains("billing limit"), "{hint}");
+        assert!(hint.contains("/model"), "{hint}");
+        assert!(!hint.contains("network connectivity"), "{hint}");
+
+        for status in [401u16, 403] {
+            let hint = http_status_hint(status, "https://api.example.com/v1", "m");
+            assert!(hint.contains("API key"), "{status}: {hint}");
+            assert!(!hint.contains("network connectivity"), "{status}: {hint}");
+        }
+        assert!(http_status_hint(404, "https://api.example.com/v1", "m").contains("/v1"));
+        // Local servers keep their own advice (e.g. `ollama pull` for a 404).
+        assert!(
+            http_status_hint(404, "http://localhost:11434/v1", "llama3.2").contains("ollama pull")
+        );
+        // Server errors keep the endpoint-specific advice.
+        assert!(
+            http_status_hint(503, "http://localhost:11434/v1", "llama3.2").contains("ollama serve")
+        );
     }
 }

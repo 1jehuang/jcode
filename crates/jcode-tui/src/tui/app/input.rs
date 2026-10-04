@@ -385,243 +385,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
-        if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
-            "ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch",
-        ) {
-            return;
-        }
-        let content = super::read_clipboard_for_paste_with(
-            &super::ClipboardPasteKind::Smart,
-            || None,
-            || Some(("image/png".to_string(), "aW1hZ2U=".to_string())),
-            |_| panic!("clipboard image bytes must not fetch a URL"),
-        );
-        assert!(matches!(
-            content,
-            super::ClipboardPasteContent::Image { .. }
-        ));
-        assert!(super::download_image_url_content("http://127.0.0.1/secret.png").is_none());
-        let content = super::read_clipboard_for_paste_with(
-            &super::ClipboardPasteKind::Smart,
-            || Some("http://127.0.0.1/secret.png".to_string()),
-            || panic!("text must stay text"),
-            super::download_image_url_content,
-        );
-        assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
-    }
-
-    use super::{
-        ClipboardPasteContent, ClipboardPasteKind, dropped_image_files,
-        is_clipboard_paste_shortcut, parse_dropped_paths, preferred_wayland_text_type,
-        read_clipboard_for_paste_with, shifted_printable_fallback, text_input_for_key,
-    };
-    use crossterm::event::{KeyCode, KeyModifiers};
-
-    #[test]
-    fn dropped_paths_accept_quotes_shell_escapes_and_file_urls() {
-        let dir = tempfile::tempdir().unwrap();
-        let first = dir.path().join("first image.png");
-        let second = dir.path().join("second.jpg");
-        std::fs::write(&first, b"png").unwrap();
-        std::fs::write(&second, b"jpeg").unwrap();
-
-        let quoted = parse_dropped_paths(&format!("'{}'", first.display())).unwrap();
-        assert_eq!(quoted, vec![first.clone()]);
-        let escaped =
-            parse_dropped_paths(&first.display().to_string().replace(' ', "\\ ")).unwrap();
-        assert_eq!(escaped, vec![first.clone()]);
-        let url = url::Url::from_file_path(&second).unwrap();
-        assert_eq!(parse_dropped_paths(url.as_str()).unwrap(), vec![second]);
-    }
-
-    #[test]
-    fn dropped_images_load_all_supported_files_and_reject_mixed_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let png = dir.path().join("a.png");
-        let jpeg = dir.path().join("b.jpeg");
-        std::fs::write(&png, b"png bytes").unwrap();
-        std::fs::write(&jpeg, b"jpeg bytes").unwrap();
-
-        let images =
-            dropped_image_files(&format!("'{}' '{}'", png.display(), jpeg.display())).unwrap();
-        assert_eq!(images[0], ("image/png".to_string(), b"png bytes".to_vec()));
-        assert_eq!(
-            images[1],
-            ("image/jpeg".to_string(), b"jpeg bytes".to_vec())
-        );
-        assert!(dropped_image_files("ordinary pasted text").is_none());
-    }
-
-    #[test]
-    fn smart_paste_prefers_normal_text_when_clipboard_has_text() {
-        let content = read_clipboard_for_paste_with(
-            &ClipboardPasteKind::Smart,
-            || Some("plain text".to_string()),
-            || Some(("image/png".to_string(), "base64".to_string())),
-            |_| None,
-        );
-
-        match content {
-            ClipboardPasteContent::Text(text) => assert_eq!(text, "plain text"),
-            other => panic!("expected text paste, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn smart_paste_uses_image_only_when_no_text_is_available() {
-        let content = read_clipboard_for_paste_with(
-            &ClipboardPasteKind::Smart,
-            || None,
-            || Some(("image/png".to_string(), "base64".to_string())),
-            |_| None,
-        );
-
-        match content {
-            ClipboardPasteContent::Image {
-                media_type,
-                base64_data,
-            } => {
-                assert_eq!(media_type, "image/png");
-                assert_eq!(base64_data, "base64");
-            }
-            other => panic!("expected image paste, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn smart_paste_empty_clipboard_stays_empty_not_dictation() {
-        let content =
-            read_clipboard_for_paste_with(&ClipboardPasteKind::Smart, || None, || None, |_| None);
-
-        assert!(
-            matches!(content, ClipboardPasteContent::Empty),
-            "expected empty paste, got {content:?}"
-        );
-    }
-
-    #[test]
-    fn smart_paste_uses_image_when_text_target_is_blank() {
-        // Image-only clipboards can advertise an empty text target; the image
-        // must still be pasted instead of producing a silent empty text paste.
-        let content = read_clipboard_for_paste_with(
-            &ClipboardPasteKind::Smart,
-            || Some("   ".to_string()),
-            || Some(("image/png".to_string(), "base64".to_string())),
-            |_| None,
-        );
-
-        match content {
-            ClipboardPasteContent::Image {
-                media_type,
-                base64_data,
-            } => {
-                assert_eq!(media_type, "image/png");
-                assert_eq!(base64_data, "base64");
-            }
-            other => panic!("expected image paste, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn paste_shortcut_accepts_control_alt_command_and_meta_v() {
-        for modifiers in [
-            KeyModifiers::CONTROL,
-            KeyModifiers::ALT,
-            KeyModifiers::SUPER,
-            KeyModifiers::META,
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            KeyModifiers::ALT | KeyModifiers::SHIFT,
-            KeyModifiers::SUPER | KeyModifiers::SHIFT,
-        ] {
-            assert!(
-                is_clipboard_paste_shortcut(KeyCode::Char('v'), modifiers),
-                "{modifiers:?}+v should paste clipboard contents"
-            );
-            assert!(
-                is_clipboard_paste_shortcut(KeyCode::Char('V'), modifiers),
-                "{modifiers:?}+V should paste clipboard contents"
-            );
-        }
-
-        assert!(!is_clipboard_paste_shortcut(
-            KeyCode::Char('v'),
-            KeyModifiers::empty()
-        ));
-    }
-
-    #[test]
-    fn wayland_text_type_prefers_utf8_plain_text() {
-        let types = "text/plain\ntext/plain;charset=utf-8\nTEXT\nSTRING\nUTF8_STRING\n";
-
-        assert_eq!(
-            preferred_wayland_text_type(types),
-            Some("text/plain;charset=utf-8")
-        );
-    }
-
-    #[test]
-    fn shifted_printable_fallback_uppercases_ascii_letters() {
-        assert_eq!(shifted_printable_fallback('a', KeyModifiers::SHIFT), 'A');
-        assert_eq!(shifted_printable_fallback('z', KeyModifiers::SHIFT), 'Z');
-    }
-
-    #[test]
-    fn shifted_printable_fallback_preserves_terminal_translated_symbols() {
-        assert_eq!(shifted_printable_fallback('/', KeyModifiers::SHIFT), '/');
-        assert_eq!(shifted_printable_fallback('?', KeyModifiers::SHIFT), '?');
-        assert_eq!(shifted_printable_fallback('(', KeyModifiers::SHIFT), '(');
-        assert_eq!(shifted_printable_fallback('&', KeyModifiers::SHIFT), '&');
-    }
-
-    #[test]
-    fn shifted_printable_fallback_does_not_synthesize_us_symbol_layout() {
-        assert_eq!(shifted_printable_fallback('7', KeyModifiers::SHIFT), '7');
-        assert_eq!(shifted_printable_fallback('8', KeyModifiers::SHIFT), '8');
-        assert_eq!(shifted_printable_fallback('=', KeyModifiers::SHIFT), '=');
-    }
-
-    #[test]
-    fn text_input_for_shifted_symbols_preserves_layout_translated_char() {
-        for c in ['/', '?', '(', ')', '&', '=', '"'] {
-            assert_eq!(
-                text_input_for_key(KeyCode::Char(c), KeyModifiers::SHIFT),
-                Some(c.to_string()),
-                "shifted {c:?} should be treated as terminal/layout-translated text"
-            );
-        }
-    }
-
-    #[test]
-    fn text_input_for_altgr_symbols_preserves_layout_translated_char() {
-        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
-
-        for c in ['@', '{', '}', '\\', '€', 'ą'] {
-            assert_eq!(
-                text_input_for_key(KeyCode::Char(c), altgr),
-                Some(c.to_string()),
-                "AltGr-style {c:?} should be treated as terminal/layout-translated text"
-            );
-        }
-    }
-
-    #[test]
-    fn text_input_for_control_shortcut_letters_stays_non_text() {
-        assert_eq!(
-            text_input_for_key(
-                KeyCode::Char('q'),
-                KeyModifiers::CONTROL | KeyModifiers::ALT
-            ),
-            None
-        );
-        assert_eq!(
-            text_input_for_key(KeyCode::Char('@'), KeyModifiers::CONTROL),
-            None
-        );
-    }
-}
+mod inline_tests;
 
 pub(super) fn cut_input_line_to_clipboard(app: &mut App) -> bool {
     cut_input_line_to_clipboard_with(app, super::copy_to_clipboard)
@@ -653,7 +417,9 @@ pub(in crate::tui::app) mod newline;
 mod paste_guard;
 #[cfg(test)]
 pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_for_test;
-use paste_guard::image_media_type;
+use paste_guard::load_dropped_image;
+#[cfg(test)]
+pub(crate) use paste_guard::tiny_png_bytes_for_test;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
     if app.append_ssh_login_input(&text) {
@@ -682,12 +448,10 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
                 insert_input_text(app, " ");
             }
 
-            if let Some(media_type) = image_media_type(&path)
-                && let Ok(data) = std::fs::read(&path)
-            {
+            if let Some((media_type, data)) = load_dropped_image(&path) {
                 attach_image(
                     app,
-                    media_type.to_string(),
+                    media_type,
                     base64::engine::general_purpose::STANDARD.encode(data),
                 );
                 image_count += 1;
@@ -748,11 +512,7 @@ fn dropped_image_files(text: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let paths = parse_dropped_paths(text)?;
     paths
         .into_iter()
-        .map(|path| {
-            let media_type = image_media_type(&path)?;
-            let data = std::fs::read(path).ok()?;
-            Some((media_type.to_string(), data))
-        })
+        .map(|path| load_dropped_image(&path))
         .collect()
 }
 
@@ -1116,6 +876,113 @@ fn bare_terminal_report_length(bytes: &[u8]) -> Option<usize> {
     REPORT_FINALS.contains(&bytes[len - 1]).then_some(len)
 }
 
+/// Remove late OSC 10/11 color replies that the terminal delivered as keys.
+///
+/// Some terminals (Orca's Electron terminal, #970) answer the startup
+/// background query after the query has timed out. crossterm then decodes the
+/// reply one character at a time: the `ESC ]` introducer and `ESC \`
+/// terminator become Alt chords that never reach the composer, but the body
+/// `11;rgb:3030/3434/4646` lands in the draft character by character. No single
+/// insertion contains the whole sequence, so it has to be recognized in the
+/// accumulated buffer instead.
+fn scrub_osc_color_replies(app: &mut App) {
+    if !app.input.contains("rgb") {
+        return;
+    }
+    let Some((cleaned, cursor)) = strip_osc_color_replies(&app.input, app.cursor_pos) else {
+        return;
+    };
+    app.input = cleaned;
+    app.cursor_pos = cursor;
+}
+
+/// Strip complete OSC color reply bodies from `input`, returning the cleaned
+/// text and the cursor remapped onto it, or `None` when nothing matched.
+///
+/// A body only matches once it is complete: `1N;rgb:` (or `rgba:`) followed by
+/// three (or four for `rgba`) `/`-separated hex components that all share the
+/// first component's width. Requiring equal widths keeps a half-arrived reply
+/// from matching early and leaving its tail behind. An adjacent `]` or `\` (surviving pieces of the OSC
+/// introducer and string terminator) is removed with it.
+pub(super) fn strip_osc_color_replies(input: &str, cursor: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut search = 0usize;
+    while let Some(found) = input[search..].find(";rgb") {
+        let semi = search + found;
+        search = semi + 1;
+        // `1` then one digit before the `;`: OSC 10..=19 color reports.
+        if semi < 2 || bytes[semi - 2] != b'1' || !bytes[semi - 1].is_ascii_digit() {
+            continue;
+        }
+        let mut start = semi - 2;
+        // A third leading digit means this is some other number, not `1N`,
+        // unless it is the tail of a reply we just matched.
+        let follows_reply = ranges.last().is_some_and(|&(_, end)| end == start);
+        if start > 0 && bytes[start - 1].is_ascii_digit() && !follows_reply {
+            continue;
+        }
+        let mut pos = semi + 4;
+        let mut wanted = 3;
+        if bytes.get(pos) == Some(&b'a') {
+            pos += 1;
+            wanted = 4;
+        }
+        if bytes.get(pos) != Some(&b':') {
+            continue;
+        }
+        pos += 1;
+        let hex_run = |from: usize| {
+            bytes[from..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_hexdigit())
+                .count()
+        };
+        let width = hex_run(pos);
+        if !(1..=4).contains(&width) {
+            continue;
+        }
+        pos += width;
+        // Later components take exactly `width` digits, so a second reply
+        // glued onto the last one (`f4f411;rgb:...`) still splits cleanly,
+        // while a component that is still arriving is too short to match.
+        let mut components = 1;
+        while components < wanted && bytes.get(pos) == Some(&b'/') && hex_run(pos + 1) >= width {
+            pos += 1 + width;
+            components += 1;
+        }
+        if components < wanted {
+            continue;
+        }
+        if start > 0 && bytes[start - 1] == b']' {
+            start -= 1;
+        }
+        if bytes.get(pos) == Some(&b'\\') {
+            pos += 1;
+        }
+        ranges.push((start, pos));
+        search = pos;
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+
+    let mut cleaned = String::with_capacity(input.len());
+    let mut new_cursor = cursor;
+    let mut last = 0usize;
+    for (start, end) in ranges {
+        cleaned.push_str(&input[last..start]);
+        if cursor >= end {
+            new_cursor -= end - start;
+        } else if cursor > start {
+            new_cursor -= cursor - start;
+        }
+        last = end;
+    }
+    cleaned.push_str(&input[last..]);
+    Some((cleaned, new_cursor))
+}
+
 pub(super) fn insert_input_text(app: &mut App, text: &str) {
     if text.is_empty() {
         return;
@@ -1161,6 +1028,7 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
 
     app.input.insert_str(app.cursor_pos, text);
     app.cursor_pos += text.len();
+    scrub_osc_color_replies(app);
 
     // Typing the final command character immediately arms picker filtering.
     // Without this, users can keep typing the command token or press Enter
@@ -1678,6 +1546,19 @@ impl App {
     }
 
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
+        // The completion-gate circuit breaker clears auto_poke_incomplete_todos,
+        // and it can only trip while every todo is complete, so the restore in
+        // the all-complete branch never runs for an agent that adds open work
+        // straight afterwards. Re-arm before the guard below, otherwise one
+        // breaker trip silences auto-poke for the rest of the session.
+        if self.auto_poke_default_on {
+            let has_open_work = super::commands::poke_todos(self)
+                .iter()
+                .any(super::commands::is_incomplete_poke_todo);
+            if has_open_work {
+                self.auto_poke_incomplete_todos = true;
+            }
+        }
         if !self.auto_poke_incomplete_todos
             || self.pending_queued_dispatch
             || self.pending_turn
@@ -3727,11 +3608,9 @@ impl App {
         // attempt's committed segments and never touches earlier turns.
         let to_remove = self.attempt_committed_assistant_messages;
         for _ in 0..to_remove {
-            if self
-                .display_messages
-                .last()
-                .is_some_and(|m| m.role == "assistant")
-            {
+            if self.display_messages.last().is_some_and(|m| {
+                m.role == "assistant" || super::state_ui_messages::is_attempt_provider_native_row(m)
+            }) {
                 let idx = self.display_messages.len() - 1;
                 self.remove_display_message(idx);
             } else {
@@ -4214,75 +4093,4 @@ impl App {
 }
 
 #[cfg(test)]
-mod terminal_control_sequence_tests {
-    use super::strip_terminal_control_sequences;
-
-    /// Remnants of terminal reports must never reach the composer (#540).
-    #[test]
-    fn strips_escape_and_bare_report_remnants() {
-        for (input, expected) in [
-            // Full mouse report, and the bare tail left by a torn read.
-            ("\x1b[<65;50;24M", ""),
-            ("[<65;50;24M", ""),
-            ("hi[<65;50;24Mthere", "hithere"),
-            ("[<65;50;24m", ""),
-            // Bracketed paste markers and cursor/focus reports.
-            ("[200~", ""),
-            ("[201~", ""),
-            ("[12;40R", ""),
-            ("[1I", ""),
-            ("[1O", ""),
-            // 8-bit CSI introducer.
-            ("\u{9b}[<65;50;24M", ""),
-            // Stray C0 controls, but tabs and newlines survive.
-            ("a\x07b", "ab"),
-            ("a\tb\nc", "a\tb\nc"),
-            // Truncated escape with no final byte: drop the remnant.
-            ("\x1b[<65;5", ""),
-        ] {
-            assert_eq!(
-                strip_terminal_control_sequences(input),
-                expected,
-                "input {input:?} should sanitize to {expected:?}"
-            );
-        }
-    }
-
-    /// The guard must not eat text a user actually typed. Being too aggressive
-    /// here is worse than missing a remnant.
-    #[test]
-    fn preserves_ordinary_bracketed_text() {
-        for input in [
-            "array[0]",
-            "list[1] = list[2]",
-            "[TODO] fix this",
-            "see docs[1] and notes[2]",
-            "fn f(v: Vec<u8>) -> [u8; 4]",
-            "a[b]c",
-            "[]",
-            "[",
-            "]",
-            "[abc]",
-            "[1]",
-            "[12;40]",
-            "plain text with no brackets",
-            "emoji 🎉 and accents café",
-            "match x { [a, b] => a + b }",
-        ] {
-            assert_eq!(
-                strip_terminal_control_sequences(input),
-                input,
-                "input {input:?} must be preserved verbatim"
-            );
-        }
-    }
-
-    /// Non-suspicious text must not be reallocated.
-    #[test]
-    fn borrows_when_nothing_to_strip() {
-        assert!(matches!(
-            strip_terminal_control_sequences("array[0] = 1"),
-            std::borrow::Cow::Borrowed(_)
-        ));
-    }
-}
+mod terminal_control_sequence_tests;

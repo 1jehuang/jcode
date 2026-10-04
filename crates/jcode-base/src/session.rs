@@ -1234,6 +1234,9 @@ request in this new forked session, using the inherited conversation only as con
                         *content = crate::message::redact_secrets(content);
                     }
                     ContentBlock::ToolUse { input, .. } => redact_json_value(input),
+                    // Export copy only: the stored item stays verbatim for
+                    // replay, but queries can carry pasted credentials.
+                    ContentBlock::ProviderNative { item, .. } => redact_json_value(item),
                     ContentBlock::Image { .. } => {}
                     ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
                 }
