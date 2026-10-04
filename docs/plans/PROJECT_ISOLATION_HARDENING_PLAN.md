@@ -1342,9 +1342,41 @@ Recorded in the previous session as "red at HEAD on stale baselines". That was
 one third right, and the wrong third mattered.
 
 The other four guards -- panic-prone usage, swallowed errors, code size, and test
-size -- all exit 1 at HEAD, and `.github/workflows/ci.yml` runs each of them
-unconditionally in the `quality` job (no `if:`, no `continue-on-error`), so
-`master`'s quality job fails. That is not a local-only observation.
+size -- all exit 1 at HEAD.
+
+`.github/workflows/ci.yml` does run each of them in the `quality` job, with no
+`if:` and no `continue-on-error`, at steps 8, 9, 10 and 13. That much is verified
+by reading the workflow. But whether they are *reached* is a separate question,
+and the answer was "no". Steps 3, 4 and 5 -- `cargo fmt --all -- --check`,
+`cargo check --all-targets --all-features`, and `cargo clippy ... -D warnings` --
+run before them, and `cargo fmt --all -- --check` was exiting 1 on `master`'s own
+tree, with 11 files unformatted across `jcode-app-core`, `jcode-base` and
+`jcode-tui`. GitHub Actions stops a job at its first failing step, so all four
+ratchets were **skipped rather than failing**. The `quality` job was red anyway,
+but the four budget ratchets were not being evaluated at all.
+
+Fixed in `fd36fa060` by running `cargo fmt --all` over those files, so the four
+ratchets are now reached. That is what exposed them: all four exit 1 at HEAD,
+which is what this section is about.
+
+An earlier version of this section said the ratchets run unconditionally and
+therefore that `master`'s quality job fails *because of them*, adding that this
+was "not a local-only observation". Both halves were wrong. The job is not red
+because of the ratchets, and no CI run history was read: `gh` is not installed on
+this machine, so any claim about what GitHub reported is an inference from the
+workflow file plus local runs, not an observation. Recorded here rather than
+quietly edited, because the same reasoning error -- reading a workflow and
+assuming the step runs -- would hide the fact that four ratchets have been
+inert for as long as formatting has been broken.
+
+The files `cargo fmt --check` flagged were not from the ratchet work. The last
+commit to touch each is dated 2026-10-03 (`0d34e73f3`, `153ac7eb0`,
+`af821fd63`, `b9619dc4b`, `1cbfcddce`, `38056f639`), which is the
+project-isolation work, not the 2026-07-24 ratchet drift discussed below. The
+two commits that fixed the cwd-fallback ratchet touch 5 and 1 files and none of
+them is Rust. `cargo fmt --check` reported 11 of these files and `cargo fmt`
+changed 12, adding `transport.rs`; treat the count as approximate rather than
+exact.
 
 They are not red because of Windows line endings, which was the obvious
 alternative. 1214 of 1254 `.rs` files in this checkout are CRLF, so the
