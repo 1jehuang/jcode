@@ -103,28 +103,70 @@ under a whole-suite run.
   proved nothing. The mutation has to remove the mutual exclusion, not merely
   change which mutex is used.
 
-#### Pre-existing failures, recorded and deliberately not fixed here
+#### The pre-existing failures are now all fixed: 1456 passing, 0 failing
 
-Baseline measured after both fixes above: **1410 passing, 27 failing, 12
-ignored, finishing in 104.36s**, with zero "has been running for over 60
-seconds" lines. The 12 ignored tests are gated on live credentials or are local
-benchmarks. None of the 27 failures are isolation bugs, and none are touched by
-this work.
+This section originally recorded 27 failures as "deliberately not fixed here,
+none of them isolation bugs". That turned out to be wrong on both counts, and
+getting to zero took 12 commits. Current state: **1456 passing, 0 failing, 12
+ignored**, confirmed in 3 consecutive whole-suite runs (the 12 ignored are gated
+on live credentials or are local benchmarks).
 
-- `restart_snapshot` (2)
-  - `restart_snapshot::restart_snapshot_tests::arm_auto_restore_from_recent_crashes_captures_dead_active_sessions`
-  - `restart_snapshot::restart_snapshot_tests::arm_auto_restore_from_recent_crashes_ignores_old_crashes`
-- `server::client_lifecycle` (5)
+Two of the 27 were genuine isolation-class bugs, in the sense this plan cares
+about: they were cross-test interference over process-global state.
+
+- **`server::tests::background_task_wake_runs_live_session_immediately_when_idle`**
+  failed with `Elapsed(())` on the streaming turn while passing in isolation.
+  `JCODE_WAKE_MODE` is process-global (`config/env_overrides.rs` reads it with
+  `std::env::var`, and `background_tasks::emit_external_wake` consults it). One
+  sibling test set it to `external` under `storage::lock_test_env()`; the other
+  five wake tests took no such lock, so in a parallel run they saw `external`
+  and skipped their own streaming turn. Fixed in `26a89783d` by taking the lock
+  in all five. This is the same defect class as the `restart_snapshot` cwd race
+  in `524a3f956`: a test mutating process-global state that its neighbours
+  depend on, without taking the shared lock.
+- **`server::socket_tests::inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead`**
+  exposed a product bug, not a test bug. `reload_process_alive`'s Windows branch
+  was `#[cfg(not(unix))] { let _ = pid; true }`, so every nonzero pid reported
+  alive: `ReloadWaitStatus::Failed` was unreachable on Windows and a reload whose
+  process died mid-wait would sit at `Waiting` forever. Fixed in `3cd8a63c3` by
+  delegating to `crate::platform::is_process_running`, which already implements
+  the correct Windows equivalent. The test also had a real defect of its own:
+  it picked a dead pid with `std::process::id() + 1_000_000`, which is a guess
+  that happened to be unused on this host, not a guarantee.
+
+The remaining 25 were Windows portability defects in the tests themselves. The
+list below is kept as the record of what each one actually was.
+
+- `restart_snapshot` (2) -- fixed in `524a3f956`. Both spawned
+  `sh -c "exit 0"`, and plain Windows has no `sh`, so the spawn failed
+  with `NotFound`. Fixing that exposed a real isolation bug:
+  `resolve_session_cwd_without_a_configured_dir_is_none_not_the_daemon_cwd`
+  calls `std::env::set_current_dir` without taking `TestEnvGuard`'s shared
+  lock, so it raced a neighbouring test that restored its own cwd.
+- `server::client_lifecycle` (5) -- fixed; the tests were wrong, not the
+  guard. `required_subscribe_working_dir` deliberately rejects a relative
+  `working_dir`, because resolving it against the daemon cwd is exactly
+  the fallback this plan forbids. A POSIX literal like `/workspace/live`
+  has a root but no drive prefix on Windows, so `Path::is_absolute()` is
+  false and the guard rejected the very fixture under test.
   - `server::client_lifecycle::target_attach_tests::target_subscribe_busy_live_agent_uses_member_root_without_waiting`
   - `server::client_lifecycle::target_attach_tests::target_subscribe_live_root_wins_over_stale_persisted_root`
   - `server::client_lifecycle::target_attach_tests::target_subscribe_preserves_explicit_directory_and_its_validation`
   - `server::client_lifecycle::target_attach_tests::target_subscribe_uses_live_unsaved_root_without_changing_it`
   - `server::client_lifecycle::target_attach_tests::target_subscribe_uses_persisted_root_when_no_live_agent_exists`
-- `server::socket_tests` (1)
-  - `server::socket_tests::inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead`
-- `server::tests` (1)
-  - `server::tests::background_task_wake_runs_live_session_immediately_when_idle`
-- `server::util` (4)
+- `server::util` (4) -- fixed in `65c1e569e`. `File::open(..).set_modified(..)`
+  needs a writable handle on Windows: `SetFileTime` requires
+  `FILE_WRITE_ATTRIBUTES`, so a read-only handle gives `PermissionDenied
+  (code 5) "Acesso negado."`. Unix `futimens` needs no access mode, so the
+  bug was invisible there. Three sites existed; they now share one
+  documented `set_mtime` helper. The rest of that commit is fixture
+  correctness: a hardcoded Linux payload name, and a
+  `candidate_version_for` that read the version out of the path -- which
+  only works for a real symlink, while `atomic_symlink_swap` *copies* on
+  Windows, so it returned the channel label (`stable`) instead of the
+  version. `freshly_updated_release_daemon_reports_no_phantom_update` is
+  now `#[cfg(unix)]`: `install.ps1` installs a plain `jcode.exe`, and the
+  wrapper+`.bin` layout the test needs is Linux-release-only.
   - `server::util::newest_reload_candidate_integration_tests::freshly_updated_release_daemon_reports_no_phantom_update`
   - `server::util::newest_reload_candidate_integration_tests::normal_user_daemon_detects_and_targets_update_after_update`
   - `server::util::newest_reload_candidate_integration_tests::selfdev_daemon_reloads_into_fresh_release_after_update`
@@ -143,12 +185,22 @@ this work.
     run**. These shell out under a hard 5s timeout on a loaded Windows box, so whichever lose
     the race are the ones that fail: three consecutive whole-suite runs gave
     `ooooooFoFFo` / `ooooooFFoFo` / `oooooFooFFF`. Not a stable baseline, so don't diff it by
-    name -- a run reporting 28 instead of 27 app-core failures has not regressed anything.
+    name -- these 11 are fixed too now, but they were the reason the count moved
+    between runs while the rest of this list stayed put.
   - `tool::replace::tests::collect_files_filters_by_glob_and_skips_git`
   - `tool::tests::tool_descriptions_stay_under_token_cap`
   - `tool::tests::tool_parameter_descriptions_stay_under_token_cap`
 - `update` (1)
   - `update::update_rate_limit::tests::prefers_retry_after_and_clamps`
+
+The last four (`tool::replace`, both `tool::tests` token-cap guards, and
+`update_rate_limit`) were not analysed individually. They are green in the
+measured 1456/0 result, so whatever they were, they no longer fail; treat
+that as an observation rather than a diagnosis.
+
+The 12 commits that got here are `db8ffbcd6`, `897e8914f`, `ba99c0871`,
+`bd5e0aadc`, `e10417d91`, `768b42469`, `e73f95001`, `ec35beb8e`,
+`65c1e569e`, `524a3f956`, `3cd8a63c3`, `26a89783d`.
 
 ##### Five of those 27 were hardcoded POSIX separators, and the fix was the test
 
@@ -241,6 +293,10 @@ The 27 count above is the baseline before this fix. After it, `agentgrep::tests`
 contributes 2 rather than 7, so a fresh whole-suite run should show 22
 app-core failures rather than 27 -- unless the `desktop_selfdev` race moves that
 number, which it does by design.
+
+Update: the whole list is now fixed. A current whole-suite run is
+**1456 passing / 0 failing / 12 ignored**. The 22 predicted here was a way
+station on the way to zero, not a target.
 
 - `server/headless.rs` drains every `ServerEvent` into a discard task, so `jcode
   run` and ACP sessions can never observe the P3.2 config-change notice (nor any
