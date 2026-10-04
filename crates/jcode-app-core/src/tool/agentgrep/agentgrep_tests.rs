@@ -3,6 +3,104 @@ use super::*;
 use chrono::Duration;
 use std::fs;
 
+/// Render a relative path in both spellings the tool's output can use, so an
+/// assertion on *observed* output does not hardcode POSIX separators.
+///
+/// `render_grep_output` (in the external `agentgrep` crate) pushes `file.path`
+/// through verbatim, and that path comes from `rg`, so it carries `\` on
+/// Windows and `/` elsewhere, behind a leading `.\` on Windows. Asserting the
+/// literal `"src/app.rs"` therefore only ever holds on Unix.
+///
+/// `Path::to_string_lossy` is *not* a separator normalizer: it preserves
+/// whatever separator the input string already contained, so it cannot be used
+/// to build the Windows spelling. The two spellings are therefore spelled out
+/// explicitly here, which also keeps this helper honest when read next to the
+/// tests that depend on it.
+fn rendered_rel_spellings(relative: &str) -> [String; 2] {
+    let posix = relative.replace('\\', "/");
+    [posix.clone(), posix.replace('/', "\\")]
+}
+
+/// True when `output` mentions `relative` in either spelling. Used for both
+/// positive and negative assertions: accepting either separator cannot mask a
+/// real regression, because the file being excluded has a different basename
+/// whichever way it is spelled.
+fn output_mentions(output: &str, relative: &str) -> bool {
+    rendered_rel_spellings(relative)
+        .iter()
+        .any(|spelling| output.contains(spelling.as_str()))
+}
+
+#[test]
+fn output_mentions_accepts_both_spellings_and_rejects_other_files() {
+    // Exactly what rg emits on Windows, including the leading `.\`.
+    let win = ".\\src\\app.rs";
+    // Exactly what rg emits on POSIX.
+    let posix = "./src/app.rs";
+    for haystack in [win, posix] {
+        assert!(output_mentions(haystack, "src/app.rs"), "{haystack}");
+        assert!(output_mentions(haystack, "app.rs"), "{haystack}");
+        // A different basename must not match, in either spelling.
+        assert!(!output_mentions(haystack, "src/other.rs"), "{haystack}");
+        assert!(!output_mentions(haystack, "other.rs"), "{haystack}");
+        assert!(!output_mentions(haystack, "sibling.rs"), "{haystack}");
+    }
+    // Regression guard for the mistake this helper was written to avoid:
+    // `Path::new("src/app.rs").to_string_lossy()` keeps the `/` that was typed
+    // into the literal, so deriving a Windows spelling from it yields a string
+    // that cannot occur in rg's output on Windows.
+    assert_ne!(
+        rendered_rel_spellings("src/app.rs")[1],
+        Path::new("src/app.rs").to_string_lossy().to_string(),
+        "the Windows spelling must not be derived from to_string_lossy"
+    );
+}
+
+#[test]
+fn exact_file_filter_matches_the_forms_rg_actually_emits() {
+    // `exact_search_file_path` hands the filter a bare file name, while rg
+    // prints a path relative to the search root. These are the spellings rg
+    // produced for a search rooted at the parent of `src/app.rs`.
+    for emitted in ["app.rs", "./src/app.rs", ".\\src\\app.rs", "src/app.rs"] {
+        assert!(
+            is_exact_search_file(emitted, "app.rs"),
+            "{emitted} should match a bare exact_file"
+        );
+    }
+    // The same holds when the caller spells the file out in full.
+    for emitted in ["./src/app.rs", ".\\src\\app.rs", "src/app.rs"] {
+        assert!(
+            is_exact_search_file(emitted, "src/app.rs"),
+            "{emitted} should match a full exact_file"
+        );
+    }
+    // Siblings must still be excluded, at a component boundary, so a
+    // substring collision cannot slip through.
+    for emitted in [
+        "./src/other.rs",
+        ".\\src\\other.rs",
+        "src/other.rs",
+        "./src/other_app.rs",
+        ".\\src\\other_app.rs",
+        "src/my_app.rs",
+    ] {
+        assert!(
+            !is_exact_search_file(emitted, "app.rs"),
+            "{emitted} must not match app.rs"
+        );
+    }
+    // Scoping to one file does not mean "any file with this basename". That is
+    // guaranteed upstream rather than by this comparison: `scope_root_for`
+    // roots a file-valued search at the exact file's *parent*, so rg cannot
+    // report a same-named file from another directory. The component-boundary
+    // check above is what keeps `other_app.rs` and `my_app.rs` out.
+    assert!(!is_exact_search_file("./src/my_app.rs", "app.rs"));
+    assert!(!is_exact_search_file("./src/other_app.rs", "app.rs"));
+    // Spelling the file out in full still works, including with rg's prefix.
+    assert!(is_exact_search_file("./src/app.rs", "./src/app.rs"));
+    assert!(is_exact_search_file(".\\src\\app.rs", "./src/app.rs"));
+}
+
 fn test_ctx(root: &Path) -> ToolContext {
     ToolContext {
         session_id: "test".to_string(),
@@ -706,7 +804,11 @@ async fn execute_runs_linked_grep() {
         .await
         .expect("tool output");
     assert!(output.output.contains("query: auth_status"));
-    assert!(output.output.contains("src/app.rs"));
+    assert!(
+        output_mentions(&output.output, "src/app.rs"),
+        "expected a match under src/app.rs, got:\n{}",
+        output.output
+    );
     assert!(output.output.contains("@ 1 pub fn auth_status() {}"));
 }
 
@@ -746,8 +848,8 @@ async fn execute_grep_file_field_does_not_scan_sibling_files() {
         .await
         .expect("file-scoped grep");
 
-    assert!(output.output.contains("app.rs"));
-    assert!(!output.output.contains("sibling.rs"));
+    assert!(output_mentions(&output.output, "app.rs"));
+    assert!(!output_mentions(&output.output, "sibling.rs"));
     assert!(!output.output.contains("sibling marker"));
 }
 
@@ -781,9 +883,13 @@ async fn execute_runs_linked_grep_when_path_points_to_file() {
         )
         .await
         .expect("tool output for exact-file path");
-    assert!(output.output.contains("app.rs"));
-    assert!(!output.output.contains("src/other.rs"));
-    assert!(!output.output.contains("other.rs"));
+    assert!(
+        output_mentions(&output.output, "app.rs"),
+        "expected app.rs, got:\n{}",
+        output.output
+    );
+    assert!(!output_mentions(&output.output, "src/other.rs"));
+    assert!(!output_mentions(&output.output, "other.rs"));
 }
 
 #[tokio::test]

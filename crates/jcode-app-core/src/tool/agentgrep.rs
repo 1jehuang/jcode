@@ -452,15 +452,57 @@ fn exact_search_file_path(ctx: &ToolContext, path: Option<&str>) -> Option<Strin
         .map(|name| name.to_string_lossy().into_owned())
 }
 
+/// True when a result file is the exact file the caller named.
+///
+/// The comparison used to be `file.path == exact_file`, with `exact_file` a
+/// bare `file_name()` and `file.path` whatever `rg` printed. Those agree only
+/// when rg happens to print a bare name. rg prints a path relative to the
+/// search root, so scoping to `src/app.rs` yields `.\src\app.rs` on Windows and
+/// `./src/app.rs` on Unix, and every match was discarded: the tool reported
+/// `matches: 0 in 0 files` for a file that plainly matched. Match on the
+/// trailing path components instead, so the filter holds for both separators
+/// and for the `./` or `.\` prefix rg adds.
+fn is_exact_search_file(result_path: &str, exact_file: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .to_string()
+    };
+    let result_path = normalize(result_path);
+    let exact_file = normalize(exact_file);
+    // Exact, or the result path ends with `/<exact_file>` at a component
+    // boundary, so `app.rs` does not match `other_app.rs`.
+    result_path == exact_file
+        || result_path
+            .strip_suffix(&format!("/{exact_file}"))
+            .is_some_and(|_| true)
+}
+
+/// Drop every result file except the one the caller named, keeping counts
+/// consistent with what survived.
+fn retain_exact_search_file<'a, T>(
+    files: impl Iterator<Item = &'a T>,
+    exact_file: Option<&str>,
+    path_of: impl Fn(&'a T) -> &str,
+) -> Vec<&'a T> {
+    let Some(exact_file) = exact_file else {
+        return files.collect();
+    };
+    files
+        .filter(|file| is_exact_search_file(path_of(file), exact_file))
+        .collect()
+}
+
 fn filter_grep_result_to_exact_file(
     mut result: GrepResult,
     exact_file: Option<&str>,
 ) -> GrepResult {
-    let Some(exact_file) = exact_file else {
+    if exact_file.is_none() {
         return result;
-    };
-
-    result.files.retain(|file| file.path == exact_file);
+    }
+    let kept = retain_exact_search_file(result.files.iter(), exact_file, |file| file.path.as_str());
+    result.files = kept.into_iter().cloned().collect();
     result.total_files = result.files.len();
     result.total_matches = result.files.iter().map(|file| file.matches.len()).sum();
     result
@@ -470,11 +512,11 @@ fn filter_find_result_to_exact_file(
     mut result: FindResult,
     exact_file: Option<&str>,
 ) -> FindResult {
-    let Some(exact_file) = exact_file else {
+    if exact_file.is_none() {
         return result;
-    };
-
-    result.files.retain(|file| file.path == exact_file);
+    }
+    let kept = retain_exact_search_file(result.files.iter(), exact_file, |file| file.path.as_str());
+    result.files = kept.into_iter().cloned().collect();
     result
 }
 
@@ -482,11 +524,11 @@ fn filter_smart_result_to_exact_file(
     mut result: SmartResult,
     exact_file: Option<&str>,
 ) -> SmartResult {
-    let Some(exact_file) = exact_file else {
+    if exact_file.is_none() {
         return result;
-    };
-
-    result.files.retain(|file| file.path == exact_file);
+    }
+    let kept = retain_exact_search_file(result.files.iter(), exact_file, |file| file.path.as_str());
+    result.files = kept.into_iter().cloned().collect();
     result.summary.total_files = result.files.len();
     result.summary.total_regions = result.files.iter().map(|file| file.regions.len()).sum();
     result.summary.best_file = result.files.first().map(|file| file.path.clone());

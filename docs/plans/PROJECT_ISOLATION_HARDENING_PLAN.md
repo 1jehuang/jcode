@@ -136,8 +136,9 @@ this work.
   - `tool::agentgrep::tests::build_grep_args_includes_scope_flags` -- fixed
   - `tool::agentgrep::tests::build_outline_args_accepts_file_field` -- fixed
   - `tool::agentgrep::tests::build_smart_args_uses_terms` -- fixed
-  - `tool::agentgrep::tests::execute_runs_linked_grep`
-  - `tool::agentgrep::tests::execute_runs_linked_grep_when_path_points_to_file`
+  - `tool::agentgrep::tests::execute_runs_linked_grep` -- fixed, see below
+  - `tool::agentgrep::tests::execute_runs_linked_grep_when_path_points_to_file` -- fixed,
+    see below; the underlying defect was in `agentgrep` itself, not the test
   - `tool::desktop_selfdev::tests::*` -- 3 or 4 of 11 per run, **and the set changes every
     run**. These shell out under a hard 5s timeout on a loaded Windows box, so whichever lose
     the race are the ones that fail: three consecutive whole-suite runs gave
@@ -178,10 +179,49 @@ That the fix still binds was checked rather than assumed: reverting the two
 `join(".")` expectations to the POSIX literal turns exactly those two tests red
 again (33 passed/2 failed becomes 31 passed/4 failed), and the file is restored
 and `git hash-object`-verified afterwards. An assertion that cannot fail is not
-a test. Net effect on this box: `agentgrep::tests` goes from 7 failures to 2,
-and the two survivors -- `execute_runs_linked_grep` and
-`execute_runs_linked_grep_when_path_points_to_file` -- genuinely shell out to
-`rg`, so they stay recorded above.
+a test. Net effect on this box: `agentgrep::tests` goes from 7 failures to 2.
+
+##### The remaining two were a real defect in the tool, not a Windows quirk
+
+Both survivors were previously recorded here as "genuinely shell out to `rg`,
+so they stay recorded above". **That was wrong.** `rg` ran fine; its output was
+sitting in the panic message the entire time. One of them had been labelled
+environmental when it was a product bug.
+
+The first was still a test bug: it asserted the literal `"src/app.rs"` against
+observed tool output, and `rg` prints `.\src\app.rs` on Windows. Fixed with a
+helper that accepts either spelling.
+
+The second was a bug in `agentgrep` itself:
+
+```
+query: auth_status
+matches: 0 in 0 files
+```
+
+for a file that plainly matched. `exact_search_file_path` yields a bare
+`file_name()` (`app.rs`) and `filter_grep_result_to_exact_file` compared it for
+equality against whatever `rg` printed in `file.path`. rg prints a path relative
+to the search root, so scoping to `src/app.rs` yields `.\src\app.rs` on Windows
+and `./src/app.rs` on Unix, and every file was retained-out. The glob was never
+at fault: `rg -g app.rs` matches correctly. The same comparison was in the
+`find` and `smart` filters too, so all three were fixed together by matching on
+trailing path components at a component boundary, which also keeps
+`other_app.rs` and `my_app.rs` out.
+
+Binding was proved both ways: restoring `result_path == exact_file` turns the
+unit test and the end-to-end test red (35 passed/2 failed), and the fix turns
+them green (37 passed/0 failed, including two new regression tests). Crate
+totals against pristine HEAD went from 1427 passed/22 failed to 1431/20, which
+is +4 passing (two new tests) and the two failures removed.
+
+Worth recording about the path to this: the first fix attempt used
+`Path::to_string_lossy()` to derive the Windows spelling, which does not work
+because `to_string_lossy` preserves whichever separator was typed into the
+literal -- so the helper returned `"src/app.rs"` while rg emitted
+`.\src\app.rs`, and both tests stayed red. The helper now spells both variants
+out explicitly, with a test that fails if anyone reintroduces the
+`to_string_lossy` derivation.
 
 Getting here took four probes, and three of them first gave a wrong answer,
 which is worth recording because the wrong answers were all plausible:
