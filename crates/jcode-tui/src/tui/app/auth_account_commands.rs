@@ -900,12 +900,8 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
     );
     if let Some(key) = current_key
         && (old.api_key_env != new.api_key_env || old.env_file != new.env_file)
-        && crate::provider_catalog::save_env_value_to_env_file(
-            &new.api_key_env,
-            &new.env_file,
-            Some(&key),
-        )
-        .is_err()
+        && crate::provider_catalog::save_named_api_key(&new.env_file, &new.api_key_env, &key)
+            .is_err()
     {
         crate::logging::warn("Failed to migrate OpenAI-compatible API key to new source");
     }

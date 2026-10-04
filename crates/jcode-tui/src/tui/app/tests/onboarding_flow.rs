@@ -575,8 +575,10 @@ fn openrouter_key_typed_through_full_key_path_does_not_reopen_picker() {
         assert!(app.input.is_empty(), "input buffer should clear after submit");
 
         // Crucially: the key must actually be *persisted*, not just "not loop".
-        // It is written to $JCODE_HOME/config/jcode/openrouter.env and exported
-        // to OPENROUTER_API_KEY so the provider can authenticate.
+        // It is written to $JCODE_HOME/config/jcode/openrouter.env, which is
+        // where the provider resolves it from at request time. It must not be
+        // copied into the process env, where it would shadow later edits of the
+        // file and leak into child processes (#1386).
         let env_file = crate::storage::app_config_dir().unwrap().join("openrouter.env");
         let contents = std::fs::read_to_string(&env_file)
             .unwrap_or_else(|e| panic!("openrouter.env should exist at {env_file:?}: {e}"));
@@ -585,9 +587,17 @@ fn openrouter_key_typed_through_full_key_path_does_not_reopen_picker() {
             "saved env file must contain the typed key, got:\n{contents}"
         );
         assert_eq!(
-            std::env::var("OPENROUTER_API_KEY").ok().as_deref(),
+            crate::provider_catalog::load_api_key_from_env_or_config(
+                "OPENROUTER_API_KEY",
+                "openrouter.env"
+            )
+            .as_deref(),
             Some(key),
-            "key must be exported to the process env for immediate use"
+            "the saved key must be immediately resolvable for authentication"
+        );
+        assert!(
+            std::env::var_os("OPENROUTER_API_KEY").is_none(),
+            "the key must not be copied into the process env (#1386)"
         );
     });
 }

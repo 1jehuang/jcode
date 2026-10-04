@@ -1794,6 +1794,7 @@ async fn live_openrouter_unified_reasoning_smoke() -> Result<()> {
         .unwrap_or(1024);
 
     for model in models {
+        let token = token.clone();
         let provider = OpenRouterProvider {
             auth: Arc::new(move || {
                 Ok(ProviderAuth::AuthorizationBearer {

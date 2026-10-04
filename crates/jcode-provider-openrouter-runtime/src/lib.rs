@@ -1817,9 +1817,11 @@ impl OpenRouterProvider {
             model: Arc::new(RwLock::new(model.to_string())),
             reasoning_effort: Arc::new(RwLock::new(None)),
             api_base: jcode_base::auth::grok_build::chat_proxy_base_url(),
-            auth: ProviderAuth::GrokCli {
-                label: GROK_BUILD_AUTH_LABEL.to_string(),
-            },
+            auth: Arc::new(|| {
+                Ok(ProviderAuth::GrokCli {
+                    label: GROK_BUILD_AUTH_LABEL.to_string(),
+                })
+            }),
             supports_provider_features: false,
             // The proxy's `/models` shape is not a documented catalog; keep the
             // curated list so `/model` works offline and before first request.

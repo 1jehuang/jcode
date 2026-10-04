@@ -3396,10 +3396,10 @@ impl App {
             Some(if use_entra { "1" } else { "0" }),
         )?;
         if let Some(api_key) = api_key {
-            crate::provider_catalog::save_env_value_to_env_file(
-                azure::API_KEY_ENV,
+            crate::provider_catalog::save_named_api_key(
                 azure::ENV_FILE,
-                Some(api_key),
+                azure::API_KEY_ENV,
+                api_key,
             )?;
         }
         azure::apply_runtime_env()?;

@@ -383,6 +383,35 @@ mod tests {
         );
     }
 
+    /// The #1386 scenario end to end: a key pasted in `/login`, then corrected
+    /// by editing the env file, must take effect on the next lookup without a
+    /// restart.
+    #[test]
+    fn corrected_env_file_wins_after_a_saved_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "TEST_CORRECTED_API_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        save_named_api_key("test-corrected.env", "TEST_CORRECTED_API_KEY", "sk-wrong")
+            .expect("save pasted key");
+        let file_path = jcode_storage::app_config_dir()
+            .expect("config dir")
+            .join("test-corrected.env");
+        jcode_storage::upsert_env_file_value(
+            &file_path,
+            "TEST_CORRECTED_API_KEY",
+            Some("sk-corrected"),
+        )
+        .expect("edit env file");
+
+        assert_eq!(
+            load_api_key_from_env_or_config("TEST_CORRECTED_API_KEY", "test-corrected.env")
+                .as_deref(),
+            Some("sk-corrected"),
+            "an edited env file must not be shadowed by the earlier save"
+        );
+    }
+
     #[test]
     fn sanitize_strips_unicode_invisible_characters() {
         // Zero-width space, BOM, NBSP, en space around the value.

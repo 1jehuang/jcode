@@ -950,10 +950,10 @@ fn login_openai_compatible_flow(
             eprintln!("\nSaved {} local endpoint setup.", resolved.display_name);
             "local_endpoint"
         } else {
-            crate::provider_catalog::save_env_value_to_env_file(
-                &resolved.api_key_env,
+            crate::provider_catalog::save_named_api_key(
                 &resolved.env_file,
-                Some(key.trim()),
+                &resolved.api_key_env,
+                key.trim(),
             )?;
             eprintln!(
                 "\nSaved {} local endpoint setup and optional API key.",
@@ -1014,10 +1014,9 @@ fn save_named_env_vars(env_file: &str, vars: &[(&str, String)]) -> Result<()> {
     std::fs::write(&file_path, &content)?;
     crate::platform::set_permissions_owner_only(&file_path)?;
 
-    for (key, value) in vars {
-        crate::env::set_var(key, value);
-    }
-
+    // File only: these assignments can include secrets (the Azure API key),
+    // and a process env copy would shadow later file edits and leak into
+    // child processes (#1386). Readers fall back to the env file.
     Ok(())
 }
 
