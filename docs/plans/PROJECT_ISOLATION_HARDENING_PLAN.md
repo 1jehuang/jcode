@@ -1336,6 +1336,84 @@ previously recorded.
 
 ---
 
+## One CI step for all budget ratchets, so a red gate cannot hide another
+
+The ratchets were individually fine. The *reporting* was the defect, and it is
+the same defect as the formatting gate above, one level down: CI ran the six
+budget ratchets as six separate sequential steps, and GitHub Actions stops a job
+at its first failing step.
+
+Measured on this tree, before and after `scripts/check_all_budgets.py`:
+
+| | gates that fail | what a developer sees |
+| --- | --- | --- |
+| six sequential steps | 4 of 6 | 1 (`code size`) |
+| one aggregating step | 4 of 6 | 4, named, in one log |
+
+`scripts/check_guardrails.sh` already aggregated gates locally, but it is bash,
+which makes it unusable on a Windows checkout, and it interleaves the slow
+`cargo` gates with the fast Python ratchets. The new script is Python, runs only
+the ratchets, and is one cheap step.
+
+It does not merge or replace any baseline. Each ratchet still owns its JSON,
+still runs standalone, and `--update` still rebaselines it -- `check_all_budgets.py --update`
+forwards the flag to all six, so rebaselining is still one command.
+
+### What the tests prove, and how that was checked
+
+`scripts/test_check_all_budgets.py`, 20 tests, all against stub ratchets rather
+than the real ones. A test that ran the real guards would assert something about
+the tree's current drift state, which is the thing under question.
+
+The central property is that a failing gate does not stop the others. A green
+suite proves nothing about that on its own, so the implementation was mutated to
+restore the early exit and the suite was re-run:
+
+| mutation | must-fail tests that went red |
+| --- | --- |
+| early exit on first failure (the original bug) | 5 of 5 |
+| missing script skipped instead of fatal | 1 of 1 |
+| launch failure aborts remaining guards | 2 of 2 |
+| `guard_name` accepts any filename | 1 of 1 |
+| `--update` dropped from the guard command | 2 of 2 |
+| `sys.executable` replaced by bare `python3` | 1 of 1 |
+| long output no longer truncated | 1 of 1 |
+
+7 of 7 caught. Plus a positive control (suite green unmutated, refusing to
+proceed otherwise) and a negative control (a semantics-free edit leaves the suite
+green, so the suite is not merely sensitive to any change). The mutated file is
+restored after each run and the restore is verified by hash, so a run that
+"passed" because the file was left unimportable cannot be mistaken for a result.
+
+Two expectations in that table were wrong on the first attempt and were corrected
+rather than papered over: the early-exit mutation was expected to break a test
+that uses all-passing stubs, where an early exit cannot trigger; and the
+truncation mutation was expected to break the short-output test, whose input the
+mutation leaves unchanged. Both times the suite had gone red as intended and only
+the harness's expectation was off.
+
+### Two real bugs the tests caught while being written
+
+- `report(results, stream=sys.stdout)` bound the interpreter's stdout at import
+  time, so `redirect_stdout` and any captured log saw nothing while the PASS/FAIL
+  lines went to the real console. Now resolved at call time.
+- `guards(script_dir=SCRIPT_DIR)` had the same defect, which made the stub-based
+  tests impossible: they could not redirect discovery at a temp directory.
+
+### Not proven here
+
+`--update` was exercised against a sandboxed copy of `scripts/`, which shows the
+flag reaches all six ratchets and that no real baseline is modified. It does not
+show that `--update` produces *correct* baselines for this tree, and that was
+deliberately not run against the real tree: rebaselining the four drifted
+ratchets is the open product call recorded below, not a mechanical step.
+
+One intermediate claim from that sandbox run was wrong and is worth recording: I
+expected the sandboxed baselines to change because the tree is drifted. The
+output said otherwise -- `tracked=104 -> 0 oversized files` -- because a
+sandboxed script directory resolves `REPO_ROOT` to a temp path with no `src/` or
+`crates/`, so each ratchet counted nothing. Drift was not the cause.
+
 ## Four ratchets are red, and CI has been red with them
 
 Recorded in the previous session as "red at HEAD on stale baselines". That was
