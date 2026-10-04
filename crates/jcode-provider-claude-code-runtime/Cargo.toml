@@ -1,0 +1,34 @@
+[package]
+name = "jcode-provider-claude-code-runtime"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Claude Code provider runtime for jcode: drives the local `claude` CLI over the Agent SDK stream-json protocol"
+
+[lib]
+name = "jcode_provider_claude_code_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+# default-features = false: the top-level binary decides heavy optional base
+# features (embeddings/bedrock). Runtime crates must not re-enable them via
+# feature unification, or --no-default-features release targets (e.g. Windows
+# ARM64, which cannot build tract-linalg asm) break.
+jcode-base = { path = "../jcode-base", default-features = false }
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "rt", "process", "io-util", "macros"] }
+tokio-stream = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+futures = "0.3"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
