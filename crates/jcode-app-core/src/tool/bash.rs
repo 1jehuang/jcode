@@ -878,6 +878,23 @@ impl Tool for BashTool {
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
 
+        // A session with no project has no directory to run in. Every spawn path
+        // below only calls `current_dir` when `ctx.working_dir` is `Some`, so
+        // without this the child would inherit the daemon's own cwd, i.e. whichever
+        // repository happened to start this process (P2.5). Guarding once here
+        // covers the foreground, detached, and background spawns together.
+        if ctx.working_dir.is_none() {
+            return Err(anyhow::anyhow!(
+                "cannot run a shell command: this session has no working directory, so there \
+                 is no project directory to run it in. Running it would use the daemon's \
+                 directory ({}) instead. Give the session a working directory, or pass an \
+                 absolute path if the command does not need one.",
+                std::env::current_dir()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|_| "<unavailable>".to_string())
+            ));
+        }
+
         // Destructive-command gate (#604), before background dispatch.
         if let Some(refusal) = destructive_command_refusal(
             &params.command,

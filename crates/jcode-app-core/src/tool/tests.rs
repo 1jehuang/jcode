@@ -1875,3 +1875,70 @@ mod mcp_collision;
 
 #[path = "tests/sdk.rs"]
 mod sdk_tests;
+
+/// A session with no project has no directory to run a command in. Every spawn
+/// path in `bash.rs` only calls `current_dir` when `ctx.working_dir` is `Some`,
+/// so without a guard the child would inherit the daemon's cwd, i.e. whichever
+/// repository happened to start the daemon (P2.5).
+///
+/// All three dispatch shapes are checked, because the guard has to sit in front
+/// of the foreground, detached, and background spawns rather than in any one of
+/// them. This lives here rather than in `bash_tests.rs` because that module is
+/// `not(windows)`, and the guard it covers is cross-platform.
+///
+/// The assertion is that no shape runs at all, so the check does not depend on
+/// parsing a shell's directory output, which differs per platform and shell.
+#[tokio::test]
+async fn bash_refuses_to_run_without_a_working_dir_instead_of_using_the_daemon_cwd() {
+    let _lock = crate::storage::lock_test_env();
+    let prev_cwd = std::env::current_dir().expect("cwd");
+    let daemon_repo = tempfile::TempDir::new().expect("daemon repo dir");
+    std::env::set_current_dir(daemon_repo.path()).expect("set cwd");
+
+    // `cd` prints the working directory on every supported platform's shell, and
+    // this build's `build_shell_command` supplies one.
+    let print_cwd = if cfg!(windows) { "cd" } else { "pwd" };
+
+    let tool = crate::tool::bash::BashTool::new();
+    let mut ctx = ToolContext {
+        session_id: "p25c-session".to_string(),
+        message_id: "p25c-msg".to_string(),
+        tool_call_id: "p25c-call".to_string(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    };
+
+    for (label, extra) in [
+        ("foreground", serde_json::json!({})),
+        ("detached", serde_json::json!({"run_in_background": true})),
+        ("background", serde_json::json!({"timeout_ms": 50})),
+    ] {
+        let mut input = serde_json::json!({"command": print_cwd});
+        if let (serde_json::Value::Object(base), serde_json::Value::Object(more)) =
+            (&mut input, extra)
+        {
+            base.extend(more);
+        }
+        let error = tool
+            .execute(input, ctx.clone())
+            .await
+            .expect_err(&format!("{label} must refuse to run without a working dir"));
+        let message = error.to_string();
+        assert!(
+            message.contains("working directory"),
+            "{label}: the error must be actionable, got: {message}"
+        );
+    }
+
+    // Positive control: the same command with a working dir runs, and it runs in
+    // that directory rather than the daemon's.
+    let target = tempfile::TempDir::new().expect("target dir");
+    ctx.working_dir = Some(target.path().to_path_buf());
+    tool.execute(serde_json::json!({"command": print_cwd}), ctx)
+        .await
+        .expect("positive control: a session with a working dir still runs commands");
+
+    std::env::set_current_dir(prev_cwd).expect("restore cwd");
+}
