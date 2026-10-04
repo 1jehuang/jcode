@@ -1033,9 +1033,12 @@ pub struct App {
     /// Consecutive turn ends that declined to re-nudge because the
     /// incomplete-todo set was byte-identical to the previous poke. Reset
     /// whenever the poke actually fires or the feature is toggled.
-    auto_poke_unchanged_idle_count: u8,
     /// Refine prompts sent without the todo list moving. Bounded by
-    /// AUTO_POKE_REFINE_PROMPT_MAX and reset alongside the fingerprint.
+    /// Reset alongside the fingerprint when the plan actually moves.
+    /// Consecutive auto-pokes issued while the incomplete-todo set stayed
+    /// byte-identical. Monotonic inside an episode; reset when the fingerprint
+    /// changes, on transport recovery, and on a re-arm.
+    auto_poke_stall_count: u8,
     auto_poke_refine_prompt_count: u8,
     /// Set once the refine prompt has given up, so the user is told exactly once.
     auto_poke_refine_exhausted: bool,
@@ -1809,13 +1812,23 @@ impl App {
     /// stall is currently silent and unbounded - no breaker, no message - so the
     /// poke just stops working with no explanation. After this many repeats we
     /// tell the user the poke gave up and why, instead of idling indefinitely.
-    const AUTO_POKE_UNCHANGED_IDLE_LIMIT: u8 = 2;
+    /// How many times auto-poke will re-poke an unchanged todo list before it
+    /// ends the episode and says so. Poking is the mechanism that works; this
+    /// bound is only what stops an unresponsive agent from being poked forever.
+    const STALL_POKE_MAX_UNCHANGED: u8 = 12;
+    /// The stall at which the operator is told what is happening and the agent is
+    /// asked to add and decompose items, so the plan can actually move.
+    const STALL_POKE_ANNOUNCE_STALLS: u8 = 6;
+    /// How many times that ask may be made within one episode. An agent ignoring
+    /// the list will ignore the ask exactly as it ignored the pokes, so this is
+    /// a separate, smaller budget than the pokes themselves.
+    const STALL_JUDGE_MAX_ATTEMPTS: u8 = 3;
     /// How many times we may ask the agent to refine its own todo list while
     /// the list stays unchanged, before giving up on asking. Asking an agent
     /// that is ignoring the list five times is no more useful than poking it
     /// five times, so the prompt is bounded. Ordinary pokes are unaffected:
     /// this only stops the *suggestion*, never the poke machinery.
-    const AUTO_POKE_REFINE_PROMPT_MAX: u8 = 5;
+    
     /// Consecutive guardrail/refusal-stopped turns tolerated before automatic
     /// continuation paths (auto-poke, overnight poke) are stopped. Guardrail
     /// refusals are deterministic for the same request, so re-poking the same

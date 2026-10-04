@@ -135,7 +135,8 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
-    app.auto_poke_unchanged_idle_count = 0;
+    app.auto_poke_stall_count = 0;
+
     app.auto_poke_refine_prompt_count = 0;
     app.auto_poke_refine_exhausted = false;
     app.last_todo_ownership_fingerprint = None;
@@ -297,7 +298,8 @@ pub(super) fn rearm_auto_poke_if_plan_unfinished(app: &mut App) -> bool {
     app.auto_poke_incomplete_todos = true;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
-    app.auto_poke_unchanged_idle_count = 0;
+    app.auto_poke_stall_count = 0;
+
     app.auto_poke_refine_prompt_count = 0;
     app.auto_poke_refine_exhausted = false;
     app.last_todo_ownership_fingerprint = None;
@@ -362,7 +364,8 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
-    app.auto_poke_unchanged_idle_count = 0;
+    app.auto_poke_stall_count = 0;
+
     app.auto_poke_refine_prompt_count = 0;
     app.auto_poke_refine_exhausted = false;
     app.last_todo_ownership_fingerprint = None;

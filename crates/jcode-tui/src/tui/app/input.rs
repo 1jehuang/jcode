@@ -1995,85 +1995,95 @@ impl App {
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
-            crate::logging::info(&format!(
-                "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
-                incomplete.len()
-            ));
-            // Idling here is loop protection, but an unbounded silent one. The
-            // agent stopped without touching the plan, so every later turn end
-            // declined the same way and the poke looked broken from the outside.
-            //
-            // Telling the user does not unstick anything, though - the agent is
-            // the one that can break the deadlock, and the likeliest reason a list
-            // stays frozen is that the remaining items are too coarse to show
-            // progress. So once the stall is a pattern rather than one skipped
-            // turn, ask the agent to decompose what is left or add the missing
-            // steps. Bounded, because an agent ignoring the list will ignore five
-            // prompts exactly as it ignored five pokes.
-            self.auto_poke_unchanged_idle_count =
-                self.auto_poke_unchanged_idle_count.saturating_add(1);
+            // The list is byte-identical to the one we already poked about. That is
+            // not by itself a reason to stop: poking is the mechanism that unsticks a
+            // model which has run out of steam, and idling at the first repeat is what
+            // made the feature look broken. It IS a reason to count, because an agent
+            // that never touches the list must not be poked forever.
+            self.auto_poke_stall_count = self.auto_poke_stall_count.saturating_add(1);
+            let stalls = self.auto_poke_stall_count;
 
-            // Tell the operator before spending any refine budget on the agent.
-            // Surfacing the stall to the user is the committed contract; asking
-            // the agent to decompose its plan is an additional measure layered
-            // on top, not a replacement for it. The counter only climbs while
-            // the list stays frozen, so this fires exactly once per stall.
-            if self.auto_poke_unchanged_idle_count == Self::AUTO_POKE_UNCHANGED_IDLE_LIMIT {
-                crate::logging::info(&format!(
-                    "AUTO_POKE_DECISION action=idle_surfaced incomplete={} idles={}",
-                    incomplete.len(),
-                    self.auto_poke_unchanged_idle_count
-                ));
-                self.push_display_message(DisplayMessage::system(format!(
-                    "Todo list unchanged across {} nudges. Auto-poke is still trying, but it has made no progress on the plan.",
-                    self.auto_poke_unchanged_idle_count
-                )));
-                return false;
-            }
 
-            if self.auto_poke_unchanged_idle_count >= Self::AUTO_POKE_UNCHANGED_IDLE_LIMIT
-                && self.auto_poke_refine_prompt_count < Self::AUTO_POKE_REFINE_PROMPT_MAX
+            // The hook is a SEPARATE budget from the pokes. A frozen list is usually
+            // too coarse to show progress, so ask the agent to add what is missing and
+            // decompose what is left - but an agent ignoring the list ignores the ask
+            // exactly as it ignored the pokes, so this may be asked only a few times.
+            if stalls >= Self::STALL_POKE_ANNOUNCE_STALLS
+                && self.auto_poke_refine_prompt_count < Self::STALL_JUDGE_MAX_ATTEMPTS
             {
                 self.auto_poke_refine_prompt_count =
                     self.auto_poke_refine_prompt_count.saturating_add(1);
                 crate::logging::info(&format!(
-                    "AUTO_POKE_DECISION action=refine_prompt incomplete={} attempt={}",
+                    "AUTO_POKE_DECISION action=refine_prompt incomplete={} attempt={} stalls={}",
                     incomplete.len(),
-                    self.auto_poke_refine_prompt_count
+                    self.auto_poke_refine_prompt_count,
+                    stalls,
                 ));
+                // This goes to the agent, not to the operator. Only the agent can
+                // unstick a frozen plan, and telling the user accomplishes nothing.
                 self.queued_messages.push(format!(
-                    "The todo list has not changed across {} nudges. If the remaining work is not finished, the open items are probably too coarse to show progress: decompose them into concrete steps, or add the steps that are missing. If the work is in fact finished, update the todo statuses rather than stopping.",
-                    self.auto_poke_unchanged_idle_count
+                    "The todo list has not changed across {} pokes, so the plan is treated as stale and must be updated in THIS turn. Pick one and act: (1) if work remains that is not on the list - especially anything urgent - add it now; (2) if the listed items are too coarse to show progress, decompose them into concrete steps; (3) if the listed work is in fact finished, mark it completed rather than stopping. Make the edit before you end this turn; an unchanged list stops here.",
+                    stalls
                 ));
                 self.pending_queued_dispatch = true;
                 return true;
             }
 
-            // Asked as often as we are willing to. Stop asking, and say so once
-            // so the silence is explained rather than merely observed.
-            if self.auto_poke_refine_prompt_count >= Self::AUTO_POKE_REFINE_PROMPT_MAX
+            // Asked as often as we are willing to. Say so once, so the silence is
+            // explained rather than merely observed.
+            if self.auto_poke_refine_prompt_count >= Self::STALL_JUDGE_MAX_ATTEMPTS
                 && !self.auto_poke_refine_exhausted
             {
                 self.auto_poke_refine_exhausted = true;
                 crate::logging::info(&format!(
-                    "AUTO_POKE_DECISION action=refine_exhausted attempts={}",
-                    self.auto_poke_refine_prompt_count
+                    "AUTO_POKE_DECISION action=refine_exhausted attempts={} stalls={}",
+                    self.auto_poke_refine_prompt_count, stalls,
                 ));
                 self.push_display_message(DisplayMessage::system(format!(
-                    "Todo list unchanged across {} nudges and {} refine requests. Auto-poke stopped pushing; /poke re-enables it.",
-                    self.auto_poke_unchanged_idle_count,
+                    "Todo list unchanged across {} pokes and {} requests to add or decompose items. We will keep poking, but stop asking; /poke re-enables everything.",
+                    stalls,
                     self.auto_poke_refine_prompt_count
                 )));
             }
 
-            // The list has not changed and there is nothing left to ask for.
-            // Falling through here would queue the identical poke again, which
-            // is the exact loop the fingerprint guard exists to prevent: the
-            // agent already received this nudge and did not touch the plan.
-            return false;
+            // The bound. End the episode visibly rather than looping forever.
+            if stalls >= Self::STALL_POKE_MAX_UNCHANGED {
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=stall_poke_bound stalls={} bound={}",
+                    stalls,
+                    Self::STALL_POKE_MAX_UNCHANGED,
+                ));
+                super::commands::stop_auto_poke_episode(self);
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Auto-poke stopped: the todo list did not move across {} pokes. The next message you send re-arms it.",
+                    Self::STALL_POKE_MAX_UNCHANGED,
+                )));
+                return false;
+            }
+
+            // Still under the bound: keep poking. The counters deliberately survive
+            // this path - only a changed list ends the episode.
+            crate::logging::info(&format!(
+                "AUTO_POKE_DECISION action=stall_poke_continue stalls={} bound={}",
+                stalls,
+                Self::STALL_POKE_MAX_UNCHANGED,
+            ));
+            self.push_display_message(DisplayMessage::system(format!(
+                "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
+                incomplete.len(),
+                if incomplete.len() == 1 { "" } else { "s" },
+            )));
+            self.queued_messages.push(poke_message.clone());
+            self.pending_queued_dispatch = true;
+            self.last_auto_poke_fingerprint = Some(fingerprint);
+            return true;
         }
-        // The poke is firing, so any previous unchanged-todo stall is over.
-        self.auto_poke_unchanged_idle_count = 0;
+        // The todo set actually moved, so this episode is over: reset every counter
+        // that only means something within one frozen stretch.
+        self.auto_poke_stall_count = 0;
+        self.auto_poke_refine_prompt_count = 0;
+        self.auto_poke_refine_exhausted = false;
+        // The poke is firing on a todo set that actually moved.
 
         self.push_display_message(DisplayMessage::system(format!(
             "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",

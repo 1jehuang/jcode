@@ -1191,10 +1191,18 @@ fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
         // Simulate dispatch and completion of the automatically poked turn.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
+        // An unchanged list no longer refuses to re-poke. Refusing is what made
+        // the feature look broken: the operator kept seeing the plan stall with no
+        // explanation and no movement. Poking is the mechanism that unsticks a
+        // model which has run out of steam, so it repeats up to
+        // STALL_POKE_MAX_UNCHANGED and only then ends the episode visibly. What is
+        // still forbidden is an UNBOUNDED repeat, which the bound now covers.
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
-            "an unchanged list must not consume another model turn"
+            app.schedule_auto_poke_followup_if_needed(),
+            "an unchanged list must keep being poked within the bound"
         );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
 
         crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
             .expect("update");
@@ -1406,7 +1414,7 @@ fn test_unchanged_todos_prompt_the_agent_to_refine_the_plan_and_then_stop() {
         // agent must be asked to fix its own plan.
         let mut refine_queued = 0usize;
         let mut refine_text = String::new();
-        for _ in 0..(App::AUTO_POKE_REFINE_PROMPT_MAX as usize + 8) {
+        for _ in 0..(App::STALL_JUDGE_MAX_ATTEMPTS as usize + 8) {
             app.queued_messages.clear();
             app.pending_queued_dispatch = false;
             let _ = app.schedule_auto_poke_followup_if_needed();
@@ -1427,9 +1435,9 @@ fn test_unchanged_todos_prompt_the_agent_to_refine_the_plan_and_then_stop() {
             "the refine prompt must talk about the todo list, got: {refine_text}"
         );
         assert!(
-            refine_queued <= App::AUTO_POKE_REFINE_PROMPT_MAX as usize,
+            refine_queued <= App::STALL_JUDGE_MAX_ATTEMPTS as usize,
             "the refine prompt must stop after its budget of {}, but it was queued {refine_queued} times",
-            App::AUTO_POKE_REFINE_PROMPT_MAX
+            App::STALL_JUDGE_MAX_ATTEMPTS
         );
     });
 }
@@ -1465,7 +1473,7 @@ fn test_refine_prompt_never_fires_when_all_todos_are_complete() {
         )
         .expect("save a completed todo");
 
-        for _ in 0..(App::AUTO_POKE_REFINE_PROMPT_MAX as usize + 6) {
+        for _ in 0..(App::STALL_JUDGE_MAX_ATTEMPTS as usize + 6) {
             app.queued_messages.clear();
             app.pending_queued_dispatch = false;
             let _ = app.schedule_auto_poke_followup_if_needed();
