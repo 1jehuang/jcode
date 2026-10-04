@@ -232,7 +232,11 @@ async fn fetch_compatible_profile_report(
         "kimi" => {
             if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
                 match fetch_kimi_usage_limits(&api_key).await {
-                    Ok(fetched) => limits.extend(fetched),
+                    Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
+                    Ok(_) => {
+                        extra_info
+                            .push(("Usage".to_string(), "no quota windows returned".to_string()));
+                    }
                     Err(e) => {
                         extra_info.push(("Usage".to_string(), format!("unavailable ({})", e)))
                     }
@@ -412,15 +416,10 @@ async fn fetch_kimi_usage_limits(api_key: &str) -> Result<Vec<UsageLimit>> {
 /// Pure parse of the Kimi usage payload: a `usage` summary plus `limits[]`
 /// (each with a `window` descriptor) or a legacy `usages` map (`limit_5h` /
 /// `limit_7d` / `limit_30d`). Every documented shape is accepted because the
-/// backend has shipped all of them at different times.
+/// backend has shipped all of them at different times. Explicit windows win
+/// over the summary when both describe the same bucket.
 pub(super) fn parse_kimi_usage_limits(json: &serde_json::Value) -> Vec<UsageLimit> {
     let mut limits: Vec<UsageLimit> = Vec::new();
-
-    if let Some(usage) = json.get("usage")
-        && let Some(limit) = kimi_parse_row(usage, "Weekly")
-    {
-        limits.push(limit);
-    }
 
     if let Some(raw_limits) = json.get("limits").and_then(|v| v.as_array()) {
         for raw in raw_limits {
@@ -478,8 +477,14 @@ pub(super) fn parse_kimi_usage_limits(json: &serde_json::Value) -> Vec<UsageLimi
         }
     }
 
-    // The summary/legacy shapes can repeat a window the limits[] shape already
-    // reported; the first occurrence wins.
+    // The summary row only fills in Weekly when no explicit window reported
+    // it; dedup below keeps the first occurrence, so this must come last.
+    if let Some(usage) = json.get("usage")
+        && let Some(limit) = kimi_parse_row(usage, "Weekly")
+    {
+        limits.push(limit);
+    }
+
     let mut seen = std::collections::HashSet::new();
     limits.retain(|limit| seen.insert(limit.name.clone()));
 

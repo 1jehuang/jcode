@@ -580,13 +580,9 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     let client = crate::provider::shared_http_client();
     let tokens = match auth::cursor::resolve_direct_tokens(&client).await {
         Ok(tokens) => tokens,
-        Err(e) => {
-            return Some(ProviderUsage {
-                provider_name: "Cursor".to_string(),
-                error: Some(format!("Cursor credentials unavailable: {}", e)),
-                ..Default::default()
-            });
-        }
+        // A valid API key whose exchange is temporarily down should still
+        // surface key status instead of only a credentials error.
+        Err(_) => return Some(cursor_key_status_report().await),
     };
 
     let response = client
@@ -602,7 +598,14 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     match response {
         Ok(response) if response.status().is_success() => {
             let json: serde_json::Value = response.json().await.unwrap_or_default();
-            Some(cursor_plan_usage_report(&json))
+            let report = cursor_plan_usage_report(&json);
+            // A 200 without recognizable planUsage fields carries no usage;
+            // fall back to the key-status probe rather than showing an
+            // empty plan label.
+            if report.limits.is_empty() {
+                return Some(cursor_key_status_report().await);
+            }
+            Some(report)
         }
         _ => Some(cursor_key_status_report().await),
     }

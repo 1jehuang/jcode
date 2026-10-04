@@ -1100,3 +1100,19 @@ fn zai_coding_plan_limits_tolerate_unwrapped_payload() {
         api_keys::parse_zai_coding_plan_limits(&serde_json::json!({"data": {"limits": []}}));
     assert!(empty.is_empty());
 }
+
+#[test]
+fn kimi_usage_explicit_weekly_window_beats_summary() {
+    let json = serde_json::json!({
+        "usage": {"limit": 100.0, "used": 12.0, "resetTime": "2026-10-08T00:00:00Z"},
+        "limits": [
+            {"window": {"duration": 7, "timeUnit": "DAY"},
+             "detail": {"limit": 100.0, "used": 72.0, "resetTime": "2026-10-09T00:00:00Z"}}
+        ]
+    });
+    let limits = api_keys::parse_kimi_usage_limits(&json);
+    assert_eq!(limits.len(), 1);
+    assert_eq!(limits[0].name, "Weekly");
+    assert!((limits[0].usage_percent - 72.0).abs() < 0.01);
+    assert_eq!(limits[0].resets_at.as_deref(), Some("2026-10-09T00:00:00Z"));
+}
