@@ -4,8 +4,8 @@ use super::{
     mark_remote_reload_started, prewarm_idle_agent, remove_detached_source_if_unclaimed,
     rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
     session_working_dir_for_client, session_was_interrupted_by_reload, subscribe_should_mark_ready,
-    subscribe_working_dir_refusal_reason, subscribe_working_dir_replacement,
-    SubscribeWorkingDirRefusal,
+    subscribe_working_dir_refusal_message, subscribe_working_dir_refusal_reason,
+    subscribe_working_dir_replacement, SubscribeWorkingDirRefusal,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -380,6 +380,49 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             assert_eq!(incoming.client_instance_id.as_deref(), Some("instance-a"));
         }
     }
+}
+
+/// The log text must state the cause, not merely classify it.
+///
+/// The defect being fixed here was a message, not a behavior: the code already refused
+/// correctly but described every refusal as a home-directory report, so a cross-project
+/// attach was logged with the wrong cause. A test that only checks which enum variant
+/// is returned would pass while the message stayed wrong, so assert the wording itself.
+#[test]
+fn subscribe_working_dir_refusal_log_states_the_actual_cause() {
+    let cross = subscribe_working_dir_refusal_message(
+        "session_target",
+        "/work/project",
+        "/work/other",
+        SubscribeWorkingDirRefusal::CrossProject,
+    );
+    assert!(
+        !cross.contains("home directory"),
+        "a cross-project refusal must not be described as a home-directory report: {cross}"
+    );
+    assert!(
+        cross.contains("creation-only"),
+        "a cross-project refusal must say why it was refused: {cross}"
+    );
+    assert!(
+        cross.contains("/work/project") && cross.contains("/work/other"),
+        "the message must name both the session's project and the reported one: {cross}"
+    );
+
+    let home = subscribe_working_dir_refusal_message(
+        "session_target",
+        "/work/project",
+        "/home/tester",
+        SubscribeWorkingDirRefusal::HomeDirectory,
+    );
+    assert!(
+        home.contains("home directory"),
+        "a home-directory refusal must say so: {home}"
+    );
+    assert!(
+        !home.contains("creation-only"),
+        "a home-directory refusal is not the creation-only rule: {home}"
+    );
 }
 
 /// The refusal log must name the reason it refused, and only when there is one.

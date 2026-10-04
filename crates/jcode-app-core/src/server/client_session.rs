@@ -521,17 +521,33 @@ fn log_ignored_subscribe_working_dir(
     reported: &str,
     reason: SubscribeWorkingDirRefusal,
 ) {
+    crate::logging::warn(&subscribe_working_dir_refusal_message(
+        session_id, current, reported, reason,
+    ));
+}
+
+/// The text of a refusal, kept separate from the logging call so it can be asserted.
+///
+/// The reason has to reach a human reading the log, not just a match arm. Building the
+/// string here means a test can check that a cross-project refusal does not describe a
+/// home directory and vice versa.
+fn subscribe_working_dir_refusal_message(
+    session_id: &str,
+    current: &str,
+    reported: &str,
+    reason: SubscribeWorkingDirRefusal,
+) -> String {
     let cause = match reason {
         SubscribeWorkingDirRefusal::HomeDirectory => {
-            "it is the home directory while the session is already bound to that project (issue #481)"
+            "the client reported the home directory while the session is bound to a project (issue #481)"
         }
         SubscribeWorkingDirRefusal::CrossProject => {
             "a client-reported directory is creation-only and never moves an existing session to another project"
         }
     };
-    crate::logging::warn(&format!(
+    format!(
         "Ignoring subscribe working_dir {reported} for session {session_id}: {cause}; the session stays bound to {current}"
-    ));
+    )
 }
 
 /// Whether two reported directories are the same project.
