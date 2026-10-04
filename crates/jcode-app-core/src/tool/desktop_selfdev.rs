@@ -122,6 +122,15 @@ fn desktop_root(cwd: Option<&Path>) -> Result<PathBuf> {
 struct CommandSpec {
     program: String,
     args: Vec<String>,
+    /// The final argument, passed verbatim instead of quoted-and-escaped.
+    ///
+    /// Windows `cmd.exe` does not decode its command line the way the C
+    /// runtime does, so a caller-supplied command containing quotes is
+    /// corrupted by ordinary argument escaping. Measured:
+    /// `.args()` turns `echo hi "quoted world"` into `hi \"quoted world\"`,
+    /// while `.raw_arg()` keeps `hi "quoted world"`. `None` for every
+    /// argv-style command.
+    raw: Option<String>,
     note: String,
 }
 
@@ -131,7 +140,7 @@ fn command_spec(
     profile: &str,
     pid: Option<u32>,
 ) -> Result<CommandSpec> {
-    let (program, args, note) = match input.action.as_str() {
+    let (program, args, raw, note) = match input.action.as_str() {
         "build" => {
             let mut args = vec!["build", "-p", "jcode-desktop", "-p", "jcode-desktop-ui"]
                 .into_iter()
@@ -145,19 +154,36 @@ fn command_spec(
             (
                 "cargo",
                 args,
+                None,
                 format!("Paired Desktop host/UI build, profile {profile}. Does not reload."),
             )
         }
         "test" => match &input.command {
-            Some(command) if !command.trim().is_empty() => (
-                "bash",
-                vec!["-c".into(), command.clone()],
-                "Provided test command, Desktop repository cwd.".into(),
-            ),
+            Some(command) if !command.trim().is_empty() => {
+                // Run in the host shell. "bash" is the WSL launcher on
+                // Windows (C:\Windows\System32\bash.exe), so the command would
+                // run in the WSL filesystem namespace: `pwd` there reports
+                // /mnt/c/... and native Windows programs are not on PATH.
+                #[cfg(windows)]
+                let (program, args, raw) = (
+                    "cmd.exe",
+                    vec!["/D".into(), "/S".into(), "/C".into()],
+                    Some(command.clone()),
+                );
+                #[cfg(not(windows))]
+                let (program, args, raw) = ("bash", vec!["-c".into()], Some(command.clone()));
+                (
+                    program,
+                    args,
+                    raw,
+                    "Provided test command, Desktop repository cwd.".into(),
+                )
+            }
             Some(_) => bail!("test command must not be empty"),
             None => (
                 "cargo",
                 vec!["test".into()],
+                None,
                 "Desktop repository tests.".into(),
             ),
         },
@@ -174,11 +200,11 @@ fn command_spec(
             let output = target.join(output);
             // Refuse existing symlink components, including target, before the script writes.
             reject_symlink_components(&output)?;
-            ("python3", vec!["scripts/screenshot.py".into(), output.display().to_string()], "Build current debug Desktop and capture a private Xvfb/offline fixture. Independent of the live host, not a capture of its window.".into())
+            ("python3", vec!["scripts/screenshot.py".into(), output.display().to_string()], None, "Build current debug Desktop and capture a private Xvfb/offline fixture. Independent of the live host, not a capture of its window.".into())
         }
         "inspect" => {
             let pid = pid.context("No verified Desktop instance for inspection. Start Desktop with --hot-reload first.")?;
-            ("python3", vec!["scripts/preview-state.py".into(), "--list".into(), "--pid".into(), pid.to_string()],
+            ("python3", vec!["scripts/preview-state.py".into(), "--list".into(), "--pid".into(), pid.to_string()], None,
                 "Read-only UI preview catalog. Requires the host's self-development preview endpoint. Not full live application state.".into())
         }
         _ => bail!("Action does not route to a subprocess"),
@@ -186,6 +212,7 @@ fn command_spec(
     Ok(CommandSpec {
         program: program.into(),
         args,
+        raw,
         note,
     })
 }
@@ -454,8 +481,17 @@ impl Drop for ProcessGroup {
 
 async fn run_command(root: &Path, spec: CommandSpec, timeout: u64) -> Result<ToolOutput> {
     let mut command = tokio::process::Command::new(&spec.program);
+    command.args(&spec.args);
+    #[cfg(windows)]
+    if let Some(raw) = &spec.raw {
+        use std::os::windows::process::CommandExt;
+        command.raw_arg(raw);
+    }
+    #[cfg(not(windows))]
+    if let Some(raw) = &spec.raw {
+        command.arg(raw);
+    }
     command
-        .args(&spec.args)
         // The Desktop checkout's .cargo/config.toml supplies its own
         // metadata-neutral rustc wrapper. An inherited workspace wrapper (for
         // example from Jcode's dev_cargo.sh) would be hashed into Desktop's
