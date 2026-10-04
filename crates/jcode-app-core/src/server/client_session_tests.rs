@@ -4,7 +4,8 @@ use super::{
     mark_remote_reload_started, prewarm_idle_agent, remove_detached_source_if_unclaimed,
     rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
     session_working_dir_for_client, session_was_interrupted_by_reload, subscribe_should_mark_ready,
-    subscribe_working_dir_replacement,
+    subscribe_working_dir_refusal_reason, subscribe_working_dir_replacement,
+    SubscribeWorkingDirRefusal,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -379,6 +380,79 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
             assert_eq!(incoming.client_instance_id.as_deref(), Some("instance-a"));
         }
     }
+}
+
+/// The refusal log must name the reason it refused, and only when there is one.
+///
+/// One log helper was reachable from four call sites with two different causes: a
+/// client that inherited `$HOME` (issue #481) and a client in a genuinely different
+/// project. Both were logged with the home-directory wording, so a cross-project
+/// attach was reported as a home-directory problem and the real cause was invisible.
+/// The classification is pinned here rather than only asserted through the apply path,
+/// because a wrong reason produces a plausible log line and nothing else fails.
+#[test]
+fn subscribe_working_dir_refusal_reason_names_the_actual_cause() {
+    let home = std::path::PathBuf::from(if cfg!(windows) {
+        r"C:\Users\tester"
+    } else {
+        "/home/tester"
+    });
+    let project = if cfg!(windows) {
+        r"C:\work\project"
+    } else {
+        "/work/project"
+    };
+    let other = if cfg!(windows) {
+        r"C:\work\other"
+    } else {
+        "/work/other"
+    };
+
+    // A client in another project: not the home case, so it must not be logged as one.
+    assert_eq!(
+        subscribe_working_dir_refusal_reason(project, other, Some(&home)),
+        Some(SubscribeWorkingDirRefusal::CrossProject),
+        "a different project must be classified as cross-project, not as a home-directory report"
+    );
+
+    // A client that inherited $HOME while the session is in a project: the #481 case.
+    assert_eq!(
+        subscribe_working_dir_refusal_reason(project, &home.to_string_lossy(), Some(&home)),
+        Some(SubscribeWorkingDirRefusal::HomeDirectory),
+        "a home report for a session already in a project is the issue #481 case"
+    );
+
+    // The session is already in home, so a home report changes nothing. This is not a
+    // refusal and must not be logged as one: working in home on purpose still works.
+    assert_eq!(
+        subscribe_working_dir_refusal_reason(
+            &home.to_string_lossy(),
+            &home.to_string_lossy(),
+            Some(&home)
+        ),
+        None,
+        "a session already in home must not treat a home report as a refusal"
+    );
+
+    // A cosmetic spelling difference is not a different project, so no log line.
+    assert_eq!(
+        subscribe_working_dir_refusal_reason(project, &format!("{project}/."), Some(&home)),
+        None,
+        "a trailing /. is the same project and must not be logged as a refusal"
+    );
+    assert_eq!(
+        subscribe_working_dir_refusal_reason(project, project, Some(&home)),
+        None,
+        "an identical report is not a refusal"
+    );
+
+    // No home known (a daemon that cannot resolve one) must still classify a
+    // cross-project report rather than defaulting to the home wording.
+    assert_eq!(
+        subscribe_working_dir_refusal_reason(project, other, None),
+        Some(SubscribeWorkingDirRefusal::CrossProject),
+        "an unknown home must not turn a cross-project report into a home-directory report"
+    );
 }
 
 /// A target session belongs to a project, and attaching to it from another

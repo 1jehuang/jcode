@@ -508,11 +508,75 @@ pub(super) fn subscribe_working_dir_replacement(
     Some(reported_trimmed.to_string())
 }
 
-fn log_ignored_subscribe_working_dir(session_id: &str, current: &str, reported: &str) {
+/// Why a client-reported subscribe directory was refused.
+///
+/// The two reasons need distinct wording. A *home* report means the client inherited
+/// `$HOME` instead of its project (issue #481). Any other differing report means the
+/// client is in a different project than the session it attached to, which the
+/// creation-only rule in `session_working_dir_for_client` refuses. Logging the home
+/// wording for a cross-project attach would name the wrong cause.
+fn log_ignored_subscribe_working_dir(
+    session_id: &str,
+    current: &str,
+    reported: &str,
+    reason: SubscribeWorkingDirRefusal,
+) {
+    let cause = match reason {
+        SubscribeWorkingDirRefusal::HomeDirectory => {
+            "it is the home directory while the session is already bound to that project (issue #481)"
+        }
+        SubscribeWorkingDirRefusal::CrossProject => {
+            "a client-reported directory is creation-only and never moves an existing session to another project"
+        }
+    };
     crate::logging::warn(&format!(
-        "Ignoring subscribe working_dir {} for session {}: it is the home directory while the session is already bound to {} (issue #481)",
-        reported, session_id, current
+        "Ignoring subscribe working_dir {reported} for session {session_id}: {cause}; the session stays bound to {current}"
     ));
+}
+
+/// Whether two reported directories are the same project.
+///
+/// `subscribe_working_dir_replacement` compares the strings literally, so
+/// `/repo` and `/repo/.` disagree with each other and the caller would then log a
+/// refusal for a directory that is in fact unchanged. Compare canonically so a
+/// cosmetic difference does not read as a cross-project attach.
+fn same_working_dir(a: &str, b: &str) -> bool {
+    super::util::canonicalize_or(a.into()) == super::util::canonicalize_or(b.into())
+}
+
+/// Classify why a reported directory was refused, or `None` when it was merely
+/// unchanged and there is nothing worth warning about.
+///
+/// Kept next to [`SubscribeWorkingDirRefusal`] so the reason a log line claims and
+/// the reason the code took cannot drift apart.
+fn subscribe_working_dir_refusal_reason(
+    current: &str,
+    reported: &str,
+    home: Option<&Path>,
+) -> Option<SubscribeWorkingDirRefusal> {
+    if same_working_dir(current, reported) {
+        return None;
+    }
+    let reported = reported.trim();
+    if let Some(home) = home
+        && Path::new(reported) == home
+        && !same_working_dir(current, &home.to_string_lossy())
+    {
+        return Some(SubscribeWorkingDirRefusal::HomeDirectory);
+    }
+    Some(SubscribeWorkingDirRefusal::CrossProject)
+}
+
+/// Why `apply_or_defer_subscribe_working_dir` refused a reported directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubscribeWorkingDirRefusal {
+    /// The report was the home directory and the session had a different project.
+    HomeDirectory,
+    /// The report names a different project than the session belongs to.
+    CrossProject,
+    // No `Unchanged` variant on purpose: an unchanged report is not a refusal, so
+    // `subscribe_working_dir_refusal_reason` returns `None` for it instead of a
+    // reason that would have to be handled as "nothing happened".
 }
 
 fn apply_or_defer_subscribe_working_dir(
@@ -539,16 +603,22 @@ fn apply_or_defer_subscribe_working_dir(
                 if let Some(accepted) = accepted {
                     agent_guard.set_working_dir(&accepted);
                 } else if let Some(current) = agent_guard.working_dir()
-                    && current != working_dir
+                    && !same_working_dir(current, working_dir)
                 {
-                    log_ignored_subscribe_working_dir(session_id, current, working_dir);
+                    log_ignored_subscribe_working_dir(
+                        session_id,
+                        current,
+                        working_dir,
+                        SubscribeWorkingDirRefusal::CrossProject,
+                    );
                 }
             }
             None => {
                 if let Some(current) = agent_guard.working_dir()
                     && current != working_dir
+                    && let Some(reason) = subscribe_working_dir_refusal_reason(current, working_dir, home.as_deref())
                 {
-                    log_ignored_subscribe_working_dir(session_id, current, working_dir);
+                    log_ignored_subscribe_working_dir(session_id, current, working_dir, reason);
                 }
             }
         }
@@ -585,8 +655,15 @@ fn apply_or_defer_subscribe_working_dir(
                         ));
                     }
                     None => {
-                        if let Some(current) = agent_guard.working_dir() {
-                            log_ignored_subscribe_working_dir(&session_id, current, &working_dir);
+                        if let Some(current) = agent_guard.working_dir()
+                            && !same_working_dir(current, &working_dir)
+                        {
+                            log_ignored_subscribe_working_dir(
+                                &session_id,
+                                current,
+                                &working_dir,
+                                SubscribeWorkingDirRefusal::CrossProject,
+                            );
                         }
                     }
                 }
@@ -594,8 +671,9 @@ fn apply_or_defer_subscribe_working_dir(
             None => {
                 if let Some(current) = agent_guard.working_dir()
                     && current != working_dir
+                    && let Some(reason) = subscribe_working_dir_refusal_reason(current, &working_dir, home.as_deref())
                 {
-                    log_ignored_subscribe_working_dir(&session_id, current, &working_dir);
+                    log_ignored_subscribe_working_dir(&session_id, current, &working_dir, reason);
                 }
             }
         }
