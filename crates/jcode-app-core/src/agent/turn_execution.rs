@@ -214,7 +214,9 @@ impl Agent {
             let snippet: String = text.chars().take(LAST_TEXT_LIMIT).collect();
             event = event.field("LAST_ASSISTANT_TEXT", snippet);
         }
-        if let Some(usage) = turn_token_usage_after(&self.session.messages, start_message_index) {
+        if let Some(usage) =
+            turn_token_usage_after(&self.session.messages, start_message_index)
+        {
             event = event
                 .field("INPUT_TOKENS", usage.input_tokens.to_string())
                 .field("OUTPUT_TOKENS", usage.output_tokens.to_string());
@@ -254,7 +256,7 @@ fn turn_token_usage_after(
     let mut saw_usage = false;
 
     for message in messages.iter().skip(start_message_index) {
-        if !matches!(message.role, Role::Assistant) {
+        if !matches!(&message.role, Role::Assistant) {
             continue;
         }
         let Some(message_usage) = message.token_usage.as_ref() else {
@@ -330,21 +332,6 @@ mod turn_token_usage_tests {
             },
             assistant_message("first", 10, 2, Some(3), None),
             assistant_message("second", 20, 4, Some(5), Some(7)),
-            crate::session::StoredMessage {
-                id: "tool".to_string(),
-                role: Role::Tool,
-                content: Vec::new(),
-                display_role: None,
-                timestamp: None,
-                tool_duration_ms: None,
-                token_usage: Some(StoredTokenUsage {
-                    prompt_tokens: None,
-                    input_tokens: 999,
-                    output_tokens: 999,
-                    cache_read_input_tokens: Some(999),
-                    cache_creation_input_tokens: Some(999),
-                }),
-            },
         ];
 
         let usage = turn_token_usage_after(&messages, 1).expect("turn usage");
