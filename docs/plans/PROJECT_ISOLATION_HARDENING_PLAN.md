@@ -1,7 +1,7 @@
 # Project Isolation Hardening Plan
 
-Status: **in_progress** (P0.1, P0.2 done)
-Last reviewed: 2026-10-03 (commit `153ac7eb0`)
+Status: **in_progress** (P0.1, P0.2, P0.3 done)
+Last reviewed: 2026-10-04 (commit `0d34e73f3`)
 Source audit: static review of the multi-project daemon (`jcode` serves sessions for
 many repositories from one process). No runtime tests were run to produce this plan.
 
@@ -123,24 +123,47 @@ They are also the cheapest to fix, so do them first.
 
 ### P0.3 - Attaching to a live session re-pins that session's working directory
 
-- [ ] **Status:** pending
-- **Where:** `client_lifecycle.rs:1925-1928` captures the resumer's cwd,
-  `client_session.rs:1585` forwards it, `turn_execution.rs:1105-1106` overwrites
-  `session.working_dir` and refreshes the context message.
-- **Existing partial guard:** `subscribe_working_dir_replacement`
-  (`client_session.rs:489-508`) rejects a report that is the home directory when the
-  session already has a different cwd (issue #481). That closes the most common case
-  (launching `jcode` from `$HOME`) but not the general cross-project attach.
-- **Divergence note:** in the live-attach path, project-local MCP is resolved from the
-  *target* session's cwd (`client_session.rs:1422-1432`) while the session's own cwd is
-  overwritten from the *subscriber*. The two can disagree.
-- **Fix:** when the subscriber's cwd and the target session's cwd differ, do not overwrite
-  the target. Either reject the attach with a clear error or preserve the target's cwd and
-  use it for MCP resolution.
+- [x] **Status:** done (commit `0d34e73f3`)
+- **Where:** `client_lifecycle.rs` captures the resumer's cwd, `client_session.rs` forwards
+  it, `agent/turn_execution.rs:1105-1106` overwrites `session.working_dir` and refreshes the
+  context message. (The plan previously cited `server/turn_execution.rs`; the file moved to
+  `agent/`.)
+- **Existing partial guard:** `subscribe_working_dir_replacement` rejects a report that is the
+  home directory when the session already has a different cwd (issue #481). That closes the
+  most common case (launching `jcode` from `$HOME`) but not the general cross-project attach.
+- **Divergence note:** project-local MCP was resolved from the *subscriber's* raw
+  `working_dir_override` while the session's own cwd was separately overwritten. Fixed
+  together: both now read one resolved value.
+- **Fix:** a client-reported directory is **creation-only**, mirroring the rule the request
+  handler already applied to system prompts ("overrides are creation-only; never apply one to
+  a target attachment") and which had never been applied to `working_dir`.
+  `session_working_dir_for_client` decides it in one place: an existing session directory
+  always wins; a session with none adopts the report only while being created; a session that
+  stays unattributed stays unattributed rather than falling back to the daemon cwd. The attach
+  is **not** rejected: it is the ordinary shape of a client reconnecting, and the target's
+  project is preserved instead. A deliberate project move needs an explicit request, which the
+  wire protocol does not have.
+- **Four writers, one answer:** all four writers reachable from a single attach were reading
+  the raw report separately. `handle_resume_session` resolves `bound_working_dir` once (from the
+  live target's agent via `try_lock`, else the on-disk copy) and feeds both
+  `restore_session_with_working_dir` and `mcp_working_dir`;
+  `apply_or_defer_subscribe_working_dir` applies the rule in **both** branches, including the
+  deferred `tokio::spawn` one that runs for a busy agent (where a guard applied only to the
+  sync path lapses mid-turn); and the swarm re-key is computed after the same rule.
 - **Acceptance:** attaching from project A to a session stored under project B leaves B's
-  `working_dir`, tools, MCP config, memory scope, and swarm grouping unchanged.
-- **Test:** resume a session created in dir B from a client subscribed to dir A; assert
-  the restored session still reports dir B.
+  `working_dir`, tools, MCP config, memory scope, and swarm grouping unchanged. **Met.**
+- **Test:** `cross_project_attach_preserves_target_session_working_dir` (live target: agent
+  directory, post-subscribe directory, swarm member, on-disk copy) and
+  `cross_project_attach_of_offline_session_preserves_its_working_dir` (restore-from-disk, the
+  only path that binds a directory at all). Each was confirmed to fail with its own guard
+  disabled.
+- **Behavior change worth noting:** the pre-existing test
+  `apply_subscribe_working_dir_keeps_project_when_client_reports_home` asserted that a
+  project-to-project move was honored. That assertion *was* the bug, so it now asserts the
+  opposite contract, and a session with no directory yet still adopts one at creation.
+- **Note:** `Agent::new_with_initial_working_dir(.., None)` does not yield a directory-less
+  agent, because `Session::ensure_initial_session_context_message` stamps the daemon process
+  cwd when the directory is `None`. Test fixtures that need one must clear it explicitly.
 
 ### P0.4 - Session attach has no identity check at all
 
@@ -441,7 +464,7 @@ Cross-cutting tests that must exist for this class of bug. Each is small and bel
 to the code it protects, not in a separate integration bucket.
 
 - [ ] **Session ownership:** a client cannot act on another session's id (P0.1).
-- [ ] **Cwd binding:** a session created in dir B, attached from dir A, keeps dir B (P0.3).
+- [x] **Cwd binding:** a session created in dir B, attached from dir A, keeps dir B (P0.3).
 - [ ] **Pool isolation:** same-named shared servers with different configs do not share a
   process (P1.1).
 - [ ] **Search scoping:** `session_search` with no `working_dir` returns only the current
