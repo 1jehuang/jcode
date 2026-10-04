@@ -568,11 +568,110 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
     })
 }
 
-/// Cursor API-key report. Cursor's admin/usage API requires a paid plan; for
-/// free keys the `/v0/me` error body still tells us the key is live and which
-/// plan tier it is on, so we surface that.
+/// Cursor monthly plan usage from the dashboard endpoint. Works with any
+/// direct credential (auth.json token, vscdb token, or an exchanged API
+/// key). When the usage call fails, falls back to the `/v0/me` probe so the
+/// key status / plan tier is still surfaced.
 pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
-    let api_key = auth::cursor::load_api_key().ok()?;
+    if !auth::cursor::has_cursor_native_auth() {
+        return None;
+    }
+
+    let client = crate::provider::shared_http_client();
+    let tokens = match auth::cursor::resolve_direct_tokens(&client).await {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            return Some(ProviderUsage {
+                provider_name: "Cursor".to_string(),
+                error: Some(format!("Cursor credentials unavailable: {}", e)),
+                ..Default::default()
+            });
+        }
+    };
+
+    let response = client
+        .post("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
+        .header("Authorization", format!("Bearer {}", tokens.access_token))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .body("{}")
+        .send()
+        .await;
+
+    match response {
+        Ok(response) if response.status().is_success() => {
+            let json: serde_json::Value = response.json().await.unwrap_or_default();
+            Some(cursor_plan_usage_report(&json))
+        }
+        _ => Some(cursor_key_status_report().await),
+    }
+}
+
+pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsage {
+    let plan = json
+        .get("planUsage")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let membership = json
+        .get("spendLimitUsage")
+        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
+        .map(|_| "Team")
+        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
+        .unwrap_or("Pro");
+    let mut chars = membership.chars();
+    let membership_title: String = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Pro".to_string(),
+    };
+
+    let resets_at = json
+        .get("billingCycleEnd")
+        .and_then(reset_timestamp_from_json_value);
+
+    let mut limits = Vec::new();
+    for (name, key) in [
+        ("Included", "totalPercentUsed"),
+        ("Auto", "autoPercentUsed"),
+        ("API", "apiPercentUsed"),
+    ] {
+        let Some(percent) = plan.get(key).and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        limits.push(UsageLimit {
+            name: name.to_string(),
+            usage_percent: percent.clamp(0.0, 100.0) as f32,
+            resets_at: resets_at.clone(),
+        });
+    }
+
+    ProviderUsage {
+        provider_name: format!("Cursor {}", membership_title),
+        limits,
+        extra_info: Vec::new(),
+        hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
+        error: None,
+        last_used_unix_secs: None,
+    }
+}
+
+/// Fallback key-status probe. The `/v0/me` error body still tells us the key
+/// is live and which plan tier it is on when the usage endpoint is out of
+/// reach.
+async fn cursor_key_status_report() -> ProviderUsage {
+    let api_key = match auth::cursor::load_api_key() {
+        Ok(api_key) => api_key,
+        Err(e) => {
+            return ProviderUsage {
+                provider_name: "Cursor".to_string(),
+                error: Some(format!("Cursor usage unavailable: {}", e)),
+                ..Default::default()
+            };
+        }
+    };
 
     let client = crate::provider::shared_http_client();
     let response = client
@@ -620,7 +719,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         }
     }
 
-    Some(ProviderUsage {
+    ProviderUsage {
         provider_name: "Cursor".to_string(),
         limits: Vec::new(),
         extra_info,
@@ -629,7 +728,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
-    })
+    }
 }
 
 pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
