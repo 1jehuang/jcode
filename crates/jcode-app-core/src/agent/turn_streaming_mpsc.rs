@@ -1298,6 +1298,7 @@ impl Agent {
                     id: 0,
                     model: model_after_stream,
                     provider_name: Some(provider_name),
+                    context_window: Some(self.provider.context_window() as u64),
                     error: None,
                     resolved_credential: self.provider.active_resolved_credential(),
                     reasoning_effort: self.provider.reasoning_effort(),
