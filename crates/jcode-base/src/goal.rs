@@ -535,11 +535,18 @@ fn project_goals_dir(working_dir: Option<&Path>) -> Result<Option<PathBuf>> {
 
     // Carry forward a directory written under the old DefaultHasher key, otherwise
     // every existing user's goals would silently vanish on this upgrade (P3.1).
-    // A migration failure is ignored: losing past goals is better than failing the
-    // call that merely asks where goals live.
+    // A migration failure stays non-fatal: it must not fail the call that merely
+    // asks where goals live. It is logged rather than dropped, because a dropped
+    // migration looks exactly like a project that never had goals.
     let legacy = projects.join(crate::project_scope::legacy_project_key(dir));
     if legacy != path {
-        let _ = crate::project_scope::migrate_legacy_project_key(&legacy, &path);
+        if let Err(migrate_err) = crate::project_scope::migrate_legacy_project_key(&legacy, &path) {
+            crate::logging::warn(&format!(
+                "Could not migrate legacy goals {} to {}: {migrate_err}",
+                legacy.display(),
+                path.display()
+            ));
+        }
     }
 
     Ok(Some(path))

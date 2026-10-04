@@ -108,11 +108,19 @@ pub(crate) const CAPABILITY_FIELD: &str = "capability";
 /// is not treated as an error here: the request itself is decoded and
 /// validated separately, and a bad capability simply fails to verify.
 pub(crate) fn capability_from_line(line: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()?
-        .get(CAPABILITY_FIELD)?
-        .as_str()
-        .map(str::to_string)
+    let value = match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(value) => value,
+        // A line that is not JSON cannot carry a capability. The request itself
+        // is decoded and validated separately and will produce the actionable
+        // error, so this is an early-out rather than a swallowed failure.
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "Comm request line did not parse, so it has no capability: {err}"
+            ));
+            return None;
+        }
+    };
+    value.get(CAPABILITY_FIELD)?.as_str().map(str::to_string)
 }
 
 /// Authorize a `Comm*` request that arrived on a one-shot control connection.
@@ -151,7 +159,7 @@ pub(crate) async fn authorize_lightweight_comm(
         "Rejected one-shot {request_type} naming session {} without a valid capability (owns {owned})",
         claim.claimed()
     ));
-    let _ = super::client_writer::write_direct_event(
+    if let Err(write_err) = super::client_writer::write_direct_event(
         writer,
         &ServerEvent::Error {
             id: request_id,
@@ -159,7 +167,14 @@ pub(crate) async fn authorize_lightweight_comm(
             retry_after_secs: None,
         },
     )
-    .await;
+    .await
+    {
+        // The refusal is already decided, so this cannot change the outcome, but
+        // a failed write here looks identical to a daemon crash to the caller.
+        crate::logging::warn(&format!(
+            "Rejected one-shot {request_type} but the error event could not be written: {write_err}"
+        ));
+    }
     true
 }
 
@@ -286,11 +301,15 @@ pub(crate) fn reject_unauthorized_comm(
         return false;
     }
     let owned = auth.owned_session_id().unwrap_or("<none>");
-    let _ = client_event_tx.send(ServerEvent::Error {
+    if let Err(send_err) = client_event_tx.send(ServerEvent::Error {
         id: request_id,
         message: auth.rejection_message(request_type),
         retry_after_secs: None,
-    });
+    }) {
+        crate::logging::warn(&format!(
+            "Rejected {request_type} but the error event could not be delivered: {send_err}"
+        ));
+    }
     crate::logging::warn(&format!(
         "Rejected {request_type} naming session {} from a connection owning {owned}",
         claim.claimed()
@@ -364,11 +383,13 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        // Writing into a `String` is infallible.
-        let _ = write!(out, "{byte:02x}");
+        // Indexing and `push` are used instead of `write!`, whose `Result` would
+        // have to be discarded for a write that cannot fail.
+        out.push(DIGITS[usize::from(byte >> 4)] as char);
+        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
     }
     out
 }

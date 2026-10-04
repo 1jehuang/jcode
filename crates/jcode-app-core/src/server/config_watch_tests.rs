@@ -136,6 +136,69 @@ fn a_setting_change_is_reported_and_names_the_key() {
     );
 }
 
+/// Replace the config file with a directory so reading it fails without the path
+/// disappearing. On Windows and Unix alike this is a read failure that is not
+/// `NotFound`, which is exactly the case that used to be reported as a deletion.
+fn make_config_unreadable(home: &TempHome) {
+    home.remove();
+    std::fs::create_dir(home.path()).expect("replace the config with a directory");
+}
+
+fn restore_config(home: &TempHome, content: &str) {
+    std::fs::remove_dir(home.path()).expect("remove the directory standing in for the config");
+    home.write(content);
+}
+
+#[test]
+fn an_unreadable_config_is_not_reported_as_deleted() {
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
+    home.write("[display]\ncentered = false\n");
+
+    let mut watch = ConfigWatch::new();
+    assert!(matches!(tick(&mut watch), ConfigTick::Unchanged));
+
+    make_config_unreadable(&home);
+
+    // The file is still on disk. Reporting "it no longer exists, so every session
+    // has fallen back to defaults" would send the user looking for a deletion
+    // that never happened.
+    let outcome = tick(&mut watch);
+    if let ConfigTick::Changed { summary, .. } = &outcome {
+        assert!(
+            !summary.contains("no longer exists"),
+            "an unreadable config must not be reported as a deleted one: {summary}"
+        );
+    }
+}
+
+#[test]
+fn the_last_observed_content_survives_an_unreadable_tick() {
+    let env = TestEnv::new();
+    let home = TempHome::new(&env);
+    home.write("[display]\ncentered = false\n");
+
+    let mut watch = ConfigWatch::new();
+    assert!(matches!(tick(&mut watch), ConfigTick::Unchanged));
+
+    make_config_unreadable(&home);
+    // Whatever the unreadable tick decided, it must not overwrite the baseline.
+    let _ = tick(&mut watch);
+
+    restore_config(&home, "[display]\ncentered = true\n");
+
+    // This is an edit to the content that was already there, not a config
+    // appearing for the first time. A tick that discarded the stored content
+    // would report the appearance instead and never mention the setting.
+    let ConfigTick::Changed { summary, .. } = tick(&mut watch) else {
+        panic!("a change made across an unreadable tick must still be reported");
+    };
+    assert!(
+        summary.contains("centered"),
+        "the summary must name the changed setting, not announce the file: {summary}"
+    );
+}
+
 #[test]
 fn one_edit_is_reported_once_and_not_repeated_on_later_ticks() {
     let env = TestEnv::new();

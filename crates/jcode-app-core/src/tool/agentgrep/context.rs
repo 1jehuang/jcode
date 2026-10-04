@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Context as _;
 
 pub(super) fn maybe_write_context_json(
     params: &AgentGrepInput,
@@ -8,8 +9,11 @@ pub(super) fn maybe_write_context_json(
         return Ok(None);
     }
 
-    let context = build_harness_context(params, ctx);
-    let Some(context) = context else {
+    // `None` means there is no exposure context worth ranking against, so no
+    // file is written and the harness is told there is no `context_json`. The
+    // inner value is what gets serialized: writing the `Option` itself would put
+    // a bare `null` in the file, which the harness cannot parse back.
+    let Some(context) = build_harness_context(params, ctx)? else {
         return Ok(None);
     };
 
@@ -19,23 +23,46 @@ pub(super) fn maybe_write_context_json(
         ctx.session_id, ctx.tool_call_id
     ));
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create the agentgrep context directory {}",
+                parent.display()
+            )
+        })?;
     }
     std::fs::write(&path, serde_json::to_vec(&context)?)?;
     Ok(Some(path))
 }
 
+/// Build the exposure context used to rank and explain results.
+///
+/// Returns `Ok(None)` when there is nothing worth ranking, which is a normal
+/// outcome for a session with no prior file exposure. A `path` that does not
+/// resolve is *not* that: it is a bad argument, and the error is propagated so
+/// the tool reports it instead of quietly searching the session's working
+/// directory, which is a different project.
 fn build_harness_context(
     params: &AgentGrepInput,
     ctx: &ToolContext,
-) -> Option<AgentGrepHarnessContext> {
-    let session = Session::load(&ctx.session_id).ok()?;
+) -> Result<Option<AgentGrepHarnessContext>> {
+    // No readable session is not an error: it just means there is no exposure
+    // history to rank against, so there is no context file to write.
+    let Some(session) = Session::load(&ctx.session_id).ok() else {
+        return Ok(None);
+    };
     let observations = collect_tool_exposures(&session);
     let search_root = params
         .path
         .as_deref()
-        .and_then(|path| resolve_path_arg(ctx, path).ok())
-        .or_else(|| ctx.working_dir.clone())?;
+        .map(|path| resolve_path_arg(ctx, path))
+        .transpose()?
+        .or_else(|| ctx.working_dir.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "agentgrep needs a search root: this session has no working directory, \
+                 so pass an explicit `path`"
+            )
+        })?;
     let total_messages = session.messages.len().max(1);
     let compaction_cutoff = session
         .compaction
@@ -98,9 +125,9 @@ fn build_harness_context(
         && context.known_symbols.is_empty()
         && context.focus_files.is_empty()
     {
-        None
+        Ok(None)
     } else {
-        Some(context)
+        Ok(Some(context))
     }
 }
 

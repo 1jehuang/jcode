@@ -383,7 +383,7 @@ fn execute_linked_agentgrep(
     ctx: &ToolContext,
     context_json_path: Option<&Path>,
 ) -> Result<ToolOutput> {
-    let exact_file = exact_search_file_path(ctx, params.path.as_deref());
+    let exact_file = exact_search_file_path(ctx, params.path.as_deref())?;
     match params.mode.as_str() {
         "grep" => {
             let args = build_grep_args(params, ctx)?;
@@ -439,17 +439,25 @@ fn resolve_path_arg(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
     ctx.resolve_path(Path::new(path))
 }
 
-fn exact_search_file_path(ctx: &ToolContext, path: Option<&str>) -> Option<String> {
-    let path = path?;
-    // An unresolvable path is not "no such file", it is a bad argument. Reporting
-    // None here would widen the grep to the whole workspace, so surface the error.
-    let resolved = resolve_path_arg(ctx, path).ok()?;
+/// The single result file an exact `file` argument names, if there is one.
+///
+/// `Ok(None)` means "no exact file filter": either no `file` was passed, or the
+/// path resolved to something that is not a file. An unresolvable path is a
+/// *different* thing and is returned as `Err`, because treating it as "no
+/// filter" widens the search to the whole workspace. That is how
+/// `execute_grep_file_field_does_not_scan_sibling_files` used to be able to
+/// pass for the wrong reason.
+fn exact_search_file_path(ctx: &ToolContext, path: Option<&str>) -> Result<Option<String>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let resolved = resolve_path_arg(ctx, path)?;
     if !resolved.is_file() {
-        return None;
+        return Ok(None);
     }
-    resolved
+    Ok(resolved
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+        .map(|name| name.to_string_lossy().into_owned()))
 }
 
 /// True when a result file is the exact file the caller named.

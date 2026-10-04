@@ -121,7 +121,26 @@ pub(super) fn tick(watch: &mut ConfigWatch) -> ConfigTick {
     }
     watch.path = Some(config_path.clone());
 
-    let current = std::fs::read_to_string(&config_path).ok();
+    // `read_to_string` failing is three different situations, and only one of
+    // them means the file is gone: `NotFound` is deletion, while a permission
+    // failure, a directory in the file's place, or a sharing violation leave the
+    // path in place and unreadable. Collapsing them into `None` is what produced
+    // a false "the config no longer exists" notice for a file that was still
+    // there, followed by silence once the state settled into (Absent, None).
+    //
+    // The stored state is left untouched on a read failure, so the next
+    // successful read still diffs against the last content actually observed.
+    let current = match std::fs::read_to_string(&config_path) {
+        Ok(content) => Some(content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "Could not read {} to check for config changes; skipping this tick and keeping the last observed state: {err}",
+                config_path.display()
+            ));
+            return ConfigTick::Unchanged;
+        }
+    };
     let previous = std::mem::replace(
         &mut watch.state,
         match &current {

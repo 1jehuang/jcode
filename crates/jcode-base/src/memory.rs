@@ -179,15 +179,21 @@ pub fn project_memory_file(project_dir: &std::path::Path) -> Result<PathBuf> {
 
     // Carry forward a file written under the old DefaultHasher key, otherwise
     // every existing user's memories would silently vanish on this upgrade.
-    // Failures are ignored: a missing migration costs a user their memories,
-    // while a failed *call* would block the whole session from starting.
-
+    // A failure stays non-fatal: it must not block the session from starting,
+    // but it is logged because a dropped migration is indistinguishable from a
+    // user who never had memories in this project.
     let legacy = memory_dir.join(format!(
         "{}.json",
         crate::project_scope::legacy_project_key(project_dir)
     ));
     if legacy != path {
-        let _ = crate::project_scope::migrate_legacy_project_key(&legacy, &path);
+        if let Err(migrate_err) = crate::project_scope::migrate_legacy_project_key(&legacy, &path) {
+            crate::logging::warn(&format!(
+                "Could not migrate legacy memory {} to {}: {migrate_err}",
+                legacy.display(),
+                path.display()
+            ));
+        }
     }
     Ok(path)
 }
@@ -304,7 +310,15 @@ impl MemoryManager {
             crate::project_scope::legacy_project_key(&project_dir)
         ));
         if legacy != notes_path {
-            let _ = crate::project_scope::migrate_legacy_project_key(&legacy, &notes_path);
+            if let Err(migrate_err) =
+                crate::project_scope::migrate_legacy_project_key(&legacy, &notes_path)
+            {
+                crate::logging::warn(&format!(
+                    "Could not migrate legacy notes {} to {}: {migrate_err}",
+                    legacy.display(),
+                    notes_path.display()
+                ));
+            }
         }
 
         Ok(Some(notes_path))

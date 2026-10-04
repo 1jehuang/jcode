@@ -143,7 +143,7 @@ pub(super) fn build_outline_args(
         file,
         json: false,
         max_items: None,
-        path: resolved_root_string(ctx, params.path.as_deref()),
+        path: resolved_root_string(ctx, params.path.as_deref())?,
         context_json: context_json_path.map(|path| path.display().to_string()),
     })
 }
@@ -245,9 +245,14 @@ fn parse_full_region_mode(value: Option<&str>) -> Result<FullRegionMode> {
     }
 }
 
-fn resolved_root_string(ctx: &ToolContext, path: Option<&str>) -> Option<String> {
-    path.and_then(|path| resolve_path_arg(ctx, path).ok())
-        .map(|p| p.display().to_string())
+/// Resolve the `path` argument to an absolute root string.
+///
+/// Returns `None` only when the caller did not pass `path` at all. A `path`
+/// that cannot be resolved is an error: falling back to the raw value would
+/// run the search somewhere other than where the caller asked.
+fn resolved_root_string(ctx: &ToolContext, path: Option<&str>) -> Result<Option<String>> {
+    path.map(|path| resolve_path_arg(ctx, path).map(|resolved| resolved.display().to_string()))
+        .transpose()
 }
 
 pub(super) fn resolve_search_root(ctx: &ToolContext, path: Option<&str>) -> Result<PathBuf> {
@@ -274,8 +279,12 @@ pub(super) fn summarize_agentgrep_request(
             util::truncate_str(&terms.join(" "), 80)
         ));
     }
-    if let Some(path) = resolved_root_string(ctx, params.path.as_deref()) {
-        parts.push(format!("root={path}"));
+    // A summary line must not fail the call, but a `path` we could not
+    // resolve is worth showing rather than silently dropping from the summary.
+    match resolved_root_string(ctx, params.path.as_deref()) {
+        Ok(Some(path)) => parts.push(format!("root={path}")),
+        Ok(None) => {}
+        Err(err) => parts.push(format!("root=<unresolved: {err}>")),
     }
     if let Some(glob) = normalized_agentgrep_glob(params.glob.as_deref()) {
         parts.push(format!("glob={glob}"));
