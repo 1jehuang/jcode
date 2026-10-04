@@ -861,6 +861,24 @@ mod newest_reload_candidate_integration_tests {
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
+    /// Backdate a freshly written file so candidate ordering is decidable.
+    ///
+    /// The handle needs write access, not read: Windows `SetFileTime` requires
+    /// FILE_WRITE_ATTRIBUTES, so `File::open` fails there with
+    /// ERROR_ACCESS_DENIED ("Acesso negado."), while `futimens` on Unix needs
+    /// no access mode at all. Measured on Windows:
+    ///
+    ///   File::open(..).set_modified(..)      -> PermissionDenied (code 5)
+    ///   OpenOptions::new().write(true)      -> ok, exact round-trip (0ns)
+    fn set_mtime(path: &Path, mtime: SystemTime) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for mtime")
+            .set_modified(mtime)
+            .expect("set mtime");
+    }
+
     fn install_versioned_binary(version: &str, mtime: SystemTime) -> std::path::PathBuf {
         // A real, distinct file per version so mtimes are independently settable
         // (install hard-links the source, which would share an inode/mtime).
@@ -871,20 +889,49 @@ mod newest_reload_candidate_integration_tests {
         std::fs::create_dir_all(&dir).expect("create version dir");
         let path = dir.join(build::binary_name());
         std::fs::write(&path, format!("binary for {version}")).expect("write binary");
-        std::fs::File::open(&path)
-            .expect("open binary")
-            .set_modified(mtime)
-            .expect("set mtime");
+        set_mtime(&path, mtime);
         path
     }
 
+    /// Which version the reload would target, as a human-checkable name.
+    ///
+    /// Read the channel's own version marker rather than recovering the version
+    /// from the candidate path. Windows `atomic_symlink_swap` copies the
+    /// launcher instead of symlinking it (Windows keeps a loaded executable
+    /// open, so the entry cannot be replaced by a link), so on Windows the
+    /// channel path canonicalizes to `stable/jcode.exe` and the version is not
+    /// in the path at all. Measured:
+    ///
+    ///   symlink -> canon .../versions/0.15.0/jcode.exe  (parent "0.15.0")
+    ///   copy    -> canon .../stable/jcode.exe         (parent "stable")
+    ///
+    /// Every channel that `update_*_symlink` publishes also writes a version
+    /// marker, so that is the portable source of truth.
     fn candidate_version_for(is_selfdev: bool) -> Option<String> {
-        let (path, _label) = newest_reload_candidate(is_selfdev)?;
+        let (path, label) = newest_reload_candidate(is_selfdev)?;
         let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-        canonical
+        // A wrapper resolves to its `<stem>-*.bin` payload, whose sibling
+        // directory is the version. Keep that, so a channel that really is a
+        // symlink still reports its version.
+        let canonical = build::resolve_binary_payload(&canonical);
+        if let Some(version) = canonical
             .parent()
             .and_then(Path::file_name)
             .map(|n| n.to_string_lossy().into_owned())
+            && version != "stable"
+            && version != "current"
+            && version != "shared-server"
+        {
+            return Some(version);
+        }
+        let marker = match label {
+            "stable" => build::stable_version_file(),
+            "current" => build::current_version_file(),
+            "shared-server" => build::shared_server_version_file(),
+            _ => return None,
+        }
+        .ok()?;
+        Some(std::fs::read_to_string(marker).ok()?.trim().to_string())
     }
 
     #[test]
@@ -1054,22 +1101,23 @@ mod newest_reload_candidate_integration_tests {
             .join("versions")
             .join(version);
         std::fs::create_dir_all(&dir).expect("create version dir");
-        let payload = dir.join("jcode-linux-x86_64.bin");
+        // `resolve_binary_payload` finds the payload as a sibling
+        // `<stem>-*.bin` of the wrapper, so the name only has to match that
+        // glob. Keeping it platform independent lets the same fixture assert
+        // the same layout everywhere.
+        let payload = dir.join(format!("{}-payload.bin", build::binary_stem()));
         std::fs::write(&payload, format!("payload for {version}")).expect("write payload");
-        std::fs::File::open(&payload)
-            .expect("open payload")
-            .set_modified(payload_mtime)
-            .expect("set payload mtime");
+        set_mtime(&payload, payload_mtime);
         let wrapper = dir.join(build::binary_name());
         std::fs::write(
             &wrapper,
-            "#!/usr/bin/env sh\nexec ./jcode-linux-x86_64.bin \"$@\"\n",
+            format!(
+                "#!/usr/bin/env sh\nexec ./{}-payload.bin \"$@\"\n",
+                build::binary_stem()
+            ),
         )
         .expect("write wrapper");
-        std::fs::File::open(&wrapper)
-            .expect("open wrapper")
-            .set_modified(wrapper_mtime)
-            .expect("set wrapper mtime");
+        set_mtime(&wrapper, wrapper_mtime);
         (wrapper, payload)
     }
 
@@ -1081,6 +1129,22 @@ mod newest_reload_candidate_integration_tests {
     /// updated daemon report "newer binary available" against ITS OWN install
     /// forever -> the client force-reloaded the server in a loop and the
     /// session never attached.
+    /// The wrapper-plus-`.bin` layout exists only in the Linux release
+    /// archive. `scripts/install.ps1` installs a plain `jcode.exe` into
+    /// `versions/<version>/` and copies it to `stable/jcode.exe`, so a Windows
+    /// channel has no wrapper and no sibling payload. Measured on Windows: the
+    /// channel wrapper carries the fixture's mtime (`std::fs::copy` does
+    /// preserve it, delta 0ns), but `resolve_binary_payload` finds no sibling
+    /// `<stem>-*.bin` beside the channel copy, so it returns the wrapper and the
+    /// wrapper-vs-payload comparison degenerates into wrapper-vs-payload from
+    /// two different directories.
+    ///
+    /// That is a fixture artifact, not the production shape this test guards:
+    /// the regression it covers is the post-`/update` infinite reload loop, and
+    /// there is no wrapper for that loop to happen on Windows. Restricting the
+    /// test keeps the guarantee where the hazard exists rather than asserting a
+    /// layout the Windows installer never creates.
+    #[cfg(unix)]
     #[test]
     fn freshly_updated_release_daemon_reports_no_phantom_update() {
         let _guard = crate::storage::lock_test_env();
