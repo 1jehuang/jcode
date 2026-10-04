@@ -1170,7 +1170,7 @@ fn make_login_default(
         "openai-oauth"
     };
     let _ = crate::auth::account_pool::sync_order_with_default_route(route);
-    output::stderr_info(&format!(
+    output::stderr_info(format!(
         "{label} is now the default account for new windows."
     ));
     Ok(())
