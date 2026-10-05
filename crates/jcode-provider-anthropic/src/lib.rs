@@ -3,7 +3,12 @@ use jcode_message_types::{
 };
 use jcode_provider_core::anthropic_map_tool_name_for_oauth as map_tool_name_for_oauth;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
+
+mod history_repair;
+use history_repair::*;
 
 /// Claude Code billing attribution text observed in the official CLI's system
 /// prompt blocks.
@@ -71,6 +76,13 @@ pub fn format_messages_with_native(
     // deduplicated; otherwise the second copy is sent with no result after it.
     let repaired_messages = dedupe_tool_uses(&repaired_messages);
     let messages = &dedupe_tool_results(&repaired_messages);
+    // Anthropic requires every tool_use to be answered in the very next
+    // message. A tool whose result was persisted later (after another turn was
+    // written in between, e.g. a reload or a scheduled-task wake-up while tools
+    // were still running) leaves the call unanswered where it matters and its
+    // result stranded later on, and the request 400s permanently. Move such
+    // results up to directly follow their call.
+    let messages = &hoist_late_tool_results(messages);
 
     // First pass: collect all tool_use IDs and tool_result IDs
     let mut tool_use_ids: HashSet<String> = HashSet::new();
@@ -190,6 +202,9 @@ pub fn format_messages_with_native(
         }
     }
 
+    rewrite_orphaned_tool_results(&mut merged);
+    answer_unpaired_tool_uses(&mut merged);
+
     // Anthropic rejects a request whose final message is an assistant turn on
     // models that do not support assistant prefill ("This model does not support
     // assistant message prefill. The conversation must end with a user message.").
@@ -277,321 +292,6 @@ pub fn format_messages_with_native(
     }
 
     merged
-}
-
-/// Fold `ContentBlock::ToolReference` blocks into their tool_result.
-///
-/// The API rejects a tool_result that mixes `tool_reference` blocks with any
-/// other content, so the referencing tool_result carries only references; its
-/// original text moves to a sibling text block right after the tool_results,
-/// keeping them contiguous. Only references to tools in this request's
-/// catalog are emitted.
-fn apply_tool_references(
-    content: &mut Vec<ApiContentBlock>,
-    blocks: &[ContentBlock],
-    is_oauth: bool,
-    available: &std::collections::HashSet<&str>,
-) {
-    use std::collections::HashMap;
-    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
-    for block in blocks {
-        if let ContentBlock::ToolReference {
-            tool_use_id,
-            tool_name,
-        } = block
-        {
-            let name = if is_oauth {
-                map_tool_name_for_oauth(tool_name)
-            } else {
-                tool_name.clone()
-            };
-            if !available.contains(name.as_str()) {
-                continue;
-            }
-            let entry = refs.entry(sanitize_tool_id(tool_use_id)).or_default();
-            if !entry.contains(&name) {
-                entry.push(name);
-            }
-        }
-    }
-    if refs.is_empty() {
-        return;
-    }
-    let mut moved_text: Vec<ApiContentBlock> = Vec::new();
-    for block in content.iter_mut() {
-        let ApiContentBlock::ToolResult {
-            tool_use_id,
-            content: result_content,
-            ..
-        } = block
-        else {
-            continue;
-        };
-        let Some(names) = refs.remove(tool_use_id.as_str()) else {
-            continue;
-        };
-        let previous = std::mem::replace(
-            result_content,
-            ToolResultContent::Blocks(
-                names
-                    .into_iter()
-                    .map(|tool_name| ToolResultContentBlock::ToolReference { tool_name })
-                    .collect(),
-            ),
-        );
-        let texts: Vec<String> = match previous {
-            ToolResultContent::Text(text) => vec![text],
-            ToolResultContent::Blocks(blocks) => blocks
-                .into_iter()
-                .filter_map(|b| match b {
-                    ToolResultContentBlock::Text { text } => Some(text),
-                    _ => None,
-                })
-                .collect(),
-        };
-        for text in texts.into_iter().filter(|t| !t.trim().is_empty()) {
-            moved_text.push(ApiContentBlock::Text {
-                text,
-                cache_control: None,
-            });
-        }
-    }
-    if moved_text.is_empty() {
-        return;
-    }
-    let insert_at = content
-        .iter()
-        .rposition(|b| matches!(b, ApiContentBlock::ToolResult { .. }))
-        .map_or(0, |i| i + 1);
-    content.splice(insert_at..insert_at, moved_text);
-}
-
-/// Returns true when a tool_result body is one of the synthetic placeholders
-/// injected by the missing tool-output repair paths rather than real output.
-fn is_placeholder_tool_result(content: &str, is_error: Option<bool>) -> bool {
-    is_error.unwrap_or(false)
-        && (content.contains(TOOL_OUTPUT_MISSING_TEXT)
-            || content.contains("[Session interrupted before tool execution completed]"))
-}
-
-/// Repair persisted Anthropic native web-search blocks that no longer form a valid pair.
-///
-/// An interrupted turn can persist a server_tool_use without its matching
-/// web_search_tool_result. Replaying that block verbatim causes Anthropic to
-/// reject the entire request with a 400. In completed history, an orphaned
-/// server-tool block is dropped rather than inventing a server response; a
-/// final assistant turn ending on an unmatched server-tool block is preserved
-/// because that is the valid pause_turn resume shape.
-fn repair_dangling_anthropic_server_tools(messages: &[Message]) -> Vec<Message> {
-    use std::collections::HashSet;
-
-    let mut starts = HashSet::new();
-    let mut results = HashSet::new();
-    for msg in messages {
-        for block in &msg.content {
-            let ContentBlock::ProviderNative { provider, item } = block else {
-                continue;
-            };
-            if provider != jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC {
-                continue;
-            }
-            match item.get("type").and_then(Value::as_str) {
-                Some("server_tool_use") => {
-                    if let Some(id) = item.get("id").and_then(Value::as_str) {
-                        starts.insert(id.to_string());
-                    }
-                }
-                Some("web_search_tool_result") => {
-                    if let Some(id) = item.get("tool_use_id").and_then(Value::as_str) {
-                        results.insert(id.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let final_paused_id = messages.last().and_then(|message| {
-        if !matches!(message.role, Role::Assistant) {
-            return None;
-        }
-        let Some(ContentBlock::ProviderNative { provider, item }) = message.content.last() else {
-            return None;
-        };
-        if provider != jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC {
-            return None;
-        }
-        (item.get("type").and_then(Value::as_str) == Some("server_tool_use"))
-            .then(|| item.get("id").and_then(Value::as_str))
-            .flatten()
-            .map(str::to_string)
-    });
-
-    let mut repaired = Vec::with_capacity(messages.len());
-    for message in messages {
-        let mut content = Vec::with_capacity(message.content.len());
-        for block in &message.content {
-            let ContentBlock::ProviderNative { provider, item } = block else {
-                content.push(block.clone());
-                continue;
-            };
-
-            if provider != jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC {
-                content.push(block.clone());
-                continue;
-            }
-
-            match item.get("type").and_then(Value::as_str) {
-                Some("server_tool_use") => {
-                    let Some(id) = item.get("id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    if results.contains(id) || final_paused_id.as_deref() == Some(id) {
-                        content.push(block.clone());
-                    }
-                }
-                Some("web_search_tool_result") => {
-                    let Some(id) = item.get("tool_use_id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    if starts.contains(id) {
-                        content.push(block.clone());
-                    }
-                }
-                _ => content.push(block.clone()),
-            }
-        }
-
-        if !content.is_empty() {
-            let mut repaired_message = message.clone();
-            repaired_message.content = content;
-            repaired.push(repaired_message);
-        }
-    }
-    repaired
-}
-
-/// Keep only the first `tool_use` block for each id. Anthropic requires every
-/// `tool_use` to be answered by a `tool_result` in the very next message, and a
-/// repeated id can never satisfy that because its result is deduplicated to
-/// the first occurrence.
-fn dedupe_tool_uses(messages: &[Message]) -> Vec<Message> {
-    use std::collections::HashSet;
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut duplicate_seen = false;
-    for msg in messages {
-        for block in &msg.content {
-            if let ContentBlock::ToolUse { id, .. } = block
-                && !seen.insert(id.as_str())
-            {
-                duplicate_seen = true;
-            }
-        }
-    }
-    if !duplicate_seen {
-        return messages.to_vec();
-    }
-
-    let mut kept: HashSet<String> = HashSet::new();
-    let mut dropped = 0usize;
-    let out = messages
-        .iter()
-        .map(|msg| {
-            let mut msg = msg.clone();
-            msg.content.retain(|block| match block {
-                ContentBlock::ToolUse { id, .. } => {
-                    let keep = kept.insert(id.clone());
-                    if !keep {
-                        dropped += 1;
-                    }
-                    keep
-                }
-                _ => true,
-            });
-            msg
-        })
-        .collect();
-    jcode_logging::warn(&format!(
-        "[anthropic] Dropped {dropped} repeated tool_use block(s); each tool_use id may appear only once"
-    ));
-    out
-}
-
-/// Remove duplicate `tool_result` blocks so each `tool_use_id` is answered
-/// exactly once, preferring real output over a synthetic placeholder.
-/// Messages left with no content at all are dropped by the caller's
-/// `!content.is_empty()` guard.
-fn dedupe_tool_results(messages: &[Message]) -> Vec<Message> {
-    use std::collections::HashMap;
-
-    // Winner position per tool_use_id: the first real result if one exists,
-    // otherwise the first occurrence at all.
-    let mut winner: HashMap<&str, (usize, usize)> = HashMap::new();
-    let mut winner_is_real: HashMap<&str, bool> = HashMap::new();
-    let mut duplicate_seen = false;
-
-    for (mi, msg) in messages.iter().enumerate() {
-        for (bi, block) in msg.content.iter().enumerate() {
-            let ContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } = block
-            else {
-                continue;
-            };
-            let real = !is_placeholder_tool_result(content, *is_error);
-            match winner_is_real.get(tool_use_id.as_str()) {
-                None => {
-                    winner.insert(tool_use_id, (mi, bi));
-                    winner_is_real.insert(tool_use_id, real);
-                }
-                Some(false) if real => {
-                    // Upgrade a placeholder winner to the real output.
-                    winner.insert(tool_use_id, (mi, bi));
-                    winner_is_real.insert(tool_use_id, true);
-                    duplicate_seen = true;
-                }
-                Some(_) => duplicate_seen = true,
-            }
-        }
-    }
-
-    if !duplicate_seen {
-        return messages.to_vec();
-    }
-
-    let dropped = std::cell::Cell::new(0usize);
-    let out: Vec<Message> = messages
-        .iter()
-        .enumerate()
-        .map(|(mi, msg)| {
-            let mut msg = msg.clone();
-            let mut bi = 0usize;
-            msg.content.retain(|block| {
-                let index = bi;
-                bi += 1;
-                let ContentBlock::ToolResult { tool_use_id, .. } = block else {
-                    return true;
-                };
-                let keep = winner.get(tool_use_id.as_str()) == Some(&(mi, index));
-                if !keep {
-                    dropped.set(dropped.get() + 1);
-                }
-                keep
-            });
-            msg
-        })
-        .collect();
-
-    if dropped.get() > 0 {
-        jcode_logging::warn(&format!(
-            "[anthropic] Dropped {} duplicate tool_result block(s); each tool_use_id may be \
-             answered only once",
-            dropped.get()
-        ));
-    }
-    out
 }
 
 /// Convert our ContentBlock to Anthropic API format
@@ -748,32 +448,6 @@ pub fn format_content_blocks_with_native(
     result
 }
 
-/// Convert tool definitions to Anthropic API format
-/// Adds cache_control to the last tool for prompt caching
-/// Local tool names that are represented by the curated Claude-Code builtin
-/// definitions in OAuth mode. These keep their hand-tuned schemas/descriptions
-/// (which the Anthropic subscription endpoint expects) instead of the raw
-/// registry definitions; every other tool is forwarded as-is (see #409).
-/// Local tool names that already have a hand-tuned curated OAuth definition
-/// above, so the registry pass must not forward them a second time.
-///
-/// `schedule` is deliberately absent: its curated `ScheduleWakeup` schema had
-/// drifted from the real tool (it advertised `delaySeconds`/`reason`/`prompt`
-/// while the handler requires `task` + `wake_in_minutes`/`wake_at`), so every
-/// call failed with "task is required for action=create" (#706). Forwarding the
-/// real schema under the remapped name keeps the two in sync by construction.
-/// `bash` is likewise forwarded: its curated schema omitted timeout units and
-/// execution options (#1223). Only its OAuth name changes, not its definition.
-const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
-    "subagent",
-    "edit",
-    "glob",
-    "grep",
-    "read",
-    "skill_manage",
-    "write",
-];
-
 /// Normalize a tool schema for Anthropic's `input_schema`.
 ///
 /// Anthropic accepts JSON Schema combinators inside object properties but
@@ -789,125 +463,22 @@ fn anthropic_input_schema(schema: &Value) -> Value {
     jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::ANTHROPIC)
 }
 
+/// Convert tool definitions to Anthropic API format.
+///
+/// Every provider and auth route advertises the same registry tools with the
+/// same schemas. OAuth (subscription) only renames a few tools to their
+/// Claude-Code builtin names (`bash` -> `Bash`, ...); the definition itself is
+/// never replaced. Hand-curated OAuth schemas drifted from the real tools and
+/// silently dropped options like `intent` (#706, #1223).
 pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool) -> Vec<ApiTool> {
-    if is_oauth {
-        // A curated builtin may only be advertised when at least one backing
-        // local tool is actually registered. Otherwise the model calls e.g.
-        // `Agent`/`Glob`, the reverse mapping resolves to `subagent`/`glob`,
-        // and the registry lookup fails with "Unknown tool" (see #572).
-        let has_backing = |candidates: &[&str]| {
-            candidates
-                .iter()
-                .any(|candidate| tools.iter().any(|tool| tool.name == *candidate))
-        };
-        // Curated Claude-Code builtin tool definitions. These remain hand-tuned
-        // because the Anthropic OAuth (subscription) endpoint expects the
-        // builtin names with compatible schemas. Anything not represented here
-        // is appended from the real registry below so OAuth users keep the full
-        // toolset (websearch, webfetch, browser, codesearch, memory, ...).
-        let curated: Vec<(&[&str], ApiTool)> = vec![
-            (
-                &["subagent"],
-                ApiTool {
-                    name: "Agent".to_string(),
-                    description: "Launch a new agent to handle complex, multi-step tasks."
-                        .to_string(),
-                    input_schema: json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["edit"],
-                ApiTool {
-                    name: "Edit".to_string(),
-                    description: "Performs exact string replacements in files.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["glob"],
-                ApiTool {
-                    name: "Glob".to_string(),
-                    description: "Fast file pattern matching tool.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["grep"],
-                ApiTool {
-                    name: "Grep".to_string(),
-                    description: "A powerful search tool built on ripgrep.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"-B":{"type":"number"},"-A":{"type":"number"},"-C":{"type":"number"},"context":{"type":"number"},"-n":{"type":"boolean"},"-i":{"type":"boolean"},"type":{"type":"string"},"head_limit":{"type":"number"},"offset":{"type":"number"},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["read"],
-                ApiTool {
-                    name: "Read".to_string(),
-                    description: "Reads a file from the local filesystem.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["skill_manage"],
-                ApiTool {
-                    name: "Skill".to_string(),
-                    description: "Execute a skill within the main conversation".to_string(),
-                    input_schema: json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["write"],
-                ApiTool {
-                    name: "Write".to_string(),
-                    description: "Writes a file to the local filesystem.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-        ];
-        let mut out: Vec<ApiTool> = curated
-            .into_iter()
-            .filter(|(backing, _)| has_backing(backing))
-            .map(|(_, tool)| tool)
-            .collect();
-
-        // Forward every other registered tool, remapping its name to the
-        // OAuth-accepted form. This restores websearch/webfetch/browser/
-        // codesearch/memory/swarm/multiedit/open/etc. for subscription users,
-        // matching the documented "remap names, keep the full toolset" behavior.
-        for tool in tools {
-            if OAUTH_BUILTIN_LOCAL_TOOLS.contains(&tool.name.as_str()) {
-                continue;
-            }
-            out.push(ApiTool {
-                name: map_tool_name_for_oauth(&tool.name),
-                description: tool.description.clone(),
-                input_schema: anthropic_input_schema(&tool.input_schema),
-                cache_control: None,
-                defer_loading: tool.defer_loading,
-            });
-        }
-
-        return finish_tool_list(out, cache_ttl_1h);
-    }
-
     let out = tools
         .iter()
         .map(|tool| ApiTool {
-            name: tool.name.clone(),
+            name: if is_oauth {
+                map_tool_name_for_oauth(&tool.name)
+            } else {
+                tool.name.clone()
+            },
             description: tool.description.clone(),
             input_schema: anthropic_input_schema(&tool.input_schema),
             cache_control: None,

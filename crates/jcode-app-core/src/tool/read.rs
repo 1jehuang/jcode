@@ -355,7 +355,7 @@ fn is_image_file(path: &Path) -> bool {
         let ext = ext.to_string_lossy().to_lowercase();
         matches!(
             ext.as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico"
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff"
         )
     } else {
         false
@@ -397,33 +397,35 @@ fn handle_image_file(path: &Path, file_path: &str) -> Result<ToolOutput> {
         }
     }
 
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    let media_type = match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        "ico" => "image/x-icon",
-        _ => "image/png",
-    };
-
     const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024;
     let mut output = if file_size <= MAX_IMAGE_SIZE {
-        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
         let display_note = if terminal_displayed {
             "Displayed in terminal. "
         } else {
             ""
         };
-        ToolOutput::new(format!(
-            "Image: {} ({})\nDimensions: {}\n{}Image sent to model for vision analysis.",
-            file_path, size_str, dim_str, display_note
-        ))
-        .with_labeled_image(media_type, b64, file_path.to_string())
+        // Detect the format from the bytes and only ever attach a format every
+        // provider accepts. A stored BMP/ICO block used to 400 every later
+        // request in the session (#1712).
+        match crate::image_normalize::normalize_image_bytes(data) {
+            Ok(image) => {
+                let converted_note = image
+                    .converted_from
+                    .map(|format| format!("Converted from {format} to PNG. "))
+                    .unwrap_or_default();
+                let b64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image.data);
+                ToolOutput::new(format!(
+                    "Image: {} ({})\nDimensions: {}\n{}{}Image sent to model for vision analysis.",
+                    file_path, size_str, dim_str, display_note, converted_note
+                ))
+                .with_labeled_image(image.media_type, b64, file_path.to_string())
+            }
+            Err(reason) => ToolOutput::new(format!(
+                "Image: {} ({})\nDimensions: {}\n{}Not sent to the model: {}.",
+                file_path, size_str, dim_str, display_note, reason
+            )),
+        }
     } else {
         let display_note = if terminal_displayed {
             "\nDisplayed in terminal."

@@ -2926,3 +2926,27 @@ fn skill_installed_mid_session_keeps_system_prompt_stable_and_is_announced_once(
         .count();
     assert_eq!(count, 1);
 }
+
+/// Esc after a queued follow-up: a cancelled turn must not swallow the
+/// follow-up into history. It stays queued so the next turn can send it.
+#[tokio::test]
+async fn cancelled_turn_leaves_soft_interrupt_queued() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.queue_soft_interrupt(
+        "do this instead".to_string(),
+        Vec::new(),
+        false,
+        SoftInterruptSource::User,
+    );
+
+    agent.request_graceful_shutdown();
+    assert!(agent.inject_soft_interrupts().is_empty());
+    assert_eq!(agent.soft_interrupt_count(), 1, "still queued after cancel");
+
+    agent.graceful_shutdown_signal().reset();
+    assert_eq!(agent.inject_soft_interrupts().len(), 1);
+    assert_eq!(agent.soft_interrupt_count(), 0);
+}

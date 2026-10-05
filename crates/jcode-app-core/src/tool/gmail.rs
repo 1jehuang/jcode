@@ -113,7 +113,7 @@ impl Tool for GmailTool {
                 "action": {
                     "type": "string",
                     "enum": ["connect", "search", "read", "list", "draft", "update_draft", "list_drafts", "delete_draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
-                    "description": "Action. Revise a draft with 'update_draft' plus draft_id; omitted fields keep their values."
+                    "description": "Action. 'connect' runs browser OAuth. Revise drafts with 'update_draft' + draft_id, not a new draft."
                 },
                 "query": { "type": "string" },
                 "message_id": { "type": "string" },
