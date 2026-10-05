@@ -1,9 +1,9 @@
 {
-  "total": 3663,
+  "total": 3666,
   "totals_by_pattern": {
-    "dot_ok": 1399,
+    "dot_ok": 1401,
     "let_underscore": 1359,
-    "unwrap_or_default": 905
+    "unwrap_or_default": 906
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -597,7 +597,7 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/update.rs": {
-      "dot_ok": 3,
+      "dot_ok": 5,
       "let_underscore": 6,
       "unwrap_or_default": 9
     },
@@ -1032,7 +1032,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/provider/pricing.rs": {
-      "dot_ok": 2,
+      "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
@@ -1197,7 +1197,7 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-base/src/usage/api_keys.rs": {
-      "dot_ok": 5,
+      "dot_ok": 6,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
@@ -1212,7 +1212,7 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-base/src/usage/model.rs": {
-      "dot_ok": 0,
+      "dot_ok": 1,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
@@ -1227,9 +1227,9 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/usage/provider_fetch.rs": {
-      "dot_ok": 5,
+      "dot_ok": 4,
       "let_underscore": 0,
-      "unwrap_or_default": 5
+      "unwrap_or_default": 6
     },
     "crates/jcode-base/src/voice.rs": {
       "dot_ok": 0,
@@ -1604,7 +1604,7 @@
     "crates/jcode-provider-openrouter-runtime/src/lib.rs": {
       "dot_ok": 22,
       "let_underscore": 0,
-      "unwrap_or_default": 9
+      "unwrap_or_default": 8
     },
     "crates/jcode-provider-openrouter-runtime/src/models_catalog_parse.rs": {
       "dot_ok": 1,
@@ -1620,6 +1620,11 @@
       "dot_ok": 1,
       "let_underscore": 7,
       "unwrap_or_default": 0
+    },
+    "crates/jcode-provider-openrouter-runtime/src/request_headers.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
     },
     "crates/jcode-provider-openrouter/src/lib.rs": {
       "dot_ok": 14,

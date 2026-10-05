@@ -298,8 +298,8 @@ pub fn load_api_key() -> Result<String> {
 pub fn save_api_key(key: &str) -> Result<()> {
     let file_path = config_file_path()?;
     crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(key))?;
-
-    crate::env::set_var("CURSOR_API_KEY", key);
+    // File only (#1386): `load_api_key` falls back to this file, and a process
+    // env copy would shadow later edits and leak into child processes.
     Ok(())
 }
 

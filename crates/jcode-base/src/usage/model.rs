@@ -26,6 +26,29 @@ pub(super) fn mask_email(email: &str) -> String {
     format!("{}@{}", masked_local, domain)
 }
 
+/// Normalize a provider-supplied reset timestamp to RFC3339. Values arrive as
+/// RFC3339 strings or epoch numbers (seconds, or milliseconds when too large
+/// for seconds); protobuf int64 fields JSON-encode as decimal strings, so
+/// strings are tried as numbers first. Non-positive epochs mean "unknown".
+pub(super) fn reset_timestamp_from_json_value(value: &serde_json::Value) -> Option<String> {
+    let epoch = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse::<f64>().ok()));
+    if let Some(epoch) = epoch {
+        if !epoch.is_finite() || epoch <= 0.0 {
+            return None;
+        }
+        let secs = if epoch > 1.0e12 {
+            epoch / 1000.0
+        } else {
+            epoch
+        };
+        let dt = chrono::DateTime::from_timestamp(secs as i64, 0)?;
+        return Some(dt.to_rfc3339());
+    }
+    value.as_str().map(|text| text.to_string())
+}
+
 pub(super) fn openai_provider_display_name(
     label: &str,
     email: Option<&str>,

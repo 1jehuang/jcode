@@ -398,7 +398,7 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
-    if auth::cursor::has_cursor_api_key() {
+    if auth::cursor::has_cursor_native_auth() {
         tasks.spawn(async {
             fetch_cursor_usage_report().await.map(|mut report| {
                 attach_activity(&mut report, "cursor");
@@ -437,7 +437,7 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
         "copilot" => auth::copilot::has_copilot_credentials(),
         "antigravity" => auth::antigravity::has_cached_auth(),
         "gemini" => auth::gemini::has_api_key(),
-        "cursor" => auth::cursor::has_cursor_api_key(),
+        "cursor" => auth::cursor::has_cursor_native_auth(),
         "jcode" => crate::subscription_catalog::configured_api_key().is_some(),
         _ => {
             // Direct OpenAI-compatible profiles are reported by the API-key
