@@ -62,6 +62,48 @@ impl KeyBinding {
     }
 }
 
+/// Map a Korean 2-Set (Dubeolsik) jamo to the US-QWERTY letter on the same physical key.
+/// With the Korean input source active, terminals report Cmd/Ctrl/Alt chords with the jamo.
+pub fn dubeolsik_jamo_to_latin(ch: char) -> Option<char> {
+    Some(match ch {
+        'ㅂ' => 'q',
+        'ㅈ' => 'w',
+        'ㄷ' => 'e',
+        'ㄱ' => 'r',
+        'ㅅ' => 't',
+        'ㅛ' => 'y',
+        'ㅕ' => 'u',
+        'ㅑ' => 'i',
+        'ㅐ' => 'o',
+        'ㅔ' => 'p',
+        'ㅁ' => 'a',
+        'ㄴ' => 's',
+        'ㅇ' => 'd',
+        'ㄹ' => 'f',
+        'ㅎ' => 'g',
+        'ㅗ' => 'h',
+        'ㅓ' => 'j',
+        'ㅏ' => 'k',
+        'ㅣ' => 'l',
+        'ㅋ' => 'z',
+        'ㅌ' => 'x',
+        'ㅊ' => 'c',
+        'ㅍ' => 'v',
+        'ㅠ' => 'b',
+        'ㅜ' => 'n',
+        'ㅡ' => 'm',
+        // Shifted jamo map to the uppercase letter, matching Shift+letter encodings.
+        'ㅃ' => 'Q',
+        'ㅉ' => 'W',
+        'ㄸ' => 'E',
+        'ㄲ' => 'R',
+        'ㅆ' => 'T',
+        'ㅒ' => 'O',
+        'ㅖ' => 'P',
+        _ => return None,
+    })
+}
+
 pub fn macos_option_char_to_ascii_key(code: KeyCode) -> Option<char> {
     let KeyCode::Char(ch) = code else {
         return None;
@@ -596,6 +638,16 @@ mod tests {
             binding.matches_for_platform(code, mods, true),
             "Cmd+B kitty sequence must trigger the open_resume binding"
         );
+    }
+
+    #[test]
+    fn dubeolsik_jamo_map_to_their_physical_latin_keys() {
+        let row = "ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔㅁㄴㅇㄹㅎㅗㅓㅏㅣㅋㅌㅊㅍㅠㅜㅡ";
+        let latin: String = row.chars().filter_map(dubeolsik_jamo_to_latin).collect();
+        assert_eq!(latin, "qwertyuiopasdfghjklzxcvbnm");
+        assert_eq!(dubeolsik_jamo_to_latin('ㅃ'), Some('Q'));
+        assert_eq!(dubeolsik_jamo_to_latin('가'), None);
+        assert_eq!(dubeolsik_jamo_to_latin('v'), None);
     }
 
     #[test]

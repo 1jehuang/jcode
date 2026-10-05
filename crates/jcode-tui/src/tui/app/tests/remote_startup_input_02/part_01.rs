@@ -952,6 +952,42 @@ fn test_remote_super_backspace_deletes_previous_word() {
 }
 
 #[test]
+fn test_handle_key_korean_jamo_ctrl_chord_runs_the_latin_shortcut() {
+    // Korean 2-Set: the physical K key yields ㅏ; Ctrl+ㅏ must act like Ctrl+K.
+    let mut app = create_test_app();
+    app.set_input_for_test("hello world again");
+
+    app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
+        .unwrap();
+    app.handle_key(KeyCode::Char('ㅏ'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    assert_eq!(app.input(), "hello world ");
+}
+
+#[test]
+fn test_handle_key_korean_jamo_cmd_chord_does_not_type_the_jamo() {
+    let mut app = create_test_app();
+    app.set_input_for_test("hi");
+
+    app.handle_key(KeyCode::Char('ㅍ'), KeyModifiers::SUPER)
+        .unwrap();
+
+    assert_eq!(app.input(), "hi");
+}
+
+#[test]
+fn test_handle_key_plain_korean_jamo_still_types() {
+    let mut app = create_test_app();
+    app.set_input_for_test("");
+
+    app.handle_key(KeyCode::Char('ㅍ'), KeyModifiers::NONE)
+        .unwrap();
+
+    assert_eq!(app.input(), "ㅍ");
+}
+
+#[test]
 fn test_handle_key_ctrl_k_deletes_to_end() {
     let mut app = create_test_app();
     app.set_input_for_test("hello world again");

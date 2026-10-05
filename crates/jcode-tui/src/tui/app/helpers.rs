@@ -217,6 +217,24 @@ pub(super) fn partition_queued_messages(
     (user_messages, reminder, display_system_messages)
 }
 
+/// Fold a Korean 2-Set jamo produced under a Ctrl/Alt/Cmd chord back to the physical
+/// letter key, so `cmd+b` and `ctrl+r` match with the Korean input source active.
+pub(super) fn hangul_chord_fallback_to_latin(code: &mut KeyCode, modifiers: &KeyModifiers) {
+    let chord = KeyModifiers::CONTROL
+        | KeyModifiers::ALT
+        | KeyModifiers::SUPER
+        | KeyModifiers::META
+        | KeyModifiers::HYPER;
+    if !modifiers.intersects(chord) {
+        return;
+    }
+    if let KeyCode::Char(c) = *code
+        && let Some(latin) = jcode_tui_core::keybind::dubeolsik_jamo_to_latin(c)
+    {
+        *code = KeyCode::Char(latin);
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn ctrl_bracket_fallback_to_esc(code: &mut KeyCode, modifiers: &mut KeyModifiers) {
     if !modifiers.contains(KeyModifiers::CONTROL) {
