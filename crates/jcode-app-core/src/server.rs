@@ -1300,7 +1300,7 @@ impl Server {
             .await;
         });
 
-        // Log when we receive SIGTERM for debugging
+        // On SIGTERM: log, unregister, let in-flight session saves finish, exit.
         #[cfg(unix)]
         {
             let sigterm_server_name = self.identity.name.clone();
@@ -1308,9 +1308,9 @@ impl Server {
                 use tokio::signal::unix::{SignalKind, signal};
                 if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
                     sigterm.recv().await;
-                    crate::logging::info("Server received SIGTERM, shutting down gracefully");
                     crate::lid_override::release_for_exiting_process();
                     let _ = crate::registry::unregister_server(&sigterm_server_name).await;
+                    lifecycle::drain_session_saves_before_exit().await;
                     std::process::exit(0);
                 }
             });
