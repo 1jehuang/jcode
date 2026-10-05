@@ -172,6 +172,7 @@ pub(super) fn cancel_pending_resume(session_id: &str) -> bool {
     }
 }
 
+#[cfg(test)]
 pub(super) fn has_pending_resume(session_id: &str) -> bool {
     PENDING
         .lock()
