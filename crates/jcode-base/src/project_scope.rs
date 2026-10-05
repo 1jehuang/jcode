@@ -18,10 +18,7 @@ use std::path::Path;
 /// and relative segments into one spelling. It fails for paths that do not
 /// exist yet, so the lexical fallback is used instead.
 fn normalize_path(path: &Path) -> String {
-    let resolved = path
-        .canonicalize()
-        .ok()
-        .unwrap_or_else(|| path.to_path_buf());
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let text = strip_verbatim_prefix(&resolved.to_string_lossy());
     trim_trailing_separator(&text)
 }

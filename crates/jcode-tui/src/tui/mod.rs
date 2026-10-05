@@ -1803,26 +1803,25 @@ pub(crate) fn subscribe_metadata(
             jcode_selfdev_types::client_selfdev_requested().then_some(true),
         );
     }
-    let working_dir = std::env::current_dir().ok();
     resolve_subscribe_metadata(
-        working_dir.as_deref(),
+        client_launch_working_dir().as_deref(),
         remote_working_dir,
         jcode_selfdev_types::client_selfdev_requested(),
     )
 }
 
 pub(crate) fn resolve_subscribe_metadata(
-    client_working_dir: Option<&std::path::Path>,
+    client_working_dir: Option<&str>,
     remote_working_dir: Option<&str>,
     client_selfdev_requested: bool,
 ) -> (Option<String>, Option<bool>) {
     let working_dir_str = remote_working_dir
         .map(str::to_string)
-        .or_else(|| client_working_dir.map(|p| p.display().to_string()));
+        .or_else(|| client_working_dir.map(str::to_string));
 
     let mut selfdev = client_selfdev_requested;
     if !selfdev && let Some(dir) = client_working_dir {
-        let mut current = Some(dir);
+        let mut current = Some(std::path::Path::new(dir));
         while let Some(path) = current {
             if crate::build::is_jcode_repo(path) {
                 selfdev = true;
@@ -2096,7 +2095,7 @@ mod tests {
 
     #[test]
     fn subscribe_metadata_prefers_remote_working_dir_override() {
-        let local_dir = std::path::Path::new("/client/project");
+        let local_dir = "/client/project";
         let (working_dir, selfdev) =
             resolve_subscribe_metadata(Some(local_dir), Some("/server/project"), false);
 
@@ -2106,7 +2105,7 @@ mod tests {
 
     #[test]
     fn subscribe_metadata_uses_client_cwd_without_override() {
-        let local_dir = std::path::Path::new("/client/project");
+        let local_dir = "/client/project";
         let (working_dir, _selfdev) = resolve_subscribe_metadata(Some(local_dir), None, false);
 
         assert_eq!(working_dir.as_deref(), Some("/client/project"));

@@ -50,8 +50,7 @@ fn parse_release_semver(value: &str) -> Option<String> {
 pub fn runtime_release_semver() -> Option<&'static str> {
     RUNTIME_RELEASE_SEMVER
         .get_or_init(|| {
-            std::env::var("JCODE_RUNTIME_RELEASE_SEMVER")
-                .ok()
+            present_env("JCODE_RUNTIME_RELEASE_SEMVER")
                 .and_then(|value| parse_release_semver(&value))
         })
         .as_deref()
@@ -68,10 +67,7 @@ pub fn version() -> &'static str {
 }
 
 fn runtime_identity_value(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    present_env(name)
 }
 
 /// Runtime git hash, honoring the fast-release wrapper identity.
@@ -134,6 +130,16 @@ pub fn present(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Read one environment variable through the crate's "blank means absent" rule.
+///
+/// Every env read in this crate goes through here. A variable that is unset and
+/// a variable that is set to whitespace are the same answer, and the difference
+/// matters because a set-but-empty value used to short-circuit the metadata file
+/// and the git fallback, stamping the binary `(unknown)`.
+pub fn present_env(name: &str) -> Option<String> {
+    present(std::env::var(name).ok())
+}
+
 /// Resolve one build-metadata value: env var, then a metadata file, then a git
 /// command.
 ///
@@ -159,7 +165,7 @@ pub fn resolve_build_value(
     metadata_lookup: impl FnOnce() -> Option<String>,
     git_lookup: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
-    match present(std::env::var(env_name).ok()) {
+    match present_env(env_name) {
         Some(value) => Some(value),
         None => present(metadata_lookup()).or_else(|| present(git_lookup())),
     }
