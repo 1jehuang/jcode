@@ -1420,6 +1420,7 @@ fn remote_effort_rejection_after_model_switch_keeps_new_model_effort() {
             error: None,
             resolved_credential: None,
             reasoning_effort: Some("high".to_string()),
+            context_window: None,
         },
         &mut remote,
     );
