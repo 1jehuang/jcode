@@ -360,10 +360,21 @@ fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent 
 /// and file managers put the copied files here as file URLs). Only consulted
 /// to confirm an ambiguous image name, so ordinary text pastes never pay it.
 fn read_clipboard_file_list() -> Vec<std::path::PathBuf> {
-    arboard::Clipboard::new()
-        .ok()
-        .and_then(|mut clipboard| clipboard.get().file_list().ok())
-        .unwrap_or_default()
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            crate::logging::info(&format!("clipboard unavailable for file list: {error}"));
+            return Vec::new();
+        }
+    };
+    match clipboard.get().file_list() {
+        Ok(files) => files,
+        // Most clipboards carry no file list; the name then stays unconfirmed.
+        Err(error) => {
+            crate::logging::info(&format!("clipboard has no file list: {error}"));
+            Vec::new()
+        }
+    }
 }
 
 /// True when clipboard text is just a reference to a picture: a single line
@@ -396,7 +407,7 @@ where
         .strip_prefix("file://")
         .or_else(|| unquoted.strip_prefix("FILE://"))
         .unwrap_or(unquoted);
-    if image_media_type(std::path::Path::new(&path.to_ascii_lowercase())).is_none() {
+    if !paste_guard::has_image_extension(std::path::Path::new(path)) {
         return false;
     }
     if !path.chars().any(char::is_whitespace) {
