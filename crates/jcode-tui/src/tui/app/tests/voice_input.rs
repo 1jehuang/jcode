@@ -113,3 +113,45 @@ fn voice_input_help_and_command_are_registered() {
     let last = app.display_messages().last().expect("usage shown");
     assert!(last.content.contains("Usage: /voice"), "{}", last.content);
 }
+
+#[test]
+fn voice_transcript_keeps_image_undo_history_with_text_undo_history() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.handle_paste_image_for_test("image/png", "QQ==");
+    assert_eq!(app.input(), "[image 1]");
+
+    super::remote::submit_voice_transcript(&mut app, "look at this");
+    assert_eq!(app.input(), "[image 1]", "typed draft is kept");
+    assert_eq!(app.pending_images.len(), 1);
+
+    // Undoing the paste removes the placeholder and its attachment together.
+    app.undo_input_change();
+    assert_eq!(app.input(), "");
+    assert!(
+        app.pending_images.is_empty(),
+        "undo must not leave an attachment the draft does not show"
+    );
+}
+
+#[test]
+fn voice_transcript_keeps_ctrl_c_cleared_images_for_undo() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.handle_paste_image_for_test("image/png", "QQ==");
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.pending_images.is_empty());
+
+    super::remote::submit_voice_transcript(&mut app, "never mind");
+
+    app.undo_input_change();
+    assert_eq!(app.input(), "[image 1]");
+    assert_eq!(
+        app.pending_images,
+        vec![("image/png".to_string(), "QQ==".to_string())],
+        "undoing the clear restores its image"
+    );
+}
