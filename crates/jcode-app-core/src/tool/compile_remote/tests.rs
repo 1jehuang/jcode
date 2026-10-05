@@ -1,6 +1,6 @@
 use super::*;
 use base64::Engine;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const KEY: &str = "synthetic-compile-test-key";
@@ -137,7 +137,6 @@ impl Environment {
             .collect();
         crate::env::remove_var("JCODE_API_KEY");
         crate::env::remove_var("JCODE_API_BASE");
-        *ACCESS.lock().unwrap() = None;
         Self {
             saved,
             _sandbox: sandbox,
@@ -152,7 +151,6 @@ impl Environment {
 
 impl Drop for Environment {
     fn drop(&mut self) {
-        *ACCESS.lock().unwrap() = None;
         for (key, value) in &self.saved {
             match value {
                 Some(value) => crate::env::set_var(key, value),
@@ -426,7 +424,7 @@ fn validates_timeout_action_and_command_without_network() {
 }
 
 #[tokio::test]
-async fn execute_denied_access_precedes_snapshot_and_upload_even_with_cached_ready() {
+async fn execute_denied_access_precedes_snapshot_and_upload() {
     let env = Environment::new();
     let root = env._sandbox.root().join("does-not-exist");
     let tool = CompileRemoteTool::new();
@@ -446,16 +444,11 @@ async fn execute_denied_access_precedes_snapshot_and_upload_even_with_cached_rea
         ),
         (200, me("active", None), "not enabled"),
         (401, "invalid auth".into(), "Not signed in"),
-        (503, "offline".into(), "could not yet be verified"),
-        (200, "invalid-json".into(), "could not yet be verified"),
+        (503, "offline".into(), "could not be verified"),
+        (200, "invalid-json".into(), "could not be verified"),
     ] {
         let server = Server::new(move |_| response(status, &body)).await;
         env.configure(&server.base);
-        *ACCESS.lock().unwrap() = Some(CachedAccess {
-            identity: identity(&server.base, KEY),
-            checked_at: Instant::now(),
-            access: Access::Ready,
-        });
         let error = tool
             .execute(json!({"command":"build"}), context(&root))
             .await
@@ -478,8 +471,24 @@ async fn execute_denied_access_precedes_snapshot_and_upload_even_with_cached_rea
         .err()
         .unwrap()
         .to_string();
-    assert!(error.contains("could not yet be verified"));
+    assert!(error.contains("could not be verified"));
     assert!(!error.contains("canonicalize"));
+}
+
+#[tokio::test]
+async fn description_is_static_across_account_states() {
+    let env = Environment::new();
+    let tool = CompileRemoteTool::new();
+    let signed_out = tool.description().to_string();
+    for (status, body) in [(200, me("active", Some(true))), (503, "offline".into())] {
+        let server = Server::new(move |_| response(status, &body)).await;
+        env.configure(&server.base);
+        let _ = tool
+            .execute(json!({"action":"status"}), context(env._sandbox.root()))
+            .await;
+        assert_eq!(tool.description(), signed_out);
+    }
+    assert_eq!(signed_out, DESCRIPTION);
 }
 
 #[tokio::test]

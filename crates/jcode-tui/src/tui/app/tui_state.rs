@@ -1226,6 +1226,10 @@ impl crate::tui::TuiState for App {
                         ContentBlock::ToolReference { tool_name, .. } => {
                             user_chars += tool_name.len();
                         }
+                        ContentBlock::ProviderNative { item, .. } => {
+                            tool_result_count += 1;
+                            tool_result_chars += item.to_string().len();
+                        }
                     }
                 }
             }
