@@ -20,6 +20,9 @@ use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+#[path = "comm_session_spawn_tests.rs"]
+mod comm_session_spawn_tests;
+
 struct MockProvider;
 
 #[async_trait]
@@ -1183,27 +1186,4 @@ async fn spawn_admission_lock_serializes_per_swarm_only() {
             .await
             .is_ok()
     );
-}
-
-#[test]
-fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
-    use super::resolve_swarm_spawn_effort;
-
-    // Explicit spawn argument wins over the config pin (#1165).
-    assert_eq!(
-        resolve_swarm_spawn_effort(Some("low"), Some("medium")),
-        Some("low".to_string())
-    );
-    // A missing or blank spawn argument falls back to `agents.swarm_effort`.
-    assert_eq!(
-        resolve_swarm_spawn_effort(None, Some("medium")),
-        Some("medium".to_string())
-    );
-    assert_eq!(
-        resolve_swarm_spawn_effort(Some("  "), Some(" medium ")),
-        Some("medium".to_string())
-    );
-    // With neither, the worker inherits the provider-wide effort.
-    assert_eq!(resolve_swarm_spawn_effort(None, None), None);
-    assert_eq!(resolve_swarm_spawn_effort(Some(""), Some("")), None);
 }

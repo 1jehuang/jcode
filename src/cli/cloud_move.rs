@@ -1644,20 +1644,13 @@ fn step(phase: &str, detail: &str) {
 // TUI handoff (`/cloud`, `/local`)
 // ---------------------------------------------------------------------------
 
-static STASHED_HANDOFF: std::sync::Mutex<Option<crate::tui::CloudHandoff>> =
+pub(super) static STASHED_HANDOFF: std::sync::Mutex<Option<crate::tui::CloudHandoff>> =
     std::sync::Mutex::new(None);
 
 pub(crate) fn stash_handoff(handoff: crate::tui::CloudHandoff) {
     *STASHED_HANDOFF
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handoff);
-}
-
-pub(crate) fn take_stashed_handoff() -> Option<crate::tui::CloudHandoff> {
-    STASHED_HANDOFF
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()
 }
 
 /// Replace this client with one attached where the session now lives.

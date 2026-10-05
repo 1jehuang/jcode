@@ -7,11 +7,12 @@ mod bg;
 #[cfg(unix)]
 pub(crate) mod bridge_reload;
 mod browser;
-mod communicate;
+pub(crate) mod communicate;
 mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
+pub(crate) use self::config_edit_notice::comparable_path as config_comparable_path;
 mod conversation_search;
 mod debug_socket;
 mod desktop_selfdev;
@@ -479,11 +480,14 @@ impl Registry {
             "skill_manage",
             skill::SkillTool::new(skills.clone()),
         );
-        // The swarm tool captures the user-editable swarm prompt in its
-        // description. Construct it once per session rather than sharing the
-        // process-wide instance. Existing sessions keep their stable tool
-        // definition (and provider KV cache), while newly created agents see
-        // prompt edits immediately.
+        // The swarm tool's description carries the project swarm prompt, which
+        // is per-session data, so this shared instance holds only the base
+        // description. Each agent's definition builder attaches its own
+        // project's prompt on top (see `Agent::apply_project_swarm_prompt`),
+        // which is also what makes prompt edits visible without a restart.
+        // Do not resolve the prompt here: at registry construction the session's
+        // working directory is not known, and the daemon's cwd belongs to
+        // whichever project happened to start the process (P2.2).
         Self::insert_tool(&mut tools, "swarm", communicate::CommunicateTool::new());
         tools
     }
@@ -654,6 +658,19 @@ impl Registry {
         crate::util::estimate_tokens(s)
     }
 
+    /// Render a tool-supplied path for a lifecycle field.
+    ///
+    /// A path that cannot be resolved is shown as such. The tempting fallback is
+    /// the path as written, but that is exactly what `resolve_path` used to hand
+    /// back and the OS then resolved against the daemon's directory, so the field
+    /// would name a file in whichever repository started this process.
+    fn resolved_display(ctx: &ToolContext, path: &std::path::Path) -> String {
+        match ctx.resolve_path(path) {
+            Ok(resolved) => resolved.display().to_string(),
+            Err(_) => format!("{} (unresolved)", path.display()),
+        }
+    }
+
     fn tool_lifecycle_fields(
         phase: &str,
         requested_name: &str,
@@ -700,7 +717,7 @@ impl Registry {
                 if let Some(path) = object.get(key).and_then(Value::as_str) {
                     touched_paths.push(format!(
                         "{key}:{}",
-                        ctx.resolve_path(std::path::Path::new(path)).display()
+                        Self::resolved_display(ctx, std::path::Path::new(path))
                     ));
                 }
             }
@@ -708,7 +725,7 @@ impl Registry {
                 for path in paths.iter().filter_map(Value::as_str).take(8) {
                     touched_paths.push(format!(
                         "paths:{}",
-                        ctx.resolve_path(std::path::Path::new(path)).display()
+                        Self::resolved_display(ctx, std::path::Path::new(path))
                     ));
                 }
             }
@@ -1332,7 +1349,10 @@ impl Registry {
                 working_dir,
             )))
         } else {
-            Arc::new(RwLock::new(McpManager::new()))
+            // Honor `working_dir` here too. `McpManager::new()` binds to the
+            // process cwd, which for the daemon is one arbitrary project, so
+            // passing it None would resolve another project's `.mcp.json`.
+            Arc::new(RwLock::new(McpManager::owned_for_dir(working_dir)))
         };
 
         // Register MCP management tool immediately (with registry for dynamic tool registration)
@@ -1667,33 +1687,13 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 #[cfg(test)]
-mod mcp_allow_list_tests {
-    use super::{tool_name_is_allowed, tool_name_is_disabled};
-    use std::collections::HashSet;
-
-    #[test]
-    fn allowing_mcp_also_allows_dynamic_server_tools() {
-        let allowed = HashSet::from(["mcp".to_string()]);
-
-        assert!(tool_name_is_allowed(&allowed, "mcp"));
-        assert!(tool_name_is_allowed(&allowed, "mcp__filesystem__read_file"));
-        assert!(!tool_name_is_allowed(&allowed, "mcpish"));
-        assert!(!tool_name_is_allowed(&allowed, "bash"));
-    }
-
-    #[test]
-    fn disabling_mcp_also_disables_dynamic_server_tools() {
-        let disabled = HashSet::from(["mcp".to_string()]);
-
-        assert!(tool_name_is_disabled(&disabled, "mcp"));
-        assert!(tool_name_is_disabled(
-            &disabled,
-            "mcp__filesystem__read_file"
-        ));
-        assert!(!tool_name_is_disabled(&disabled, "mcpish"));
-        assert!(!tool_name_is_disabled(&disabled, "bash"));
-    }
-}
+#[path = "mcp_allow_list_tests.rs"]
+mod mcp_allow_list_tests;
 
 #[cfg(test)]
 mod tests;
+
+// Own file so these do not grow `tests.rs`, which is already over the test-size
+// ratchet, and so `read.rs`'s isolation guarantees are readable in one place.
+#[cfg(test)]
+mod read_tests;

@@ -427,7 +427,30 @@ async fn inspect_reload_wait_status_reports_failed_when_reload_pid_is_dead() {
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
     crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
-    let dead_pid = std::process::id().saturating_add(1_000_000);
+    // Use a real reaped child rather than `std::process::id() + 1_000_000`.
+    // That offset is a guess: Windows allocates pids from a bounded range that
+    // cycles, so an offset pid can name a live process, and the assertion below
+    // then fails with "test requires a definitely-dead pid". Measured on a busy
+    // Windows host: 1269 live processes spanning pid 0..=66516, so an offset of
+    // a million happened to be unused -- which is luck, not a guarantee. pid 0
+    // is not an option either: it is the System Idle Process and reports alive.
+    //
+    // A child that has exited and been waited on stays dead until its pid is
+    // recycled, and the recycle window is orders of magnitude longer than the
+    // few microseconds this test needs. The retry loop in
+    // `reload_state::tests::spawn_and_reap_dead_pid` covers the residual case.
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/C", "exit", "0"])
+        .spawn()
+        .expect("spawn child");
+    #[cfg(not(windows))]
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("spawn child");
+    let dead_pid = child.id();
+    let _ = child.wait().expect("wait for child");
     assert!(
         !reload_process_alive(dead_pid),
         "test requires a definitely-dead pid"

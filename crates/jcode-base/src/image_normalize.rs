@@ -103,13 +103,13 @@ pub fn normalize_image_bytes(data: Vec<u8>) -> Result<ProviderImage, String> {
     }
     match sniff_other_format(&data) {
         Some(format @ ("BMP" | "ICO" | "TIFF")) => match reencode_png(&data) {
-            Some(png) => Ok(ProviderImage {
+            Ok(png) => Ok(ProviderImage {
                 media_type: "image/png",
                 data: png,
                 converted_from: Some(format),
             }),
-            None => Err(format!(
-                "{format} data could not be decoded, so it cannot be sent to the model"
+            Err(err) => Err(format!(
+                "{format} data could not be decoded ({err}), so it cannot be sent to the model"
             )),
         },
         Some(format) => Err(format!(
@@ -119,11 +119,11 @@ pub fn normalize_image_bytes(data: Vec<u8>) -> Result<ProviderImage, String> {
     }
 }
 
-fn reencode_png(data: &[u8]) -> Option<Vec<u8>> {
-    let img = image::load_from_memory(data).ok()?;
+fn reencode_png(data: &[u8]) -> Result<Vec<u8>, image::ImageError> {
+    let img = image::load_from_memory(data)?;
     let mut out = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut out, image::ImageFormat::Png).ok()?;
-    Some(out.into_inner())
+    img.write_to(&mut out, image::ImageFormat::Png)?;
+    Ok(out.into_inner())
 }
 
 #[cfg(test)]

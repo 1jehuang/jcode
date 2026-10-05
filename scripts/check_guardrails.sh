@@ -14,6 +14,9 @@
 # Note: CI tracks the `stable` toolchain. If your local stable is behind, clippy
 # can pass here and fail in CI on a newly added lint, so this warns when the two
 # are likely to disagree. Run `rustup update stable` to align them.
+#
+# Note: the six budget ratchets run through scripts/check_all_budgets.py, which
+# reports every failure rather than stopping at the first. That mirrors ci.yml.
 
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -24,7 +27,7 @@ for arg in "$@"; do
     case "$arg" in
         --fix) FIX=true ;;
         --skip-slow) SKIP_SLOW=true ;;
-        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -47,7 +50,8 @@ run_gate() {
     return 1
 }
 
-# Ratchet scripts share a --update flag to accept intentional growth.
+# Only check_all_budgets.py takes --update now; it forwards the flag to every
+# ratchet it runs, so rebaselining stays one command.
 run_ratchet() {
     local label=$1 script=$2
     if $FIX; then
@@ -82,12 +86,13 @@ fi
 # 8 of 9 jobs and fails Windows at "Build release binary".
 run_gate "Cargo.lock is up to date" cargo metadata --locked --format-version 1
 run_gate "warning budget" bash scripts/check_warning_budget.sh
-run_ratchet "oversized-file ratchet" check_code_size_budget.py
-run_ratchet "oversized-test ratchet" check_test_size_budget.py
-run_ratchet "panic-prone usage ratchet" check_panic_budget.py
-run_ratchet "swallowed-error usage ratchet" check_swallowed_error_budget.py
+# One gate for all budget ratchets, matching ci.yml's single step. The
+# aggregator keeps going after a failure and reports all of them, so a red run
+# here says how many ratchets are red instead of naming only the first.
+run_ratchet "all budget ratchets" check_all_budgets.py
 run_gate "crate dependency boundaries" python3 scripts/check_dependency_boundaries.py
-run_gate "wildcard re-export ratchet" python3 scripts/check_wildcard_reexport_budget.py
+run_gate "test the all-budgets ratchet runner" \
+    python3 -m unittest scripts/test_check_all_budgets.py
 
 # Onboarding state-space invariants. The onboarding flow is a graph, and the
 # properties that keep users unstuck (no dead ends, every failure has a recovery

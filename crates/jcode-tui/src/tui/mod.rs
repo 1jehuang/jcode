@@ -244,109 +244,8 @@ fn reapply_terminal_modes_after_focus_to(
 }
 
 #[cfg(test)]
-mod terminal_mode_tests {
-    use super::{
-        disable_keyboard_enhancement_to, enable_keyboard_enhancement_to,
-        reapply_keyboard_enhancement_to, reapply_terminal_modes_after_focus_to,
-        reapply_terminal_modes_to,
-    };
-
-    #[test]
-    fn tmux_keyboard_lifecycle_requests_and_resets_extended_keys() {
-        let mut output = Vec::new();
-        enable_keyboard_enhancement_to(&mut output, true).unwrap();
-        assert_eq!(output, b"\x1b[>4;2m\x1b[>7u");
-
-        output.clear();
-        reapply_keyboard_enhancement_to(&mut output, true).unwrap();
-        assert_eq!(output, b"\x1b[>4;2m\x1b[=7u");
-
-        output.clear();
-        disable_keyboard_enhancement_to(&mut output, true).unwrap();
-        assert_eq!(output, b"\x1b[>4;0m\x1b[<1u");
-    }
-
-    #[test]
-    fn outside_tmux_keyboard_lifecycle_keeps_kitty_protocol_only() {
-        let mut output = Vec::new();
-        enable_keyboard_enhancement_to(&mut output, false).unwrap();
-        assert_eq!(output, b"\x1b[>7u");
-
-        output.clear();
-        reapply_keyboard_enhancement_to(&mut output, false).unwrap();
-        assert_eq!(output, b"\x1b[=7u");
-
-        output.clear();
-        disable_keyboard_enhancement_to(&mut output, false).unwrap();
-        assert_eq!(output, b"\x1b[<1u");
-    }
-
-    #[test]
-    fn reapply_omits_keyboard_protocols_when_disabled() {
-        let mut output = Vec::new();
-        reapply_terminal_modes_to(&mut output, false, false, false).unwrap();
-        assert_eq!(output, b"\x1b[?2004h");
-    }
-
-    #[test]
-    fn reapply_omits_mouse_sequences_when_capture_is_disabled() {
-        let mut output = Vec::new();
-        reapply_terminal_modes_to(&mut output, false, true, true).unwrap();
-
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.starts_with("\x1b[?2004h\x1b[?1004h"));
-        assert!(!output.contains("\x1b[?1000h"));
-        assert!(output.contains("\x1b[="));
-    }
-
-    #[test]
-    fn reapply_emits_configured_idempotent_modes_without_keyboard_push() {
-        let mut output = Vec::new();
-        reapply_terminal_modes_to(&mut output, true, true, true).unwrap();
-
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("\x1b[?2004h"));
-        assert!(output.contains("\x1b[?1004h"));
-        assert!(output.contains("\x1b[?1000h"));
-        assert!(output.contains("\x1b[="), "must set Kitty keyboard flags");
-        assert!(
-            !output.contains("\x1b[>7u"),
-            "must not push the Kitty keyboard stack"
-        );
-    }
-
-    #[test]
-    fn focus_reapply_preserves_other_modes_without_rearming_focus_reporting() {
-        for mouse_capture in [false, true] {
-            for keyboard_enhanced in [false, true] {
-                let mut output = Vec::new();
-                reapply_terminal_modes_after_focus_to(
-                    &mut output,
-                    mouse_capture,
-                    keyboard_enhanced,
-                )
-                .unwrap();
-
-                let output = String::from_utf8(output).unwrap();
-                assert!(output.starts_with("\x1b[?2004h"));
-                assert!(
-                    !output.contains("\x1b[?1004h"),
-                    "must not trigger a focus reply"
-                );
-                assert!(
-                    !output.contains("\x1b[?1004l"),
-                    "must keep focus reporting enabled"
-                );
-                assert_eq!(output.contains("\x1b[?1000h"), mouse_capture);
-                assert_eq!(output.contains("\x1b[=7u"), keyboard_enhanced);
-                assert!(
-                    !output.contains("\x1b[>7u"),
-                    "must not push the Kitty keyboard stack (tmux modifyOtherKeys is allowed)"
-                );
-            }
-        }
-    }
-}
+#[path = "terminal_mode_tests.rs"]
+mod terminal_mode_tests;
 
 /// Hash a rendered image's transcript anchor into `hasher`. Shared by the
 /// default and `App` implementations of `side_pane_images_signature` so both
@@ -1803,26 +1702,25 @@ pub(crate) fn subscribe_metadata(
             jcode_selfdev_types::client_selfdev_requested().then_some(true),
         );
     }
-    let working_dir = std::env::current_dir().ok();
     resolve_subscribe_metadata(
-        working_dir.as_deref(),
+        client_launch_working_dir().as_deref(),
         remote_working_dir,
         jcode_selfdev_types::client_selfdev_requested(),
     )
 }
 
 pub(crate) fn resolve_subscribe_metadata(
-    client_working_dir: Option<&std::path::Path>,
+    client_working_dir: Option<&str>,
     remote_working_dir: Option<&str>,
     client_selfdev_requested: bool,
 ) -> (Option<String>, Option<bool>) {
     let working_dir_str = remote_working_dir
         .map(str::to_string)
-        .or_else(|| client_working_dir.map(|p| p.display().to_string()));
+        .or_else(|| client_working_dir.map(str::to_string));
 
     let mut selfdev = client_selfdev_requested;
     if !selfdev && let Some(dir) = client_working_dir {
-        let mut current = Some(dir);
+        let mut current = Some(std::path::Path::new(dir));
         while let Some(path) = current {
             if crate::build::is_jcode_repo(path) {
                 selfdev = true;
@@ -1833,6 +1731,80 @@ pub(crate) fn resolve_subscribe_metadata(
     }
 
     (working_dir_str, if selfdev { Some(true) } else { None })
+}
+
+/// The directory this client launched in: the project the *user* is sitting in.
+///
+/// This is the same value `subscribe_metadata` sends to the daemon, kept separately
+/// because it is a different question from "which project does this session belong
+/// to". The daemon refuses to move an existing session to another project, so the two
+/// can legitimately disagree, and when they do the user needs to be told rather than
+/// silently dropped into someone else's repository.
+///
+/// `None` under SSH, where the process cwd is the laptop's and says nothing about the
+/// remote session, and `None` for a client that reports a remote working dir it was
+/// handed instead.
+pub(crate) fn client_launch_working_dir() -> Option<String> {
+    if is_ssh_remote() {
+        return None;
+    }
+    std::env::current_dir()
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+/// One-shot notice shown when this client attaches to a session that belongs to a
+/// different project than the one it launched in.
+///
+/// The attach itself is correct and ordinary: a client reconnecting to a session must
+/// honor the session's project, not the cwd it happens to be sitting in. But the
+/// consequence is that the composer and every file tool now act on the session's
+/// project, not the directory in the user's terminal, and that is invisible unless
+/// something says so. Returns `None` when both sides agree, when either side is
+/// unknown, or for an SSH client.
+///
+/// The comparison is canonicalized so `/repo` and `/repo/.` are not reported as two
+/// different projects, matching the daemon's own comparison.
+pub(crate) fn cross_project_attach_notice(
+    client_launch_dir: Option<&str>,
+    session_working_dir: Option<&str>,
+) -> Option<String> {
+    let client = client_launch_dir?;
+    let session = session_working_dir?;
+    if same_project_dir(client, session) {
+        return None;
+    }
+    Some(format!(
+        "Attached to a session in {session}, not {client}. Tools here act on that project."
+    ))
+}
+
+fn same_project_dir(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        // At least one path cannot be canonicalized, so it no longer exists (or does
+        // not exist yet). Normalize what can be normalized without the filesystem
+        // before giving up, otherwise a trailing separator alone would read as a
+        // different project.
+        _ => trim_trailing_separator(a) == trim_trailing_separator(b),
+    }
+}
+
+/// Drop trailing separators, keeping a bare root such as `/` or `C:\` intact.
+///
+/// Windows treats `C:\` and `C:\repo\` as directories but not `C:\repo\` and `C:\repo`
+/// as equal strings, and neither does any string comparison, so the notice would fire
+/// on the same project.
+fn trim_trailing_separator(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(std::path::is_separator);
+    if trimmed.is_empty() {
+        // The whole path was separators, so it is a root (`/`, `\\`) with nothing left.
+        return path;
+    }
+    trimmed
 }
 
 /// Public wrapper to render a single frame (used by benchmarks/tools).
@@ -1920,271 +1892,5 @@ pub fn prewarm_focused_side_panel(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        CacheTtlInfo, KvCacheProblemKind, connection_type_icon, detect_kv_cache_problem,
-        keyboard_enhancement_flags, resolve_subscribe_metadata, scheduled_notification_text,
-    };
-    use crate::ambient::AmbientStatus;
-    use crate::tui::info_widget::AmbientWidgetData;
-    use crossterm::event::KeyboardEnhancementFlags;
-
-    fn warm_cache_ttl() -> CacheTtlInfo {
-        CacheTtlInfo {
-            is_estimate: false,
-            remaining_secs: 240,
-            ttl_secs: 300,
-            is_cold: false,
-            cold_for_secs: 0,
-            cached_tokens: Some(12_000),
-        }
-    }
-
-    fn cold_cache_ttl() -> CacheTtlInfo {
-        CacheTtlInfo {
-            is_estimate: false,
-            remaining_secs: 0,
-            ttl_secs: 300,
-            is_cold: true,
-            cold_for_secs: 90,
-            cached_tokens: Some(12_000),
-        }
-    }
-
-    #[test]
-    fn cache_estimate_is_not_evidence_of_an_expected_warm_hit() {
-        let mut timer = warm_cache_ttl();
-        assert!(super::cache_expected_warm(Some(&timer)));
-        timer.is_estimate = true;
-        assert!(!super::cache_expected_warm(Some(&timer)));
-    }
-
-    #[test]
-    fn subscribe_metadata_prefers_remote_working_dir_override() {
-        let local_dir = std::path::Path::new("/client/project");
-        let (working_dir, selfdev) =
-            resolve_subscribe_metadata(Some(local_dir), Some("/server/project"), false);
-
-        assert_eq!(working_dir.as_deref(), Some("/server/project"));
-        assert_eq!(selfdev, None);
-    }
-
-    #[test]
-    fn subscribe_metadata_uses_client_cwd_without_override() {
-        let local_dir = std::path::Path::new("/client/project");
-        let (working_dir, _selfdev) = resolve_subscribe_metadata(Some(local_dir), None, false);
-
-        assert_eq!(working_dir.as_deref(), Some("/client/project"));
-    }
-
-    #[test]
-    fn format_compact_age_is_glanceable() {
-        use super::format_compact_age;
-        assert_eq!(format_compact_age(0), "0s");
-        assert_eq!(format_compact_age(45), "45s");
-        assert_eq!(format_compact_age(60), "1m");
-        assert_eq!(format_compact_age(3_660), "1h 1m");
-        assert_eq!(format_compact_age(7_200), "2h");
-        assert_eq!(format_compact_age(90_000), "1d 1h");
-        assert_eq!(format_compact_age(172_800), "2d");
-    }
-
-    #[test]
-    fn anthropic_cache_creation_on_turn_two_is_warmup_not_problem() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                2,
-                12_000,
-                Some(0),
-                Some(12_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn anthropic_cache_creation_without_read_on_warm_later_turn_is_problem() {
-        let ttl = warm_cache_ttl();
-        let problem = detect_kv_cache_problem(
-            "anthropic",
-            None,
-            3,
-            12_000,
-            Some(0),
-            Some(12_000),
-            Some(&ttl),
-        )
-        .expect("expected explicit cache creation without read to warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::UnexpectedCacheCreation);
-        assert_eq!(problem.affected_tokens, Some(12_000));
-    }
-
-    #[test]
-    fn cache_read_suppresses_cache_creation_warning() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                3,
-                12_000,
-                Some(8_000),
-                Some(4_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn cold_cache_suppresses_cache_warning() {
-        let ttl = cold_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem(
-                "anthropic",
-                None,
-                3,
-                12_000,
-                Some(0),
-                Some(12_000),
-                Some(&ttl)
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn openai_explicit_zero_cache_read_on_warm_cacheable_turn_is_problem() {
-        let ttl = warm_cache_ttl();
-        let problem = detect_kv_cache_problem("openai", None, 3, 8_000, Some(0), None, Some(&ttl))
-            .expect("expected explicit zero cached tokens to warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-        assert_eq!(problem.affected_tokens, Some(8_000));
-    }
-
-    #[test]
-    fn missing_cache_read_metric_is_not_a_warning() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openai", None, 3, 8_000, None, None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn read_only_warning_requires_cacheable_input_size() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openai", None, 3, 800, Some(0), None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn openrouter_zero_cache_read_requires_known_cache_capable_upstream() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("openrouter", None, 3, 8_000, Some(0), None, Some(&ttl)),
-            None
-        );
-
-        let problem = detect_kv_cache_problem(
-            "openrouter",
-            Some("OpenAI"),
-            3,
-            8_000,
-            Some(0),
-            None,
-            Some(&ttl),
-        )
-        .expect("known OpenAI upstream should make explicit zero read actionable");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-    }
-
-    #[test]
-    fn unsupported_provider_zero_cache_read_does_not_warn_even_if_metric_present() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("copilot", None, 3, 8_000, Some(0), None, Some(&ttl)),
-            None
-        );
-    }
-
-    #[test]
-    fn gemini_zero_cache_read_uses_conservative_minimum() {
-        let ttl = warm_cache_ttl();
-        assert_eq!(
-            detect_kv_cache_problem("gemini", None, 3, 3_000, Some(0), None, Some(&ttl)),
-            None
-        );
-
-        let problem = detect_kv_cache_problem("gemini", None, 3, 5_000, Some(0), None, Some(&ttl))
-            .expect("large Gemini prompt with explicit zero cached content should warn");
-        assert_eq!(problem.kind, KvCacheProblemKind::ExpectedCacheReadMissing);
-    }
-
-    #[test]
-    fn connection_type_icon_uses_protocol_specific_icons() {
-        assert_eq!(connection_type_icon(Some("websocket")), Some("🔌"));
-        assert_eq!(connection_type_icon(Some("wss")), Some("🔌"));
-        assert_eq!(connection_type_icon(Some("https")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("https/sse")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("http")), Some("🌐"));
-        assert_eq!(connection_type_icon(Some("unknown")), None);
-        assert_eq!(connection_type_icon(None), None);
-    }
-
-    #[test]
-    fn connection_type_icons_avoid_vs16_sequences() {
-        // macOS window/tab title fonts ignore the VS16 emoji-presentation
-        // selector, so title icons must be single emoji-default codepoints.
-        for connection in ["websocket", "wss", "https", "https/sse", "http"] {
-            let icon = connection_type_icon(Some(connection)).unwrap();
-            assert_eq!(
-                icon.chars().count(),
-                1,
-                "connection icon for '{connection}' must be a single codepoint, got {icon:?}"
-            );
-            assert!(
-                !icon.contains('\u{FE0F}'),
-                "connection icon for '{connection}' must not need VS16, got {icon:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn scheduled_notification_text_uses_session_reminder_count_only() {
-        let info = AmbientWidgetData {
-            show_widget: false,
-            status: AmbientStatus::Disabled,
-            queue_count: 88,
-            next_queue_preview: Some("ambient backlog".to_string()),
-            reminder_count: 2,
-            next_reminder_preview: Some("follow up".to_string()),
-            last_run_ago: None,
-            last_summary: None,
-            next_wake: Some("in 0s".to_string()),
-            next_reminder_wake: Some("in 5m".to_string()),
-            budget_percent: None,
-        };
-
-        assert_eq!(
-            scheduled_notification_text(Some(&info)).as_deref(),
-            Some("⏰ next scheduled task in 5m · 2 queued")
-        );
-    }
-
-    #[test]
-    fn keyboard_enhancement_flags_avoid_report_all_keys_escape_mode() {
-        let flags = keyboard_enhancement_flags();
-
-        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
-        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
-    }
-}
+#[path = "tests.rs"]
+mod tests;

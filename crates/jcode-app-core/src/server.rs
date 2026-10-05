@@ -15,12 +15,19 @@ mod client_lightweight_control;
 mod client_session;
 mod client_state;
 mod client_writer;
+mod comm_auth;
+mod subscribe_working_dir;
+pub(crate) use self::comm_auth::{CAPABILITY_FIELD, claimed_session_id, mint};
 mod comm_await;
 mod comm_control;
 mod comm_graph;
+#[cfg(test)]
+#[path = "server/comm_ownership_tests.rs"]
+mod comm_ownership_tests;
 mod comm_plan;
 mod comm_session;
 mod comm_sync;
+mod config_watch;
 mod debug;
 mod debug_ambient;
 mod debug_command_exec;
@@ -35,6 +42,10 @@ mod debug_testers;
 mod durable_state;
 mod headless;
 mod jade_relay;
+// Sibling file: `jade_relay.rs` is over the code-size ratchet already.
+#[cfg(test)]
+#[path = "server/jade_relay_launch_tests.rs"]
+mod jade_relay_launch_tests;
 mod lifecycle;
 mod live_turn;
 mod provider_control;
@@ -43,6 +54,7 @@ mod reload_recovery;
 mod reload_state;
 mod reload_trace;
 mod runtime;
+mod server_name_config;
 mod socket;
 mod swarm;
 mod swarm_channels;
@@ -63,6 +75,9 @@ use self::debug_jobs::DebugJob;
 use self::headless::create_headless_session;
 use self::reload::await_reload_signal;
 use self::runtime::ServerRuntime;
+use self::server_name_config::configured_server_name;
+#[cfg(test)]
+use self::server_name_config::normalize_configured_server_name;
 use self::swarm::{
     MAX_SWARM_MEMBERS, broadcast_swarm_plan, broadcast_swarm_plan_with_previous,
     broadcast_swarm_status, expired_terminal_member_ids, member_consumes_swarm_capacity,
@@ -141,9 +156,6 @@ pub(super) async fn remove_session_entry<T>(
     removed
 }
 
-const SERVER_NAME_ENV: &str = "JCODE_SERVER_NAME";
-const SERVER_DISPLAY_NAME_ENV: &str = "JCODE_SERVER_DISPLAY_NAME";
-const MAX_CONFIGURED_SERVER_NAME_LEN: usize = 64;
 const SWARM_TERMINAL_MEMBER_GC_BATCH_SIZE: usize = 64;
 
 async fn prune_expired_terminal_swarm_members(
@@ -351,54 +363,6 @@ fn headless_member_should_restore(status: &str, is_headless: bool) -> bool {
 fn headless_reload_continuation_message(reload_ctx: Option<ReloadContext>) -> Option<String> {
     ReloadContext::recovery_directive(reload_ctx.as_ref(), true, "", None)
         .map(|directive| directive.continuation_message)
-}
-
-fn configured_server_name(cli_name: Option<String>) -> Option<String> {
-    cli_name
-        .as_deref()
-        .and_then(normalize_configured_server_name)
-        .or_else(configured_server_name_from_env)
-}
-
-fn configured_server_name_from_env() -> Option<String> {
-    [SERVER_NAME_ENV, SERVER_DISPLAY_NAME_ENV]
-        .into_iter()
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .and_then(|value| normalize_configured_server_name(&value))
-        })
-}
-
-fn normalize_configured_server_name(raw: &str) -> Option<String> {
-    let mut normalized = String::new();
-    let mut previous_dash = false;
-
-    for ch in raw.trim().chars() {
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else if ch == '.' || ch == '-' {
-            ch
-        } else {
-            '-'
-        };
-
-        if mapped == '-' {
-            if previous_dash {
-                continue;
-            }
-            previous_dash = true;
-        } else {
-            previous_dash = false;
-        }
-        normalized.push(mapped);
-        if normalized.len() >= MAX_CONFIGURED_SERVER_NAME_LEN {
-            break;
-        }
-    }
-
-    let trimmed = normalized.trim_matches(|ch| matches!(ch, '-' | '.'));
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[derive(Default)]
@@ -658,25 +622,8 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
 
 #[cfg(test)]
-mod idle_monitor_tests {
-    use super::idle_monitor_should_start;
-
-    #[test]
-    fn shared_idle_monitor_preserves_live_headless_worker() {
-        assert!(!idle_monitor_should_start(0, true));
-    }
-
-    #[test]
-    fn temporary_idle_monitor_preserves_live_headless_worker() {
-        assert!(!idle_monitor_should_start(0, true));
-    }
-
-    #[test]
-    fn idle_monitor_starts_only_without_clients_or_headless_workers() {
-        assert!(idle_monitor_should_start(0, false));
-        assert!(!idle_monitor_should_start(1, false));
-    }
-}
+#[path = "idle_monitor_tests.rs"]
+mod idle_monitor_tests;
 
 /// How often the retained-heap watchdog samples allocator retention.
 const HEAP_RETENTION_CHECK_SECS: u64 = 120;
@@ -1343,6 +1290,15 @@ impl Server {
                 monitor_swarm_event_tx,
             )
             .await;
+        });
+
+        // Watch the global config.toml so a change is reported to every session,
+        // not just the one that made it. Its own task rather than another arm of
+        // `monitor_bus`, because that loop blocks on bus traffic: a config edited
+        // while jcode is idle would otherwise go unnoticed until the next event.
+        let config_watch_members = Arc::clone(&self.swarm_state.members);
+        tokio::spawn(async move {
+            config_watch::watch_config_file(config_watch_members).await;
         });
 
         // Resume any background `swarm await_members` watchers that were active

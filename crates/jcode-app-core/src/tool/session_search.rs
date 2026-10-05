@@ -6,6 +6,13 @@
 //! - snapshot + journal persistence is searched so recent messages are visible
 //! - results are grouped by session by default to avoid duplicate floods
 
+#[path = "session_search_params.rs"]
+mod session_search_params;
+use session_search_params::{
+    normalize_optional_filter, normalize_source_filter, parse_datetime_filter, parse_role_filter,
+    resolve_working_dir_filter, validate_bounded_usize,
+};
+
 use super::session_search_index::{self, IndexFileSpec};
 use super::{Tool, ToolContext, ToolOutput};
 use crate::message::ContentBlock;
@@ -13,7 +20,7 @@ use crate::session::{Session, StoredMessage, session_journal_path_from_snapshot}
 use crate::storage;
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Utc};
 use jcode_import_core::{
     ExternalMessageRecord, ExternalSessionRecord, ImportCoreResult, collect_recent_files_recursive,
     load_claude_external_messages, load_codex_external_session, load_cursor_external_session,
@@ -60,6 +67,8 @@ const LEGACY_INDEX_FILE_NAME: &str = "session_search_recent_index_v1.json";
 #[derive(Debug, Deserialize)]
 struct SearchInput {
     query: String,
+    /// Defaults to the calling session's working directory. Pass "*" to search
+    /// every project deliberately.
     #[serde(default)]
     working_dir: Option<String>,
     #[serde(default)]
@@ -308,7 +317,7 @@ impl Tool for SessionSearchTool {
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Only sessions whose working directory matches this path prefix (case-insensitive)."
+                    "description": "Working directory prefix, case-insensitive. Defaults to this session's own. Pass \"*\" for all projects."
                 },
                 "limit": {
                     "type": "integer",
@@ -490,7 +499,10 @@ impl Tool for SessionSearchTool {
 
         let options = SearchOptions {
             current_session_id: ctx.session_id.clone(),
-            working_dir_filter: params.working_dir.clone(),
+            working_dir_filter: resolve_working_dir_filter(
+                params.working_dir.as_deref(),
+                ctx.working_dir.as_deref(),
+            ),
             limit,
             max_per_session,
             include_current: params.include_current.unwrap_or(false),
@@ -530,78 +542,6 @@ impl Tool for SessionSearchTool {
                 .with_title("session_search"),
         )
     }
-}
-
-fn validate_bounded_usize(
-    value: Option<i64>,
-    default: usize,
-    min: usize,
-    max: usize,
-    name: &str,
-) -> std::result::Result<usize, String> {
-    let Some(value) = value else {
-        return Ok(default);
-    };
-    if value < min as i64 || value > max as i64 {
-        return Err(format!(
-            "{name} must be between {min} and {max}; received {value}."
-        ));
-    }
-    Ok(value as usize)
-}
-
-fn parse_role_filter(raw: Option<&str>) -> std::result::Result<Option<RoleFilter>, String> {
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return Ok(None);
-    };
-    if raw.eq_ignore_ascii_case("all") {
-        return Ok(None);
-    }
-    RoleFilter::parse(raw).map(Some).ok_or_else(|| {
-        format!("role must be one of all, user, assistant, or metadata; received {raw}.")
-    })
-}
-
-fn normalize_optional_filter(raw: Option<String>) -> Option<String> {
-    raw.map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-}
-
-fn normalize_source_filter(raw: Option<&str>) -> std::result::Result<Option<String>, String> {
-    let Some(source) = raw.map(str::trim).filter(|source| !source.is_empty()) else {
-        return Ok(None);
-    };
-    let normalized = source.to_ascii_lowercase();
-    match normalized.as_str() {
-        "all" => Ok(None),
-        "jcode" | "claude" | "claude-code" | "codex" | "pi" | "opencode" | "cursor" => {
-            Ok(Some(normalized.replace("claude-code", "claude")))
-        }
-        _ => Err(format!(
-            "source must be one of all, jcode, claude, codex, pi, opencode, or cursor; received {source}."
-        )),
-    }
-}
-
-fn parse_datetime_filter(
-    raw: Option<&str>,
-    name: &str,
-) -> std::result::Result<Option<DateTime<Utc>>, String> {
-    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
-        return Ok(None);
-    };
-    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-        return Ok(Some(dt.with_timezone(&Utc)));
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        let Some(naive) = date.and_hms_opt(0, 0, 0) else {
-            return Err(format!("{name} has an invalid date: {raw}."));
-        };
-        return Ok(Some(DateTime::from_naive_utc_and_offset(naive, Utc)));
-    }
-    Err(format!(
-        "{name} must be an RFC3339 timestamp or YYYY-MM-DD date; received {raw}."
-    ))
 }
 
 /// Synchronous search across session files with parallel raw pre-filtering and

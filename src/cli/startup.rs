@@ -11,6 +11,32 @@ use super::{
     dispatch, hot_exec, output, terminal,
 };
 
+/// The process cwd for this CLI composition root, or `None` when the OS
+/// cannot report it.
+///
+/// This is the CLI's own load path, the documented exception to the rule
+/// that an absent working dir must never fall back to the daemon's cwd
+/// (AGENTS.md, invariant 1): the closure below runs in the client process
+/// the user launched in this directory, not in the shared daemon.
+///
+/// The cwd can still be unreadable, because the directory can be deleted or
+/// denied out from under a long-lived process. Degrading to global skills
+/// only is the right answer there, but doing it silently is exactly the
+/// cross-project leak invariant 1 exists to prevent, so say which scope the
+/// entries came from instead of swallowing the failure.
+fn process_working_dir_or_warn() -> Option<std::path::PathBuf> {
+    match std::env::current_dir() {
+        Ok(dir) => Some(dir),
+        Err(err) => {
+            logging::warn(&format!(
+                "Could not read the process working directory ({err}); synthetic memory \
+                 entries will come from global skills only, so project skills are missing."
+            ));
+            None
+        }
+    }
+}
+
 fn sync_output_style_from_config() {
     crate::output_style::set_emoji_enabled(crate::config::config().display.emoji);
 }
@@ -99,15 +125,20 @@ pub async fn run() -> Result<()> {
     // entries from registered providers, and skill (the higher layer that
     // depends on MemoryEntry) registers its registry->memory adapter here.
     // The shared snapshot holds global skills only; memory retrieval is
-    // process-scoped, so compose the project overlay from the process cwd
-    // (issue #457 keeps session overlays out of the shared registry).
+    // deliberately process-scoped, so compose the project overlay from the
+    // process cwd, passed explicitly (issue #457 keeps session overlays out of
+    // the shared registry; P2.1 removed the implicit None fallback). The
+    // session-scoped path for skills is the agent/tool path, not this one.
     crate::memory::register_synthetic_entry_provider(|| {
         let global = crate::skill::SkillRegistry::shared_snapshot();
-        crate::skill::SkillRegistry::effective_for_working_dir(&global, None)
-            .list()
-            .into_iter()
-            .map(|skill| skill.as_memory_entry())
-            .collect()
+        crate::skill::SkillRegistry::effective_for_working_dir(
+            &global,
+            process_working_dir_or_warn().as_deref(),
+        )
+        .list()
+        .into_iter()
+        .map(|skill| skill.as_memory_entry())
+        .collect()
     });
 
     // Invert the legacy server -> tui dependency: the TUI session picker owns

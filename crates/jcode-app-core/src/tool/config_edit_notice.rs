@@ -14,7 +14,10 @@ use std::path::Path;
 /// A config file that does not exist yet cannot be canonicalized, and that is
 /// a normal case here (the very first write creates it), so the unresolved
 /// path is the correct answer rather than an error to report.
-fn comparable(path: &Path) -> std::path::PathBuf {
+///
+/// Public because the daemon's config watcher compares the same two paths to
+/// decide whether the config it is watching moved (see `server/config_watch.rs`).
+pub fn comparable_path(path: &Path) -> std::path::PathBuf {
     match std::fs::canonicalize(path) {
         Ok(resolved) => resolved,
         Err(_) => path.to_path_buf(),
@@ -29,7 +32,7 @@ fn is_active_config_file(path: &Path) -> bool {
     let Some(config_path) = crate::config::Config::path() else {
         return false;
     };
-    comparable(path) == comparable(&config_path)
+    comparable_path(path) == comparable_path(&config_path)
 }
 
 /// Report appended to a tool result after a write to the active config file.

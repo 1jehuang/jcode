@@ -383,7 +383,7 @@ fn execute_linked_agentgrep(
     ctx: &ToolContext,
     context_json_path: Option<&Path>,
 ) -> Result<ToolOutput> {
-    let exact_file = exact_search_file_path(ctx, params.path.as_deref());
+    let exact_file = exact_search_file_path(ctx, params.path.as_deref())?;
     match params.mode.as_str() {
         "grep" => {
             let args = build_grep_args(params, ctx)?;
@@ -435,30 +435,82 @@ fn execute_linked_agentgrep(
     }
 }
 
-fn resolve_path_arg(ctx: &ToolContext, path: &str) -> PathBuf {
+fn resolve_path_arg(ctx: &ToolContext, path: &str) -> Result<PathBuf> {
     ctx.resolve_path(Path::new(path))
 }
 
-fn exact_search_file_path(ctx: &ToolContext, path: Option<&str>) -> Option<String> {
-    let path = path?;
-    let resolved = resolve_path_arg(ctx, path);
+/// The single result file an exact `file` argument names, if there is one.
+///
+/// `Ok(None)` means "no exact file filter": either no `file` was passed, or the
+/// path resolved to something that is not a file. An unresolvable path is a
+/// *different* thing and is returned as `Err`, because treating it as "no
+/// filter" widens the search to the whole workspace. That is how
+/// `execute_grep_file_field_does_not_scan_sibling_files` used to be able to
+/// pass for the wrong reason.
+fn exact_search_file_path(ctx: &ToolContext, path: Option<&str>) -> Result<Option<String>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let resolved = resolve_path_arg(ctx, path)?;
     if !resolved.is_file() {
-        return None;
+        return Ok(None);
     }
-    resolved
+    Ok(resolved
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+        .map(|name| name.to_string_lossy().into_owned()))
+}
+
+/// True when a result file is the exact file the caller named.
+///
+/// The comparison used to be `file.path == exact_file`, with `exact_file` a
+/// bare `file_name()` and `file.path` whatever `rg` printed. Those agree only
+/// when rg happens to print a bare name. rg prints a path relative to the
+/// search root, so scoping to `src/app.rs` yields `.\src\app.rs` on Windows and
+/// `./src/app.rs` on Unix, and every match was discarded: the tool reported
+/// `matches: 0 in 0 files` for a file that plainly matched. Match on the
+/// trailing path components instead, so the filter holds for both separators
+/// and for the `./` or `.\` prefix rg adds.
+fn is_exact_search_file(result_path: &str, exact_file: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .replace('\\', "/")
+            .trim_start_matches("./")
+            .to_string()
+    };
+    let result_path = normalize(result_path);
+    let exact_file = normalize(exact_file);
+    // Exact, or the result path ends with `/<exact_file>` at a component
+    // boundary, so `app.rs` does not match `other_app.rs`.
+    result_path == exact_file
+        || result_path
+            .strip_suffix(&format!("/{exact_file}"))
+            .is_some_and(|_| true)
+}
+
+/// Drop every result file except the one the caller named, keeping counts
+/// consistent with what survived.
+fn retain_exact_search_file<'a, T>(
+    files: impl Iterator<Item = &'a T>,
+    exact_file: Option<&str>,
+    path_of: impl Fn(&'a T) -> &str,
+) -> Vec<&'a T> {
+    let Some(exact_file) = exact_file else {
+        return files.collect();
+    };
+    files
+        .filter(|file| is_exact_search_file(path_of(file), exact_file))
+        .collect()
 }
 
 fn filter_grep_result_to_exact_file(
     mut result: GrepResult,
     exact_file: Option<&str>,
 ) -> GrepResult {
-    let Some(exact_file) = exact_file else {
+    if exact_file.is_none() {
         return result;
-    };
-
-    result.files.retain(|file| file.path == exact_file);
+    }
+    let kept = retain_exact_search_file(result.files.iter(), exact_file, |file| file.path.as_str());
+    result.files = kept.into_iter().cloned().collect();
     result.total_files = result.files.len();
     result.total_matches = result.files.iter().map(|file| file.matches.len()).sum();
     result
@@ -468,11 +520,11 @@ fn filter_find_result_to_exact_file(
     mut result: FindResult,
     exact_file: Option<&str>,
 ) -> FindResult {
-    let Some(exact_file) = exact_file else {
+    if exact_file.is_none() {
         return result;
-    };
-
-    result.files.retain(|file| file.path == exact_file);
+    }
+    let kept = retain_exact_search_file(result.files.iter(), exact_file, |file| file.path.as_str());
+    result.files = kept.into_iter().cloned().collect();
     result
 }
 
@@ -480,11 +532,11 @@ fn filter_smart_result_to_exact_file(
     mut result: SmartResult,
     exact_file: Option<&str>,
 ) -> SmartResult {
-    let Some(exact_file) = exact_file else {
+    if exact_file.is_none() {
         return result;
-    };
-
-    result.files.retain(|file| file.path == exact_file);
+    }
+    let kept = retain_exact_search_file(result.files.iter(), exact_file, |file| file.path.as_str());
+    result.files = kept.into_iter().cloned().collect();
     result.summary.total_files = result.files.len();
     result.summary.total_regions = result.files.iter().map(|file| file.regions.len()).sum();
     result.summary.best_file = result.files.first().map(|file| file.path.clone());
@@ -513,5 +565,5 @@ fn is_match_all_glob(glob: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "agentgrep_tests.rs"]
+#[path = "agentgrep/agentgrep_tests.rs"]
 mod tests;

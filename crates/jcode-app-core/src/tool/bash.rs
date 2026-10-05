@@ -34,7 +34,7 @@ const CHECKPOINT_MARKER_PREFIX: &str = "JCODE_CHECKPOINT ";
 const BACKGROUND_PROGRESS_GUIDANCE: &str = "For long-running background commands, prefer scripts or commands that periodically print progress updates. Best format: print lines starting with `JCODE_PROGRESS ` followed by JSON like {\"percent\":42,\"message\":\"Running\"} or {\"current\":120,\"total\":1000,\"unit\":\"batches\",\"message\":\"Epoch 2/5\",\"eta_seconds\":30}. Supported JSON fields are `percent`, `message`, `current`, `total`, `unit`, `eta_seconds`, and optional `kind`=`indeterminate` or `kind`=`checkpoint`. For milestone-style wakeups, print `JCODE_CHECKPOINT {\"message\":\"Unit tests passed\"}`. Generic fallback output that can be parsed includes `42%`, `3/10 tests`, `3 of 10 steps`, `1.5/3.0 GiB`, or phase lines like `Compiling ...`, `Downloading ...`, `Running ...`, and `Building ...`. If you are writing the script yourself, add these progress/checkpoint lines explicitly. Put large temporary files, worktrees, and virtual environments under `$JCODE_SCRATCH_DIR`, not `/tmp`, because `/tmp` may be RAM-backed.";
 const BASH_TOOL_DESCRIPTION: &str = "Run a bash command.";
 const WINDOWS_SHELL_TOOL_DESCRIPTION: &str =
-    "Run a Windows cmd.exe command (compatibility name `bash`). Use cmd.exe syntax, not Bash.";
+    "Run a cmd.exe command (compatibility name `bash`), using cmd.exe syntax.";
 
 #[cfg(unix)]
 fn shell_single_quote(value: &str) -> String {
@@ -720,89 +720,8 @@ fn format_command_output(mut output: String, exit_code: Option<i32>) -> String {
 }
 
 #[cfg(test)]
-mod utf8_truncation_tests {
-    #[cfg(any(windows, unix))]
-    use super::build_shell_command;
-    use super::format_command_output;
-
-    #[test]
-    fn format_command_output_truncates_on_utf8_boundary() {
-        let input = format!("{}é", "a".repeat(29_999));
-        let output = format_command_output(input, None);
-        assert!(output.ends_with("\n... (output truncated)"));
-        assert!(output.starts_with(&"a".repeat(29_999)));
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn build_shell_command_uses_cmd_and_executes_command() {
-        let output = build_shell_command("echo hello-from-cmd")
-            .output()
-            .await
-            .expect("run cmd command");
-        assert!(output.status.success(), "cmd command should succeed");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.to_ascii_lowercase().contains("hello-from-cmd"),
-            "unexpected stdout: {}",
-            stdout
-        );
-
-        let probe_path = std::env::temp_dir().join(format!(
-            "jcode-cmd-quoting-probe-{}.cmd",
-            std::process::id()
-        ));
-        std::fs::write(
-            &probe_path,
-            concat!(
-                "@echo off\r\n",
-                "if \"%~1\"==\"text with spaces\" if \"%~2\"==\"\" (\r\n",
-                "  echo quoted-argument-ok\r\n",
-                "  exit /b 0\r\n",
-                ")\r\n",
-                "echo first=[%~1] second=[%~2]\r\n",
-                "exit /b 1\r\n",
-            ),
-        )
-        .expect("write cmd quoting probe");
-
-        let quoted_command = format!("call \"{}\" \"text with spaces\"", probe_path.display());
-        let quoted_output = build_shell_command(&quoted_command)
-            .output()
-            .await
-            .expect("run cmd quoting probe");
-        let _ = std::fs::remove_file(&probe_path);
-        let quoted_stdout = String::from_utf8_lossy(&quoted_output.stdout);
-        let quoted_stderr = String::from_utf8_lossy(&quoted_output.stderr);
-        assert!(
-            quoted_output.status.success(),
-            "quoted argument should remain one child-process argument; stdout={quoted_stdout:?} stderr={quoted_stderr:?}"
-        );
-        assert!(
-            quoted_stdout.contains("quoted-argument-ok"),
-            "unexpected quoted-command stdout: {quoted_stdout}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn build_shell_command_uses_disk_backed_scratch_directory() {
-        // Keep JCODE_HOME stable until the final directory assertion. Running
-        // synchronously avoids holding the environment MutexGuard across await.
-        let _env_lock = crate::storage::lock_test_env();
-        let expected = super::tool_scratch_dir().expect("jcode scratch directory");
-        let output = build_shell_command("printf '%s\\n%s\\n' \"$TMPDIR\" \"$JCODE_SCRATCH_DIR\"")
-            .as_std_mut()
-            .output()
-            .expect("run bash command");
-        assert!(output.status.success(), "bash command should succeed");
-        let stdout = String::from_utf8(output.stdout).expect("utf-8 scratch paths");
-        let paths = stdout.lines().collect::<Vec<_>>();
-        let expected = expected.to_string_lossy().into_owned();
-        assert_eq!(paths, vec![expected.as_str(), expected.as_str()]);
-        assert!(std::path::Path::new(&expected).is_dir());
-    }
-}
+#[path = "utf8_truncation_tests.rs"]
+mod utf8_truncation_tests;
 
 pub struct BashTool;
 
@@ -877,6 +796,23 @@ impl Tool for BashTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut params: BashInput = serde_json::from_value(input)?;
         let run_in_background = params.run_in_background.unwrap_or(false);
+
+        // A session with no project has no directory to run in. Every spawn path
+        // below only calls `current_dir` when `ctx.working_dir` is `Some`, so
+        // without this the child would inherit the daemon's own cwd, i.e. whichever
+        // repository happened to start this process (P2.5). Guarding once here
+        // covers the foreground, detached, and background spawns together.
+        if ctx.working_dir.is_none() {
+            return Err(anyhow::anyhow!(
+                "cannot run a shell command: this session has no working directory, so there \
+                 is no project directory to run it in. Running it would use the daemon's \
+                 directory ({}) instead. Give the session a working directory, or pass an \
+                 absolute path if the command does not need one.",
+                std::env::current_dir()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|_| "<unavailable>".to_string())
+            ));
+        }
 
         // Destructive-command gate (#604), before background dispatch.
         if let Some(refusal) = destructive_command_refusal(
@@ -961,37 +897,8 @@ fn file_edit_hint(command: &str) -> Option<&'static str> {
 }
 
 #[cfg(test)]
-mod file_edit_hint_tests {
-    use super::file_edit_hint;
-
-    #[test]
-    fn flags_in_place_edits() {
-        for command in [
-            "sed -i 's/a/b/' src/main.rs",
-            "cd x && sed -Ei 's/a/b/g' f.rs",
-            "sed --in-place=.bak 's/a/b/' f",
-            "perl -pi -e 's/a/b/' f.rs",
-            "python3 - <<'EOF'\ns=open(p).read()\ns=s.replace('a','b')\nopen(p,'w').write(s)\nEOF",
-            "python3 -c \"import pathlib;p=pathlib.Path('f');p.write_text(p.read_text().replace('a','b'))\"",
-        ] {
-            assert!(file_edit_hint(command).is_some(), "{command}");
-        }
-    }
-
-    #[test]
-    fn ignores_read_only_commands() {
-        for command in [
-            "sed -n '1,20p' f.rs",
-            "sed 's/a/b/' f.rs",
-            "grep -i foo f.rs",
-            "cargo test -p jcode-app-core",
-            "python3 -c \"print('a'.replace('a','b'))\"",
-            "git diff --ignore-space-change",
-        ] {
-            assert!(file_edit_hint(command).is_none(), "{command}");
-        }
-    }
-}
+#[path = "file_edit_hint_tests.rs"]
+mod file_edit_hint_tests;
 
 impl BashTool {
     async fn execute_foreground(

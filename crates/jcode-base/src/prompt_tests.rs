@@ -16,6 +16,226 @@ fn test_default_system_prompt_no_claude_code_identity() {
     );
 }
 
+/// P2.3: a session with no working directory must not pick up the daemon's
+/// project system-prompt.md, AGENTS.md, prompt overlay, or preferred tools.
+///
+/// Every test points the process cwd at a repo that has all four files, so a
+/// relative fallback would be found, then re-asserts with `Some(repo)` as a
+/// positive control so the negative cannot pass vacuously.
+#[test]
+fn no_working_dir_loads_no_project_prompt_files_even_under_a_repo_cwd() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_user_home = std::env::var_os("USERPROFILE");
+    let prev_home_unix = std::env::var_os("HOME");
+    let home = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("USERPROFILE", home.path());
+    crate::env::set_var("HOME", home.path());
+
+    let project = tempfile::tempdir().unwrap();
+    let jcode_dir = project.path().join(".jcode");
+    std::fs::create_dir_all(&jcode_dir).unwrap();
+    std::fs::write(
+        jcode_dir.join("system-prompt.md"),
+        "daemon project system prompt",
+    )
+    .unwrap();
+    std::fs::write(
+        jcode_dir.join("prompt-overlay.md"),
+        "daemon project overlay",
+    )
+    .unwrap();
+    std::fs::write(
+        jcode_dir.join("preferred-tools.md"),
+        "daemon project preferred tools",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "daemon project agents instructions",
+    )
+    .unwrap();
+
+    let prev_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(project.path()).unwrap();
+
+    // --- None must not see the project files ---
+    let (system_prompt, _) = build_system_prompt_split_with_capabilities(
+        None,
+        &[],
+        false,
+        None,
+        None,
+        PromptCapabilities { mermaid: false },
+    );
+    let joined = format!(
+        "{}{}",
+        system_prompt.static_part, system_prompt.dynamic_part
+    );
+    for (label, leaked) in [
+        ("system-prompt.md", "daemon project system prompt"),
+        ("prompt-overlay.md", "daemon project overlay"),
+        ("preferred-tools.md", "daemon project preferred tools"),
+        ("AGENTS.md", "daemon project agents instructions"),
+    ] {
+        assert!(
+            !joined.contains(leaked),
+            "{label} leaked into a prompt built with no working dir: {joined:?}"
+        );
+    }
+
+    let (agents_md, agents_info) = load_agents_md_files_from_dir(None);
+    assert!(
+        agents_md
+            .as_deref()
+            .is_none_or(|content| !content.contains("daemon project agents instructions")),
+        "AGENTS.md leaked into a session with no working dir: {agents_md:?}"
+    );
+    assert!(!agents_info.has_project_agents_md);
+
+    let (overlay, _) = load_prompt_overlay_files_from_dir(None);
+    assert!(
+        overlay
+            .as_deref()
+            .is_none_or(|content| !content.contains("daemon project overlay")),
+        "the project overlay leaked into a session with no working dir: {overlay:?}"
+    );
+
+    let (preferred, _) = load_preferred_tools_files_from_dir(None);
+    assert!(
+        preferred
+            .as_deref()
+            .is_none_or(|content| !content.contains("daemon project preferred tools")),
+        "the project preferred tools leaked into a session with no working dir: {preferred:?}"
+    );
+
+    // --- positive control: Some(repo) sees all of them ---
+    let (system_prompt, _) = build_system_prompt_split_with_capabilities(
+        None,
+        &[],
+        false,
+        None,
+        Some(project.path()),
+        PromptCapabilities { mermaid: false },
+    );
+    let joined = format!(
+        "{}{}",
+        system_prompt.static_part, system_prompt.dynamic_part
+    );
+    assert!(
+        joined.contains("daemon project system prompt"),
+        "positive control: the project's system prompt was not loaded: {joined:?}"
+    );
+
+    let (agents_md, agents_info) = load_agents_md_files_from_dir(Some(project.path()));
+    assert!(
+        agents_info.has_project_agents_md,
+        "positive control: project AGENTS.md was not loaded"
+    );
+    let agents_md = agents_md.expect("positive control: project AGENTS.md content");
+    assert!(agents_md.contains("daemon project agents instructions"));
+
+    let (overlay, _) = load_prompt_overlay_files_from_dir(Some(project.path()));
+    let overlay = overlay.expect("positive control: project overlay content");
+    assert!(overlay.contains("daemon project overlay"));
+
+    let (preferred, _) = load_preferred_tools_files_from_dir(Some(project.path()));
+    let preferred = preferred.expect("positive control: project preferred tools content");
+    assert!(preferred.contains("daemon project preferred tools"));
+
+    std::env::set_current_dir(prev_cwd).unwrap();
+    if let Some(value) = prev_home {
+        crate::env::set_var("JCODE_HOME", value);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(value) = prev_user_home {
+        crate::env::set_var("USERPROFILE", value);
+    } else {
+        crate::env::remove_var("USERPROFILE");
+    }
+    if let Some(value) = prev_home_unix {
+        crate::env::set_var("HOME", value);
+    } else {
+        crate::env::remove_var("HOME");
+    }
+}
+
+/// With no project there is no project file, but the global `~/AGENTS.md` is
+/// shared by every project and must still load.
+#[test]
+fn no_working_dir_still_loads_the_global_agents_md() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    // `user_home_path` resolves the global AGENTS.md under `external/`.
+    std::fs::create_dir_all(home.path().join("external")).unwrap();
+    std::fs::write(
+        home.path().join("external/AGENTS.md"),
+        "global agents instructions",
+    )
+    .unwrap();
+
+    let (content, info) = load_agents_md_files_from_dir(None);
+
+    assert!(
+        info.has_global_agents_md,
+        "the global AGENTS.md must still apply"
+    );
+    assert!(
+        !info.has_project_agents_md,
+        "there is no project, so there is no project AGENTS.md"
+    );
+    let content = content.expect("global instructions content");
+    assert!(content.contains("global agents instructions"));
+    assert!(content.contains("# Global Instructions (~/AGENTS.md)"));
+
+    if let Some(value) = prev_home {
+        crate::env::set_var("JCODE_HOME", value);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+/// With no project there is nothing for the project file to duplicate, so the
+/// global overlay must not be suppressed by the same-canonical-path dedup.
+#[test]
+fn no_working_dir_does_not_suppress_the_global_overlay_or_preferred_tools() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
+    std::fs::write(home.path().join("prompt-overlay.md"), "global overlay").unwrap();
+    std::fs::write(
+        home.path().join("preferred-tools.md"),
+        "global preferred tools",
+    )
+    .unwrap();
+
+    let (overlay, _) = load_prompt_overlay_files_from_dir(None);
+    let overlay = overlay.expect("the global overlay must load when there is no project");
+    assert!(
+        overlay.contains("global overlay"),
+        "global overlay: {overlay:?}"
+    );
+
+    let (preferred, _) = load_preferred_tools_files_from_dir(None);
+    let preferred =
+        preferred.expect("the global preferred tools must load when there is no project");
+    assert!(
+        preferred.contains("global preferred tools"),
+        "global preferred tools: {preferred:?}"
+    );
+
+    if let Some(value) = prev_home {
+        crate::env::set_var("JCODE_HOME", value);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
 #[test]
 fn mermaid_prompt_module_follows_capability() {
     let (enabled, _) = build_system_prompt_split_with_capabilities(
@@ -169,7 +389,8 @@ fn agents_md_same_canonical_file_is_loaded_only_as_project_instructions() {
     let agents_md = project_dir.path().join("AGENTS.md");
     std::fs::write(&agents_md, "shared instructions").unwrap();
 
-    let (content, info) = load_agents_md_files_from_dirs(project_dir.path(), Some(&agents_md));
+    let (content, info) =
+        load_agents_md_files_from_dirs(Some(project_dir.path()), Some(&agents_md));
     let content = content.expect("project instructions");
 
     assert!(info.has_project_agents_md);
@@ -188,7 +409,7 @@ fn agents_md_distinct_project_and_global_files_are_both_loaded() {
     std::fs::write(&global_agents_md, "global instructions").unwrap();
 
     let (content, info) =
-        load_agents_md_files_from_dirs(project_dir.path(), Some(&global_agents_md));
+        load_agents_md_files_from_dirs(Some(project_dir.path()), Some(&global_agents_md));
     let content = content.expect("project and global instructions");
 
     assert!(info.has_project_agents_md);
@@ -202,7 +423,7 @@ fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
     let project_dir = tempfile::TempDir::new().unwrap();
     let agents_md = project_dir.path().join("AGENTS.md");
     std::fs::write(&agents_md, "original session instructions").unwrap();
-    let snapshot = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let snapshot = load_agents_md_files_from_dirs(Some(project_dir.path()), None);
 
     let (before, _) = build_system_prompt_split_with_agents_md(
         None,
@@ -232,7 +453,7 @@ fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
 
     // A new session/workspace boundary captures a fresh snapshot rather than
     // pinning the old instructions forever.
-    let fresh_snapshot = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let fresh_snapshot = load_agents_md_files_from_dirs(Some(project_dir.path()), None);
     let (next_session, _) = build_system_prompt_split_with_agents_md(
         None,
         &[],
@@ -257,7 +478,7 @@ fn agents_md_missing_global_file_keeps_project_instructions() {
     std::fs::write(project_dir.path().join("AGENTS.md"), "project only").unwrap();
 
     let (content, info) =
-        load_agents_md_files_from_dirs(project_dir.path(), Some(&missing_global_agents_md));
+        load_agents_md_files_from_dirs(Some(project_dir.path()), Some(&missing_global_agents_md));
     let content = content.expect("project instructions");
 
     assert!(info.has_project_agents_md);
@@ -278,7 +499,7 @@ fn agents_md_symlink_alias_is_deduplicated_by_canonical_file_path() {
     symlink(&global_agents_md, project_dir.path().join("AGENTS.md")).unwrap();
 
     let (content, info) =
-        load_agents_md_files_from_dirs(project_dir.path(), Some(&global_agents_md));
+        load_agents_md_files_from_dirs(Some(project_dir.path()), Some(&global_agents_md));
     let content = content.expect("project instructions through symlink");
 
     assert!(info.has_project_agents_md);
@@ -455,6 +676,56 @@ fn test_preferred_tools_files_are_loaded_from_project_and_global_jcode_dirs() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+/// P2.2: a session with no working directory must not pick up the swarm prompt
+/// of whichever repository happens to have started the daemon. `None` means
+/// "no project", so the project level is skipped entirely rather than resolved
+/// against the process cwd.
+#[test]
+fn no_working_dir_skips_the_project_swarm_prompt_even_under_a_repo_cwd() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let project = tempfile::tempdir().unwrap();
+    let prompt_dir = project.path().join(".jcode");
+    std::fs::create_dir_all(&prompt_dir).unwrap();
+    std::fs::write(
+        prompt_dir.join("swarm-prompt.md"),
+        "daemon started project routing",
+    )
+    .unwrap();
+    // A global prompt so "no project" is distinguishable from "nothing at all".
+    std::fs::write(temp.path().join("swarm-prompt.md"), "global swarm routing").unwrap();
+
+    let prev_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(project.path()).unwrap();
+
+    let without_working_dir = load_swarm_prompt(None);
+    let with_working_dir = load_swarm_prompt(Some(project.path()));
+
+    std::env::set_current_dir(prev_cwd).unwrap();
+    match prev_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+
+    assert_eq!(
+        without_working_dir, "global swarm routing",
+        "working_dir = None must skip the project level, not resolve it against the process cwd"
+    );
+    assert!(
+        !without_working_dir.contains("daemon started project routing"),
+        "the launching project's prompt leaked into a session with no working dir"
+    );
+    // Positive control: the same call with an explicit dir does find it, so the
+    // assertion above cannot pass just because the prompt is unreadable.
+    assert_eq!(
+        with_working_dir, "daemon started project routing",
+        "a session with a working dir must get its own project's prompt"
+    );
 }
 
 #[test]

@@ -62,21 +62,31 @@ jobs:
         shell: bash
         run: scripts/check_warning_budget.sh
 
-      - name: Enforce oversized-file ratchet
+      # One step for all six budget ratchets, not one step each. GitHub Actions
+      # stops a job at its first failing step, so six sequential ratchet steps
+      # meant a developer saw exactly one red gate and never learned how many
+      # others were red. Measured on this tree at the time of writing: 4 of 6
+      # ratchets fail, and sequentially the first failure hides the other 3.
+      #
+      # Each ratchet is still individually runnable and still owns its
+      # baseline; only the reporting changed.
+      - name: Enforce all budget ratchets
         shell: bash
-        run: python3 scripts/check_code_size_budget.py
+        run: python3 scripts/check_all_budgets.py
 
-      - name: Enforce oversized-test ratchet
+      # The ratchets above shipped with three holes in the guard itself, each with
+      # CI green, so they need their own proof. Run next to them: a ratchet that is
+      # silently broken looks identical to one that is working.
+      - name: Test the process-cwd fallback ratchet
         shell: bash
-        run: python3 scripts/check_test_size_budget.py
+        run: python3 -m unittest -v scripts/test_cwd_fallback_ratchet.py
 
-      - name: Enforce panic-prone usage ratchet
+      # Same reason: the aggregator's central claim is "every ratchet runs, even
+      # when an earlier one fails", which is exactly the property a sequential
+      # runner lacks.
+      - name: Test the all-budgets ratchet runner
         shell: bash
-        run: python3 scripts/check_panic_budget.py
-
-      - name: Enforce swallowed-error usage ratchet
-        shell: bash
-        run: python3 scripts/check_swallowed_error_budget.py
+        run: python3 -m unittest -v scripts/test_check_all_budgets.py
 
       - name: Enforce crate dependency boundaries
         shell: bash
@@ -85,10 +95,6 @@ jobs:
       - name: Enforce Rust and TypeScript SDK surface parity
         shell: bash
         run: cargo test -p jcode-sdk parity -- --nocapture
-
-      - name: Enforce wildcard re-export ratchet
-        shell: bash
-        run: python3 scripts/check_wildcard_reexport_budget.py
 
       - name: Enforce no unused dependencies
         shell: bash

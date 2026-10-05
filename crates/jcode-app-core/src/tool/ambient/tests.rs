@@ -463,6 +463,323 @@ async fn test_schedule_tool_defaults_to_resuming_originating_session() {
     }
 }
 
+/// Restore `JCODE_HOME` on drop so a failing assertion cannot leak a temp home
+/// into every later test in the process.
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl HomeGuard {
+    fn install(dir: &std::path::Path) -> Self {
+        let prev = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", dir);
+        Self(prev)
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
+fn schedule_ctx(session_id: &str) -> ToolContext {
+    ToolContext {
+        session_id: session_id.to_string(),
+        message_id: "msg_1".to_string(),
+        tool_call_id: "call_1".to_string(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: crate::tool::ToolExecutionMode::Direct,
+    }
+}
+
+/// Queue one schedule owned by `session` and return its id.
+///
+/// The id is only in the create output's prose today, which is exactly why an
+/// agent had to keep it to cancel later. Pull it out of the line the tool
+/// already prints rather than inventing a second source of truth.
+async fn schedule_for(session: &str, task: &str) -> String {
+    let output = ScheduleTool::new()
+        .execute(
+            json!({ "task": task, "wake_in_minutes": 60 }),
+            schedule_ctx(session),
+        )
+        .await
+        .expect("schedule should succeed")
+        .output;
+
+    let marker = "(id: ";
+    let start = output
+        .find(marker)
+        .expect("create output should name the schedule id")
+        + marker.len();
+    let end = output[start..]
+        .find(')')
+        .expect("create output should close the id")
+        + start;
+    output[start..end].to_string()
+}
+
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async tool execution"
+)]
+async fn schedule_list_hides_other_sessions_schedules_by_default() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = HomeGuard::install(temp.path());
+
+    let mine = schedule_for("project_a", "a task from project A").await;
+    let theirs = schedule_for("project_b", "a task from project B").await;
+
+    let tool = ScheduleTool::new();
+    let listing = tool
+        .execute(json!({ "action": "list" }), schedule_ctx("project_a"))
+        .await
+        .expect("list should succeed")
+        .output;
+
+    assert!(
+        listing.contains(&mine),
+        "own schedule must be listed: {listing}"
+    );
+    assert!(
+        !listing.contains(&theirs),
+        "another project's schedule leaked into the listing: {listing}"
+    );
+
+    let opt_out = tool
+        .execute(
+            json!({ "action": "list", "all_sessions": true }),
+            schedule_ctx("project_a"),
+        )
+        .await
+        .expect("list should succeed")
+        .output;
+    assert!(
+        opt_out.contains(&mine) && opt_out.contains(&theirs),
+        "all_sessions=true is the documented opt-out: {opt_out}"
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async tool execution"
+)]
+async fn schedule_cancel_rejects_another_sessions_schedule_and_leaves_it_queued() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = HomeGuard::install(temp.path());
+
+    let theirs = schedule_for("project_b", "a task from project B").await;
+
+    let err = ScheduleTool::new()
+        .execute(
+            json!({ "action": "cancel", "schedule_id": theirs }),
+            schedule_ctx("project_a"),
+        )
+        .await
+        .expect_err("cancelling another session's schedule must be refused");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("project_b") && message.contains("all_sessions=true"),
+        "error must name the owning session and the opt-out, got: {message}"
+    );
+
+    let still_queued = AmbientManager::new()
+        .expect("ambient manager")
+        .queue()
+        .items()
+        .iter()
+        .any(|item| item.id == theirs);
+    assert!(
+        still_queued,
+        "a refused cancel must not remove the schedule"
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async tool execution"
+)]
+async fn all_sessions_opts_into_cancelling_another_sessions_schedule() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = HomeGuard::install(temp.path());
+
+    let theirs = schedule_for("project_b", "a task from project B").await;
+
+    ScheduleTool::new()
+        .execute(
+            json!({ "action": "cancel", "schedule_id": theirs, "all_sessions": true }),
+            schedule_ctx("project_a"),
+        )
+        .await
+        .expect("all_sessions=true should permit the cancel");
+
+    assert!(
+        !AmbientManager::new()
+            .expect("ambient manager")
+            .queue()
+            .items()
+            .iter()
+            .any(|item| item.id == theirs),
+        "the opted-in cancel should have removed the schedule"
+    );
+}
+
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state across async tool execution"
+)]
+async fn a_session_can_still_cancel_its_own_schedule() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = HomeGuard::install(temp.path());
+
+    let mine = schedule_for("project_a", "a task from project A").await;
+
+    ScheduleTool::new()
+        .execute(
+            json!({ "action": "cancel", "schedule_id": mine }),
+            schedule_ctx("project_a"),
+        )
+        .await
+        .expect("a session should be able to cancel its own schedule");
+}
+
+/// The ownership rule belongs to the queue, not to one tool call, so a new
+/// caller cannot skip it by using the manager directly.
+#[test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state"
+)]
+fn cancel_schedule_refuses_another_sessions_item_at_the_manager() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = HomeGuard::install(temp.path());
+
+    let mut manager = AmbientManager::new().expect("ambient manager");
+    let id = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            context: "owned by b".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Session {
+                session_id: "project_b".to_string(),
+            },
+            created_by_session: "project_b".to_string(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule should succeed");
+
+    match manager.cancel_schedule(&id, "project_a").expect("cancel") {
+        CancelOutcome::NotOwned { created_by } => assert_eq!(created_by, "project_b"),
+        other => panic!("expected NotOwned, got {other:?}"),
+    }
+    assert_eq!(
+        manager.queue().len(),
+        1,
+        "refused cancel must keep the item"
+    );
+
+    match manager.cancel_schedule(&id, "project_b").expect("cancel") {
+        CancelOutcome::Removed { .. } => {}
+        other => panic!("expected Removed for the owner, got {other:?}"),
+    }
+    assert!(manager.queue().is_empty());
+}
+
+/// Every outcome `cancel_schedule` can return, in one pass.
+///
+/// The owner check, the missing-id check and the removal are three separate
+/// decisions over the same queue, and a caller can reach any of them in any
+/// order. This pins the whole table so a refactor cannot start aborting the
+/// daemon on one of them: a schedule id is model-supplied text, so a panic in
+/// the queue would take down every session the daemon owns, not just the one
+/// that named the id.
+#[test]
+#[allow(
+    clippy::await_holding_lock,
+    reason = "test intentionally serializes process-wide JCODE_HOME/env state"
+)]
+fn cancel_schedule_returns_every_outcome_without_aborting() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = HomeGuard::install(temp.path());
+
+    let mut manager = AmbientManager::new().expect("ambient manager");
+    let id = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            context: "owned".to_string(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Session {
+                session_id: "project_a".to_string(),
+            },
+            created_by_session: "project_a".to_string(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule should succeed");
+
+    // 1. An id that was never scheduled: refused as missing, not as an error.
+    assert!(
+        matches!(
+            manager
+                .cancel_schedule("no-such-id", "project_a")
+                .expect("cancel"),
+            CancelOutcome::NotFound
+        ),
+        "an unknown id must report NotFound"
+    );
+
+    // 2. Someone else's item: refused on ownership, and kept.
+    assert!(
+        matches!(
+            manager.cancel_schedule(&id, "project_b").expect("cancel"),
+            CancelOutcome::NotOwned { .. }
+        ),
+        "another session's item must be refused"
+    );
+    assert_eq!(manager.queue().len(), 1, "a refused cancel keeps the item");
+
+    // 3. The owner's own item: removed, and reported as removed with the item.
+    match manager.cancel_schedule(&id, "project_a").expect("cancel") {
+        CancelOutcome::Removed { item } => assert_eq!(item.context, "owned"),
+        other => panic!("the owner must get Removed, got {other:?}"),
+    }
+    assert!(manager.queue().is_empty(), "a successful cancel empties it");
+
+    // 4. Cancelling the same id again is the missing-id case, not a second
+    //    removal and not an abort.
+    assert!(
+        matches!(
+            manager.cancel_schedule(&id, "project_a").expect("cancel"),
+            CancelOutcome::NotFound
+        ),
+        "a second cancel of a removed id must report NotFound"
+    );
+}
+
 #[test]
 fn test_schedule_tool_schema_avoids_top_level_combinators() {
     let tool = ScheduleTool::new();

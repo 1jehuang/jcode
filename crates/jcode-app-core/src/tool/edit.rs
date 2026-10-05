@@ -203,7 +203,7 @@ impl Tool for EditTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: EditInput = serde_json::from_value(input)?;
         let edits = params.operations()?;
-        let path = ctx.resolve_path(Path::new(&params.file_path));
+        let path = ctx.resolve_path(Path::new(&params.file_path))?;
 
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));

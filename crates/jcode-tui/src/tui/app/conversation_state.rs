@@ -422,6 +422,77 @@ impl App {
         self.status_notice = Some((text.into(), Instant::now()));
     }
 
+    /// Tell the user when the attached session belongs to a different project than
+    /// the one this client launched in.
+    ///
+    /// The attach is allowed and the target's project is preserved, which is the
+    /// correct behavior for a client reconnecting to a session. But it means every
+    /// file and shell tool in this window now acts on the session's project rather
+    /// than the directory the user is sitting in, and that is not something the user
+    /// can be expected to notice on their own.
+    ///
+    /// Shown as a transcript card rather than a `status_notice` because the two
+    /// projects disagreeing is the single most important fact about the rest of the
+    /// session, and a status notice expires after three seconds
+    /// (`TuiState::status_notice`). The card is stashed via
+    /// `set_pending_startup_notice` so it survives the remote History bootstrap
+    /// clearing the transcript for a fresh session.
+    pub fn set_cross_project_attach_notice(&mut self, notice: impl Into<String>) {
+        let notice = notice.into();
+        self.set_pending_startup_notice("Attached to another project", notice);
+    }
+
+    /// Compare this client's launch project against the session's project and surface
+    /// the disagreement once. Returns true when a notice was shown.
+    ///
+    /// Called at every point where a session's project becomes known to this client:
+    /// remote startup resume, an explicit `/resume` or workspace switch, and the
+    /// initial Subscribe snapshot. The guard keeps it one-shot per client, because a
+    /// reconnect re-runs startup and must not re-announce a project the user has
+    /// already been told about.
+    pub fn note_cross_project_attach(&mut self) -> bool {
+        if self.cross_project_attach_notice_shown || crate::tui::is_ssh_remote() {
+            return false;
+        }
+        let session_dir = self.session.working_dir.clone();
+        let Some(notice) = crate::tui::cross_project_attach_notice(
+            self.client_launch_working_dir.as_deref(),
+            session_dir.as_deref(),
+        ) else {
+            return false;
+        };
+        self.cross_project_attach_notice_shown = true;
+        self.set_cross_project_attach_notice(notice);
+        true
+    }
+
+    /// Same check, but for a target that is not the loaded session yet.
+    ///
+    /// A `/resume` or workspace switch names the target before its history arrives,
+    /// so `self.session` still describes the session being left. Reading the target's
+    /// directory off disk is the only way to know whether the user is switching
+    /// projects, and skipping it would leave the most explicit cross-project case the
+    /// only one without a notice.
+    pub fn note_cross_project_attach_for_session(&mut self, session_id: &str) -> bool {
+        if self.cross_project_attach_notice_shown || crate::tui::is_ssh_remote() {
+            return false;
+        }
+        let Ok(session) = crate::session::Session::load_startup_stub(session_id) else {
+            // Nothing is known about the target's project, so there is nothing to
+            // report. Failing to read it must not block the switch itself.
+            return false;
+        };
+        let Some(notice) = crate::tui::cross_project_attach_notice(
+            self.client_launch_working_dir.as_deref(),
+            session.working_dir.as_deref(),
+        ) else {
+            return false;
+        };
+        self.cross_project_attach_notice_shown = true;
+        self.set_cross_project_attach_notice(notice);
+        true
+    }
+
     /// Stash a persistent startup notice card and show it immediately.
     ///
     /// The card is also re-applied once the remote History bootstrap clears the

@@ -81,53 +81,8 @@ async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::
         .await;
 }
 
-#[tokio::test]
-async fn mcp_list_remains_available_while_background_connect_is_handshaking() {
-    let _env_lock = crate::storage::lock_test_env();
-    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-    let _home_guard = TestHomeGuard::new(home.path());
-    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
-
-    std::fs::write(
-        home.path().join("mcp.json"),
-        r#"{
-            "mcpServers": {
-                "slow": {
-                    "command": "/bin/sh",
-                    "args": ["-c", "sleep 2"],
-                    "timeout_secs": 86400
-                }
-            }
-        }"#,
-    )
-    .expect("write slow MCP config");
-
-    let registry = Registry::empty();
-    registry
-        .register_mcp_tools_for_dir(None, None, None, Some(working_dir.path().to_path_buf()))
-        .await;
-
-    // Let the background connection task acquire its read guard and enter the
-    // slow initialize handshake before asking the management tool to list.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    let output = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        registry.execute(
-            "mcp",
-            serde_json::json!({"action": "list"}),
-            mcp_test_context(working_dir.path()),
-        ),
-    )
-    .await
-    .expect("mcp list must not wait for a slow background handshake")
-    .expect("mcp list should succeed");
-
-    assert!(
-        output.output.contains("slow"),
-        "unexpected output: {}",
-        output.output
-    );
-}
+#[path = "working_dir_tests.rs"]
+mod working_dir_tests;
 
 #[tokio::test]
 async fn real_mcp_registration_does_not_retain_registry_tool_map() {

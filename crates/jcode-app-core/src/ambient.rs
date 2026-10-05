@@ -14,7 +14,7 @@ pub mod scheduler;
 pub use directives::{
     UserDirective, add_directive, has_pending_directives, load_directives, take_pending_directives,
 };
-pub use manager::AmbientManager;
+pub use manager::{AmbientManager, CancelOutcome};
 pub use persistence::{AmbientLock, ScheduledQueue};
 #[cfg(test)]
 pub(crate) use prompt::format_duration_rough;

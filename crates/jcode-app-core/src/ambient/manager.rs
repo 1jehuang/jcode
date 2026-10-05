@@ -16,6 +16,20 @@ pub struct AmbientManager {
     queue: ScheduledQueue,
 }
 
+/// Result of [`AmbientManager::cancel_schedule`].
+///
+/// `NotOwned` is deliberately distinct from `NotFound`: telling a caller that a
+/// schedule exists but belongs to another session is the honest answer, and it
+/// is what lets the error name the owning session.
+#[derive(Debug)]
+pub enum CancelOutcome {
+    // Boxed so the enum stays pointer-sized: `ScheduledItem` is ~264 bytes and this
+    // variant is the only large one, which tripped `clippy::large_enum_variant` under `-D warnings`.
+    Removed { item: Box<ScheduledItem> },
+    NotOwned { created_by: String },
+    NotFound,
+}
+
 impl AmbientManager {
     pub fn new() -> Result<Self> {
         // Ensure storage layout exists
@@ -96,7 +110,49 @@ impl AmbientManager {
     }
 
     /// Cancel a queued scheduled item by ID.
-    pub fn cancel_schedule(&mut self, id: &str) -> Result<Option<ScheduledItem>> {
+    ///
+    /// The caller is only allowed to remove items it owns, so the check lives
+    /// here rather than in one caller: every path that mutates the shared queue
+    /// needs it, and a check that lives in one caller is one refactor away from
+    /// being gone. Ownership is per *creator* session, not per target session,
+    /// because the queue is one file for the whole daemon and the creator is
+    /// what ties an item to a project.
+    pub fn cancel_schedule(&mut self, id: &str, created_by_session: &str) -> Result<CancelOutcome> {
+        let Some(item) = self
+            .queue
+            .items()
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+        else {
+            return Ok(CancelOutcome::NotFound);
+        };
+
+        if item.created_by_session != created_by_session {
+            return Ok(CancelOutcome::NotOwned {
+                created_by: item.created_by_session,
+            });
+        }
+
+        // Ownership is checked above, but this method is reachable from any
+        // `CancelOutcome` construction path, and `remove_by_id` only answers
+        // `None` for an ID that is not in the queue. Keep the removal visible and
+        // drop the value instead of `unwrap`: panicking here would take down a
+        // daemon that owns every session, over one schedule id.
+        match self.queue.remove_by_id(id)? {
+            Some(item) => Ok(CancelOutcome::Removed {
+                item: Box::new(item),
+            }),
+            None => Ok(CancelOutcome::NotFound),
+        }
+    }
+
+    /// Remove an item by ID with no ownership check.
+    ///
+    /// Only for a caller that has *already* established cross-session intent,
+    /// such as `schedule cancel all_sessions=true`. Anything else must go
+    /// through [`Self::cancel_schedule`], which refuses by default.
+    pub fn force_cancel_schedule(&mut self, id: &str) -> Result<Option<ScheduledItem>> {
         self.queue.remove_by_id(id)
     }
 

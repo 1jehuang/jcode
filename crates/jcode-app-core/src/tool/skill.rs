@@ -400,11 +400,15 @@ mod tests {
     }
 
     fn create_test_context() -> ToolContext {
+        create_test_context_in(None)
+    }
+
+    fn create_test_context_in(working_dir: Option<&std::path::Path>) -> ToolContext {
         ToolContext {
             session_id: "test-session".to_string(),
             message_id: "test-message".to_string(),
             tool_call_id: "test-tool-call".to_string(),
-            working_dir: None,
+            working_dir: working_dir.map(std::path::PathBuf::from),
             stdin_request_tx: None,
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
@@ -462,6 +466,81 @@ mod tests {
         }
         // No skills are loaded in this tool, so they should be "not installed".
         assert!(result.output.contains("[not installed]"));
+    }
+
+    /// Drives the real tool with `working_dir = None` while the process cwd is a
+    /// repository that has `.jcode/skills`. This is the P2.1 surface: a session
+    /// with no workspace root must not see the daemon's project skills.
+    ///
+    /// Bound to `SkillTool::execute` rather than the registry helper, because a
+    /// correct helper is indistinguishable from a call site that stopped using
+    /// it (the P1.3 `all_sessions` lesson).
+    #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "test serializes storage environment and moves the process cwd, so the guard must span the awaits"
+    )]
+    async fn skill_tool_with_no_working_dir_does_not_list_daemon_cwd_project_skills() {
+        let _env = crate::storage::lock_test_env();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let skill_dir = repo
+            .path()
+            .join(".jcode")
+            .join("skills")
+            .join("daemon-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: daemon-skill\ndescription: Only in the daemon cwd repo\n---\n\n# Daemon skill\n",
+        )
+        .unwrap();
+
+        let old_cwd = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(repo.path()).expect("set current dir");
+
+        // Base registry holds global skills only, as the shared registry does.
+        let tool = create_test_tool();
+        let without_dir = tool
+            .execute(json!({"action": "list"}), create_test_context())
+            .await
+            .expect("list without working dir");
+        let with_dir = tool
+            .execute(
+                json!({"action": "list"}),
+                create_test_context_in(Some(repo.path())),
+            )
+            .await
+            .expect("list with working dir");
+        let load_without_dir = tool
+            .execute(
+                json!({"action": "load", "name": "daemon-skill"}),
+                create_test_context(),
+            )
+            .await;
+
+        std::env::set_current_dir(old_cwd).expect("restore current dir");
+
+        assert!(
+            !without_dir.output.contains("daemon-skill"),
+            "a session with no working dir must not list another project's skills:\n{}",
+            without_dir.output
+        );
+        assert!(
+            load_without_dir.is_err(),
+            "loading a project skill with no working dir must fail, got:\n{}",
+            load_without_dir
+                .map(|output| output.output)
+                .unwrap_or_else(|err| err.to_string())
+        );
+
+        // Positive control: the same tool, same process, does list it when the
+        // session names its workspace root. Without this the assertions above
+        // would also pass if `list` were simply broken.
+        assert!(
+            with_dir.output.contains("daemon-skill"),
+            "naming the workspace root must still expose that project's skills:\n{}",
+            with_dir.output
+        );
     }
 
     #[tokio::test]

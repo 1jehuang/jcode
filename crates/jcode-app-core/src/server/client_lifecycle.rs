@@ -19,13 +19,12 @@ use super::client_lifecycle_logging::{
 use super::client_lightweight_control::{
     LightweightControlContext, handle_lightweight_control_request, parse_swarm_spawn_mode,
 };
-use super::client_session::{
-    handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
-};
+use super::client_session::{handle_clear_session, handle_resume_session};
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
 };
 use super::client_writer::write_direct_event;
+use super::comm_auth::{comm_claimed_session, reject_unauthorized_comm};
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
     handle_client_debug_command, handle_client_debug_response, handle_comm_assign_next,
@@ -46,6 +45,7 @@ use super::provider_control::{
     handle_set_service_tier, handle_set_transport, handle_switch_anthropic_account,
     handle_switch_openai_account, try_available_models_updated_event,
 };
+use super::subscribe_working_dir::{handle_reload, handle_subscribe};
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
     SessionControlHandle, SessionInterruptQueues, SharedContext, SwarmEvent, SwarmMember,
@@ -64,7 +64,6 @@ use anyhow::Result;
 use futures::FutureExt;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource, StreamError};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -77,111 +76,6 @@ type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
-
-fn required_subscribe_working_dir(working_dir: Option<&str>) -> std::result::Result<&str, String> {
-    let working_dir = working_dir
-        .map(str::trim)
-        .filter(|dir| !dir.is_empty())
-        .ok_or_else(|| "Subscribe requires the client's working directory".to_string())?;
-    if !Path::new(working_dir).is_absolute() {
-        return Err("Subscribe working_dir must be an absolute path".to_string());
-    }
-    Ok(working_dir)
-}
-
-fn initial_subscribe_working_dir(request: &Request) -> std::result::Result<String, String> {
-    match request {
-        Request::Subscribe {
-            working_dir,
-            continue_on_disconnect,
-            ..
-        } => validated_subscribe_working_dir(working_dir.as_deref(), *continue_on_disconnect)
-            .map(str::to_string),
-        _ => Err(
-            "Client must Subscribe with a working_dir before sending stateful requests".to_string(),
-        ),
-    }
-}
-
-/// A reattachment names an existing session, not a new client working directory.
-/// Resolve an omitted cwd before provisional initialization, never from the
-/// daemon/bridge process cwd. Idle empty sessions may exist only in memory.
-async fn resolve_target_subscribe_working_dir(
-    request: &mut Request,
-    sessions: &SessionAgents,
-    members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> std::result::Result<(), String> {
-    let Request::Subscribe {
-        working_dir,
-        target_session_id: Some(target),
-        ..
-    } = request
-    else {
-        return Ok(());
-    };
-    if working_dir.is_some() {
-        return Ok(());
-    }
-    let live = sessions.read().await.get(target).cloned();
-    let resolved = if let Some(live) = live {
-        let idle_cwd = live
-            .try_lock()
-            .ok()
-            .and_then(|agent| agent.working_dir().map(str::to_string));
-        if idle_cwd.is_some() {
-            idle_cwd
-        } else {
-            // A generating Agent owns its mutex. The member records the same
-            // session root, so attaching must not wait for the model turn.
-            members
-                .read()
-                .await
-                .get(target)
-                .and_then(|member| member.working_dir.as_ref())
-                .map(|path| path.to_string_lossy().into_owned())
-        }
-    } else {
-        crate::session::Session::load_startup_stub(target)
-            .ok()
-            .and_then(|session| session.working_dir)
-    };
-    *working_dir = Some(resolved.ok_or_else(|| {
-        format!("Unknown session '{target}' or session has no working directory")
-    })?);
-    Ok(())
-}
-
-fn validated_subscribe_working_dir(
-    working_dir: Option<&str>,
-    remote_continuation: bool,
-) -> std::result::Result<&str, String> {
-    let working_dir = required_subscribe_working_dir(working_dir)?;
-    if remote_continuation && !Path::new(working_dir).is_dir() {
-        return Err(format!(
-            "Remote working directory must exist and be a directory on the server: {working_dir}"
-        ));
-    }
-    Ok(working_dir)
-}
-
-fn new_session_system_prompt<'a>(
-    provisional_session: bool,
-    target_session_id: Option<&str>,
-    system_prompt: Option<&'a str>,
-) -> Option<&'a str> {
-    if provisional_session && target_session_id.is_none() {
-        system_prompt
-    } else {
-        None
-    }
-}
-
-fn initial_subscribe_terminal_env(request: &Request) -> Vec<(String, String)> {
-    match request {
-        Request::Subscribe { terminal_env, .. } => terminal_env.clone(),
-        _ => Vec::new(),
-    }
-}
 
 struct ProcessingMessage {
     id: u64,
@@ -505,6 +399,7 @@ pub(super) async fn handle_client(
                     let keep_connection_open = matches!(request, Request::Ping { .. });
                     handle_lightweight_control_request(
                         request,
+                        &line,
                         Arc::clone(&writer),
                         LightweightControlContext {
                             sessions: &sessions,
@@ -1052,6 +947,19 @@ pub(super) async fn handle_client(
             line.len(),
         ) {
             crate::logging::info(&format!("SERVER_INTERRUPT_REQUEST_DECODED {}", fields));
+        }
+
+        // Session ownership gate for `Comm*` requests on a subscribed
+        // connection. Every `Comm*` variant names its caller in one field and
+        // its target in a separate one, so comparing that caller field against
+        // this connection's own id bounds authority to the connection's own
+        // session. Rejected before dispatch so no handler ever runs against a
+        // session this connection does not own.
+        if let Some(claim) = comm_claimed_session(&request) {
+            let auth = claim.authorize_subscribed(&client_session_id);
+            if reject_unauthorized_comm(&claim, auth, &request_kind, request_id, &client_event_tx) {
+                continue;
+            }
         }
 
         // A cancellation request must never be gated on writing an Ack to the client.
@@ -1989,6 +1897,13 @@ pub(super) async fn handle_client(
             }
 
             Request::ResumeAllSessions { id } => {
+                // Scope the sweep to this connection's project. Read from the
+                // agent rather than the daemon's cwd: the daemon serves many
+                // projects and its cwd is whichever one happened to start it.
+                let caller_working_dir = {
+                    let agent_guard = agent.lock().await;
+                    agent_guard.working_dir().map(str::to_string)
+                };
                 super::client_actions::handle_resume_all_sessions(
                     id,
                     &sessions,
@@ -1998,6 +1913,7 @@ pub(super) async fn handle_client(
                     &event_counter,
                     &swarm_event_tx,
                     &client_event_tx,
+                    caller_working_dir.as_deref(),
                 )
                 .await;
             }
@@ -3884,6 +3800,11 @@ pub(super) async fn process_locked_message_streaming_mpsc(
     }
     result
 }
+
+#[path = "client_lifecycle_subscribe.rs"]
+mod client_lifecycle_subscribe;
+
+use client_lifecycle_subscribe::*;
 
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]

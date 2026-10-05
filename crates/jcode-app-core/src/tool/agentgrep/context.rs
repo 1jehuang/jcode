@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Context as _;
 
 pub(super) fn maybe_write_context_json(
     params: &AgentGrepInput,
@@ -8,8 +9,11 @@ pub(super) fn maybe_write_context_json(
         return Ok(None);
     }
 
-    let context = build_harness_context(params, ctx);
-    let Some(context) = context else {
+    // `None` means there is no exposure context worth ranking against, so no
+    // file is written and the harness is told there is no `context_json`. The
+    // inner value is what gets serialized: writing the `Option` itself would put
+    // a bare `null` in the file, which the harness cannot parse back.
+    let Some(context) = build_harness_context(params, ctx)? else {
         return Ok(None);
     };
 
@@ -19,23 +23,84 @@ pub(super) fn maybe_write_context_json(
         ctx.session_id, ctx.tool_call_id
     ));
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create the agentgrep context directory {}",
+                parent.display()
+            )
+        })?;
     }
     std::fs::write(&path, serde_json::to_vec(&context)?)?;
     Ok(Some(path))
 }
 
+/// True when the only reason a session could not be read is that it is not there.
+///
+/// Silence here is deliberate, and the silence is narrow. A session that has never
+/// been written has no exposure history, so there is no ranking context to produce
+/// and `None` is the correct answer. Every other failure (a truncated or corrupt
+/// snapshot, a directory where the file should be, a permissions problem) means
+/// ranking silently degrades to nothing on every call, which is why those get
+/// reported instead of discarded.
+///
+/// `storage::read_json` starts with `std::fs::read_to_string`, so the absent-file
+/// case arrives as an `io::Error` carrying `ErrorKind::NotFound`. Both the error
+/// and the context resolution can also fail before any read is attempted, which is
+/// why the downcast is a question rather than an assumption.
+fn is_expected_missing_session(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Build the exposure context used to rank and explain results.
+///
+/// Returns `Ok(None)` when there is nothing worth ranking, which is a normal
+/// outcome for a session with no prior file exposure. A `path` that does not
+/// resolve is *not* that: it is a bad argument, and the error is propagated so
+/// the tool reports it instead of quietly searching the session's working
+/// directory, which is a different project.
 fn build_harness_context(
     params: &AgentGrepInput,
     ctx: &ToolContext,
-) -> Option<AgentGrepHarnessContext> {
-    let session = Session::load(&ctx.session_id).ok()?;
+) -> Result<Option<AgentGrepHarnessContext>> {
+    // Two different things make the session unreadable, and only one of them is
+    // an ordinary outcome. A session whose file has not been written yet simply
+    // has no exposure history to rank against, so there is no context to write
+    // and `Ok(None)` is the correct answer, silently. A session file that exists
+    // and will not parse is a different fault: ranking then degrades to nothing on
+    // every call, with nothing to show for it. Discarding the error is how that
+    // stayed invisible, so the two cases are separated here instead.
+    //
+    // `storage::read_json` starts with `std::fs::read_to_string`, so a missing
+    // file arrives as an `io::Error` with `ErrorKind::NotFound`; anything that is
+    // not that is a real read or parse failure worth reporting.
+    let session = match Session::load(&ctx.session_id) {
+        Ok(session) => session,
+        Err(error) => {
+            if !is_expected_missing_session(&error) {
+                logging::warn(&format!(
+                    "agentgrep: session {} is unreadable, so no exposure ranking context \
+                     is available for this call: {:#}",
+                    ctx.session_id, error
+                ));
+            }
+            return Ok(None);
+        }
+    };
     let observations = collect_tool_exposures(&session);
     let search_root = params
         .path
         .as_deref()
         .map(|path| resolve_path_arg(ctx, path))
-        .or_else(|| ctx.working_dir.clone())?;
+        .transpose()?
+        .or_else(|| ctx.working_dir.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "agentgrep needs a search root: this session has no working directory, \
+                 so pass an explicit `path`"
+            )
+        })?;
     let total_messages = session.messages.len().max(1);
     let compaction_cutoff = session
         .compaction
@@ -98,9 +163,9 @@ fn build_harness_context(
         && context.known_symbols.is_empty()
         && context.focus_files.is_empty()
     {
-        None
+        Ok(None)
     } else {
-        Some(context)
+        Ok(Some(context))
     }
 }
 
@@ -368,7 +433,14 @@ pub(super) fn collect_bash_exposure(
 fn normalize_context_path(path: &str, search_root: &Path, ctx: &ToolContext) -> Option<String> {
     let path = path.trim().trim_matches('"').trim_matches('\'');
     let path = path.strip_prefix("./").unwrap_or(path);
-    let resolved = ctx.resolve_path(Path::new(path));
+    // A failure to resolve a hint path drops one ranking hint and nothing else,
+    // which is the right degradation here: the result is a label, never a path
+    // that gets opened, and the root the agent actually asked for is resolved and
+    // checked by resolved_search_scope. Propagating would force every ranking
+    // call site to become fallible. What would not be acceptable is the old
+    // behaviour of resolving against the daemon's own directory, which is another
+    // project.
+    let resolved = ctx.resolve_path(Path::new(path)).ok()?;
     if let Ok(relative) = resolved.strip_prefix(search_root) {
         return Some(relative.display().to_string());
     }
@@ -816,7 +888,7 @@ fn file_modified_at(path: &str, search_root: &Path, ctx: &ToolContext) -> Option
     let candidate = if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
-        let resolved = ctx.resolve_path(Path::new(path));
+        let resolved = ctx.resolve_path(Path::new(path)).ok()?;
         if resolved.starts_with(search_root) {
             resolved
         } else {
@@ -1041,4 +1113,52 @@ fn parse_path_line_hits(content: &str) -> Vec<(String, usize)> {
 
 fn leak_str(value: String) -> &'static str {
     Box::leak(value.into_boxed_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A missing session file is the one failure with no defect behind it.
+    #[test]
+    fn absent_session_file_is_expected_and_silent() {
+        let error = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(is_expected_missing_session(&error));
+    }
+
+    /// The narrowness is the guarantee. Any other `io::ErrorKind` reaching the same
+    /// call site is a real fault and must not be treated as "session not written
+    /// yet", so each of these has to be reported.
+    #[test]
+    fn every_other_io_error_kind_is_not_expected() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::IsADirectory,
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            let error = anyhow::Error::from(std::io::Error::from(kind));
+            assert!(
+                !is_expected_missing_session(&error),
+                "{kind:?} must be reported, not treated as a missing session file"
+            );
+        }
+    }
+
+    /// A parse failure is not an `io::Error` at all, so the downcast cannot succeed.
+    /// This is the case that made ranking degrade invisibly: the file exists and is
+    /// readable, but `serde_json` rejects it.
+    #[test]
+    fn json_parse_failure_is_not_expected() {
+        let error = anyhow::Error::msg("expected value at line 1 column 1");
+        assert!(!is_expected_missing_session(&error));
+
+        let json_error = serde_json::from_str::<serde_json::Value>("{ not json")
+            .expect_err("input is deliberately malformed");
+        let wrapped: anyhow::Error = json_error.into();
+        assert!(
+            !is_expected_missing_session(&wrapped),
+            "a serde_json error carries no NotFound kind and must be reported"
+        );
+    }
 }

@@ -25,6 +25,8 @@ use std::time::Instant;
 #[path = "memory/activity.rs"]
 mod activity;
 mod cache;
+#[path = "memory_paths.rs"]
+mod memory_paths;
 #[path = "memory/pending.rs"]
 mod pending;
 #[path = "memory_prompt.rs"]
@@ -168,17 +170,7 @@ impl MemoryEntryEmbeddingExt for MemoryEntry {
     }
 }
 
-/// Per-project memory file for `project_dir`. Keyed by the absolute path, so a
-/// migrated session that keeps the same repo path keeps the same memories.
-pub fn project_memory_file(project_dir: &std::path::Path) -> Result<PathBuf> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    project_dir.hash(&mut hasher);
-    let project_hash = format!("{:016x}", hasher.finish());
-    let memory_dir = storage::jcode_dir()?.join("memory").join("projects");
-    Ok(memory_dir.join(format!("{}.json", project_hash)))
-}
+pub use memory_paths::project_memory_file;
 
 #[derive(Debug, Clone)]
 pub struct MemoryManager {
@@ -281,19 +273,7 @@ impl MemoryManager {
             None => return Ok(None),
         };
 
-        let project_hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            project_dir.hash(&mut hasher);
-            format!("{:016x}", hasher.finish())
-        };
-
-        Ok(Some(
-            storage::jcode_dir()?
-                .join("notes")
-                .join(format!("{}.json", project_hash)),
-        ))
+        memory_paths::legacy_notes_file(&project_dir).map(Some)
     }
 
     fn normalize_graph_search_text(graph: &mut MemoryGraph) -> bool {
@@ -1637,3 +1617,7 @@ impl Default for MemoryManager {
 #[cfg(test)]
 #[path = "memory_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "project_key_tests.rs"]
+mod project_key_tests;

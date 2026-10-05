@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::io::IsTerminal;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
@@ -1199,7 +1199,7 @@ fn try_acquire_spawn_lock(path: &std::path::Path) -> Result<Option<SpawnLockGuar
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
-        std::fs::create_dir_all(parent).with_context(|| {
+        anyhow::Context::with_context(std::fs::create_dir_all(parent), || {
             format!(
                 "Failed to create JCode runtime directory {}",
                 parent.display()

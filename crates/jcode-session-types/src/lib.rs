@@ -609,10 +609,18 @@ pub fn session_search_working_dir_matches(session_wd: &str, filter: &str) -> boo
         return true;
     }
 
-    // If the user supplied only a project name or path fragment, keep substring
-    // matching as a fallback. This preserves the previous loose behavior while
-    // making absolute path filters deterministic above.
-    !filter_norm.contains('/') && session_norm.contains(&filter_norm)
+    // A bare filter with no separator is treated as a project *name*. Match it
+    // against whole path segments rather than as a substring: the substring
+    // form quietly widened every project whose path happened to contain the
+    // text, which is the cross-project leak isolation invariant 4 forbids.
+    // Deliberate opt-out of this convenience is passing an absolute path.
+    if !filter_norm.contains('/') {
+        return session_norm
+            .split('/')
+            .any(|segment| segment == filter_norm.as_str());
+    }
+
+    false
 }
 
 pub fn session_search_truncate_title_text(text: &str, max_chars: usize) -> String {
@@ -1079,6 +1087,31 @@ mod session_search_tests {
             "/workspace/jcode",
             "/workspace/other"
         ));
+    }
+
+    #[test]
+    fn bare_working_dir_filter_matches_whole_segments_not_substrings() {
+        // A bare name is a project name, so it matches that segment and its
+        // subdirectories.
+        assert!(session_search_working_dir_matches(
+            "/workspace/jcode",
+            "jcode"
+        ));
+        assert!(session_search_working_dir_matches(
+            "/workspace/jcode/crates/jcode-base",
+            "jcode"
+        ));
+
+        // It must not leak into unrelated projects that merely contain the text.
+        assert!(!session_search_working_dir_matches(
+            "/workspace/jcode-old",
+            "jcode"
+        ));
+        assert!(!session_search_working_dir_matches(
+            "/workspace/myjcode",
+            "jcode"
+        ));
+        assert!(!session_search_working_dir_matches("/other/place", "code"));
     }
 
     #[test]

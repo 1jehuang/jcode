@@ -463,10 +463,94 @@ fn running_status_fixture(task_id: &str, session_id: &str) -> TaskStatusFile {
     }
 }
 
+/// A finished task owned by `session_id`. Cleanup deliberately skips running
+/// tasks, so ownership-scoping tests need terminal status to be observable.
+fn completed_status_fixture(task_id: &str, session_id: &str) -> TaskStatusFile {
+    let mut status = running_status_fixture(task_id, session_id);
+    status.status = BackgroundTaskStatus::Completed;
+    status.completed_at = Some(Utc::now().to_rfc3339());
+    status.duration_secs = Some(1.0);
+    status
+}
+
 async fn write_status_fixture(manager: &BackgroundTaskManager, status: &TaskStatusFile) {
     let path = manager.status_path_for(&status.task_id);
     let json = serde_json::to_string_pretty(status).expect("serialize status fixture");
     tokio::fs::write(&path, json).await.expect("write fixture");
+}
+
+#[tokio::test]
+async fn session_scoped_cleanup_leaves_other_sessions_task_files_alone() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let mine = completed_status_fixture("cleanup-mine", "session-a");
+    let theirs = completed_status_fixture("cleanup-theirs", "session-b");
+    write_status_fixture(&manager, &mine).await;
+    write_status_fixture(&manager, &theirs).await;
+
+    // max_age_hours=0 puts the cutoff in the past so both files are old enough.
+    let no_filter = std::collections::HashSet::new();
+    let result = manager
+        .cleanup_filtered_for_session(0, &no_filter, false, "session-a")
+        .await?;
+
+    assert_eq!(
+        result.removed_files, 1,
+        "only session-a's own file should go"
+    );
+    assert!(
+        manager.status("cleanup-mine").await.is_none(),
+        "the scoped owner's file should be removed"
+    );
+    assert!(
+        manager.status("cleanup-theirs").await.is_some(),
+        "session-b's file must survive session-a's cleanup"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn global_cleanup_still_sweeps_every_session() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    write_status_fixture(&manager, &completed_status_fixture("sweep-a", "session-a")).await;
+    write_status_fixture(&manager, &completed_status_fixture("sweep-b", "session-b")).await;
+
+    let no_filter = std::collections::HashSet::new();
+    let result = manager.cleanup_filtered(0, &no_filter, false).await?;
+
+    assert_eq!(result.removed_files, 2, "daemon maintenance stays global");
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_scoped_cleanup_ignores_files_whose_status_cannot_be_read() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    // An output file with no matching status: ownership is unknowable, so it
+    // must be left alone rather than attributed to whichever session asked.
+    let orphan = tmp.path().join("orphan.output");
+    std::fs::write(&orphan, "output")?;
+    write_status_fixture(
+        &manager,
+        &completed_status_fixture("known-mine", "session-a"),
+    )
+    .await;
+
+    let no_filter = std::collections::HashSet::new();
+    let result = manager
+        .cleanup_filtered_for_session(0, &no_filter, false, "session-a")
+        .await?;
+
+    assert_eq!(result.removed_files, 1);
+    assert!(
+        orphan.exists(),
+        "a file with no readable status must not be deleted by a session sweep"
+    );
+    Ok(())
 }
 
 #[tokio::test]

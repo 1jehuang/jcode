@@ -36,12 +36,32 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def is_test_rust_file(path: Path) -> bool:
-    rel = path.relative_to(REPO_ROOT).as_posix()
+def is_test_rust_file(path: Path, relative_to: Path = None) -> bool:
+    """True if `path` is a test file, judged by its path components.
+
+    `relative_to` is the scan root the path came from. It matters: the question
+    "is this a test file" is about the path *within the tree*, not the absolute
+    path, so an ancestor directory named `tests` -- a checkout under
+    `~/dev/tests/jcode`, say -- must not make every file in it a test file. The
+    caller passes the root it actually scanned.
+
+    This takes the root as an argument rather than reaching for this module's
+    `REPO_ROOT` because the caller may be scanning a different tree entirely:
+    `production_rust_files` takes its roots as an argument, and
+    `path.relative_to(REPO_ROOT)` raised ValueError on every file outside this
+    repo, so a cross-tree scan crashed instead of reporting.
+    """
     if path.suffix != ".rs":
         return False
-    parts = rel.split("/")
-    if parts[0] == "tests" or any(
+    try:
+        rel = path.relative_to(relative_to) if relative_to is not None else path
+    except ValueError:
+        # Not under the given root, which means the caller passed the wrong root.
+        # Fall back to the full path rather than raising, so one bad root cannot
+        # take down a whole scan.
+        rel = path
+    parts = list(rel.parts)
+    if any(
         part == "tests" or part.endswith("_tests") or part.endswith("_test") or part.startswith("tests_")
         for part in parts
     ):
@@ -55,13 +75,25 @@ def is_test_rust_file(path: Path) -> bool:
     )
 
 
-def production_rust_files() -> list[Path]:
+def production_rust_files(scan_roots=None) -> list[Path]:
+    """Production `.rs` files under `scan_roots`.
+
+    `scan_roots` is a parameter rather than an implicit read of this module's
+    `SCAN_ROOTS` because another guard imports this function to scan ITS OWN repo
+    root. Python caches an import under its bare module name, so whichever copy of
+    this file is imported first wins and every later caller silently inherits that
+    copy's roots. That was not hypothetical: it made the cwd-fallback guard's test
+    suite order-dependent, because each test's scratch tree overwrote the scan roots
+    for the tests after it, which then scanned an already-deleted directory and
+    passed for the wrong reason. Callers that care which tree they scan must say so.
+    """
+    roots = SCAN_ROOTS if scan_roots is None else tuple(scan_roots)
     files: list[Path] = []
-    for root in SCAN_ROOTS:
+    for root in roots:
         if not root.exists():
             continue
         for path in sorted(root.rglob("*.rs")):
-            if path.suffix == ".rs" and not is_test_rust_file(path):
+            if path.suffix == ".rs" and not is_test_rust_file(path, root):
                 files.append(path)
     return files
 

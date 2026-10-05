@@ -5,41 +5,55 @@ struct ResolvedSearchScope {
     glob: Option<String>,
 }
 
+/// The directory a resolved search scope should be rooted at.
+///
+/// Split out from `resolved_search_scope` so the parentless case can be tested
+/// directly. `resolved_search_scope` cannot reach it: it only calls this after
+/// `is_file()`, and every path whose `parent()` is `None` is a directory or
+/// absent, so the `None` arm is unreachable through the tool's public surface.
+/// Testing it through `build_grep_args` produced a test that passed with the
+/// old `unwrap_or_else(|| Path::new("."))` restored, i.e. it proved nothing.
+pub(crate) fn scope_root_for(path: &Path) -> Result<String> {
+    match path.parent() {
+        Some(parent) => Ok(parent.display().to_string()),
+        None => Err(anyhow::anyhow!(
+            "agentgrep: path has no parent directory: {}",
+            path.display()
+        )),
+    }
+}
+
 fn resolved_search_scope(
     ctx: &ToolContext,
     path: Option<&str>,
     file: Option<&str>,
     glob: Option<&str>,
-) -> ResolvedSearchScope {
+) -> Result<ResolvedSearchScope> {
     // `file` scopes grep/find to one exact file when `path` is absent.
     let path = path.or(file);
     let Some(path) = path else {
-        return ResolvedSearchScope {
+        return Ok(ResolvedSearchScope {
             root: None,
             glob: normalized_agentgrep_glob_owned(glob),
-        };
+        });
     };
 
-    let resolved = resolve_path_arg(ctx, path);
+    let resolved = resolve_path_arg(ctx, path)?;
     if resolved.is_file() {
-        let root = resolved
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .display()
-            .to_string();
+        let root = scope_root_for(&resolved)?;
         let glob = resolved
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
-        return ResolvedSearchScope {
+        return Ok(ResolvedSearchScope {
             root: Some(root),
             glob,
-        };
+        });
     }
 
-    ResolvedSearchScope {
+    Ok(ResolvedSearchScope {
         root: Some(resolved.display().to_string()),
         glob: normalized_agentgrep_glob_owned(glob),
-    }
+    })
 }
 
 pub(super) fn build_grep_args(params: &AgentGrepInput, ctx: &ToolContext) -> Result<GrepArgs> {
@@ -52,7 +66,7 @@ pub(super) fn build_grep_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
         params.path.as_deref(),
         params.file.as_deref(),
         params.glob.as_deref(),
-    );
+    )?;
     Ok(GrepArgs {
         query,
         regex: params.regex.unwrap_or(false),
@@ -85,7 +99,7 @@ pub(super) fn build_find_args(params: &AgentGrepInput, ctx: &ToolContext) -> Res
         params.path.as_deref(),
         params.file.as_deref(),
         params.glob.as_deref(),
-    );
+    )?;
     Ok(FindArgs {
         query_parts: query.split_whitespace().map(ToOwned::to_owned).collect(),
         file_type: params.file_type.clone(),
@@ -112,7 +126,7 @@ pub(super) fn build_outline_args(
     // so the file argument is not joined onto it (for example,
     // ".../todo.rs/.../todo.rs").
     if let Some(path) = params.path.as_deref() {
-        let resolved = resolve_path_arg(ctx, path);
+        let resolved = resolve_path_arg(ctx, path)?;
         if resolved.is_file() {
             return Ok(OutlineArgs {
                 file: resolved.display().to_string(),
@@ -129,7 +143,7 @@ pub(super) fn build_outline_args(
         file,
         json: false,
         max_items: None,
-        path: resolved_root_string(ctx, params.path.as_deref()),
+        path: resolved_root_string(ctx, params.path.as_deref())?,
         context_json: context_json_path.map(|path| path.display().to_string()),
     })
 }
@@ -151,7 +165,7 @@ pub(super) fn build_smart_args_and_query(
         params.path.as_deref(),
         params.file.as_deref(),
         params.glob.as_deref(),
-    );
+    )?;
 
     let args = SmartArgs {
         terms,
@@ -231,8 +245,14 @@ fn parse_full_region_mode(value: Option<&str>) -> Result<FullRegionMode> {
     }
 }
 
-fn resolved_root_string(ctx: &ToolContext, path: Option<&str>) -> Option<String> {
-    path.map(|path| resolve_path_arg(ctx, path).display().to_string())
+/// Resolve the `path` argument to an absolute root string.
+///
+/// Returns `None` only when the caller did not pass `path` at all. A `path`
+/// that cannot be resolved is an error: falling back to the raw value would
+/// run the search somewhere other than where the caller asked.
+fn resolved_root_string(ctx: &ToolContext, path: Option<&str>) -> Result<Option<String>> {
+    path.map(|path| resolve_path_arg(ctx, path).map(|resolved| resolved.display().to_string()))
+        .transpose()
 }
 
 pub(super) fn resolve_search_root(ctx: &ToolContext, path: Option<&str>) -> Result<PathBuf> {
@@ -259,8 +279,12 @@ pub(super) fn summarize_agentgrep_request(
             util::truncate_str(&terms.join(" "), 80)
         ));
     }
-    if let Some(path) = resolved_root_string(ctx, params.path.as_deref()) {
-        parts.push(format!("root={path}"));
+    // A summary line must not fail the call, but a `path` we could not
+    // resolve is worth showing rather than silently dropping from the summary.
+    match resolved_root_string(ctx, params.path.as_deref()) {
+        Ok(Some(path)) => parts.push(format!("root={path}")),
+        Ok(None) => {}
+        Err(err) => parts.push(format!("root=<unresolved: {err}>")),
     }
     if let Some(glob) = normalized_agentgrep_glob(params.glob.as_deref()) {
         parts.push(format!("glob={glob}"));

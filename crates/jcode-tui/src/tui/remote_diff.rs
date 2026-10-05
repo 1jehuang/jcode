@@ -106,6 +106,9 @@ pub(crate) fn resolve_diff_path(raw: &str) -> PathBuf {
     if expanded.is_absolute() {
         expanded
     } else {
+        // Resolved against the process cwd, which in the foreground TUI is the
+        // project the diff was requested from. Recorded in
+        // scripts/cwd_fallback.json.
         std::env::current_dir().unwrap_or_default().join(expanded)
     }
 }

@@ -46,6 +46,31 @@ pub(super) async fn send_request(request: Request) -> Result<ServerEvent> {
     send_request_with_timeout(request, None).await
 }
 
+/// Serialize a request, adding the session capability to `Comm*` lines.
+///
+/// One-shot connections are not attached to a session, so the daemon
+/// authorizes them by a capability instead. Injecting it here means every
+/// in-tree `Comm*` producer is covered by construction rather than by
+/// remembering to call something at each of its call sites.
+///
+/// The capability is verified against the id the request itself names, so this
+/// cannot widen authority: it only ever proves the caller is this daemon,
+/// already acting for the session it named.
+fn encode_request_with_capability(request: &Request) -> Result<String> {
+    let Some(claimed) = crate::server::claimed_session_id(request) else {
+        return Ok(serde_json::to_string(request)?);
+    };
+    let mut value = serde_json::to_value(request)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("Comm request did not serialize to a JSON object"))?;
+    object.insert(
+        crate::server::CAPABILITY_FIELD.to_string(),
+        Value::String(crate::server::mint(&claimed)),
+    );
+    Ok(serde_json::to_string(&value)?)
+}
+
 pub(super) async fn send_request_with_timeout(
     request: Request,
     timeout: Option<std::time::Duration>,
@@ -58,7 +83,7 @@ pub(super) async fn send_request_with_timeout(
     let deadline =
         tokio::time::Instant::now() + timeout.unwrap_or(std::time::Duration::from_secs(30));
 
-    let json = serde_json::to_string(&request)? + "\n";
+    let json = encode_request_with_capability(&request)? + "\n";
     let request_type = request_type_from_json(&json);
     writer.write_all(json.as_bytes()).await?;
 
@@ -149,15 +174,25 @@ pub(super) async fn send_request_with_timeout(
 mod tests {
     use super::{SERVER_NOT_RUNNING, connect_swarm_socket};
 
+    /// Extract the error from a `Result<Stream, _>`.
+    ///
+    /// `expect_err` requires `Stream: Debug`, which the transport enum does
+    /// not implement. That made this test module fail to compile, which in
+    /// turn took down the whole `jcode-app-core` lib test target rather than
+    /// just this one test.
+    fn expect_connect_error(result: anyhow::Result<crate::transport::Stream>) -> anyhow::Error {
+        match result {
+            Ok(_) => panic!("expected the connection to fail"),
+            Err(error) => error,
+        }
+    }
+
     #[tokio::test]
     async fn missing_daemon_socket_has_actionable_error() {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("missing.sock");
 
-        let err = match connect_swarm_socket(&socket_path).await {
-            Ok(_) => panic!("missing socket should fail"),
-            Err(err) => err,
-        };
+        let err = expect_connect_error(connect_swarm_socket(&socket_path).await);
 
         assert_eq!(err.to_string(), SERVER_NOT_RUNNING);
     }
@@ -171,10 +206,7 @@ mod tests {
             let _listener = crate::transport::Listener::bind(&socket_path).expect("bind listener");
         }
 
-        let err = match connect_swarm_socket(&socket_path).await {
-            Ok(_) => panic!("stale socket should refuse the connection"),
-            Err(err) => err,
-        };
+        let err = expect_connect_error(connect_swarm_socket(&socket_path).await);
 
         assert_eq!(err.to_string(), SERVER_NOT_RUNNING);
     }

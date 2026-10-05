@@ -32,6 +32,10 @@ const LIGHT_MODE_DEFAULT_CONCURRENCY: usize = 4;
 mod transport;
 use transport::{send_request, send_request_with_timeout};
 
+#[path = "communicate_description.rs"]
+mod communicate_description;
+pub use communicate_description::CommunicateTool;
+
 fn fresh_spawn_request_nonce(ctx: &ToolContext) -> String {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1814,33 +1818,6 @@ fn format_swarm_model_list(
     }
     out.push_str("\nAlso pass effort (none|minimal|low|medium|high|xhigh|max) to set the spawned agent's reasoning effort.");
     out
-}
-
-pub struct CommunicateTool {
-    /// Full tool description including the user-tunable swarm prompt
-    /// (model-routing guidance loaded from `swarm-prompt.md`). Computed once at
-    /// registry construction so `description()` can hand out a borrowed str.
-    description: String,
-}
-
-impl CommunicateTool {
-    pub fn new() -> Self {
-        Self::new_for_working_dir(None)
-    }
-
-    fn new_for_working_dir(working_dir: Option<&std::path::Path>) -> Self {
-        const BASE_DESCRIPTION: &str =
-            "Coordinate agents: spawn workers with a prompt, message them, and manage swarm plans.";
-        let swarm_prompt = crate::prompt::load_swarm_prompt(working_dir);
-        let description = if swarm_prompt.is_empty() {
-            BASE_DESCRIPTION.to_string()
-        } else {
-            format!(
-                "{BASE_DESCRIPTION}\n\nSwarm prompt (user-tunable via ~/.jcode/swarm-prompt.md):\n{swarm_prompt}"
-            )
-        };
-        Self { description }
-    }
 }
 
 #[derive(Clone, Deserialize)]

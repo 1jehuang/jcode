@@ -1115,40 +1115,8 @@ async fn spawn_execute_rejects_missing_label_before_sending_request() {
     assert_eq!(error.to_string(), "'label' is required for spawn action");
 }
 
-#[test]
-fn description_includes_swarm_prompt_guidance() {
-    let tool = CommunicateTool::new();
-    let description = tool.description();
-    assert!(
-        description.starts_with("Coordinate agents"),
-        "description should lead with the short coordination summary"
-    );
-    assert!(
-        description.contains("Swarm prompt"),
-        "description should embed the swarm prompt section"
-    );
-}
-
-#[test]
-fn existing_tool_keeps_prompt_while_new_tool_loads_edit() {
-    let project = tempfile::tempdir().unwrap();
-    let prompt_dir = project.path().join(".jcode");
-    std::fs::create_dir_all(&prompt_dir).unwrap();
-    let prompt_path = prompt_dir.join("swarm-prompt.md");
-    std::fs::write(&prompt_path, "first routing version").unwrap();
-
-    let existing = CommunicateTool::new_for_working_dir(Some(project.path()));
-    std::fs::write(&prompt_path, "second routing version").unwrap();
-    let newly_created = CommunicateTool::new_for_working_dir(Some(project.path()));
-
-    assert!(existing.description().contains("first routing version"));
-    assert!(!existing.description().contains("second routing version"));
-    assert!(
-        newly_created
-            .description()
-            .contains("second routing version")
-    );
-}
+#[path = "swarm_description_tests.rs"]
+mod swarm_description_tests;
 
 #[test]
 fn spawning_action_inputs_preserve_requested_model() {

@@ -8,6 +8,7 @@ use super::client_comm::{
 };
 use super::client_comm_swarms::{handle_comm_list_swarms, handle_comm_set_swarm_label};
 use super::client_writer::write_direct_event;
+use super::comm_auth::authorize_lightweight_comm;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
     handle_comm_assign_next, handle_comm_assign_role, handle_comm_assign_task,
@@ -82,9 +83,18 @@ pub(super) struct LightweightControlContext<'a> {
 
 pub(super) async fn handle_lightweight_control_request(
     request: Request,
+    request_line: &str,
     writer: Arc<Mutex<crate::transport::WriteHalf>>,
     context: LightweightControlContext<'_>,
 ) -> Result<()> {
+    // Pre-`Subscribe` connections have no session attached, so a `Comm*`
+    // request naming a session is authorized by the in-process capability in
+    // its envelope rather than by connection ownership. Checked before the
+    // `Ping` fast path and before the generic `Ack`, so a rejected request is
+    // never reported as acknowledged.
+    if authorize_lightweight_comm(&request, request_line, &writer).await {
+        return Ok(());
+    }
     let LightweightControlContext {
         sessions,
         global_session_id,

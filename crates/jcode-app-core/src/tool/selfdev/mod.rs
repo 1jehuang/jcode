@@ -148,6 +148,25 @@ struct BuildRequest {
     status_file: Option<String>,
     attached_to_request_id: Option<String>,
 }
+/// Read one positive unsigned env override, treating anything else as unset.
+///
+/// "Anything else" is unset, unparseable, and zero. All three are ordinary: a
+/// build machine sets these to tune its own queue, and the product does not
+/// break when they are missing or malformed, because the default is the intended
+/// behavior. So no diagnostic is emitted here; doing so would fire on every poll
+/// of every machine that does not set the knob, which is noise rather than signal.
+///
+/// These three knobs used to each spell this chain out inline, which put six
+/// swallowed errors on disk for what is one rule.
+fn positive_env_u64(name: &str, fallback: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(value) if value > 0 => value,
+            _ => fallback,
+        },
+        Err(_) => fallback,
+    }
+}
 
 impl BuildRequest {
     const DEFAULT_TERMINAL_HISTORY_LIMIT: usize = 256;
@@ -186,11 +205,11 @@ impl BuildRequest {
     }
 
     fn terminal_history_limit() -> usize {
-        std::env::var("JCODE_SELFDEV_REQUEST_HISTORY_LIMIT")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|limit| *limit > 0)
-            .unwrap_or(Self::DEFAULT_TERMINAL_HISTORY_LIMIT)
+        let limit = positive_env_u64(
+            "JCODE_SELFDEV_REQUEST_HISTORY_LIMIT",
+            Self::DEFAULT_TERMINAL_HISTORY_LIMIT as u64,
+        );
+        usize::try_from(limit).unwrap_or(Self::DEFAULT_TERMINAL_HISTORY_LIMIT)
     }
 
     fn archive_old_terminal_requests() -> Result<usize> {
@@ -477,6 +496,47 @@ impl Drop for BuildLockGuard {
 #[derive(Default)]
 pub struct SelfDevTool;
 
+/// The checked-out commit, in the same SHORT form the publish gate compares
+/// against, or None when there is no repository to ask.
+///
+/// Two ways to get this wrong, both of which have shipped here:
+///
+/// 1. A full 40-character hash. `validate_binary_version_matches_source_report`
+///    (`jcode-build-support/src/lib.rs`) compares the embedded hash against
+///    `source_state.rs`'s own `rev-parse --short HEAD` with `!=`, so a full hash
+///    can never match and every build is refused with a message that reads like
+///    a build failure.
+/// 2. An empty string, which `jcode_build_meta::present` collapses to None.
+///    That rule is the same one 22909eb7a fixed in the build script's own copy,
+///    and it is reused here rather than reimplemented: a second copy of
+///    "blank means absent" would be a third thing to keep in step.
+///
+/// So: ask git for the short form, and let `present` decide what blank means.
+///
+/// On the blank rule specifically: the delegation here is not separately
+/// testable, and that is deliberate rather than an oversight. Replacing
+/// `present(x)` with an inline `Some(x.trim())` is an EQUIVALENT mutant over
+/// this function's reachable inputs, because the two differ only on blank
+/// output, which no git invocation produces (outside a repository git exits 128
+/// and the early return fires first; probed). A test that claimed to catch it
+/// would be asserting on an unreachable arm. The rule itself is tested once, in
+/// `jcode_build_meta`, and mutating it there fails 5 tests.
+fn short_git_hash(repo_dir: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(repo_dir)
+        .output()
+        .ok()?;
+
+    // Outside a repository git exits 128 with empty stdout, so this early
+    // return fires before the blank check ever matters. Probed, not assumed.
+    if !output.status.success() {
+        return None;
+    }
+
+    jcode_build_meta::present(Some(String::from_utf8_lossy(&output.stdout).to_string()))
+}
+
 impl SelfDevTool {
     pub fn new() -> Self {
         Self
@@ -716,22 +776,14 @@ impl SelfDevTool {
     }
 
     fn reload_timeout_secs() -> u64 {
-        std::env::var("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|secs| *secs > 0)
-            .unwrap_or(15)
+        positive_env_u64("JCODE_SELFDEV_RELOAD_TIMEOUT_SECS", 15)
     }
 
     /// How long `build-reload` waits inline for the queued build (and any
     /// builds ahead of it in the queue) to finish before giving up and telling
     /// the agent to reload manually.
     fn build_reload_wait_secs() -> u64 {
-        std::env::var("JCODE_SELFDEV_BUILD_WAIT_SECS")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .filter(|secs| *secs > 0)
-            .unwrap_or(1800)
+        positive_env_u64("JCODE_SELFDEV_BUILD_WAIT_SECS", 1800)
     }
 
     fn session_is_selfdev(session_id: &str) -> bool {

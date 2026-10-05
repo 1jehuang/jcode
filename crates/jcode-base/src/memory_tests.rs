@@ -732,14 +732,19 @@ fn retrieval_candidates_include_local_skills() {
         // synthetic-entry provider (as cli::startup does in production) so the
         // memory<-skill integration this test exercises is wired up. The
         // shared snapshot is global-only (issue #457), so production composes
-        // the process-cwd project overlay on top.
+        // the process-cwd project overlay on top. That cwd is passed
+        // explicitly here for the same reason (P2.1): the provider is
+        // deliberately process-scoped, so it says so at the call site.
         crate::memory::register_synthetic_entry_provider(|| {
             let global = crate::skill::SkillRegistry::shared_snapshot();
-            crate::skill::SkillRegistry::effective_for_working_dir(&global, None)
-                .list()
-                .into_iter()
-                .map(|skill| skill.as_memory_entry())
-                .collect()
+            crate::skill::SkillRegistry::effective_for_working_dir(
+                &global,
+                std::env::current_dir().ok().as_deref(),
+            )
+            .list()
+            .into_iter()
+            .map(|skill| skill.as_memory_entry())
+            .collect()
         });
         let project_dir = home.join("project-with-skill");
         fs::create_dir_all(project_dir.join(".jcode/skills/firefox-browser"))

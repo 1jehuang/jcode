@@ -84,8 +84,26 @@ fn test_and_inspection_commands_are_scoped_and_read_only() {
     let mut custom = input("test");
     custom.command = Some("cargo test -p jcode-desktop-ui".into());
     let spec = command_spec(root, &custom, "debug", None).unwrap();
-    assert_eq!(spec.program, "bash");
-    assert_eq!(spec.args, ["-c", "cargo test -p jcode-desktop-ui"]);
+    // The caller's command is passed verbatim: cmd.exe does not decode its
+    // command line the way the C runtime does, and quoting the command would
+    // corrupt any quotes inside it.
+    #[cfg(windows)]
+    {
+        assert_eq!(spec.program, "cmd.exe");
+        assert_eq!(spec.args, ["/D", "/S", "/C"]);
+    }
+    #[cfg(not(windows))]
+    {
+        assert_eq!(spec.program, "bash");
+        assert_eq!(spec.args, ["-c"]);
+    }
+    assert_eq!(
+        spec.raw.as_deref(),
+        Some("cargo test -p jcode-desktop-ui"),
+        "caller command must survive verbatim"
+    );
+    // An argv-style command needs no raw argument.
+    assert_eq!(default.raw, None);
     let inspect = command_spec(root, &input("inspect"), "debug", Some(42)).unwrap();
     assert_eq!(
         inspect.args,
@@ -123,6 +141,48 @@ fn screenshot_rejects_symlink_destination() {
     let root = checkout();
     std::os::unix::fs::symlink(root.path(), root.path().join("target")).unwrap();
     assert!(command_spec(root.path(), &input("screenshot"), "debug", None).is_err());
+}
+
+// The symlink test above is Unix-only, so nothing covered the walk on Windows,
+// where it failed outright. `checkout()` canonicalizes its tempdir, and on
+// Windows that yields a verbatim "\?\C:\..." path. Pushing a Prefix
+// component on its own yields the bare drive "\?\C:", which
+// `symlink_metadata` rejects with ERROR_INVALID_FUNCTION ("Funcao incorreta.
+// (os error 1)"), so every screenshot and custom test failed there.
+#[test]
+fn repo_walk_accepts_a_canonicalized_repo_root() {
+    let root = checkout();
+    assert!(
+        reject_symlink_components(root.path()).is_ok(),
+        "canonicalized repo root must be walkable"
+    );
+    // ...and a path whose leaf does not exist yet, as for a screenshot target.
+    assert!(
+        reject_symlink_components(&root.path().join("target/desktop.png")).is_ok(),
+        "missing leaf must stay tolerated"
+    );
+    // The exemption is only for the prefix: every real component is still
+    // checked. This is the property the walk exists to enforce.
+    if let Ok(link) = symlink_dir(&root) {
+        let error = reject_symlink_components(&link).unwrap_err().to_string();
+        assert!(error.contains("symlink"), "{error}");
+    }
+}
+
+/// Creates `root/target` as a symlink to `root` and returns the link path.
+#[cfg(unix)]
+fn symlink_dir(root: &tempfile::TempDir) -> std::io::Result<PathBuf> {
+    let link = root.path().join("target");
+    std::os::unix::fs::symlink(root.path(), &link)?;
+    Ok(link)
+}
+
+/// Windows needs the symlink privilege, so "cannot create" means skipped.
+#[cfg(windows)]
+fn symlink_dir(root: &tempfile::TempDir) -> std::io::Result<PathBuf> {
+    let link = root.path().join("target");
+    std::os::windows::fs::symlink_dir(root.path(), &link)?;
+    Ok(link)
 }
 
 #[test]
@@ -171,16 +231,25 @@ async fn custom_test_executes_from_detected_repo_root() {
     let root = checkout();
     let output = DesktopSelfDevTool::new()
         .execute(
-            json!({"action":"test", "command":"pwd", "timeout_seconds":5}),
+            json!({"action":"test", "command":"cd", "timeout_seconds":5}),
             context(Some(root.path().join("crates/jcode-desktop-ui/src"))),
         )
         .await
         .unwrap();
     let data: Value = serde_json::from_str(&output.output).unwrap();
     assert_eq!(data["success"], true);
+    // `cd` prints the cwd in both shells, unlike `pwd`, which is a bash builtin
+    // only. The command runs in the Desktop repository, not in the directory
+    // the tool was called from -- that is what this test pins.
+    let expected = root.path().canonicalize().unwrap();
+    let reported = data["stdout"].as_str().unwrap().trim();
+    // Windows canonicalize yields a verbatim "\\?\C:\..." path, which
+    // `cd` reports without the prefix, and drive letters are not
+    // case-preserved. Compare the canonicalized pair.
+    let reported = std::path::Path::new(reported);
     assert_eq!(
-        data["stdout"].as_str().unwrap().trim(),
-        root.path().canonicalize().unwrap().to_str().unwrap()
+        reported.canonicalize().unwrap().to_str().unwrap(),
+        expected.to_str().unwrap()
     );
 }
 
@@ -202,18 +271,67 @@ async fn invalid_timeout_and_action_fail_before_execution() {
     }
 }
 
+// The caller's command is a shell command, and its own quoting has to reach
+// the child intact. Measured: passing it through ordinary argument escaping
+// turns `echo hi "quoted world"` into `hi \"quoted world\"`, because cmd.exe
+// does not decode its command line the way the C runtime does. This is why
+// CommandSpec has a raw argument. Every other test here sends a command
+// without quotes, so without this one the raw argument could be dropped and
+// nothing would fail.
+#[tokio::test]
+async fn custom_test_command_keeps_its_own_quoting() {
+    let root = checkout();
+    let output = DesktopSelfDevTool::new()
+        .execute(
+            json!({"action":"test", "command": "echo hi \"quoted world\"", "timeout_seconds":5}),
+            context(Some(root.path().to_path_buf())),
+        )
+        .await
+        .unwrap();
+    let data: Value = serde_json::from_str(&output.output).unwrap();
+    assert_eq!(data["success"], true);
+    assert_eq!(
+        data["stdout"].as_str().unwrap().trim(),
+        "hi \"quoted world\"",
+        "the command's own quotes must survive the shell hop"
+    );
+}
+
 #[tokio::test]
 async fn command_timeout_is_bounded_and_failures_are_reported() {
     let root = checkout();
     let mut params = input("test");
-    params.command = Some("printf failure >&2; exit 7".into());
+    // `printf ... >&2` and `sleep` are bash-only spellings. Measured in
+    // cmd.exe: `echo failure 1>&2 & exit 7` yields rc=7 with stderr
+    // "failure", and `ping -n 3 127.0.0.1 > nul` blocks about two seconds.
+    #[cfg(windows)]
+    {
+        params.command = Some("echo failure 1>&2 & exit 7".into());
+    }
+    #[cfg(not(windows))]
+    {
+        params.command = Some("printf failure >&2; exit 7".into());
+    }
     let spec = command_spec(root.path(), &params, "debug", None).unwrap();
     let output = run_command(root.path(), spec, 5).await.unwrap();
     let data: Value = serde_json::from_str(&output.output).unwrap();
     assert_eq!(data["success"], false);
     assert_eq!(data["exit_code"], 7);
-    assert_eq!(data["stderr"], "failure");
-    params.command = Some("sleep 30".into());
+    // `echo` in cmd.exe pads the redirected line ("failure  "), while bash's
+    // `printf` does not, so compare on content rather than byte-exact bytes.
+    assert_eq!(
+        data["stderr"].as_str().unwrap().trim(),
+        "failure",
+        "stderr must carry the command's own output"
+    );
+    #[cfg(windows)]
+    {
+        params.command = Some("ping -n 3 127.0.0.1 > nul".into());
+    }
+    #[cfg(not(windows))]
+    {
+        params.command = Some("sleep 30".into());
+    }
     let spec = command_spec(root.path(), &params, "debug", None).unwrap();
     let start = std::time::Instant::now();
     assert!(

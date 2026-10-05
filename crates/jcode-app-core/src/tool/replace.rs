@@ -151,7 +151,7 @@ impl Tool for ReplaceTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ReplaceInput = serde_json::from_value(input)?;
         let matcher = Matcher::new(&params)?;
-        let root = ctx.resolve_path(Path::new(params.path.as_deref().unwrap_or(".")));
+        let root = ctx.resolve_path(Path::new(params.path.as_deref().unwrap_or(".")))?;
         anyhow::ensure!(root.exists(), "Path not found: {}", root.display());
 
         let files = {
@@ -392,15 +392,52 @@ mod tests {
         std::fs::write(dir.path().join("src/c.md"), "x").unwrap();
         std::fs::write(dir.path().join(".git/config"), "x").unwrap();
 
-        let names = |glob| {
+        // Compare path components rather than rendered strings:
+        // `display_path` intentionally prints native separators, so the
+        // Windows form is "src\\nested\\b.rs". The selection is what this
+        // test is about, not the separator convention.
+        let names = |glob: Option<&str>| {
             collect_files(dir.path(), glob)
                 .unwrap()
                 .iter()
                 .map(|path| display_path(path, dir.path()))
-                .collect::<Vec<_>>()
+                .map(|rendered| {
+                    rendered
+                        .split(['/', std::path::MAIN_SEPARATOR])
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<Vec<String>>>()
         };
-        assert_eq!(names(Some("*.rs")), ["src/a.rs", "src/nested/b.rs"]);
-        assert_eq!(names(Some("src/*.rs")), ["src/a.rs"]);
-        assert_eq!(names(None), ["src/a.rs", "src/c.md", "src/nested/b.rs"]);
+
+        assert_eq!(
+            names(Some("*.rs")),
+            [vec!["src", "a.rs"], vec!["src", "nested", "b.rs"]]
+        );
+        assert_eq!(names(Some("src/*.rs")), [vec!["src", "a.rs"]]);
+        assert_eq!(
+            names(None),
+            [
+                vec!["src", "a.rs"],
+                vec!["src", "c.md"],
+                vec!["src", "nested", "b.rs"]
+            ]
+        );
+
+        // Pin the deliberate choice: display_path renders whatever separator
+        // the path carries, and in production that path comes from the
+        // walker, so it carries native separators. Measure the walked path
+        // rather than a hand-joined fixture -- `Path::join` appends its
+        // argument verbatim and would keep a POSIX-spelled fixture POSIX.
+        let walked = collect_files(dir.path(), None).unwrap();
+        let deepest = walked
+            .iter()
+            .max_by_key(|p| p.components().count())
+            .expect("at least one walked file");
+        let rendered = display_path(deepest, dir.path());
+        assert!(
+            rendered.contains(std::path::MAIN_SEPARATOR),
+            "walked path should render native separators, got {rendered:?} from {deepest:?}"
+        );
     }
 }

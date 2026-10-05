@@ -73,10 +73,21 @@ fn rate_limit_backoff(
         retry_after_secs
             .map(Duration::from_secs)
             .or_else(|| {
-                // checked_add: a garbage reset header must not panic here.
-                let reset_at =
-                    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(reset_epoch_secs?))?;
-                reset_at.duration_since(now).ok()
+                // `reset` is a Unix epoch second count, so the quantity we want
+                // is "seconds from now". Do that subtraction in `u64` rather
+                // than building a `SystemTime` and taking a `duration_since`:
+                // on Windows `SystemTime` is a 64-bit FILETIME, so
+                // `UNIX_EPOCH.checked_add` returns None once the offset
+                // exceeds its range, and a far-future (or garbage) header would
+                // silently degrade to the fallback window instead of hitting the
+                // clamp. `saturating_sub` keeps the old "past hint" answer that
+                // `duration_since(..).ok()` produced.
+                let reset = reset_epoch_secs?;
+                let now_epoch_secs = now
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|since_epoch| since_epoch.as_secs())
+                    .unwrap_or(0);
+                Some(Duration::from_secs(reset.saturating_sub(now_epoch_secs)))
             })
             .filter(|backoff| !backoff.is_zero())
             .unwrap_or(RATE_LIMIT_BACKOFF_FALLBACK)
@@ -152,6 +163,44 @@ mod tests {
         assert_eq!(
             rate_limit_backoff(429, Some(0), None, Some(10), now).unwrap(),
             RATE_LIMIT_BACKOFF_FALLBACK
+        );
+    }
+
+    /// `x-ratelimit-reset` is a Unix epoch second count. Turning it into a
+    /// `SystemTime` before subtracting makes the answer depend on the
+    /// platform's clock representation: Windows' 64-bit FILETIME overflows and
+    /// `checked_add` yields `None`, which silently dropped a far-future hint
+    /// to the 1h fallback instead of the 6h clamp. These pin the arithmetic in
+    /// `u64`, where it is platform-independent.
+    #[test]
+    fn reset_header_is_interpreted_as_epoch_seconds_not_a_system_time() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+
+        // Year 10000: far future, and inside the range of every SystemTime
+        // representation in use. Must clamp.
+        assert_eq!(
+            rate_limit_backoff(429, Some(0), None, Some(253_402_300_800), now).unwrap(),
+            RATE_LIMIT_BACKOFF_MAX
+        );
+
+        // A hostile or broken header near u64::MAX must also clamp, not
+        // degrade to the fallback. This is the case Windows got wrong.
+        assert_eq!(
+            rate_limit_backoff(429, Some(0), None, Some(u64::MAX), now).unwrap(),
+            RATE_LIMIT_BACKOFF_MAX
+        );
+
+        // A hint already in the past (clock skew, stale cached response) must
+        // not wrap into a huge value.
+        assert_eq!(
+            rate_limit_backoff(429, Some(0), None, Some(10), now).unwrap(),
+            RATE_LIMIT_BACKOFF_FALLBACK
+        );
+
+        // An ordinary future hint is used as-is.
+        assert_eq!(
+            rate_limit_backoff(429, Some(0), None, Some(1_000 + 600), now).unwrap(),
+            Duration::from_secs(600)
         );
     }
 

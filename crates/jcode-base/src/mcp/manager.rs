@@ -118,9 +118,26 @@ impl Drop for OwnedConnectionAttemptGuard {
 }
 
 impl McpManager {
-    /// Create a new manager in owned in-process mode (used by tests and local harnesses).
+    /// Create a new manager in owned in-process mode, resolving project-local
+    /// MCP config against the process cwd.
+    ///
+    /// Only correct where the process cwd *is* the user's project: the `jcode`
+    /// foreground binary and tests. A caller that knows its own project
+    /// directory -- anything running inside the multi-project daemon -- must use
+    /// [`Self::owned_for_dir`] instead, because the daemon's process cwd is
+    /// whichever project happened to start it.
     pub fn new() -> Self {
-        let project_dir = std::env::current_dir().ok();
+        Self::owned_for_dir(std::env::current_dir().ok())
+    }
+
+    /// Create an owned (unpooled) manager resolving project-local MCP config
+    /// against `project_dir` rather than the process cwd.
+    ///
+    /// The owned counterpart of [`Self::with_shared_pool_for_dir`]. Both branches
+    /// of `Registry::register_mcp_tools_for_dir` must resolve config the same
+    /// way, or the same session silently reads a different project's servers
+    /// depending on which branch it took (issue #420).
+    pub fn owned_for_dir(project_dir: Option<std::path::PathBuf>) -> Self {
         Self {
             pool: None,
             pool_handles: RwLock::new(HashMap::new()),
@@ -174,6 +191,15 @@ impl McpManager {
         self.pool.is_some()
     }
 
+    /// This session's project scope key, as used for pooled server entries.
+    ///
+    /// Computed once at construction: the session's project does not move, and
+    /// deriving it per call would let two spellings of the same directory land in
+    /// two different pool buckets.
+    fn project_scope(&self) -> String {
+        crate::project_scope::optional_project_key(self.project_dir.as_deref())
+    }
+
     /// Connect to all configured servers.
     /// Shared servers go to the pool, non-shared are spawned per-session.
     #[expect(
@@ -194,15 +220,19 @@ impl McpManager {
             .filter(|(_, config)| config.is_enabled())
             .partition(|(_, config)| config.shared && self.pool.is_some());
 
-        // Connect shared servers via pool
+        // Connect shared servers via pool, filed under this session's project.
+        // The pool is daemon-global and holds entries for many projects, so
+        // every call names this session's scope rather than relying on the
+        // pool's own default (P1.1).
         if let Some(pool) = &self.pool {
             if !shared_servers.is_empty() {
-                let (successes, failures) = pool.connect_all().await;
+                let scope = self.project_scope();
+                let (successes, failures) = pool.connect_all_scoped(&scope).await;
                 total_successes += successes;
                 total_failures.extend(failures);
 
                 // Acquire handles for shared servers only
-                let all_handles = pool.acquire_handles(&self.session_id).await;
+                let all_handles = pool.acquire_handles_scoped(&self.session_id, &scope).await;
                 let shared_names: std::collections::HashSet<&String> =
                     shared_servers.iter().map(|(name, _)| *name).collect();
                 let mut pool_handles = self.pool_handles.write().await;
@@ -267,8 +297,9 @@ impl McpManager {
         }
         if config.shared {
             if let Some(pool) = &self.pool {
-                pool.connect_server(name, config).await?;
-                if let Some(handle) = pool.get_handle(name).await {
+                let scope = self.project_scope();
+                pool.connect_server_scoped(&scope, name, config).await?;
+                if let Some(handle) = pool.get_handle_scoped(&scope, name).await {
                     self.pool_handles
                         .write()
                         .await
@@ -353,7 +384,8 @@ impl McpManager {
             let mut handles = self.pool_handles.write().await;
             if handles.remove(name).is_some() {
                 if let Some(pool) = &self.pool {
-                    pool.release_handles(&self.session_id, &[name.to_string()])
+                    let scope = self.project_scope();
+                    pool.release_handles_scoped(&self.session_id, &[name.to_string()], &scope)
                         .await;
                 }
                 return Ok(());
@@ -379,7 +411,9 @@ impl McpManager {
             let names: Vec<String> = handles.keys().cloned().collect();
             handles.clear();
             if let Some(pool) = &self.pool {
-                pool.release_handles(&self.session_id, &names).await;
+                let scope = self.project_scope();
+                pool.release_handles_scoped(&self.session_id, &names, &scope)
+                    .await;
             }
         }
 
@@ -559,9 +593,12 @@ impl McpManager {
         // Reload config
         self.config = McpConfig::load_for_dir(self.project_dir.as_deref());
 
-        // If we have a pool, reload it too (reconnects shared servers)
+        // If we have a pool, reload it too (reconnects shared servers). Scoped
+        // to this session's project so a reload in one project does not tear
+        // down processes other projects' sessions are using.
         if let Some(pool) = &self.pool {
-            pool.reload().await;
+            let scope = self.project_scope();
+            pool.reload_scoped(&scope).await;
         }
 
         // Reconnect everything
