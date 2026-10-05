@@ -3,6 +3,7 @@ use super::*;
 use crate::message::{Message, ToolDefinition};
 use crate::provider::EventStream;
 use async_trait::async_trait;
+use std::path::Path;
 
 struct NoRequests;
 #[async_trait]

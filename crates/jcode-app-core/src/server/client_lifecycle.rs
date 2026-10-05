@@ -64,7 +64,6 @@ use anyhow::Result;
 use futures::FutureExt;
 use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource, StreamError};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -77,111 +76,6 @@ type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 const RELOAD_STARTING_GUARD_MAX_AGE: Duration = Duration::from_secs(30);
 const REQUEST_HANDLER_STALL_THRESHOLDS_MS: [u64; 3] = [2_000, 10_000, 60_000];
-
-fn required_subscribe_working_dir(working_dir: Option<&str>) -> std::result::Result<&str, String> {
-    let working_dir = working_dir
-        .map(str::trim)
-        .filter(|dir| !dir.is_empty())
-        .ok_or_else(|| "Subscribe requires the client's working directory".to_string())?;
-    if !Path::new(working_dir).is_absolute() {
-        return Err("Subscribe working_dir must be an absolute path".to_string());
-    }
-    Ok(working_dir)
-}
-
-fn initial_subscribe_working_dir(request: &Request) -> std::result::Result<String, String> {
-    match request {
-        Request::Subscribe {
-            working_dir,
-            continue_on_disconnect,
-            ..
-        } => validated_subscribe_working_dir(working_dir.as_deref(), *continue_on_disconnect)
-            .map(str::to_string),
-        _ => Err(
-            "Client must Subscribe with a working_dir before sending stateful requests".to_string(),
-        ),
-    }
-}
-
-/// A reattachment names an existing session, not a new client working directory.
-/// Resolve an omitted cwd before provisional initialization, never from the
-/// daemon/bridge process cwd. Idle empty sessions may exist only in memory.
-async fn resolve_target_subscribe_working_dir(
-    request: &mut Request,
-    sessions: &SessionAgents,
-    members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> std::result::Result<(), String> {
-    let Request::Subscribe {
-        working_dir,
-        target_session_id: Some(target),
-        ..
-    } = request
-    else {
-        return Ok(());
-    };
-    if working_dir.is_some() {
-        return Ok(());
-    }
-    let live = sessions.read().await.get(target).cloned();
-    let resolved = if let Some(live) = live {
-        let idle_cwd = live
-            .try_lock()
-            .ok()
-            .and_then(|agent| agent.working_dir().map(str::to_string));
-        if idle_cwd.is_some() {
-            idle_cwd
-        } else {
-            // A generating Agent owns its mutex. The member records the same
-            // session root, so attaching must not wait for the model turn.
-            members
-                .read()
-                .await
-                .get(target)
-                .and_then(|member| member.working_dir.as_ref())
-                .map(|path| path.to_string_lossy().into_owned())
-        }
-    } else {
-        crate::session::Session::load_startup_stub(target)
-            .ok()
-            .and_then(|session| session.working_dir)
-    };
-    *working_dir = Some(resolved.ok_or_else(|| {
-        format!("Unknown session '{target}' or session has no working directory")
-    })?);
-    Ok(())
-}
-
-fn validated_subscribe_working_dir(
-    working_dir: Option<&str>,
-    remote_continuation: bool,
-) -> std::result::Result<&str, String> {
-    let working_dir = required_subscribe_working_dir(working_dir)?;
-    if remote_continuation && !Path::new(working_dir).is_dir() {
-        return Err(format!(
-            "Remote working directory must exist and be a directory on the server: {working_dir}"
-        ));
-    }
-    Ok(working_dir)
-}
-
-fn new_session_system_prompt<'a>(
-    provisional_session: bool,
-    target_session_id: Option<&str>,
-    system_prompt: Option<&'a str>,
-) -> Option<&'a str> {
-    if provisional_session && target_session_id.is_none() {
-        system_prompt
-    } else {
-        None
-    }
-}
-
-fn initial_subscribe_terminal_env(request: &Request) -> Vec<(String, String)> {
-    match request {
-        Request::Subscribe { terminal_env, .. } => terminal_env.clone(),
-        _ => Vec::new(),
-    }
-}
 
 struct ProcessingMessage {
     id: u64,
@@ -3906,6 +3800,11 @@ pub(super) async fn process_locked_message_streaming_mpsc(
     }
     result
 }
+
+#[path = "client_lifecycle_subscribe.rs"]
+mod client_lifecycle_subscribe;
+
+use client_lifecycle_subscribe::*;
 
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]

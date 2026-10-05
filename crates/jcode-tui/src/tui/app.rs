@@ -11,6 +11,7 @@ use crate::id;
 use crate::mcp::McpManager;
 use crate::message::{
     ContentBlock, Message, Role, StreamEvent, TOOL_OUTPUT_MISSING_TEXT, ToolCall, ToolDefinition,
+    cache_relevant_messages,
 };
 use crate::provider::Provider;
 use crate::runtime_memory_log::RuntimeMemoryLogController;
@@ -29,10 +30,13 @@ use futures::StreamExt;
 pub(crate) use helpers::effort_display_label;
 use helpers::*;
 use jcode_tui_messages::DisplayMessage;
+use kv_cache_hash::{
+    message_hashes, ratio_pct, stable_hash_json, stable_hash_str, stable_json_len,
+};
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -76,6 +80,7 @@ mod idle_heap_release;
 mod inline_interactive;
 mod input;
 mod input_help;
+mod kv_cache_hash;
 mod local;
 mod misc_ui;
 mod model_context;
@@ -2659,47 +2664,6 @@ impl App {
             .zip(previous.message_hashes.iter())
             .take_while(|(current, previous)| current == previous)
             .count()
-    }
-}
-
-fn stable_hash_str(value: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn stable_hash_json<T: serde::Serialize + ?Sized>(value: &T) -> u64 {
-    let encoded = serde_json::to_string(value).unwrap_or_default();
-    stable_hash_str(&encoded)
-}
-
-fn stable_json_len<T: serde::Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_string(value)
-        .map(|encoded| encoded.len())
-        .unwrap_or_default()
-}
-
-// The cache-relevant projection lives in `jcode-message-types` (re-exported
-// through `crate::message`) so this local path and the server event path in
-// `jcode-app-core::agent::kv_cache_request_event` hash messages identically.
-// If the two projections drift, remote sessions report false
-// `harness:_prefix_changed` KV-cache misses.
-use crate::message::{cache_relevant_message_value, cache_relevant_messages};
-
-fn message_hashes(messages: &[Message]) -> Vec<u64> {
-    messages
-        .iter()
-        .map(|message| stable_hash_json(&cache_relevant_message_value(message)))
-        .collect()
-}
-
-fn ratio_pct(numerator: u64, denominator: u64) -> u8 {
-    if denominator == 0 {
-        0
-    } else {
-        ((numerator as f32 / denominator as f32) * 100.0)
-            .round()
-            .clamp(0.0, 100.0) as u8
     }
 }
 
