@@ -28,14 +28,14 @@ pub fn project_memory_file(project_dir: &std::path::Path) -> Result<PathBuf> {
         "{}.json",
         crate::project_scope::legacy_project_key(project_dir)
     ));
-    if legacy != path {
-        if let Err(migrate_err) = crate::project_scope::migrate_legacy_project_key(&legacy, &path) {
-            crate::logging::warn(&format!(
-                "Could not migrate legacy memory {} to {}: {migrate_err}",
-                legacy.display(),
-                path.display()
-            ));
-        }
+    if legacy != path
+        && let Err(migrate_err) = crate::project_scope::migrate_legacy_project_key(&legacy, &path)
+    {
+        crate::logging::warn(&format!(
+            "Could not migrate legacy memory {} to {}: {migrate_err}",
+            legacy.display(),
+            path.display()
+        ));
     }
     Ok(path)
 }
@@ -53,16 +53,15 @@ pub fn legacy_notes_file(project_dir: &std::path::Path) -> Result<PathBuf> {
         "{}.json",
         crate::project_scope::legacy_project_key(project_dir)
     ));
-    if legacy != notes_path {
-        if let Err(migrate_err) =
+    if legacy != notes_path
+        && let Err(migrate_err) =
             crate::project_scope::migrate_legacy_project_key(&legacy, &notes_path)
-        {
-            crate::logging::warn(&format!(
-                "Could not migrate legacy notes {} to {}: {migrate_err}",
-                legacy.display(),
-                notes_path.display()
-            ));
-        }
+    {
+        crate::logging::warn(&format!(
+            "Could not migrate legacy notes {} to {}: {migrate_err}",
+            legacy.display(),
+            notes_path.display()
+        ));
     }
 
     Ok(notes_path)
