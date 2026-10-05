@@ -245,6 +245,16 @@ impl MultiProvider {
             std::iter::once(current.to_string()).collect();
         let max_attempts = labels.len().saturating_sub(1);
         let mut attempts = 0usize;
+        // A marked OpenAI alternative may have reset early. Recheck its live
+        // usage before the rotation filters it out, as is done for the
+        // session's own account, so a usable account is not reported as out.
+        if kind == AccountProviderKind::OpenAi {
+            for label in labels.iter().filter(|label| label.as_str() != current) {
+                if account_exhausted(kind, label).is_some() {
+                    crate::usage::revalidate_openai_account_exhaustion(label).await;
+                }
+            }
+        }
         for label in account_rotation(kind, Some(current), labels) {
             if attempts >= max_attempts || !tried.insert(label.clone()) {
                 continue;

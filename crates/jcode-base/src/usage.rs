@@ -21,6 +21,7 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub use cache::note_openai_usage_limit_observed;
 use cache::*;
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
@@ -46,6 +47,34 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
 /// OpenAI ChatGPT usage endpoint
 const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+
+/// Test-only override of [`OPENAI_USAGE_URL`] so the live usage path can run
+/// against a local mock server.
+#[cfg(test)]
+static OPENAI_USAGE_URL_OVERRIDE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_openai_usage_url_for_tests(url: Option<String>) {
+    *OPENAI_USAGE_URL_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = url;
+}
+
+/// Usage endpoint to query, or `None` in tests without a mock server (unit
+/// tests use fake credentials and must never reach the real endpoint).
+fn openai_usage_url() -> Option<String> {
+    #[cfg(test)]
+    {
+        OPENAI_USAGE_URL_OVERRIDE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+    #[cfg(not(test))]
+    {
+        Some(OPENAI_USAGE_URL.to_string())
+    }
+}
 
 /// Cache duration (refresh every 5 minutes - usage data is slow-changing)
 const CACHE_DURATION: Duration = Duration::from_secs(300);

@@ -1072,3 +1072,177 @@ fn openai_early_reset_clears_usage_limit_mark_and_resume_is_sent() {
         crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
     });
 }
+
+/// Serve `body` as the OpenAI usage endpoint for every request, counting
+/// requests. Returns the base URL.
+fn serve_openai_usage(
+    rt: &tokio::runtime::Runtime,
+    body: &'static str,
+    hits: Arc<std::sync::atomic::AtomicUsize>,
+) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("bind usage mock");
+    let url = format!("http://{}/wham/usage", listener.local_addr().unwrap());
+    rt.spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    url
+}
+
+const OPENAI_USAGE_OPEN_BODY: &str = r#"{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":3,"limit_window_seconds":18000},"secondary_window":{"used_percent":10,"limit_window_seconds":604800}}}"#;
+
+/// The live recheck path end to end: the session's own marked account is
+/// rechecked against the (mock) usage endpoint, and the resume is sent.
+#[test]
+fn openai_marked_account_is_rechecked_live_and_the_resume_is_sent() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        store_openai_accounts(1);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        crate::usage::set_openai_usage_url_for_tests(Some(serve_openai_usage(
+            &rt,
+            OPENAI_USAGE_OPEN_BODY,
+            Arc::clone(&hits),
+        )));
+
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::OpenAi,
+            "openai-otter",
+            Some(chrono::Utc::now().timestamp() + 5 * 3600),
+        );
+        record_provider_unavailable_for_label("openai", "openai-otter", "openai-otter is out of usage");
+
+        let text = complete_text(&rt, &a);
+        crate::usage::set_openai_usage_url_for_tests(None);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
+        assert_eq!(text.expect("resume is sent"), "hi from openai-otter");
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "usage was fetched live");
+    });
+}
+
+/// The current account is still out, but a marked alternative reset early.
+/// Rotation must recheck the alternative live instead of filtering it out.
+#[test]
+fn openai_rotation_rechecks_a_marked_alternative_live() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        let labels = store_openai_accounts(2);
+        assert_eq!(labels, ["openai-otter", "openai-fox"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        crate::usage::set_openai_usage_url_for_tests(Some(serve_openai_usage(
+            &rt,
+            OPENAI_USAGE_OPEN_BODY,
+            Arc::clone(&hits),
+        )));
+
+        let far = chrono::Utc::now().timestamp() + 5 * 3600;
+        // otter is really out: its recheck is throttled, so it stays marked.
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::OpenAi,
+            "openai-otter",
+            Some(far),
+        );
+        crate::usage::mark_openai_exhaustion_revalidated_for_tests("openai-otter");
+        // fox was marked too, but has reset early.
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::OpenAi,
+            "openai-fox",
+            Some(far),
+        );
+
+        let text = complete_text(&rt, &a);
+        crate::usage::set_openai_usage_url_for_tests(None);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-fox");
+        assert_eq!(
+            text.expect("the reset alternative takes the request"),
+            "hi from openai-fox"
+        );
+        assert_eq!(world.labels_for("A"), ["openai-fox"]);
+    });
+}
+
+/// A usage fetch that started before a new limit was recorded must not clear
+/// that newer mark when it lands.
+#[test]
+fn stale_available_snapshot_does_not_clear_a_newer_exhaustion_mark() {
+    with_account_failover_env(|| {
+        store_openai_accounts(1);
+        let started_at = crate::usage::openai_usage_generation_for_tests();
+        crate::provider::account_failover::record_account_exhausted(
+            AccountProviderKind::OpenAi,
+            "openai-otter",
+            Some(chrono::Utc::now().timestamp() + 3600),
+        );
+        crate::usage::store_openai_usage_for_label_at_generation_for_tests(
+            started_at,
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                seven_day: Some(crate::usage::OpenAIUsageWindow {
+                    name: "7-day window".to_string(),
+                    usage_ratio: 0.0,
+                    resets_at: None,
+                }),
+                fetched_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            crate::provider::account_failover::account_exhausted(
+                AccountProviderKind::OpenAi,
+                "openai-otter"
+            )
+            .is_some(),
+            "the stale snapshot must not clear the newer mark"
+        );
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
+    });
+}
+
+/// An available snapshot says nothing about credentials. A 401/403 cooldown
+/// must stay until it expires.
+#[test]
+fn available_snapshot_keeps_an_auth_cooldown() {
+    with_account_failover_env(|| {
+        store_openai_accounts(1);
+        record_provider_unavailable_for_label(
+            "openai",
+            "openai-otter",
+            "OpenAI API error (401 Unauthorized): token expired",
+        );
+        crate::usage::store_openai_usage_for_label_for_tests(
+            "openai-otter",
+            crate::usage::OpenAIUsageData {
+                seven_day: Some(crate::usage::OpenAIUsageWindow {
+                    name: "7-day window".to_string(),
+                    usage_ratio: 0.0,
+                    resets_at: None,
+                }),
+                fetched_at: Some(std::time::Instant::now()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            provider_unavailability_detail_for_label("openai", "openai-otter").is_some(),
+            "an auth cooldown is not a usage limit"
+        );
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
+    });
+}

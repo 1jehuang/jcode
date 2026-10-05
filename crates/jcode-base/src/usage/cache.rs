@@ -14,6 +14,13 @@ static ANTHROPIC_USAGE_CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<Strin
 
 static OPENAI_USAGE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// A new usage limit was observed for an OpenAI account. Usage fetches that
+/// started before it can no longer be trusted to say the account is open, so
+/// advance the generation they are checked against.
+pub fn note_openai_usage_limit_observed() {
+    OPENAI_USAGE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 pub(super) fn openai_usage_generation() -> u64 {
     OPENAI_USAGE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
 }
@@ -223,7 +230,7 @@ pub(super) fn store_openai_usage_for_generation(
         // Fresh usage says this account is open again (an early or banked
         // reset, or the window rolled over). Drop the usage-limit mark and
         // the provider cooldown so the next resume is actually sent.
-        crate::provider::clear_openai_provider_unavailability_for_account_label(Some(&label));
+        crate::provider::clear_openai_usage_limit_for_account_label(&label);
     }
 }
 

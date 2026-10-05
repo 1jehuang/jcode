@@ -209,9 +209,16 @@ pub(super) async fn fetch_openai_usage_for_account(
         return provider_report_from_openai_usage_data(display_name, &cached);
     }
 
+    let Some(usage_url) = openai_usage_url() else {
+        return ProviderUsage {
+            provider_name: display_name,
+            error: Some("OpenAI usage endpoint unavailable".to_string()),
+            ..Default::default()
+        };
+    };
     let client = crate::provider::shared_http_client();
     let mut builder = client
-        .get(OPENAI_USAGE_URL)
+        .get(usage_url)
         .header("Accept", "application/json")
         .header("Authorization", format!("Bearer {}", creds.access_token));
 

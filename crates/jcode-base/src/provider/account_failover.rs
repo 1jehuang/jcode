@@ -250,6 +250,11 @@ pub(crate) fn record_account_exhausted(
     // resets now. Treat it as unknown, or the mark would clear at once and
     // the next turn would resend the doomed request or bounce back to it.
     let resets_at = resets_at.filter(|at| *at > now);
+    if kind == AccountProviderKind::OpenAi {
+        // An in-flight usage fetch that began before this limit must not
+        // clear the new mark when it lands.
+        crate::usage::note_openai_usage_limit_observed();
+    }
     ACCOUNT_EXHAUSTION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
