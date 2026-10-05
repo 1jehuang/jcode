@@ -914,6 +914,18 @@ pub struct HooksConfig {
     /// Fields: SOURCE ("create"/"resume").
     /// Env override: JCODE_HOOK_SESSION_START.
     pub session_start: Option<HookCommands>,
+    /// Context providers run synchronously when a session is created, attached
+    /// or resumed, before its first turn. Each receives the same fields as
+    /// `session_start` and may print `{"hookSpecificOutput":{"additionalContext":
+    /// "..."}}` (or plain text) on stdout; the text is added to the session's
+    /// initial context. Empty output, a non-zero exit, a timeout or a spawn
+    /// failure adds nothing (fail open). Env override:
+    /// JCODE_HOOK_SESSION_START_CONTEXT.
+    pub session_start_context: Option<HookCommands>,
+    /// Max milliseconds to wait for each session_start_context provider
+    /// (default and cap: 3000). Env override:
+    /// JCODE_HOOK_SESSION_START_CONTEXT_TIMEOUT_MS.
+    pub session_start_context_timeout_ms: u64,
     /// Runs when a session closes normally.
     /// Env override: JCODE_HOOK_SESSION_END.
     pub session_end: Option<HookCommands>,
@@ -939,6 +951,8 @@ impl Default for HooksConfig {
             turn_start: None,
             turn_end: None,
             session_start: None,
+            session_start_context: None,
+            session_start_context_timeout_ms: 3000,
             session_end: None,
             pre_tool: None,
             post_tool: None,

@@ -12,6 +12,7 @@ sessions appear*); lifecycle hooks tell you *what is happening inside them*.
 [hooks]
 turn_end      = "~/bin/jcode-turn-notify"     # observer
 session_start = ""                            # observer
+session_start_context = ""                    # context provider
 session_end   = ""                            # observer
 pre_tool      = "~/bin/jcode-tool-policy"     # gate
 post_tool     = ""                            # observer
@@ -20,7 +21,8 @@ pre_tool_timeout_ms = 5000
 
 Env overrides (always win; empty value disables a config hook):
 `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
-`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`.
+`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`,
+`JCODE_HOOK_SESSION_START_CONTEXT`, `JCODE_HOOK_SESSION_START_CONTEXT_TIMEOUT_MS`.
 
 ## Common contract
 
@@ -59,6 +61,25 @@ Extra fields: `JCODE_HOOK_STATUS` (`ok`/`error`), `JCODE_HOOK_DURATION_MS`,
 `JCODE_HOOK_SOURCE` = `create` (brand new), `attach` (existing session object
 attached), or `resume` (restored by id). `session_end` fires on normal close
 (`JCODE_HOOK_SOURCE=close`).
+
+### `session_start_context`
+
+Runs **synchronously** when a session is created, attached or resumed, before
+its first turn, with the same environment as `session_start`. The text it
+prints on stdout, either `{"hookSpecificOutput":{"additionalContext":"..."}}`
+or plain text, is added to the session's initial context as one system
+reminder (at most 8000 characters per command). Nothing is added once the
+conversation has started.
+
+Each command is bounded by `session_start_context_timeout_ms` (default and
+maximum 3000). Empty output, a non-zero exit, a timeout (the process is
+killed) or a spawn failure adds nothing. `jcode version --json` lists
+`session_start_context` in `hook_capabilities`.
+
+```toml
+[hooks]
+session_start_context = "~/bin/project-notes"
+```
 
 ### `post_tool`
 

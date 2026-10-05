@@ -1486,6 +1486,7 @@ fn version_command_plain_output_includes_core_fields() {
         build_time: "2026-03-18 18:00:00 +0000".to_string(),
         git_date: "2026-03-18 17:59:00 +0000".to_string(),
         release_build: false,
+        hook_capabilities: vec!["session_start_context".to_string()],
     };
     let text = format!(
         "version\t{}\nsemver\t{}\nbase_semver\t{}\nupdate_semver\t{}\ngit_hash\t{}\ngit_tag\t{}\nbuild_time\t{}\ngit_date\t{}\nrelease_build\t{}\n",

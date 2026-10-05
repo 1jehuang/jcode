@@ -617,6 +617,14 @@ swarm_max_concurrent_agents = 32
 # ("create"/"attach"/"resume").
 # session_start = ""
 #
+# Context providers run synchronously (under a timeout) when a session starts,
+# before its first turn. Same env as session_start. A provider may print
+# {"hookSpecificOutput":{"additionalContext":"..."}} or plain text on stdout;
+# the text is added to the session's initial context. Anything else (empty
+# output, non-zero exit, timeout, missing binary) adds nothing.
+# session_start_context = ""
+# session_start_context_timeout_ms = 3000   # default and maximum
+#
 # Runs when a session closes normally. Extra: JCODE_HOOK_SOURCE ("close").
 # session_end = ""
 #
