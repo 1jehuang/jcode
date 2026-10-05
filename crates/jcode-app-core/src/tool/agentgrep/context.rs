@@ -395,13 +395,13 @@ pub(super) fn collect_bash_exposure(
 fn normalize_context_path(path: &str, search_root: &Path, ctx: &ToolContext) -> Option<String> {
     let path = path.trim().trim_matches('"').trim_matches('\'');
     let path = path.strip_prefix("./").unwrap_or(path);
-    // `.ok()?`: the result of this function is a *label* used to rank grep hits,
-    // never a path that gets opened, and the search root the agent actually asked
-    // for is resolved and checked by resolved_search_scope. An unresolvable path
-    // therefore drops one ranking hint, which is the right degradation for a
-    // hint; propagating would force every ranking call site to become fallible.
-    // What is not acceptable is the old behaviour of resolving against the
-    // daemon's own directory, which is a different project.
+    // A failure to resolve a hint path drops one ranking hint and nothing else,
+    // which is the right degradation here: the result is a label, never a path
+    // that gets opened, and the root the agent actually asked for is resolved and
+    // checked by resolved_search_scope. Propagating would force every ranking
+    // call site to become fallible. What would not be acceptable is the old
+    // behaviour of resolving against the daemon's own directory, which is another
+    // project.
     let resolved = ctx.resolve_path(Path::new(path)).ok()?;
     if let Ok(relative) = resolved.strip_prefix(search_root) {
         return Some(relative.display().to_string());

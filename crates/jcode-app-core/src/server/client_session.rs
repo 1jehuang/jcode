@@ -785,10 +785,7 @@ pub(super) async fn handle_subscribe(
         // resume just preserved and move a session into the attaching client's
         // project. `apply_or_defer_subscribe_working_dir` applies the same
         // decision, so the agent and the swarm/mcp resolution below agree.
-        let existing_dir = agent
-            .try_lock()
-            .ok()
-            .and_then(|agent_guard| agent_guard.working_dir().map(str::to_string));
+        let existing_dir = current_working_dir(agent, client_session_id);
         let bound_dir = session_working_dir_for_client(existing_dir.as_deref(), Some(dir), true);
         if bound_dir.as_deref() != Some(dir) {
             crate::logging::warn(&format!(
@@ -809,10 +806,7 @@ pub(super) async fn handle_subscribe(
         // left the swarm keyed to the attaching client's project while the
         // session's own tools ran in its own.
         let bound_dir = {
-            let current = agent
-                .try_lock()
-                .ok()
-                .and_then(|guard| guard.working_dir().map(str::to_string));
+            let current = current_working_dir(agent, client_session_id);
             let after_home_rule = effective_subscribe_working_dir(
                 current.as_deref(),
                 dir,
@@ -979,25 +973,14 @@ pub(super) async fn handle_subscribe(
             // Resolve against the bound directory so a rejected home-dir report
             // cannot point project-local MCP discovery at home (issue #481).
             Some(dir) => {
-                let current = agent
-                    .try_lock()
-                    .ok()
-                    .and_then(|guard| guard.working_dir().map(str::to_string));
+                let current = current_working_dir(agent, client_session_id);
                 Some(PathBuf::from(effective_subscribe_working_dir(
                     current.as_deref(),
                     dir,
                     dirs::home_dir().as_deref(),
                 )))
             }
-            None => agent
-                .try_lock()
-                .ok()
-                .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
-                .or_else(|| {
-                    crate::session::Session::load_startup_stub(client_session_id)
-                        .ok()
-                        .and_then(|session| session.working_dir.map(PathBuf::from))
-                }),
+            None => current_working_dir(agent, client_session_id).map(PathBuf::from),
         };
         registry
             .register_mcp_tools_for_dir(
@@ -1314,6 +1297,45 @@ async fn remove_detached_source_if_unclaimed(
         sessions_guard.remove(old_session_id);
     }
     owns_source
+}
+
+/// Read a session's working directory without ever blocking on the agent lock.
+///
+/// `try_lock` is not an answer here. A lock held by an in-flight turn is not the
+/// same fact as a session with no working directory, and reading it as one sent a
+/// busy session's directory back to the *client's* report: the agent stayed put,
+/// because `apply_or_defer_subscribe_working_dir` refuses to move a bound
+/// session, while the swarm member and project-local MCP discovery were re-keyed
+/// to the attaching client's project. That is the disagreement these rules exist
+/// to prevent, and a desktop attaches to live sessions routinely, so contention
+/// was the ordinary case rather than a race.
+///
+/// The persisted session is read first for the same reason
+/// `ensure_client_swarm_member` does: it is the same session file the agent
+/// saves its directory to, it needs no lock, and a missing or partial file is an
+/// ordinary outcome rather than an error. Only when it yields nothing does the
+/// live agent get asked, and then through `try_lock` so this still cannot stall a
+/// subscribe behind an in-flight turn.
+fn current_working_dir(agent: &Arc<Mutex<Agent>>, session_id: &str) -> Option<String> {
+    match crate::session::Session::load_startup_stub(session_id) {
+        Ok(session) => match session.working_dir {
+            Some(dir) => return Some(dir),
+            // A stub that parsed but carries no directory is still evidence about
+            // this session, so ask the live agent before falling back to the
+            // client's report.
+            None => {}
+        },
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "Could not read the persisted working directory for session {}: {:#}",
+                session_id, err
+            ));
+        }
+    }
+    agent
+        .try_lock()
+        .ok()
+        .and_then(|guard| guard.working_dir().map(str::to_string))
 }
 
 /// Atomically reserves an existing live target for this connection.
