@@ -152,6 +152,47 @@ impl Config {
         Ok(())
     }
 
+    /// Save the reasoning effort a named OpenAI-compatible profile applies when
+    /// `model` becomes active (`[[providers.<profile>.models]] reasoning_effort`).
+    /// Adds the model entry when the profile does not list it yet.
+    pub fn set_named_provider_model_reasoning_effort(
+        profile: &str,
+        model: &str,
+        value: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        let Some(provider) = cfg
+            .providers
+            .iter_mut()
+            .find(|(id, _)| id.eq_ignore_ascii_case(profile))
+            .map(|(_, provider)| provider)
+        else {
+            anyhow::bail!("Named provider profile `{profile}` is not in the config file");
+        };
+        let model = model.trim();
+        match provider
+            .models
+            .iter_mut()
+            .find(|entry| entry.id.trim().eq_ignore_ascii_case(model))
+        {
+            Some(entry) => entry.reasoning_effort = value.map(str::to_string),
+            None if value.is_some() => {
+                provider.models.push(NamedProviderModelConfig {
+                    id: model.to_string(),
+                    reasoning_effort: value.map(str::to_string),
+                    ..Default::default()
+                });
+            }
+            None => {}
+        }
+        cfg.save()?;
+        crate::logging::info(&format!(
+            "Saved reasoning_effort for {profile}/{model} to config: {}",
+            value.unwrap_or("(none)")
+        ));
+        Ok(())
+    }
+
     /// Update the persisted Anthropic reasoning effort preference.
     pub fn set_anthropic_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;

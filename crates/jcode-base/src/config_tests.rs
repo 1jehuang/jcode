@@ -1737,3 +1737,40 @@ fn removed_overscroll_status_key_still_loads_config() {
     assert!(config.display.centered);
     assert_eq!(config.display.usage_display, "used");
 }
+
+#[test]
+fn named_provider_model_reasoning_effort_is_saved_per_model() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[providers.Custom]\ntype = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\n\n\
+         [[providers.Custom.models]]\nid = \"kimi-k3\"\nreasoning = true\n",
+    )
+    .unwrap();
+
+    // An existing entry keeps its other fields; a new model gets an entry.
+    Config::set_named_provider_model_reasoning_effort("custom", "KIMI-K3", Some("high"))
+        .expect("save existing");
+    Config::set_named_provider_model_reasoning_effort("custom", "gpt-5.5", Some("low"))
+        .expect("save new");
+    let saved = Config::load_from_file_strict().unwrap().unwrap();
+    let profile = &saved.providers["Custom"];
+    assert_eq!(profile.models.len(), 2);
+    assert_eq!(profile.models[0].reasoning, Some(true));
+    assert_eq!(profile.models[0].reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(profile.models[1].id, "gpt-5.5");
+    assert_eq!(profile.models[1].reasoning_effort.as_deref(), Some("low"));
+
+    assert!(
+        Config::set_named_provider_model_reasoning_effort("missing", "m", Some("high")).is_err()
+    );
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
+}

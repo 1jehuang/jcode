@@ -403,7 +403,71 @@ fn saved_default_reasoning_effort(model: &str, route: &PickerOption) -> Option<S
         Some("openai-oauth") | Some("openai-api") => {
             config.provider.openai_reasoning_effort.clone()
         }
-        _ => None,
+        Some(profile) => named_profile_model_reasoning_effort(config, profile, model),
+        None => None,
+    }
+}
+
+/// The named OpenAI-compatible profile entry `[providers.<profile>]`, if
+/// `profile` is one.
+fn named_compatible_profile<'a>(
+    config: &'a crate::config::Config,
+    profile: &str,
+) -> Option<(&'a String, &'a crate::config::NamedProviderConfig)> {
+    config
+        .providers
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(profile))
+        .filter(|(_, named)| {
+            named.provider_type == crate::config::NamedProviderType::OpenAiCompatible
+        })
+}
+
+/// The level a named profile applies when `model` becomes active: its
+/// per-model `reasoning_effort`, else the shared `openai_reasoning_effort`
+/// the runtime falls back to.
+fn named_profile_model_reasoning_effort(
+    config: &crate::config::Config,
+    profile: &str,
+    model: &str,
+) -> Option<String> {
+    let (_, named) = named_compatible_profile(config, profile)?;
+    named
+        .models
+        .iter()
+        .find(|entry| entry.id.trim().eq_ignore_ascii_case(model.trim()))
+        .and_then(|entry| entry.reasoning_effort.clone())
+        .or_else(|| config.provider.openai_reasoning_effort.clone())
+}
+
+/// Persist `effort` as the saved level for a default saved on
+/// `provider_key`. `None` means the provider has no saved level, so the
+/// caller must not claim one was saved.
+fn persist_default_reasoning_effort(
+    config: &crate::config::Config,
+    provider_key: Option<&str>,
+    model: &str,
+    effort: &str,
+) -> Option<anyhow::Result<()>> {
+    match provider_key? {
+        "claude-oauth" | "claude-api" => Some(
+            crate::config::Config::set_anthropic_reasoning_effort(Some(effort)),
+        ),
+        "openai-oauth" | "openai-api" => Some(crate::config::Config::set_openai_reasoning_effort(
+            Some(effort),
+        )),
+        // A named profile applies its per-model level when the model becomes
+        // active, so save it there rather than in a shared provider setting.
+        profile => {
+            let (profile, _) = named_compatible_profile(config, profile)?;
+            Some(
+                crate::config::Config::set_named_provider_model_reasoning_effort(
+                    profile,
+                    model,
+                    Some(effort),
+                ),
+            )
+        }
     }
 }
 
@@ -3494,8 +3558,25 @@ impl App {
                 }
             }
         }
-        if let Some(effort) = effort {
-            let _ = self.provider.set_reasoning_effort(&effort);
+        if let Some(effort) = effort.as_deref()
+            && let Err(error) = self.provider.set_reasoning_effort(effort)
+            // A remote session's local provider is only a stand-in; the
+            // server applies the staged `pending_reasoning_effort`.
+            && !self.is_remote
+        {
+            // The model switched, but the level did not: say so instead of
+            // a notice that claims the picked level is active.
+            crate::logging::event_error(
+                "model_picker_effort_rejected",
+                vec![("effort", effort.to_string()), ("error", error.to_string())],
+            );
+            self.push_display_message(DisplayMessage::error(format!(
+                "Switched to {}, but reasoning level `{}` was not applied: {}",
+                entry.name, effort, error
+            )));
+            self.set_status_notice(format!("Model → {} · level unchanged", entry.name));
+            self.onboarding_after_model_select();
+            return;
         }
         if !route_detail.is_empty() {
             self.push_display_message(DisplayMessage::system(format!(
@@ -3557,36 +3638,37 @@ impl App {
         } else {
             (bare_name.clone(), None)
         };
-        let effort_suffix = effort
+        let mut effort_suffix = effort
             .map(|effort| format!(" ({})", reasoning_effort_picker_label(effort)))
             .unwrap_or_default();
-
-        let notice = format!(
-            "Default → {}{} via {}",
-            model_spec,
-            effort_suffix,
-            provider_key.as_deref().unwrap_or("auto")
-        );
 
         match crate::config::Config::set_default_model(Some(&model_spec), provider_key.as_deref()) {
             Ok(()) => {
                 // Persist the level picked in the reasoning step so the
                 // default survives restarts with its effort (issue #675).
+                // The confirmation names the level only if it was saved.
                 if let Some(effort) = effort {
-                    let save_result = match provider_key.as_deref() {
-                        Some("claude-oauth") | Some("claude-api") => Some(
-                            crate::config::Config::set_anthropic_reasoning_effort(Some(effort)),
-                        ),
-                        Some("openai-oauth") | Some("openai-api") => Some(
-                            crate::config::Config::set_openai_reasoning_effort(Some(effort)),
-                        ),
-                        _ => None,
-                    };
-                    if let Some(Err(e)) = save_result {
-                        self.push_display_message(DisplayMessage::error(format!(
-                            "Saved default model, but failed to save effort: {}",
-                            e
-                        )));
+                    match persist_default_reasoning_effort(
+                        crate::config::config(),
+                        provider_key.as_deref(),
+                        &bare_name,
+                        effort,
+                    ) {
+                        Some(Ok(())) => {}
+                        Some(Err(e)) => {
+                            effort_suffix.clear();
+                            self.push_display_message(DisplayMessage::error(format!(
+                                "Saved default model, but failed to save effort: {}",
+                                e
+                            )));
+                        }
+                        None => {
+                            effort_suffix.clear();
+                            self.push_display_message(DisplayMessage::system(format!(
+                                "Saved default model without a level: `{}` has no saved reasoning level. Use /effort after switching.",
+                                provider_key.as_deref().unwrap_or("auto")
+                            )));
+                        }
                     }
                 }
                 self.invalidate_model_picker_cache();
@@ -3598,13 +3680,15 @@ impl App {
                         entry.is_default = true;
                     }
                 }
+                let route = provider_key.as_deref().unwrap_or("auto");
                 self.push_display_message(DisplayMessage::system(format!(
                     "Saved default model: {}{} via {}. This affects future sessions.",
-                    model_spec,
-                    effort_suffix,
-                    provider_key.as_deref().unwrap_or("auto")
+                    model_spec, effort_suffix, route
                 )));
-                self.set_status_notice(notice)
+                self.set_status_notice(format!(
+                    "Default → {}{} via {}",
+                    model_spec, effort_suffix, route
+                ))
             }
             Err(e) => self.set_status_notice(format!("Failed to save default: {}", e)),
         }
@@ -4496,6 +4580,112 @@ mod tests {
             model_route_effort_levels_with_config("kimi-k3", &route, &config),
             vec!["none", "low", "medium", "high", "max"],
         );
+    }
+
+    /// Accepts any model and only the `high` reasoning level, like a
+    /// runtime whose ladder lacks the picked level.
+    struct LevelRejectingProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for LevelRejectingProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            unimplemented!("LevelRejectingProvider")
+        }
+
+        fn name(&self) -> &str {
+            "custom"
+        }
+
+        fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+            if effort == "high" {
+                Ok(())
+            } else {
+                anyhow::bail!("Reasoning effort '{effort}' is not supported")
+            }
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(LevelRejectingProvider)
+        }
+    }
+
+    #[test]
+    fn rejected_reasoning_level_is_reported_instead_of_claimed() {
+        use crate::tui::TuiState;
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.provider = std::sync::Arc::new(LevelRejectingProvider);
+        let mut entry = picker_entry("deepseek-v4", "custom", 0);
+        entry.options = vec![picker_option_with_method(
+            "custom",
+            "openai-compatible:custom",
+        )];
+
+        app.apply_model_picker_choice(entry.clone(), Some("xhigh".to_string()));
+        let last = app.display_messages.last().expect("error message");
+        assert!(
+            last.content.contains("`xhigh` was not applied"),
+            "{}",
+            last.content
+        );
+        assert!(
+            app.status_notice()
+                .is_some_and(|notice| notice.contains("level unchanged"))
+        );
+
+        app.apply_model_picker_choice(entry, Some("high".to_string()));
+        assert!(
+            app.status_notice()
+                .is_some_and(|notice| !notice.contains("level unchanged"))
+        );
+    }
+
+    #[test]
+    fn named_profile_default_level_is_persisted_per_model() {
+        let _guard = crate::storage::lock_test_env();
+        let prev_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        crate::config::Config::invalidate_cache();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[providers.custom]\ntype = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\n",
+        )
+        .unwrap();
+        let config = crate::config::Config::load();
+
+        assert!(matches!(
+            super::persist_default_reasoning_effort(&config, Some("custom"), "kimi-k3", "high"),
+            Some(Ok(()))
+        ));
+        // A provider with no saved level must not report one as saved.
+        assert!(
+            super::persist_default_reasoning_effort(&config, Some("copilot"), "gpt-5", "high")
+                .is_none()
+        );
+        assert!(super::persist_default_reasoning_effort(&config, None, "m", "high").is_none());
+
+        crate::config::Config::invalidate_cache();
+        let saved = crate::config::Config::load();
+        assert_eq!(
+            super::named_profile_model_reasoning_effort(&saved, "custom", "kimi-k3").as_deref(),
+            Some("high")
+        );
+
+        match prev_home {
+            Some(home) => crate::env::set_var("JCODE_HOME", home),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::Config::invalidate_cache();
     }
 
     #[test]

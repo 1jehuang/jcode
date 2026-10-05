@@ -571,7 +571,12 @@ pub(super) fn inferred_reasoning_efforts(
 
 /// Return the named OpenAI-compatible profile's actual effort ladder, or None
 /// when `provider_name` is not a configured named profile. `Some(vec![])`
-/// means the profile explicitly disables effort for this model.
+/// means the runtime accepts no effort for this model.
+///
+/// Mirrors the OpenRouter runtime's `available_efforts()` for a named profile
+/// (explicit per-model and per-profile settings first, then the profile id,
+/// then model-family heuristics), so the TUI never offers a level that
+/// `set_reasoning_effort` rejects.
 pub(super) fn named_profile_reasoning_efforts(
     config: &crate::config::Config,
     provider_name: Option<&str>,
@@ -581,7 +586,7 @@ pub(super) fn named_profile_reasoning_efforts(
     let profile_id = provider_name
         .strip_prefix("openai-compatible:")
         .unwrap_or(provider_name);
-    let (_, profile) = config
+    let (profile_id, profile) = config
         .providers
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(profile_id))?;
@@ -589,24 +594,46 @@ pub(super) fn named_profile_reasoning_efforts(
         return None;
     }
 
+    let model = model_name.unwrap_or_default().trim().to_ascii_lowercase();
     let model_reasoning = profile
         .models
         .iter()
-        .find(|model| model_name.is_some_and(|id| model.id.eq_ignore_ascii_case(id)))
-        .and_then(|model| model.reasoning);
-    if model_reasoning == Some(false) || profile.supports_reasoning_effort == Some(false) {
-        return Some(Vec::new());
-    }
-    if profile.supports_reasoning_effort == Some(true) {
+        .find(|entry| entry.id.trim().eq_ignore_ascii_case(&model))
+        .and_then(|entry| entry.reasoning);
+    // `conifer` uses OpenRouter-style unified reasoning, never the
+    // model-family heuristics.
+    let unified = profile_id.eq_ignore_ascii_case("conifer");
+    let heuristics = !profile.disable_reasoning_heuristics && !unified;
+
+    let deepseek_style = model_reasoning != Some(false)
+        && profile.supports_reasoning_effort.unwrap_or_else(|| {
+            profile_id.eq_ignore_ascii_case("deepseek")
+                || (heuristics && model.contains("deepseek"))
+        });
+    if deepseek_style {
         return Some(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec());
     }
-    if model_reasoning == Some(true) {
+    let openai_style = model_reasoning.unwrap_or_else(|| {
+        profile.supports_reasoning_effort != Some(false)
+            && (profile_id.eq_ignore_ascii_case("zai")
+                || (heuristics && is_openai_reasoning_family(&model)))
+    });
+    if openai_style {
         return Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec());
     }
-    if profile.disable_reasoning_heuristics {
-        return Some(Vec::new());
+    if unified {
+        return Some(jcode_provider_core::OPENROUTER_SELECTABLE_EFFORTS.to_vec());
     }
-    None
+    Some(Vec::new())
+}
+
+/// GPT-family reasoning models, matching the OpenRouter runtime's check.
+fn is_openai_reasoning_family(model: &str) -> bool {
+    model.starts_with("gpt-5")
+        || model.contains("codex")
+        || ["o1", "o3", "o4", "o5"]
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
 }
 
 pub(super) fn effort_bar(index: usize, total: usize) -> String {

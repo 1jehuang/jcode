@@ -228,6 +228,86 @@ fn unconfigured_named_profile_preserves_existing_inference() {
     );
 }
 
+fn named_profile_config(profile: crate::config::NamedProviderConfig) -> crate::config::Config {
+    let mut config = crate::config::Config::default();
+    config.providers.insert("custom".into(), profile);
+    config
+}
+
+fn named_model(id: &str, reasoning: Option<bool>) -> crate::config::NamedProviderModelConfig {
+    crate::config::NamedProviderModelConfig {
+        id: id.into(),
+        reasoning,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn named_profile_deepseek_model_with_reasoning_on_uses_deepseek_levels() {
+    // Greptile #1689: the runtime treats a DeepSeek-family model as
+    // DeepSeek-style even when `reasoning = true`, so `minimal`/`xhigh`
+    // would be rejected.
+    let config = named_profile_config(crate::config::NamedProviderConfig {
+        models: vec![named_model("deepseek-v4-pro", Some(true))],
+        ..Default::default()
+    });
+    let levels = named_profile_reasoning_efforts(
+        &config,
+        Some("openai-compatible:custom"),
+        Some("deepseek-v4-pro"),
+    )
+    .unwrap();
+    assert_eq!(
+        levels,
+        jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
+    );
+    assert!(!levels.contains(&"minimal") && !levels.contains(&"xhigh"));
+}
+
+#[test]
+fn named_profile_without_explicit_reasoning_infers_from_model_family() {
+    let config = named_profile_config(crate::config::NamedProviderConfig::default());
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("gpt-5.5")),
+        Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()),
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("deepseek-v4")),
+        Some(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()),
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("kimi-k3")),
+        Some(Vec::new()),
+    );
+
+    // Heuristics off: only explicit settings count.
+    let config = named_profile_config(crate::config::NamedProviderConfig {
+        disable_reasoning_heuristics: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("gpt-5.5")),
+        Some(Vec::new()),
+    );
+}
+
+#[test]
+fn named_profile_effort_off_still_honors_model_that_enables_it() {
+    let config = named_profile_config(crate::config::NamedProviderConfig {
+        supports_reasoning_effort: Some(false),
+        models: vec![named_model("kimi-k3", Some(true))],
+        ..Default::default()
+    });
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("kimi-k3")),
+        Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()),
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("other")),
+        Some(Vec::new()),
+    );
+}
+
 #[test]
 fn swarm_effort_display_labels_use_configured_root_and_preserve_modes() {
     for (level, title) in [
