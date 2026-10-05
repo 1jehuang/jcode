@@ -690,6 +690,11 @@ impl Request {
                 // one-shot client can send it without subscribing to a session.
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
+                // `jcode login` and the SDK login flow send a lone auth-change
+                // notice on a fresh socket. The process-wide refresh needs no
+                // session; on a subscribed connection it keeps its full
+                // session-aware handling.
+                | Request::NotifyAuthChanged { .. }
                 | Request::NotifySession { .. }
                 | Request::AppletAction { .. }
                 | Request::CloseApplet { .. }

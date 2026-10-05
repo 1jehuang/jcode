@@ -62,7 +62,7 @@ use crate::tool::Registry;
 use crate::transport::Stream;
 use anyhow::Result;
 use futures::FutureExt;
-use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource, StreamError};
+use jcode_agent_runtime::{InterruptSignal, SoftInterruptSource};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{
@@ -351,6 +351,7 @@ fn send_agent_busy_error(
             "Cannot handle {request_kind} while the session is busy. Try again after the current turn finishes."
         ),
         retry_after_secs: Some(1),
+        server_resumes: false,
     });
 }
 
@@ -502,7 +503,10 @@ pub(super) async fn handle_client(
         match decode_request(&line) {
             Ok(request) => {
                 if request.is_lightweight_control_request() {
-                    let keep_connection_open = matches!(request, Request::Ping { .. });
+                    let keep_connection_open = matches!(
+                        request,
+                        Request::Ping { .. } | Request::NotifyAuthChanged { .. }
+                    );
                     handle_lightweight_control_request(
                         request,
                         Arc::clone(&writer),
@@ -532,6 +536,9 @@ pub(super) async fn handle_client(
                     // Native SSH probes daemon capability before sending its
                     // Subscribe on this same stream. Ping must not consume the
                     // connection, unlike the other one-shot control requests.
+                    // The harness bridge may forward an auth-change notice
+                    // before its client attaches, so that must not close the
+                    // connection either. `jcode login` just hangs up after Done.
                     if keep_connection_open {
                         continue;
                     }
@@ -546,6 +553,7 @@ pub(super) async fn handle_client(
                         id: 0,
                         message: format!("Invalid request: {}", error),
                         retry_after_secs: None,
+                        server_resumes: false,
                     },
                 )
                 .await?;
@@ -566,6 +574,7 @@ pub(super) async fn handle_client(
                         id: initial_request.id(),
                         message,
                         retry_after_secs: None,
+                        server_resumes: false,
                     },
                 )
                 .await?;
@@ -939,6 +948,9 @@ pub(super) async fn handle_client(
                         let _ = client_event_tx.send(event);
                         last_available_models_snapshot = Some(dedup_key);
                     }
+                    Ok(BusEvent::CredentialsChanged { provider }) => {
+                        let _ = client_event_tx.send(ServerEvent::CredentialsChanged { provider });
+                    }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
                             let _ = client_event_tx.send(ServerEvent::BatchProgress { progress });
@@ -1000,6 +1012,7 @@ pub(super) async fn handle_client(
                         id: 0,
                         message: format!("Invalid request: {}", e),
                         retry_after_secs: None,
+                        server_resumes: false,
                     };
                     let json = encode_event(&event);
                     let mut w = writer.lock().await;
@@ -1155,7 +1168,7 @@ pub(super) async fn handle_client(
                 }
                 _ => unreachable!(),
             };
-            let event = response.unwrap_or_else(|error| ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None });
+            let event = response.unwrap_or_else(|error| ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None, server_resumes: false });
             let _ = client_event_tx.send(event);
             continue;
         }
@@ -1233,6 +1246,7 @@ pub(super) async fn handle_client(
         ).await {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id: request.id(), message, retry_after_secs: None,
+                server_resumes: false,
             });
             continue;
         }
@@ -1260,6 +1274,9 @@ pub(super) async fn handle_client(
                     .await;
                     continue;
                 }
+                // The user's message supersedes a server-initiated turn that
+                // is waiting for a usage-limit reset.
+                super::usage_limit_resume::cancel_pending_resume(&client_session_id);
                 if !client_is_processing {
                     // A live resume cannot replace stdin routing while the old
                     // turn owns the agent. Restore it when this client starts a
@@ -1473,6 +1490,7 @@ pub(super) async fn handle_client(
                         id,
                         message: "Cannot rewind while a turn is processing.".to_string(),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     continue;
                 }
@@ -1523,6 +1541,7 @@ pub(super) async fn handle_client(
                             id,
                             message,
                             retry_after_secs: None,
+                            server_resumes: false,
                         });
                     }
                 }
@@ -1534,6 +1553,7 @@ pub(super) async fn handle_client(
                         id,
                         message: "Cannot undo rewind while a turn is processing.".to_string(),
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     continue;
                 }
@@ -1583,6 +1603,7 @@ pub(super) async fn handle_client(
                             id,
                             message,
                             retry_after_secs: None,
+                            server_resumes: false,
                         });
                     }
                 }
@@ -1643,6 +1664,7 @@ pub(super) async fn handle_client(
                         id,
                         message,
                         retry_after_secs: None,
+                        server_resumes: false,
                     });
                     continue;
                 }
@@ -1899,6 +1921,7 @@ pub(super) async fn handle_client(
                     id,
                     message: "debug_command is only supported on the debug socket".to_string(),
                     retry_after_secs: None,
+                    server_resumes: false,
                 });
             }
 
@@ -2372,6 +2395,7 @@ pub(super) async fn handle_client(
                             id,
                             message: error.to_string(),
                             retry_after_secs: None,
+                            server_resumes: false,
                         });
                     }
                 }
@@ -3322,9 +3346,7 @@ async fn record_processing_completion(
                 )
                 .await;
             }
-            let retry_after_secs = e
-                .downcast_ref::<StreamError>()
-                .and_then(|se| se.retry_after_secs);
+            let retry_after_secs = super::usage_limit_resume::error_retry_after_secs(&e);
             if retry_after_secs.is_some() {
                 crate::telemetry::record_error(crate::telemetry::ErrorCategory::RateLimited);
             } else {
@@ -3375,6 +3397,7 @@ async fn append_context_message(
             id,
             message: crate::util::format_error_chain(&error),
             retry_after_secs: None,
+            server_resumes: false,
         },
     };
     let _ = client_event_tx.send(event);
@@ -3412,6 +3435,7 @@ async fn start_processing_message(
             id,
             message: "Already processing a message".to_string(),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -3426,6 +3450,7 @@ async fn start_processing_message(
             id,
             message: format!("Skill '{skill_name}' is not installed on the server"),
             retry_after_secs: None,
+            server_resumes: false,
         });
         return;
     }
@@ -3530,9 +3555,10 @@ async fn start_processing_message(
             Err(error) => ServerEvent::Error {
                 id,
                 message: crate::util::format_error_chain(error),
-                retry_after_secs: error
-                    .downcast_ref::<StreamError>()
-                    .and_then(|stream_error| stream_error.retry_after_secs),
+                // A usage limit carries its reset so the client holds the
+                // turn and resends at the reset.
+                retry_after_secs: super::usage_limit_resume::error_retry_after_secs(error),
+                server_resumes: false,
             },
         };
         let _ = tx.send(terminal_event);

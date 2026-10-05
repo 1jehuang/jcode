@@ -59,6 +59,9 @@ pub use selection::{
     provider_label, strip_own_model_prefix,
 };
 
+/// When to resume a turn that stopped on a subscription usage limit.
+pub mod usage_limit_resume;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
