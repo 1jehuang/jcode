@@ -788,6 +788,75 @@ fn opencode_sources_rank_stored_updates_before_applying_scan_cap() {
 }
 
 #[test]
+fn opencode_legacy_search_reads_bounded_metadata_for_small_scan_limit() {
+    with_temp_home(|home| {
+        let legacy = home.join("external/.local/share/opencode/storage/session/proj");
+        std::fs::create_dir_all(&legacy).unwrap();
+        for i in 0..200 {
+            let id = format!("ses_{i:03}");
+            std::fs::write(
+                legacy.join(format!("{id}.json")),
+                json!({"id": id, "title": "bulk", "time": {"created": 1, "updated": 1_000 + i}})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        let mut options = SearchOptions::for_test("current-session");
+        options.source_filter = Some("opencode".to_string());
+        options.max_scan_sessions = 2;
+        OPENCODE_LEGACY_META_READS.with(|reads| reads.set(0));
+        let report = run_report(home, "bulk", &options);
+        let reads = OPENCODE_LEGACY_META_READS.with(|reads| reads.get());
+        assert!(report.truncated);
+        assert_eq!(report.scanned_external_sessions, 2);
+        assert!(
+            reads <= legacy_opencode_metadata_window(2),
+            "a small scan limit must not read every legacy session file (read {reads})"
+        );
+    });
+}
+
+#[test]
+fn opencode_legacy_duplicate_session_ids_take_one_scan_slot() {
+    with_temp_home(|home| {
+        let legacy = home.join("external/.local/share/opencode/storage/session");
+        for dir in ["copy-a", "copy-b"] {
+            std::fs::create_dir_all(legacy.join(dir)).unwrap();
+            std::fs::write(
+                legacy.join(dir).join("ses_dup.json"),
+                json!({"id": "ses_dup", "title": "dup-needle copy", "time": {"created": 1, "updated": 5_000_000}})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            legacy.join("copy-a").join("ses_other.json"),
+            json!({"id": "ses_other", "title": "dup-needle distinct", "time": {"created": 1, "updated": 4_000_000}})
+                .to_string(),
+        )
+        .unwrap();
+        let mut options = SearchOptions::for_test("current-session");
+        options.source_filter = Some("opencode".to_string());
+        options.max_scan_sessions = 2;
+        let report = run_report(home, "dup-needle", &options);
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.session_id == "opencode:ses_other"),
+            "duplicate copies of one session must not displace a distinct session"
+        );
+        assert!(
+            report
+                .results
+                .iter()
+                .any(|r| r.session_id == "opencode:ses_dup")
+        );
+        assert!(!report.truncated);
+    });
+}
+
+#[test]
 fn opencode_sqlite_tool_output_is_searchable_with_include_tools() {
     with_temp_home(|home| {
         let f = opencode_db_fixture(home);

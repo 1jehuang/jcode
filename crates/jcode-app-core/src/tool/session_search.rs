@@ -1374,41 +1374,19 @@ fn collect_opencode_external_sessions(
         found_store = true;
         let db_ids: std::collections::HashSet<String> =
             candidates.iter().map(|(_, id, _)| id.clone()).collect();
-        // Read small session metadata before capping candidates. Filesystem mtime
-        // can change when old stores are copied, including within the legacy store.
-        // Message histories are still loaded only for the selected sessions.
-        for path in jcode_import_core::collect_files_recursive(root, "json") {
-            let Some(value) = std::fs::File::open(&path)
-                .ok()
-                .and_then(|file| serde_json::from_reader::<_, Value>(file).ok())
-            else {
-                report.parse_errors += 1;
-                continue;
-            };
-            let Some(id) = value
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-            else {
-                continue;
-            };
-            if db_ids.contains(id) {
-                continue;
-            }
-            let updated = value
-                .get("time")
-                .and_then(|time| time.get("updated"))
-                .and_then(Value::as_i64)
-                .and_then(DateTime::<Utc>::from_timestamp_millis)
-                .or_else(|| jcode_import_core::file_modified_datetime(&path))
-                .unwrap_or_default();
-            candidates.push((updated, id.to_string(), OpenCodeCandidate::Legacy(path)));
-        }
+        let (legacy, parse_errors) =
+            select_legacy_opencode_candidates(root, &db_ids, options.max_scan_sessions);
+        report.parse_errors += parse_errors;
+        candidates.extend(
+            legacy
+                .into_iter()
+                .map(|(updated, id, path)| (updated, id, OpenCodeCandidate::Legacy(path))),
+        );
     }
     if found_store {
         report.external_sources.push("opencode");
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     if candidates.len() > options.max_scan_sessions {
         candidates.truncate(options.max_scan_sessions);
         report.truncated = true;
@@ -1480,6 +1458,90 @@ fn collect_opencode_external_sessions(
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Number of legacy OpenCode session metadata files read by session search.
+    static OPENCODE_LEGACY_META_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Small subset of a legacy OpenCode session file used to rank candidates.
+#[derive(Deserialize)]
+struct LegacyOpenCodeSessionMeta {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    time: Option<LegacyOpenCodeSessionTime>,
+}
+
+#[derive(Deserialize)]
+struct LegacyOpenCodeSessionTime {
+    #[serde(default)]
+    updated: Option<i64>,
+}
+
+/// How many legacy session files to read metadata from, given the scan limit.
+///
+/// Files are preselected by filesystem mtime so a large store does not cost
+/// one open and parse per session. The headroom lets stored update times
+/// reorder sessions whose mtime drifted (for example after a copy) without
+/// making the work proportional to the whole store.
+fn legacy_opencode_metadata_window(max_scan_sessions: usize) -> usize {
+    max_scan_sessions
+        .saturating_mul(2)
+        .max(max_scan_sessions.saturating_add(16))
+}
+
+/// Pick legacy OpenCode JSON sessions to scan, one entry per session id.
+///
+/// Sessions already present in the database are skipped. When several files
+/// carry the same id (copied stores), only the most recently updated copy is
+/// kept so duplicates cannot take scan slots from distinct sessions. Returns
+/// the candidates and the number of unreadable files.
+fn select_legacy_opencode_candidates(
+    root: &Path,
+    db_ids: &std::collections::HashSet<String>,
+    max_scan_sessions: usize,
+) -> (Vec<(DateTime<Utc>, String, PathBuf)>, usize) {
+    let mut parse_errors = 0;
+    let mut by_id: HashMap<String, (DateTime<Utc>, PathBuf)> = HashMap::new();
+    let window = legacy_opencode_metadata_window(max_scan_sessions);
+    for path in collect_recent_files_recursive(root, "json", window) {
+        #[cfg(test)]
+        OPENCODE_LEGACY_META_READS.with(|reads| reads.set(reads.get() + 1));
+        let meta = match std::fs::File::open(&path).map(std::io::BufReader::new) {
+            Ok(reader) => serde_json::from_reader::<_, LegacyOpenCodeSessionMeta>(reader),
+            Err(_) => {
+                parse_errors += 1;
+                continue;
+            }
+        };
+        let Ok(meta) = meta else {
+            parse_errors += 1;
+            continue;
+        };
+        if meta.id.is_empty() || db_ids.contains(&meta.id) {
+            continue;
+        }
+        let updated = meta
+            .time
+            .and_then(|time| time.updated)
+            .and_then(DateTime::<Utc>::from_timestamp_millis)
+            .or_else(|| jcode_import_core::file_modified_datetime(&path))
+            .unwrap_or_default();
+        match by_id.get(&meta.id) {
+            Some((existing, existing_path)) if (*existing, existing_path) >= (updated, &path) => {}
+            _ => {
+                by_id.insert(meta.id, (updated, path));
+            }
+        }
+    }
+    let candidates = by_id
+        .into_iter()
+        .map(|(id, (updated, path))| (updated, id, path))
+        .collect();
+    (candidates, parse_errors)
 }
 
 fn load_opencode_db_external_session(
