@@ -1,6 +1,23 @@
-use super::{SearchResult, WebSearchTool};
+use super::{SearchResult, WebSearchTool, apply_extra_headers};
 use anyhow::Result;
 use serde::Deserialize;
+
+/// True when the URL uses plaintext HTTP with a non-loopback host, in which
+/// case configured credentials would be sent unencrypted.
+pub(super) fn is_insecure_remote_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host = if let Some(bracketed) = rest.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        rest.split(['/', ':', '?', '#']).next().unwrap_or("")
+    };
+    !(host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host.to_ascii_lowercase().ends_with(".localhost"))
+}
 
 impl WebSearchTool {
     /// Query a user-configured SearXNG instance via its JSON API. SearXNG is a
@@ -33,8 +50,15 @@ impl WebSearchTool {
                 )
             })?;
 
+        if !config.websearch.searxng_headers.is_empty() && is_insecure_remote_http(&base) {
+            anyhow::bail!(
+                "refusing to send websearch.searxng_headers over plaintext HTTP to a \
+                 non-local host ({base}); use an https:// URL or a loopback address"
+            );
+        }
+
         let endpoint = format!("{}/search", base.trim_end_matches('/'));
-        let response = self
+        let request = self
             .client
             .get(&endpoint)
             .query(&[("q", query), ("format", "json")])
@@ -42,7 +66,8 @@ impl WebSearchTool {
                 reqwest::header::USER_AGENT,
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
             )
-            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json");
+        let response = apply_extra_headers(request, &config.websearch.searxng_headers)?
             .send()
             .await?;
 

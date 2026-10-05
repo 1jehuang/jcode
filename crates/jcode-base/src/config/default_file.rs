@@ -336,6 +336,12 @@ bing_market = "en-US"
 # Anthropic tool version. "web_search_20260209" and newer are sent with
 # allowed_callers = ["direct"].
 # native_anthropic_tool_version = "web_search_20250305"
+# Extra HTTP headers for authenticated SearXNG instances (e.g. behind a reverse
+# proxy requiring a bearer token). Headers are only sent over HTTPS, or over
+# plaintext HTTP to loopback hosts. NOTE: this must stay at the end of the
+# [websearch] section — a TOML sub-table absorbs every key that follows it.
+# [websearch.searxng_headers]
+# Authorization = "Bearer ..."
 
 [tools]
 # Controls which built-in tools are sent to the model.

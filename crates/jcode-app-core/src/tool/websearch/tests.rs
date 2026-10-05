@@ -212,3 +212,81 @@ fn websearch_engine_parses_searxng_aliases() {
     );
     assert_eq!(WebSearchEngine::Searxng.as_str(), "searxng");
 }
+
+#[test]
+fn extra_headers_reject_invalid_names_and_values() {
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("bad header".to_string(), "x".to_string());
+    let request = reqwest::Client::new().get("http://127.0.0.1/");
+    assert!(apply_extra_headers(request, &headers).is_err());
+
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("x-ok".to_string(), "bad\nvalue".to_string());
+    let request = reqwest::Client::new().get("http://127.0.0.1/");
+    assert!(apply_extra_headers(request, &headers).is_err());
+}
+
+#[tokio::test]
+async fn extra_headers_are_sent_on_the_wire() {
+    use std::io::{Read, Write};
+
+    // Minimal one-shot HTTP server that captures the raw request headers.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => raw.extend_from_slice(&buf[..n]),
+            }
+        }
+        let body = "{\"results\":[]}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        String::from_utf8_lossy(&raw).to_string()
+    });
+
+    let mut headers = std::collections::HashMap::new();
+    headers.insert("Authorization".to_string(), "Bearer test-token".to_string());
+    let request = apply_extra_headers(
+        reqwest::Client::new()
+            .get(format!("http://{addr}/search"))
+            .query(&[("q", "test"), ("format", "json")]),
+        &headers,
+    )
+    .unwrap();
+    let response = request.send().await.unwrap();
+    assert!(response.status().is_success());
+
+    let raw = server.join().unwrap().to_lowercase();
+    assert!(
+        raw.contains("authorization: bearer test-token"),
+        "configured header missing from request:\n{raw}"
+    );
+}
+
+#[test]
+fn searxng_insecure_remote_http_detection() {
+    use super::searxng::is_insecure_remote_http;
+
+    // Plaintext HTTP to a remote host is insecure for credentials.
+    assert!(is_insecure_remote_http("http://searx.example.org"));
+    assert!(is_insecure_remote_http("http://192.168.1.10:8080"));
+    // Loopback plaintext HTTP stays allowed (local instances).
+    assert!(!is_insecure_remote_http("http://127.0.0.1:8080"));
+    assert!(!is_insecure_remote_http("http://localhost:8080"));
+    assert!(!is_insecure_remote_http("http://[::1]:8080"));
+    assert!(!is_insecure_remote_http("http://searx.localhost"));
+    // HTTPS is fine anywhere.
+    assert!(!is_insecure_remote_http("https://searx.example.org"));
+}

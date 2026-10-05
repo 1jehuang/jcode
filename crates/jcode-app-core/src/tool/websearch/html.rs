@@ -1,4 +1,8 @@
-/// Decode the few HTML entities the scraping engines care about.
+/// Detect whether an HTML body is an anti-bot/captcha challenge rather than a
+/// real results page. DuckDuckGo (and similar) serve these with HTTP 200, so a
+/// successful status plus zero parsed results is ambiguous without this check.
+///
+/// Returns a short human-readable reason when a challenge page is detected.
 pub(super) fn detect_anti_bot_page(html: &str) -> Option<&'static str> {
     let lowered = html.to_ascii_lowercase();
     const MARKERS: &[(&str, &str)] = &[
@@ -21,6 +25,7 @@ pub(super) fn detect_anti_bot_page(html: &str) -> Option<&'static str> {
     None
 }
 
+/// Decode the few HTML entities the scraping engines care about.
 pub(super) fn html_decode(s: &str) -> String {
     s.replace("&nbsp;", " ")
         .replace("&lt;", "<")
@@ -33,10 +38,6 @@ pub(super) fn html_decode(s: &str) -> String {
         .trim()
         .to_string()
 }
-
-/// Engines the local tool tries, in order. `native` is provider-side and never
-/// runs locally: when it is preferred (e.g. the active provider has no server
-/// search), the local fallbacks run, defaulting to DuckDuckGo then Bing.
 
 pub(super) mod search_regex {
     use regex::Regex;

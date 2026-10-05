@@ -77,7 +77,7 @@ impl Tool for WebSearchTool {
                 "engine": {
                     "type": "string",
                     "enum": ["duckduckgo", "bing", "searxng"],
-                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL."
+                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL (optional websearch.searxng_headers for authenticated instances)."
                 },
                 "bing_market": {
                     "type": "string",
@@ -142,7 +142,8 @@ impl Tool for WebSearchTool {
                  DuckDuckGo/Bing engines may be blocked here by TLS fingerprinting \
                  or IP reputation (common on Linux/servers). Workarounds:\n\
                  - Point at a SearXNG instance: set `websearch.searxng_url` (or \
-                 JCODE_SEARXNG_URL) and use engine \"searxng\".\n\
+                 JCODE_SEARXNG_URL) and use engine \"searxng\". Authenticated \
+                 instances can be configured via `websearch.searxng_headers`.\n\
                  - Or provide a Bing Search API key via JCODE_BING_API_KEY.",
                 params.query
             )));
@@ -187,6 +188,28 @@ impl WebSearchTool {
     }
 }
 
+/// Apply user-configured extra HTTP headers (e.g. an `Authorization` header
+/// for authenticated SearXNG instances) to a request, rejecting invalid header
+/// names or values.
+pub(super) fn apply_extra_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<reqwest::RequestBuilder> {
+    for (name, value) in headers {
+        match (
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+            reqwest::header::HeaderValue::from_str(value),
+        ) {
+            (Ok(name), Ok(value)) => request = request.header(name, value),
+            _ => anyhow::bail!("invalid websearch extra header configured: {name}"),
+        }
+    }
+    Ok(request)
+}
+
+/// Engines the local tool tries, in order. `native` is provider-side and never
+/// runs locally: when it is preferred (e.g. the active provider has no server
+/// search), the local fallbacks run, defaulting to DuckDuckGo then Bing.
 pub(super) fn local_engine_order(
     preferred: WebSearchEngine,
     fallbacks: &[WebSearchEngine],

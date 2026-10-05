@@ -97,12 +97,6 @@ pub(super) fn parse_ddg_results(html: &str, max_results: usize) -> Vec<SearchRes
     results
 }
 
-/// Detect whether an HTML body is an anti-bot/captcha challenge rather than a
-/// real results page. DuckDuckGo (and similar) serve these with HTTP 200, so a
-/// successful status plus zero parsed results is ambiguous without this check.
-///
-/// Returns a short human-readable reason when a challenge page is detected.
-
 pub(super) fn decode_ddg_url(url: &str) -> String {
     // DDG wraps URLs like //duckduckgo.com/l/?uddg=ACTUAL_URL&...
     if let Some(uddg_start) = url.find("uddg=") {

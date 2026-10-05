@@ -67,6 +67,10 @@ pub struct WebSearchConfig {
     pub searxng_url: Option<String>,
     /// Environment variable containing the SearXNG base URL.
     pub searxng_url_env: String,
+    /// Extra HTTP headers sent to the SearXNG instance (e.g. an `Authorization`
+    /// header for authenticated instances). Headers are only sent over HTTPS,
+    /// or over plaintext HTTP to loopback hosts.
+    pub searxng_headers: std::collections::HashMap<String, String>,
     /// Prefer the model provider's own server-side search whenever the active
     /// provider/model supports it (Anthropic first-party API, OpenAI
     /// Responses). The local `websearch` tool is then replaced by the hosted
@@ -99,6 +103,7 @@ impl Default for WebSearchConfig {
             bing_market: "en-US".to_string(),
             searxng_url: None,
             searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
+            searxng_headers: std::collections::HashMap::new(),
             prefer_native: true,
             native_max_uses: Some(DEFAULT_NATIVE_WEB_SEARCH_MAX_USES),
             native_allowed_domains: Vec::new(),
