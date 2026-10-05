@@ -1347,6 +1347,10 @@ pub struct ProviderConfig {
     /// Whether jcode should automatically try another account on the same provider
     /// before falling back to a different provider.
     pub same_provider_account_failover: bool,
+    /// After failover moved a session to another account, move it back to
+    /// the preferred account at the start of a turn once that account's
+    /// usage limit has reset.
+    pub account_failover_return_home: bool,
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
@@ -1394,6 +1398,7 @@ impl Default for ProviderConfig {
             preserve_reasoning_context: true,
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
+            account_failover_return_home: true,
             copilot_premium: None,
             gemini_force_oauth: false,
             gemini_project: None,

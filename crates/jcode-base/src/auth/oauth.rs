@@ -28,6 +28,57 @@ pub mod claude {
 
 const CLAUDE_TOKEN_TIMEOUT_SECS: u64 = 15;
 
+/// Test-only token endpoint overrides so refresh paths can hit a local mock.
+#[cfg(any(test, feature = "test-support"))]
+static TOKEN_URL_OVERRIDES: std::sync::RwLock<(Option<String>, Option<String>)> =
+    std::sync::RwLock::new((None, None));
+
+/// Which provider's token endpoint a test override applies to.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy)]
+pub enum TokenUrlProvider {
+    Claude,
+    OpenAi,
+}
+
+/// Point Claude or OpenAI token refreshes at `url`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_token_url_override_for_tests(provider: TokenUrlProvider, url: Option<String>) {
+    let mut guard = TOKEN_URL_OVERRIDES
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match provider {
+        TokenUrlProvider::Claude => guard.0 = url,
+        TokenUrlProvider::OpenAi => guard.1 = url,
+    }
+}
+
+fn claude_token_url() -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(url) = TOKEN_URL_OVERRIDES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .0
+        .clone()
+    {
+        return url;
+    }
+    claude::TOKEN_URL.to_string()
+}
+
+fn openai_token_url() -> String {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(url) = TOKEN_URL_OVERRIDES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .1
+        .clone()
+    {
+        return url;
+    }
+    openai::TOKEN_URL.to_string()
+}
+
 /// OpenAI Codex OAuth configuration
 pub mod openai {
     pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -1053,7 +1104,7 @@ async fn send_claude_refresh_request(
 
     let client = crate::provider::shared_http_client();
     let resp = client
-        .post(claude::TOKEN_URL)
+        .post(claude_token_url())
         .header("Content-Type", "application/json")
         .timeout(Duration::from_secs(CLAUDE_TOKEN_TIMEOUT_SECS))
         .json(&payload)
@@ -1123,6 +1174,25 @@ pub async fn refresh_claude_tokens(refresh_token: &str) -> Result<OAuthTokens> {
     let label =
         claude_auth::active_account_label().unwrap_or_else(claude_auth::primary_account_label);
     refresh_claude_tokens_for_account(refresh_token, &label).await
+}
+
+/// Refresh Claude tokens for `scope`. `Pinned` refreshes and persists to the
+/// pinned account's current label only. `Default` keeps the legacy behaviour.
+pub async fn refresh_claude_tokens_scoped(
+    refresh_token: &str,
+    scope: crate::auth::AccountScope<'_>,
+) -> Result<OAuthTokens> {
+    match scope {
+        crate::auth::AccountScope::Default => refresh_claude_tokens(refresh_token).await,
+        crate::auth::AccountScope::Pinned(pin) => {
+            let label = claude_auth::resolve_pin(pin).ok_or_else(|| {
+                anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
+                    pin.label.clone(),
+                ))
+            })?;
+            refresh_claude_tokens_for_account(refresh_token, &label).await
+        }
+    }
 }
 
 /// Stored Claude tokens for `label`, expressed as [`OAuthTokens`].
@@ -1211,6 +1281,26 @@ pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
     }
 }
 
+/// Refresh OpenAI tokens for `scope`. `Pinned` refreshes and persists to the
+/// pinned account's current label only. `Default` keeps the legacy behaviour
+/// (active label, or an unstored external token).
+pub async fn refresh_openai_tokens_scoped(
+    refresh_token: &str,
+    scope: crate::auth::AccountScope<'_>,
+) -> Result<OAuthTokens> {
+    match scope {
+        crate::auth::AccountScope::Default => refresh_openai_tokens(refresh_token).await,
+        crate::auth::AccountScope::Pinned(pin) => {
+            let label = crate::auth::codex::resolve_pin(pin).ok_or_else(|| {
+                anyhow::Error::new(crate::auth::account_store::PinnedAccountMissing(
+                    pin.label.clone(),
+                ))
+            })?;
+            refresh_openai_tokens_for_account(refresh_token, &label).await
+        }
+    }
+}
+
 /// Stored OpenAI tokens for `label`, expressed as [`OAuthTokens`].
 fn stored_openai_tokens(label: &str) -> Option<OAuthTokens> {
     let account = crate::auth::codex::list_accounts()
@@ -1278,7 +1368,7 @@ async fn refresh_openai_tokens_inner(
     let result: Result<OAuthTokens> = async {
         let client = crate::provider::shared_http_client();
         let resp = client
-            .post(openai::TOKEN_URL)
+            .post(openai_token_url())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(format!(
                 "grant_type=refresh_token&client_id={}&refresh_token={}",

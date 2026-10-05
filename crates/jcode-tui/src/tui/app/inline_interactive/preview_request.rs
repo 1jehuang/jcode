@@ -76,6 +76,9 @@ pub(super) fn picker_account_provider_scope(picker: &InlineInteractiveState) -> 
             AccountPickerAction::Switch {
                 ref provider_id, ..
             }
+            | AccountPickerAction::SetDefault {
+                ref provider_id, ..
+            }
             | AccountPickerAction::Add { ref provider_id }
             | AccountPickerAction::Replace {
                 ref provider_id, ..

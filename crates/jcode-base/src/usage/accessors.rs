@@ -3,6 +3,60 @@ use super::*;
 
 static USAGE: tokio::sync::OnceCell<Arc<RwLock<UsageData>>> = tokio::sync::OnceCell::const_new();
 static REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Cache key (label plus credential fingerprint) of the login `USAGE` was
+/// fetched for. Lets the request precheck notice that the active Claude login
+/// changed underneath the process-wide snapshot.
+static USAGE_KEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(super) fn set_active_usage_key(key: Option<String>) {
+    *USAGE_KEY.lock().unwrap_or_else(|e| e.into_inner()) = key;
+}
+
+/// Usage cache key for whichever Claude login requests would use right now.
+pub(super) fn current_anthropic_usage_key() -> Option<String> {
+    let creds = auth::claude::load_credentials().ok()?;
+    let label =
+        auth::claude::active_account_label().unwrap_or_else(auth::claude::primary_account_label);
+    Some(anthropic_usage_cache_key(&creds.access_token, Some(&label)))
+}
+
+/// Forget the process-wide Claude usage snapshot so the next read refetches
+/// for the login that is active now. Call after any Claude auth change.
+pub fn invalidate_active_anthropic_usage() {
+    if let Some(usage) = USAGE.get()
+        && let Ok(mut data) = usage.try_write()
+    {
+        *data = UsageData::default();
+    }
+    set_active_usage_key(None);
+}
+
+/// True when the active Claude login's 5-hour and weekly windows are both
+/// spent. Used to skip Claude before sending a request, so it must never
+/// judge a new login by the previous login's usage: after a relogin (often
+/// under the same label) or an account switch the stale snapshot is dropped
+/// and a refresh starts instead of rejecting the prompt.
+pub fn active_claude_usage_exhausted_sync() -> bool {
+    let usage = get_sync();
+    if !(usage.five_hour >= 0.99 && usage.seven_day >= 0.99) {
+        return false;
+    }
+    let fetched_for = USAGE_KEY.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if fetched_for.is_some() && fetched_for == current_anthropic_usage_key() {
+        return true;
+    }
+    invalidate_active_anthropic_usage();
+    if let Some(usage) = USAGE.get() {
+        try_spawn_refresh(usage.clone());
+    }
+    false
+}
+
+#[cfg(test)]
+pub(super) async fn set_active_usage_for_tests(data: UsageData, key: Option<String>) {
+    *get_usage().await.write().await = data;
+    set_active_usage_key(key);
+}
 
 pub(super) async fn get_usage() -> Arc<RwLock<UsageData>> {
     USAGE
@@ -11,8 +65,8 @@ pub(super) async fn get_usage() -> Arc<RwLock<UsageData>> {
         .clone()
 }
 
-/// Fetch usage data from the API
-async fn fetch_usage() -> Result<UsageData> {
+/// Fetch usage data from the API, with the cache key it was fetched for.
+async fn fetch_usage() -> Result<(UsageData, String)> {
     let creds = auth::claude::load_credentials().context("Failed to load Claude credentials")?;
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -30,13 +84,21 @@ async fn fetch_usage() -> Result<UsageData> {
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&active_label));
-    fetch_anthropic_usage_data(access_token, cache_key).await
+    let data = fetch_anthropic_usage_data(access_token, cache_key.clone()).await?;
+    Ok((data, cache_key))
 }
 
 async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
     match fetch_usage().await {
-        Ok(new_data) => {
-            *usage.write().await = new_data;
+        Ok((new_data, key)) => {
+            let mut data = usage.write().await;
+            // The login may have switched while the fetch was in flight. The
+            // result is already cached under `key`; only publish it as the
+            // active snapshot when that login is still the active one.
+            if current_anthropic_usage_key().as_deref() == Some(key.as_str()) {
+                *data = new_data;
+                set_active_usage_key(Some(key));
+            }
         }
         Err(e) => {
             let err_msg = e.to_string();
@@ -394,4 +456,39 @@ pub fn get_sync() -> UsageData {
     }
 
     UsageData::default()
+}
+
+/// Label-keyed usage view for per-session account failover. Returns
+/// `Some(resets_at)` (unix seconds, when known) when the cached usage of this
+/// account label says its windows are spent. Never fetches: cache only, so it
+/// is safe on the request path.
+pub fn account_label_usage_exhausted_sync(
+    provider: MultiAccountProviderKind,
+    label: &str,
+) -> Option<Option<i64>> {
+    let to_unix = |at: Option<&str>| {
+        at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.timestamp())
+    };
+    match provider {
+        MultiAccountProviderKind::Anthropic => {
+            let usage = cached_anthropic_usage_for_label(label)?;
+            (usage.five_hour >= 0.99 && usage.seven_day >= 0.99).then(|| {
+                to_unix(usage.five_hour_resets_at.as_deref())
+                    .into_iter()
+                    .chain(to_unix(usage.seven_day_resets_at.as_deref()))
+                    .max()
+            })
+        }
+        MultiAccountProviderKind::OpenAI => {
+            let usage = cached_openai_usage_for_label(label)?;
+            usage.exhausted().then(|| {
+                [usage.five_hour.as_ref(), usage.seven_day.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|window| to_unix(window.resets_at.as_deref()))
+                    .max()
+            })
+        }
+    }
 }

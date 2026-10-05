@@ -60,6 +60,8 @@ fn subscribe(target: &str) -> Request {
         crash_on_disconnect: false,
         continue_on_disconnect: false,
         terminal_env: vec![],
+        account_pins: Vec::new(),
+        supports_session_accounts: false,
     }
 }
 

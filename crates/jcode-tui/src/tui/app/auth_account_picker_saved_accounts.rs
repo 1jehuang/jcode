@@ -31,7 +31,8 @@ impl App {
 
     pub(crate) fn render_openai_accounts_markdown(&self) -> String {
         let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
-        let active_label = crate::auth::codex::active_account_label();
+        let window_label = self.window_account_label("openai");
+        let default_label = super::window_account::stored_default_label("openai");
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         if accounts.is_empty() {
@@ -40,10 +41,9 @@ impl App {
                 .to_string();
         }
 
-        let headers = ["Account", "Email", "Status", "ChatGPT Account ID", "Active"];
+        let headers = ["Account", "Email", "Status", "ChatGPT Account ID", "Use"];
         let mut rows: Vec<[String; 5]> = Vec::new();
         for account in &accounts {
-            let is_active = active_label.as_deref() == Some(&account.label);
             let status = match account.expires_at {
                 Some(expires_at) if expires_at > now_ms => "valid",
                 Some(_) => "expired",
@@ -55,7 +55,10 @@ impl App {
                 .map(mask_email)
                 .unwrap_or_else(|| "unknown".to_string());
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
-            let active_mark = if is_active { "active" } else { "" };
+            let active_mark = scope_mark(
+                window_label.as_deref() == Some(&account.label),
+                default_label.as_deref() == Some(&account.label),
+            );
             rows.push([
                 account_display_name("OpenAI", &account.label, accounts.len()),
                 email,
@@ -86,7 +89,7 @@ impl App {
 
         lines.push(String::new());
         lines.push(
-            "Commands: /account openai switch <label>, /account openai add, /account openai remove <label>"
+            "Commands: /account switch <label> (this window), /account default <label> (new windows), /account openai add, /account openai remove <label>"
                 .to_string(),
         );
 
@@ -95,7 +98,8 @@ impl App {
 
     pub(crate) fn render_anthropic_accounts_markdown(&self) -> String {
         let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
-        let active_label = crate::auth::claude::active_account_label();
+        let window_label = self.window_account_label("claude");
+        let default_label = super::window_account::stored_default_label("claude");
         let now_ms = chrono::Utc::now().timestamp_millis();
 
         if accounts.is_empty() {
@@ -107,7 +111,10 @@ impl App {
         let headers = ["Account", "Email", "Status", "Use", "Subscription"];
         let mut rows: Vec<[String; 5]> = Vec::new();
         for account in &accounts {
-            let is_active = active_label.as_deref() == Some(&account.label);
+            let mark = scope_mark(
+                window_label.as_deref() == Some(&account.label),
+                default_label.as_deref() == Some(&account.label),
+            );
             let status = if account.expires > now_ms {
                 "valid"
             } else {
@@ -120,10 +127,10 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let sub = account.subscription_type.as_deref().unwrap_or("unknown");
             let account_use = anthropic_account_use(account.subscription_type.as_deref());
-            let sub = if is_active {
-                format!("{sub} (active)")
-            } else {
+            let sub = if mark.is_empty() {
                 sub.to_string()
+            } else {
+                format!("{sub} ({mark})")
             };
             rows.push([
                 account_display_name("Claude", &account.label, accounts.len()),
@@ -138,7 +145,7 @@ impl App {
         lines.extend(format_account_table(&headers, &rows));
         lines.push(String::new());
         lines.push(
-            "Commands: /account claude switch <label>, /account claude add, /account claude remove <label>"
+            "Commands: /account switch <label> (this window), /account default <label> (new windows), /account claude add, /account claude remove <label>"
                 .to_string(),
         );
 
@@ -150,7 +157,6 @@ impl App {
         items: &mut Vec<crate::tui::account_picker::AccountPickerItem>,
         provider: crate::provider_catalog::LoginProviderDescriptor,
     ) {
-        let active_label = crate::auth::claude::active_account_label();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
         for account in &accounts {
@@ -168,20 +174,16 @@ impl App {
             let account_use = anthropic_account_use(account.subscription_type.as_deref());
             let label = account.label.clone();
             let display_name = account_display_name("Claude", &label, accounts.len());
-            let active_suffix = if active_label.as_deref() == Some(label.as_str()) {
-                " - active"
-            } else {
-                ""
-            };
+            let scope_suffix = self.account_row_scope_suffix("claude", &label);
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
                 format!("Switch {display_name}"),
-                format!("{email} - {account_use} - {status} - plan {plan}{active_suffix}"),
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                    "/account {} switch {}",
-                    provider.id, label
-                )),
+                format!("{email} - {account_use} - {status} - plan {plan}{scope_suffix}"),
+                crate::tui::account_picker::AccountPickerCommand::Switch {
+                    provider: crate::tui::account_picker::AccountProviderKind::Anthropic,
+                    label: label.clone(),
+                },
             ));
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
@@ -211,7 +213,6 @@ impl App {
         items: &mut Vec<crate::tui::account_picker::AccountPickerItem>,
         provider: crate::provider_catalog::LoginProviderDescriptor,
     ) {
-        let active_label = crate::auth::codex::active_account_label();
         let now_ms = chrono::Utc::now().timestamp_millis();
         let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
         for account in &accounts {
@@ -228,21 +229,17 @@ impl App {
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
             let label = account.label.clone();
             let display_name = account_display_name("OpenAI", &label, accounts.len());
-            let active_suffix = if active_label.as_deref() == Some(label.as_str()) {
-                " - active"
-            } else {
-                ""
-            };
+            let scope_suffix = self.account_row_scope_suffix("openai", &label);
             items.push(
                 crate::tui::account_picker::AccountPickerItem::action(
                     provider.id,
                     provider.display_name,
                     format!("Switch {display_name}"),
-                    format!("{email} - {status} - acct {account_id}{active_suffix}"),
-                    crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                        "/account {} switch {}",
-                        provider.id, label
-                    )),
+                    format!("{email} - {status} - acct {account_id}{scope_suffix}"),
+                    crate::tui::account_picker::AccountPickerCommand::Switch {
+                        provider: crate::tui::account_picker::AccountProviderKind::OpenAi,
+                        label: label.clone(),
+                    },
                 )
                 .with_details(openai_account_usage_details(&label)),
             );
@@ -278,6 +275,16 @@ fn openai_account_usage_details(label: &str) -> Vec<(String, String)> {
     )];
     details.extend(crate::provider_activity::openai_oauth_usage_summary(label));
     details
+}
+
+/// "this window", "default", or both, for account tables.
+fn scope_mark(is_window: bool, is_default: bool) -> &'static str {
+    match (is_window, is_default) {
+        (true, true) => "this window, default",
+        (true, false) => "this window",
+        (false, true) => "default",
+        (false, false) => "",
+    }
 }
 
 /// A provider name is enough when there is only one login. Animal names are

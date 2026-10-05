@@ -717,6 +717,27 @@ pub struct InfoWidgetData {
     /// Absolute paths the agent edited this session (edit-style tool calls),
     /// used to mark agent changes in the Changes widget.
     pub agent_edited: std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>,
+    /// Stored account this window uses for the active Claude/OpenAI provider.
+    pub window_account: Option<WindowAccount>,
+}
+
+/// Account shown next to the model: `claude · claude-fox` or
+/// `claude-otter (default)` when the window follows the default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowAccount {
+    pub label: String,
+    pub pinned: bool,
+    pub is_default: bool,
+}
+
+impl WindowAccount {
+    pub fn display(&self) -> String {
+        if !self.pinned && self.is_default {
+            format!("{} (default)", self.label)
+        } else {
+            self.label.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

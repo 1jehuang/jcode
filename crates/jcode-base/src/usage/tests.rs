@@ -940,6 +940,225 @@ fn jcode_usage_tolerates_older_gateways_without_jev_usage() {
     assert_eq!(report.extra_info[0].0, "Plan");
 }
 
+/// A same-label relogin (e.g. `jcode login --provider claude` reusing
+/// "default" for a different Claude account) must not inherit the old
+/// account's cached usage or its shared 429 backoff.
+#[test]
+fn anthropic_usage_cache_key_changes_when_same_label_holds_new_token() {
+    let old = anthropic_usage_cache_key("sk-ant-oat01-old-account-token", Some("default"));
+    let new = anthropic_usage_cache_key("sk-ant-oat01-new-account-token", Some("default"));
+    assert_ne!(old, new, "new account must not reuse old account's usage");
+    assert_eq!(
+        old,
+        anthropic_usage_cache_key("sk-ant-oat01-old-account-token", Some("default")),
+        "same credential keeps one key so cross-process backoff still applies"
+    );
+}
+
+#[test]
+fn anthropic_usage_invalidate_by_label_clears_every_token_for_that_label() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    let key = anthropic_usage_cache_key("sk-ant-oat01-some-token", Some("work"));
+    store_anthropic_usage(
+        key.clone(),
+        UsageData {
+            five_hour: 1.0,
+            seven_day: 1.0,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        },
+    );
+    assert!(cached_anthropic_usage(&key).is_some());
+    invalidate_anthropic_usage_reset_state(Some("work"));
+    assert!(cached_anthropic_usage(&key).is_none());
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// The per-request Claude precheck must not reject a prompt with the OLD
+/// account's exhausted usage after the same label now holds a new login.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_usage_snapshot_is_dropped_after_same_label_relogin() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::auth::claude::set_active_account_override(None);
+    let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let account = |label: &str, access: &str| crate::auth::claude::AnthropicAccount {
+        label: label.to_string(),
+        access: access.to_string(),
+        refresh: format!("{access}-refresh"),
+        expires: far_future,
+        email: None,
+        subscription_type: Some("max".to_string()),
+        scopes: vec!["user:inference".to_string()],
+    };
+    let label =
+        crate::auth::claude::upsert_account(account("default", "sk-ant-oat01-exhausted-old"))
+            .unwrap();
+    let old_key = anthropic_usage_cache_key("sk-ant-oat01-exhausted-old", Some(&label));
+    set_active_usage_for_tests(
+        UsageData {
+            five_hour: 1.0,
+            seven_day: 1.0,
+            fetched_at: Some(Instant::now()),
+            ..Default::default()
+        },
+        Some(old_key),
+    )
+    .await;
+    assert!(active_claude_usage_exhausted_sync());
+
+    // Re-login: same label, different Claude account.
+    crate::auth::claude::upsert_account(account(&label, "sk-ant-oat01-fresh-new")).unwrap();
+    assert!(
+        !active_claude_usage_exhausted_sync(),
+        "old account's exhausted usage must not gate the new login"
+    );
+
+    set_active_usage_for_tests(UsageData::default(), None).await;
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// A Claude usage fetch that finishes after an account switch must keep the
+/// report under the account that produced it and must not mark the newly
+/// active login as exhausted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_report_finishing_after_account_switch_keeps_old_account_key() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::auth::claude::set_active_account_override(None);
+    let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let account = |label: &str, access: &str| crate::auth::claude::AnthropicAccount {
+        label: label.to_string(),
+        access: access.to_string(),
+        refresh: format!("{access}-refresh"),
+        expires: far_future,
+        email: None,
+        subscription_type: Some("max".to_string()),
+        scopes: vec!["user:inference".to_string()],
+    };
+    let old_label =
+        crate::auth::claude::upsert_account(account("old", "sk-ant-oat01-switch-old")).unwrap();
+    crate::auth::claude::set_active_account(&old_label).unwrap();
+    let old_key = anthropic_usage_cache_key("sk-ant-oat01-switch-old", Some(&old_label));
+    set_active_usage_for_tests(UsageData::default(), None).await;
+
+    // The fetch starts for the old account...
+    let fetched_for = accessors::current_anthropic_usage_key();
+    assert_eq!(fetched_for.as_deref(), Some(old_key.as_str()));
+
+    // ...the user switches accounts while it is in flight...
+    let new_label =
+        crate::auth::claude::upsert_account(account("new", "sk-ant-oat01-switch-new")).unwrap();
+    crate::auth::claude::set_active_account(&new_label).unwrap();
+    let new_key = anthropic_usage_cache_key("sk-ant-oat01-switch-new", Some(&new_label));
+
+    // ...and the old account's exhausted report lands afterwards.
+    let exhausted = ProviderUsage {
+        provider_name: "Anthropic (Claude)".to_string(),
+        limits: vec![
+            UsageLimit {
+                name: "5-hour window".to_string(),
+                usage_percent: 100.0,
+                resets_at: None,
+            },
+            UsageLimit {
+                name: "7-day window".to_string(),
+                usage_percent: 100.0,
+                resets_at: None,
+            },
+        ],
+        ..Default::default()
+    };
+    sync_active_anthropic_usage_from_reports(&[exhausted], fetched_for).await;
+
+    assert!(
+        cached_anthropic_usage(&new_key).is_none(),
+        "old account's report must not be stored under the new login's key"
+    );
+    assert!(
+        cached_anthropic_usage(&old_key).is_some_and(|data| data.five_hour >= 0.99),
+        "report must be stored under the account that produced it"
+    );
+    assert!(
+        !active_claude_usage_exhausted_sync(),
+        "new login must not be rejected by the old account's usage"
+    );
+
+    set_active_usage_for_tests(UsageData::default(), None).await;
+    crate::auth::claude::set_active_account_override(None);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// The usage tasks pick the active Claude account while they are enqueued.
+/// If the user switches accounts in that window, the fetched report may belong
+/// to either login, so it must not be tied to the key captured before.
+#[test]
+fn account_switch_while_enqueueing_usage_does_not_tie_report_to_old_key() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    crate::auth::claude::set_active_account_override(None);
+    let far_future = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let account = |label: &str, access: &str| crate::auth::claude::AnthropicAccount {
+        label: label.to_string(),
+        access: access.to_string(),
+        refresh: format!("{access}-refresh"),
+        expires: far_future,
+        email: None,
+        subscription_type: Some("max".to_string()),
+        scopes: vec!["user:inference".to_string()],
+    };
+    let first =
+        crate::auth::claude::upsert_account(account("first", "sk-ant-oat01-enqueue-a")).unwrap();
+    let second =
+        crate::auth::claude::upsert_account(account("second", "sk-ant-oat01-enqueue-b")).unwrap();
+    crate::auth::claude::set_active_account(&first).unwrap();
+
+    // No switch: the key is the active login's key.
+    let (_, key) = enqueue_with_stable_anthropic_key(|| 1);
+    assert_eq!(
+        key,
+        Some(anthropic_usage_cache_key(
+            "sk-ant-oat01-enqueue-a",
+            Some(&first)
+        ))
+    );
+
+    // A switch while the tasks are being enqueued: no key, so the report is
+    // neither stored under the first account nor applied as active usage.
+    let (_, key) = enqueue_with_stable_anthropic_key(|| {
+        crate::auth::claude::set_active_account(&second).unwrap();
+        1
+    });
+    assert_eq!(
+        key, None,
+        "report must not be tied to the key captured before the switch"
+    );
+
+    crate::auth::claude::set_active_account_override(None);
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
 #[test]
 fn kimi_usage_limits_shape_parses_windowed_quotas() {
     let json = serde_json::json!({
