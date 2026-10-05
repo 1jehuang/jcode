@@ -89,7 +89,7 @@ fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
                 ContentBlock::OpenAICompaction { .. } => {
                     out.push_str("[openai native compaction]\n");
                 }
-                ContentBlock::ToolReference { .. } => {}
+                ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
             }
         }
         out.push('\n');
@@ -562,6 +562,11 @@ impl Provider for CursorCliProvider {
             .fast
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model_catalog = self
+            .fetched_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
 
         tokio::spawn(async move {
             let _stream_guard = stream_guard;
@@ -571,6 +576,7 @@ impl Provider for CursorCliProvider {
                 &prompt,
                 &model,
                 fast_override,
+                &model_catalog,
                 None,
                 resume_session_id.as_deref(),
                 &stream_uuid,
@@ -776,6 +782,7 @@ async fn run_native_text_command(
     prompt: &str,
     model: &str,
     fast_override: Option<bool>,
+    model_catalog: &[String],
     _account_label: Option<&str>,
     resume_session_id: Option<&str>,
     stream_uuid: &str,
@@ -784,6 +791,25 @@ async fn run_native_text_command(
     mut tool_result_rx: mpsc::Receiver<NativeToolResult>,
 ) -> Result<()> {
     let tokens = cursor_auth::resolve_direct_tokens(&client).await?;
+
+    // Cursor rejects some bare base ids (`grok-4.6`, `claude-opus-5-5`) and only
+    // serves the exact ids in its catalog, so model resolution needs it. The
+    // catalog is normally prefetched in the background, but a first turn can
+    // race that. Fetch it inline (bounded) when we have nothing yet.
+    let fetched_catalog;
+    let model_catalog = if model_catalog.is_empty() {
+        fetched_catalog = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_agent_models(&client, &tokens.access_token),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+        fetched_catalog.as_slice()
+    } else {
+        model_catalog
+    };
 
     // The current Cursor agent transport (`agent.v1.AgentService/Run`) is a
     // paced bidirectional Connect/HTTP2 stream. The old
@@ -794,6 +820,7 @@ async fn run_native_text_command(
         prompt,
         model,
         fast_override,
+        model_catalog,
         resume_session_id,
         stream_uuid,
         tools,
@@ -816,6 +843,7 @@ async fn run_native_text_command(
                 prompt,
                 model,
                 fast_override,
+                model_catalog,
                 resume_session_id,
                 stream_uuid,
                 tools,

@@ -316,11 +316,14 @@ pub(crate) struct ResolvedModel {
 /// default: an explicit `-fast` suffix wins, and Composer defaults to Fast,
 /// matching Cursor's API (`composer-2.5` with no params runs the Fast variant).
 pub(crate) fn resolve_model_id(model: &str, fast_override: Option<bool>) -> ResolvedModel {
-    let mut name = model.trim();
-    name = name.strip_prefix("cursor:").unwrap_or(name);
-    name = name.strip_prefix("cursor-").unwrap_or(name);
+    resolve_model_id_with_catalog(model, fast_override, &[])
+}
 
-    let mut suffix_fast = false;
+/// Split a catalog-style id into (base, has_fast_suffix, has_effort_suffix).
+fn split_model_suffixes(model: &str) -> (&str, bool, bool) {
+    let mut name = model;
+    let mut fast = false;
+    let mut effort = false;
     const SUFFIXES: &[&str] = &[
         "-fast",
         "-xhigh",
@@ -328,6 +331,7 @@ pub(crate) fn resolve_model_id(model: &str, fast_override: Option<bool>) -> Reso
         "-medium",
         "-low",
         "-minimal",
+        "-max",
         "-thinking",
     ];
     loop {
@@ -337,7 +341,9 @@ pub(crate) fn resolve_model_id(model: &str, fast_override: Option<bool>) -> Reso
                 && !stripped.is_empty()
             {
                 if *suffix == "-fast" {
-                    suffix_fast = true;
+                    fast = true;
+                } else {
+                    effort = true;
                 }
                 name = stripped;
                 stripped_any = true;
@@ -348,7 +354,115 @@ pub(crate) fn resolve_model_id(model: &str, fast_override: Option<bool>) -> Reso
             break;
         }
     }
+    (name, fast, effort)
+}
 
+/// Models whose bare base id Cursor rejects, mapped to the catalog entry
+/// Cursor itself labels with the plain display name. Used only when the live
+/// catalog is unavailable. Verified against AgentService on 2026-09-29:
+/// `grok-4.6` -> `ERROR_BAD_MODEL_NAME`, `cursor-grok-4.6-high` ("Grok 4.6")
+/// is accepted.
+const OFFLINE_CATALOG_ALIASES: &[(&str, &str)] = &[("grok-4.6", "cursor-grok-4.6-high")];
+
+/// Resolve a jcode model id against Cursor's live `GetUsableModels` catalog.
+///
+/// Cursor's AgentService accepts the exact catalog ids it advertises
+/// (`cursor-grok-4.6-high`, `claude-opus-5-5-medium`, `grok-4.7-high-fast`)
+/// but only *some* bare base ids (`grok-4.7`, `composer-2.5` work, while
+/// `grok-4.6`, `claude-opus-5-5` are rejected with `ERROR_BAD_MODEL_NAME`).
+/// So an id that is in the catalog is sent verbatim, and a base id is mapped
+/// onto the catalog variant that matches it. Only when there is no catalog
+/// entry at all do we fall back to stripping suffixes.
+pub(crate) fn resolve_model_id_with_catalog(
+    model: &str,
+    fast_override: Option<bool>,
+    catalog: &[String],
+) -> ResolvedModel {
+    let mut name = model.trim();
+    name = name.strip_prefix("cursor:").unwrap_or(name);
+    let in_catalog = |id: &str| catalog.iter().any(|entry| entry == id);
+
+    // 1. Exact catalog id: send verbatim, honoring /fast by switching to the
+    //    sibling `-fast` variant when one exists.
+    if in_catalog(name) {
+        let (_, suffix_fast, _) = split_model_suffixes(name);
+        let mut id = name.to_string();
+        let mut fast = suffix_fast;
+        match fast_override {
+            Some(true) if !suffix_fast && in_catalog(&format!("{name}-fast")) => {
+                id = format!("{name}-fast");
+                fast = true;
+            }
+            Some(false) if suffix_fast => {
+                let slow = name.strip_suffix("-fast").unwrap_or(name);
+                if in_catalog(slow) {
+                    id = slow.to_string();
+                    fast = false;
+                }
+            }
+            _ => {}
+        }
+        if name.starts_with("composer-") && fast_override.is_none() {
+            fast = true;
+        }
+        return ResolvedModel {
+            id,
+            fast: fast_override.unwrap_or(fast),
+        };
+    }
+
+    // 2. Base or legacy composite id: map onto a catalog variant with the same
+    //    base. Prefer an entry without an effort suffix, then `-high` (what
+    //    Cursor labels as the plain model name), then anything else.
+    let stripped_prefix = name.strip_prefix("cursor-").unwrap_or(name);
+    let (base, suffix_fast, _) = split_model_suffixes(stripped_prefix);
+    let want_fast = fast_override.unwrap_or(suffix_fast);
+    if !catalog.is_empty() {
+        let mut best: Option<(u8, &String)> = None;
+        for entry in catalog {
+            let entry_unprefixed = entry.strip_prefix("cursor-").unwrap_or(entry);
+            let (entry_base, entry_fast, entry_effort) = split_model_suffixes(entry_unprefixed);
+            if entry_base != base {
+                continue;
+            }
+            let effort_rank = if !entry_effort {
+                0
+            } else if entry_unprefixed.contains("-high") && !entry_unprefixed.contains("-xhigh") {
+                1
+            } else {
+                2
+            };
+            let rank = effort_rank * 2 + u8::from(entry_fast != want_fast);
+            if best.is_none_or(|(best_rank, _)| rank < best_rank) {
+                best = Some((rank, entry));
+            }
+        }
+        if let Some((_, entry)) = best
+            && entry != base
+        {
+            let (_, entry_fast, _) = split_model_suffixes(entry);
+            return ResolvedModel {
+                id: entry.clone(),
+                fast: fast_override.unwrap_or(entry_fast),
+            };
+        }
+    }
+
+    // 3. No catalog match: known offline aliases, then the base id.
+    if let Some((_, alias)) = OFFLINE_CATALOG_ALIASES
+        .iter()
+        .find(|(bare, _)| *bare == base)
+    {
+        return ResolvedModel {
+            id: if want_fast {
+                format!("{alias}-fast")
+            } else {
+                (*alias).to_string()
+            },
+            fast: want_fast,
+        };
+    }
+    let name = base;
     let default_fast = suffix_fast || name.starts_with("composer-");
     ResolvedModel {
         id: name.to_string(),
@@ -646,6 +760,7 @@ pub async fn run_agent_turn(
     prompt: &str,
     model: &str,
     fast_override: Option<bool>,
+    model_catalog: &[String],
     logical_session_id: Option<&str>,
     stream_uuid: &str,
     tools: &[jcode_message_types::ToolDefinition],
@@ -742,7 +857,7 @@ pub async fn run_agent_turn(
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
 
     let prompt = routed_prompt(prompt, system, tools);
-    let resolved_model = resolve_model_id(model, fast_override);
+    let resolved_model = resolve_model_id_with_catalog(model, fast_override, model_catalog);
     stream_debug(format_args!(
         "model requested={model} resolved={} fast={}",
         resolved_model.id, resolved_model.fast
@@ -1251,7 +1366,68 @@ pub async fn run_agent_turn(
                         let connect_bytes = crate::wire::connect_frame(&agent_bytes);
                         let _ = outbound_tx.send(connect_bytes).await;
                     }
-                    ExecServerMessageVariant::Unknown(_, _) => {}
+                    ExecServerMessageVariant::McpState(args) => {
+                        stream_debug(format_args!(
+                            "mcp_state requested servers={:?} kick_only={}",
+                            args.server_identifiers, args.kick_only
+                        ));
+                        let res = crate::wire::encode_mcp_state_result(
+                            msg.id,
+                            &msg.exec_id,
+                            &args,
+                            tools,
+                        )
+                        .unwrap_or_else(|error| {
+                            crate::wire::encode_mcp_state_error(
+                                msg.id,
+                                &msg.exec_id,
+                                &format!("jcode could not describe its tools: {error}"),
+                            )
+                        });
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&res);
+                        let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                        let _ = outbound_tx.send(connect_bytes).await;
+                    }
+                    ExecServerMessageVariant::McpAllowlistPrecheck {
+                        provider_identifier,
+                    } => {
+                        let allowlisted = provider_identifier == crate::wire::JCODE_TOOL_PROVIDER;
+                        stream_debug(format_args!(
+                            "mcp allowlist precheck provider={provider_identifier} allowlisted={allowlisted}"
+                        ));
+                        let res = crate::wire::encode_allowlist_precheck_result(
+                            msg.id,
+                            &msg.exec_id,
+                            42,
+                            allowlisted,
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&res);
+                        let _ = outbound_tx
+                            .send(crate::wire::connect_frame(&agent_bytes))
+                            .await;
+                    }
+                    ExecServerMessageVariant::OtherAllowlistPrecheck(field) => {
+                        stream_debug(format_args!("allowlist precheck field={field} denied"));
+                        let res = crate::wire::encode_allowlist_precheck_result(
+                            msg.id,
+                            &msg.exec_id,
+                            field,
+                            false,
+                        );
+                        let agent_bytes = crate::wire::encode_agent_client_exec_message(&res);
+                        let _ = outbound_tx
+                            .send(crate::wire::connect_frame(&agent_bytes))
+                            .await;
+                    }
+                    ExecServerMessageVariant::Unknown(field, _) => {
+                        // An unanswered exec request stalls AgentService with
+                        // heartbeat-only frames. Make that visible instead of
+                        // silently waiting out the idle timeout.
+                        jcode_base::logging::warn(&format!(
+                            "Cursor agent sent unsupported exec request field {field}; the turn may stall"
+                        ));
+                        stream_debug(format_args!("unsupported exec field={field}"));
+                    }
                 }
             }
         }
@@ -1310,8 +1486,14 @@ mod tests {
     #[test]
     fn resolve_model_id_reduces_composite_ids_to_base_ids() {
         let cases = [
-            ("cursor-grok-4.6-high-fast", "grok-4.6", true),
-            ("grok-4.6", "grok-4.6", false),
+            // Cursor rejects bare `grok-4.6` (ERROR_BAD_MODEL_NAME); its
+            // catalog only serves the `cursor-grok-4.6-*` ids.
+            (
+                "cursor-grok-4.6-high-fast",
+                "cursor-grok-4.6-high-fast",
+                true,
+            ),
+            ("grok-4.6", "cursor-grok-4.6-high", false),
             ("grok-4.7", "grok-4.7", false),
             ("claude-opus-5-thinking-high", "claude-opus-5", false),
             ("claude-opus-5-thinking-high-fast", "claude-opus-5", true),
@@ -1320,7 +1502,7 @@ mod tests {
             ("gemini-3.7-flash-high", "gemini-3.7-flash", false),
             ("gemini-3.1-pro", "gemini-3.1-pro", false),
             ("sonnet-4.6", "sonnet-4.6", false),
-            ("cursor:grok-4.6", "grok-4.6", false),
+            ("cursor:grok-4.6", "cursor-grok-4.6-high", false),
         ];
         for (input, id, fast) in cases {
             assert_eq!(
@@ -1335,6 +1517,59 @@ mod tests {
     }
 
     /// Cursor: `composer-2.5` with no params defaults to the Fast variant.
+    /// Live catalog (GetUsableModels, 2026-09-29): exact ids pass through,
+    /// base ids map to the variant Cursor labels with the plain model name.
+    #[test]
+    fn resolve_model_id_uses_live_catalog_ids() {
+        let catalog: Vec<String> = [
+            "composer-2.5",
+            "composer-2.5-fast",
+            "grok-4.7-high",
+            "grok-4.7-high-fast",
+            "grok-4.7-low",
+            "cursor-grok-4.6-low",
+            "cursor-grok-4.6-high",
+            "cursor-grok-4.6-high-fast",
+            "cursor-grok-4.6-xhigh",
+            "claude-opus-5-5-low",
+            "claude-opus-5-5-high",
+            "claude-opus-5-5-high-fast",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let r = |m: &str, f: Option<bool>| resolve_model_id_with_catalog(m, f, &catalog);
+
+        // Exact ids are sent verbatim.
+        assert_eq!(r("cursor-grok-4.6-xhigh", None).id, "cursor-grok-4.6-xhigh");
+        assert_eq!(r("grok-4.7-low", None).id, "grok-4.7-low");
+        // Bare base ids Cursor rejects map onto the catalog.
+        assert_eq!(r("grok-4.6", None).id, "cursor-grok-4.6-high");
+        assert_eq!(r("grok-4.6", Some(true)).id, "cursor-grok-4.6-high-fast");
+        assert_eq!(r("cursor:grok-4.6", None).id, "cursor-grok-4.6-high");
+        assert_eq!(r("claude-opus-5-5", None).id, "claude-opus-5-5-high");
+        assert_eq!(r("grok-4.7", None).id, "grok-4.7-high");
+        // /fast toggles between catalog siblings.
+        let fast = r("cursor-grok-4.6-high", Some(true));
+        assert_eq!(
+            (fast.id.as_str(), fast.fast),
+            ("cursor-grok-4.6-high-fast", true)
+        );
+        let slow = r("cursor-grok-4.6-high-fast", Some(false));
+        assert_eq!(
+            (slow.id.as_str(), slow.fast),
+            ("cursor-grok-4.6-high", false)
+        );
+        // Composer keeps its Fast default.
+        let composer = r("composer-2.5", None);
+        assert_eq!(
+            (composer.id.as_str(), composer.fast),
+            ("composer-2.5", true)
+        );
+        // Unknown models fall back to the base id.
+        assert_eq!(r("gpt-5.4-high", None).id, "gpt-5.4");
+    }
+
     #[test]
     fn composer_defaults_to_fast_and_respects_override() {
         assert!(resolve_model_id("composer-2.5", None).fast);
@@ -1370,7 +1605,7 @@ mod tests {
         let id = iter_fields(requested_model.data)
             .find(|field| field.field == 1 && field.wire == 2)
             .and_then(|field| std::str::from_utf8(field.data).ok());
-        assert_eq!(id, Some("grok-4.6"));
+        assert_eq!(id, Some("cursor-grok-4.6-high-fast"));
         let fast = iter_fields(requested_model.data)
             .find(|field| field.field == 3 && field.wire == 2)
             .and_then(|meta| {
@@ -1379,11 +1614,6 @@ mod tests {
                     .and_then(|field| std::str::from_utf8(field.data).ok())
             });
         assert_eq!(fast, Some("true"));
-        let hay = String::from_utf8_lossy(&payload);
-        assert!(
-            !hay.contains("high-fast"),
-            "composite id leaked to the wire"
-        );
     }
 
     #[test]

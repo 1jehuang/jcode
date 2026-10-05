@@ -1,3 +1,4 @@
+use super::response_recovery::MalformedToolCallInfo;
 use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
 
@@ -51,6 +52,7 @@ impl Agent {
     }
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
+        self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
         crate::session_metrics::record_turn(&self.session.id);
@@ -71,6 +73,7 @@ impl Agent {
         let mut fable_guardrail_reconsiderations = 0u32;
         let mut sequential_single_tool_rounds = 0u32;
         let mut batch_nudge_pending = false;
+        let mut consecutive_malformed_tool_rounds = 0u32;
 
         loop {
             // Do not start another provider request once a cancel has been
@@ -78,6 +81,12 @@ impl Agent {
             // (issue #732, regression of #428).
             if self.is_graceful_shutdown() {
                 logging::info("Cancel observed at turn-loop head - not starting another request");
+                break;
+            }
+            if let Some(block) = self.session.migration_lease_block() {
+                logging::info(&format!(
+                    "Session migrated mid-turn - stopping local turn loop: {block}"
+                ));
                 break;
             }
             let repaired = self.repair_missing_tool_outputs();
@@ -268,6 +277,10 @@ impl Agent {
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
+            // Provider-executed tool items (e.g. native web search), stored
+            // verbatim at their position in the response for exact replay.
+            let mut provider_native_items =
+                jcode_message_types::provider_native::ProviderNativeItems::default();
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
                 std::collections::HashMap::new();
@@ -594,9 +607,29 @@ impl Agent {
                         reasoning_content.clear();
                         reasoning_signature.clear();
                         openai_reasoning_items.clear();
+                        provider_native_items.clear();
                         openai_native_compaction = None;
                         saw_message_end = false;
                         stop_reason = None;
+                    }
+                    StreamEvent::ProviderNative { provider, item } => {
+                        if print_output
+                            && let Some(display) =
+                                jcode_message_types::provider_native::provider_native_display(
+                                    &provider, &item,
+                                )
+                        {
+                            match display.output {
+                                None => print!("\n[{}] ", display.name),
+                                Some(output) => println!(
+                                    "\n[{}] {}",
+                                    display.name,
+                                    crate::util::truncate_str(&output, 200)
+                                ),
+                            }
+                            io::stdout().flush()?;
+                        }
+                        provider_native_items.push(text_content.len(), provider, item);
                     }
                     StreamEvent::TextDone => {}
                     StreamEvent::MessageEnd {
@@ -802,6 +835,18 @@ impl Agent {
                     usage_cache_read,
                     usage_cache_creation,
                 );
+                crate::telemetry::record_provider_usage(
+                    Some(&self.session.id),
+                    self.provider.name(),
+                    &self.provider.model(),
+                    crate::telemetry::UsageSource::Agent,
+                    crate::telemetry::ProviderUsage {
+                        input_tokens: usage_input.unwrap_or(0),
+                        output_tokens: usage_output.unwrap_or(0),
+                        cache_read_input_tokens: usage_cache_read,
+                        cache_creation_input_tokens: usage_cache_creation,
+                    },
+                );
             }
 
             if print_output
@@ -846,7 +891,9 @@ impl Agent {
             // cleanly with only spaces despite non-zero output tokens. Persisting that makes the
             // UI look like the agent stopped after tools with no explanation.
             let mut content_blocks = Vec::new();
-            if !text_content.is_empty() && !visible_text_is_empty {
+            if !provider_native_items.is_empty() {
+                content_blocks.extend(provider_native_items.interleave(&text_content));
+            } else if !text_content.is_empty() && !visible_text_is_empty {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,
@@ -998,6 +1045,8 @@ impl Agent {
             }
 
             // Execute tools and add results
+            let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
+            let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
             for tc in tool_calls {
                 let message_id = assistant_message_id
@@ -1005,6 +1054,10 @@ impl Agent {
                     .unwrap_or_else(|| self.session.id.clone());
 
                 if let Some(error_msg) = tc.validation_error() {
+                    malformed_calls.push(MalformedToolCallInfo {
+                        name: tc.name.clone(),
+                        error: error_msg.clone(),
+                    });
                     logging::warn(&error_msg);
                     Bus::global().publish(BusEvent::ToolUpdated(ToolEvent {
                         session_id: self.session.id.clone(),
@@ -1030,6 +1083,10 @@ impl Agent {
                     continue;
                 }
 
+                // A call that passed validation is genuinely valid even if
+                // the tool itself later fails: it resets the malformed-round
+                // bound in handle_malformed_tool_round below.
+                executed_valid_call = true;
                 self.validate_tool_allowed(&tc.name)?;
 
                 let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
@@ -1221,6 +1278,17 @@ impl Agent {
                 self.session.save()?;
             }
 
+            // Bounded recovery for repeated malformed tool calls (e.g. a
+            // model emitting null arguments): correct with the expected
+            // schema, then end the turn with an actionable error instead of
+            // retrying the same malformed round forever.
+            self.handle_malformed_tool_round(
+                &malformed_calls,
+                executed_valid_call,
+                &mut consecutive_malformed_tool_rounds,
+                &tools,
+            )?;
+
             if print_output {
                 println!();
             }
@@ -1253,7 +1321,19 @@ impl Agent {
                 return true;
             }
             message.content.iter().any(|block| match block {
-                ContentBlock::Text { text, .. } => text.trim().starts_with("<system-reminder>"),
+                ContentBlock::Text { text, .. } => {
+                    let trimmed = text.trim();
+                    trimmed.starts_with("<system-reminder>")
+                        // The empty-post-tool continuation is itself a
+                        // User-role `<system-reminder>`. Counting it would let the
+                        // injected instruction keep this predicate true on its own,
+                        // so every later whitespace-only response appends another
+                        // continuation and spends another call, with no tool result
+                        // anywhere near.
+                        && !trimmed.starts_with(
+                            Self::EMPTY_POST_TOOL_CONTINUATION_PREFIX
+                        )
+                }
                 _ => false,
             })
         })
@@ -1261,102 +1341,5 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn user_text(text: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: text.to_string(),
-                cache_control: None,
-            }],
-            timestamp: None,
-            tool_duration_ms: None,
-        }
-    }
-
-    fn tool_result(id: &str, content: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: id.to_string(),
-                content: content.to_string(),
-                is_error: None,
-            }],
-            timestamp: None,
-            tool_duration_ms: Some(1),
-        }
-    }
-
-    #[test]
-    fn messages_end_with_tool_result_detects_tool_continuation_context() {
-        let messages = vec![
-            user_text("tell me about the desktop application"),
-            tool_result("functions.read:0", "desktop architecture docs"),
-            tool_result("functions.agentgrep:4", "desktop source summary"),
-        ];
-
-        assert!(Agent::messages_end_with_tool_result(&messages));
-    }
-
-    #[test]
-    fn messages_end_with_tool_result_allows_memory_after_tool_results() {
-        let messages = vec![
-            user_text("tell me about the desktop application"),
-            tool_result("functions.read:0", "desktop architecture docs"),
-            user_text("<system-reminder>Relevant memory</system-reminder>"),
-        ];
-
-        assert!(Agent::messages_end_with_tool_result(&messages));
-    }
-
-    #[test]
-    fn messages_end_with_tool_result_ignores_plain_user_prompt() {
-        let messages = vec![user_text("hello")];
-
-        assert!(!Agent::messages_end_with_tool_result(&messages));
-    }
-
-    #[test]
-    fn sequential_tool_rounds_trigger_after_three_single_calls() {
-        let mut rounds = 0;
-        for _ in 0..3 {
-            rounds = Agent::update_sequential_tool_rounds(rounds, 1, false);
-        }
-
-        assert_eq!(rounds, Agent::SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE);
-    }
-
-    #[test]
-    fn parallel_or_batch_calls_reset_sequential_tool_rounds() {
-        assert_eq!(Agent::update_sequential_tool_rounds(2, 2, false), 0);
-        assert_eq!(Agent::update_sequential_tool_rounds(2, 1, true), 0);
-        assert_eq!(Agent::update_sequential_tool_rounds(2, 0, false), 0);
-    }
-
-    #[test]
-    fn pending_nudge_is_injected_only_when_batch_is_available() {
-        assert!(Agent::should_inject_batch_nudge(true, true));
-        assert!(!Agent::should_inject_batch_nudge(false, true));
-        assert!(!Agent::should_inject_batch_nudge(true, false));
-        assert!(Agent::BATCH_NUDGE.contains("use the batch tool"));
-        assert!(Agent::BATCH_NUDGE.contains("result is required"));
-    }
-
-    #[test]
-    fn plan_limit_reminder_relays_upgrade_link_without_purchasing() {
-        let reminder = Agent::plan_limit_reminder(&crate::subscription_notice::QuotaExceeded {
-            feature: "memory".into(),
-            tier: Some("plus".into()),
-            upgrade_tier: Some("pro".into()),
-            upgrade_url: Some("https://jcode.sh/pricing".into()),
-            resets_at: None,
-        });
-        assert!(reminder.starts_with("<system-reminder>"));
-        assert!(reminder.contains("Daily memory recall limit reached on your Plus plan"));
-        assert!(reminder.contains("Upgrade to Pro"));
-        assert!(reminder.contains("https://jcode.sh/pricing"));
-        assert!(reminder.contains("Do not open checkout"));
-    }
-}
+#[path = "turn_loops_tests.rs"]
+mod tests;

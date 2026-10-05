@@ -168,6 +168,18 @@ impl MemoryEntryEmbeddingExt for MemoryEntry {
     }
 }
 
+/// Per-project memory file for `project_dir`. Keyed by the absolute path, so a
+/// migrated session that keeps the same repo path keeps the same memories.
+pub fn project_memory_file(project_dir: &std::path::Path) -> Result<PathBuf> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    project_dir.hash(&mut hasher);
+    let project_hash = format!("{:016x}", hasher.finish());
+    let memory_dir = storage::jcode_dir()?.join("memory").join("projects");
+    Ok(memory_dir.join(format!("{}.json", project_hash)))
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoryManager {
     project_dir: Option<PathBuf>,
@@ -254,16 +266,7 @@ impl MemoryManager {
             None => return Ok(None),
         };
 
-        let project_hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            project_dir.hash(&mut hasher);
-            format!("{:016x}", hasher.finish())
-        };
-
-        let memory_dir = storage::jcode_dir()?.join("memory").join("projects");
-        Ok(Some(memory_dir.join(format!("{}.json", project_hash))))
+        project_memory_file(&project_dir).map(Some)
     }
 
     fn legacy_notes_path(&self) -> Result<Option<PathBuf>> {

@@ -182,7 +182,8 @@ impl App {
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
                     | ContentBlock::OpenAIReasoning { .. }
-                    | ContentBlock::ToolReference { .. } => {}
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
