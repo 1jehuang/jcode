@@ -616,6 +616,27 @@ fn signal_crash_reason(sig: i32) -> String {
     }
 }
 
+fn restore_terminal_modes_for_signal_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    use crossterm::QueueableCommand;
+    use crossterm::event::{DisableBracketedPaste, DisableFocusChange, DisableMouseCapture};
+    use crossterm::terminal::LeaveAlternateScreen;
+
+    writer.queue(DisableBracketedPaste)?;
+    writer.queue(DisableFocusChange)?;
+    writer.queue(DisableMouseCapture)?;
+    if inside_tmux {
+        // Reset tmux's modifyOtherKeys mode before popping Kitty flags.
+        writer.write_all(b"\x1b[>4;0m")?;
+    }
+    writer.write_all(b"\x1b[<1u")?;
+    writer.queue(LeaveAlternateScreen)?;
+    writer.queue(crossterm::cursor::Show)?;
+    writer.flush()
+}
+
 #[cfg(unix)]
 fn handle_termination_signal(sig: i32) -> ! {
     mark_current_session_crashed(signal_crash_reason(sig));
@@ -832,6 +853,32 @@ mod tests {
                 "disable sequence must turn off VT mouse mode {mode}"
             );
         }
+    }
+
+    #[test]
+    fn signal_cleanup_disables_terminal_input_modes_before_exit() {
+        let mut output = Vec::new();
+        restore_terminal_modes_for_signal_to(&mut output, false).unwrap();
+        let output = String::from_utf8(output).unwrap();
+
+        for mode in ["?2004l", "?1004l", "?1000l", "?1006l"] {
+            assert!(
+                output.contains(mode),
+                "signal cleanup must disable {mode}: {output:?}"
+            );
+        }
+        assert!(
+            output.contains("\x1b[<1u"),
+            "keyboard enhancement stack must be popped: {output:?}"
+        );
+        assert!(
+            output.contains("\x1b[?1049l"),
+            "alternate screen must be left: {output:?}"
+        );
+        assert!(
+            output.contains("\x1b[?25h"),
+            "cursor must be restored: {output:?}"
+        );
     }
 
     #[test]
