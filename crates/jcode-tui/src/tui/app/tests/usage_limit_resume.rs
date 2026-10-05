@@ -317,3 +317,57 @@ fn test_terminal_server_error_with_retry_hint_is_shown_as_an_error() {
         );
     }
 }
+
+/// A server-owned resume notice that arrives while the user's own turn is in
+/// flight is about a different turn. It must not settle that turn, count as a
+/// failure of it, or schedule a resend.
+#[test]
+fn test_server_owned_resume_notice_during_users_turn_does_not_spend_its_retries() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: "my own turn".to_string(),
+        images: vec![],
+        is_system: false,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(7);
+    app.processing_started = Some(Instant::now());
+
+    for _ in 0..5 {
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: 0,
+                message: ANTHROPIC_FAIL_FAST_USAGE_LIMIT.to_string(),
+                retry_after_secs: Some(120),
+                server_resumes: true,
+            },
+            &mut remote,
+        );
+    }
+
+    assert!(app.is_processing, "the user's turn keeps running");
+    assert_eq!(app.current_message_id, Some(7));
+    assert!(app.rate_limit_reset.is_none(), "no client resend is scheduled");
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .map(|pending| pending.retry_attempts),
+        Some(0),
+        "the user's retry budget is untouched"
+    );
+    let last = app.display_messages().last().expect("a notice");
+    assert!(
+        last.content
+            .starts_with("⏳ Usage limit hit. The server will resume this at "),
+        "{}",
+        last.content
+    );
+}

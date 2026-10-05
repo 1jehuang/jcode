@@ -1267,12 +1267,19 @@ pub(in crate::tui::app) fn handle_server_event(
             // send the turn, so it must not hold or resend anything itself.
             // Only the explicit `server_resumes` flag means that: an id-0
             // error with just a retry hint is terminal and shown normally.
-            if server_resumes
-                && app.current_message_id.is_none()
-                && let Some(resume_in) = retry_after_secs
-            {
-                app.handle_server_owned_usage_limit_resume(resume_in.min(24 * 60 * 60));
-                remote.reset_call_output_tokens_seen();
+            if server_resumes && let Some(resume_in) = retry_after_secs {
+                let resume_in = resume_in.min(24 * 60 * 60);
+                if app.current_message_id.is_none() {
+                    app.handle_server_owned_usage_limit_resume(resume_in);
+                    remote.reset_call_output_tokens_seen();
+                } else {
+                    // The user's own turn is in flight. The notice is about a
+                    // different, server-owned turn: show it, but do not settle
+                    // the user's turn or spend its retry budget.
+                    app.push_display_message(DisplayMessage::system(
+                        App::server_usage_limit_resume_notice(resume_in),
+                    ));
+                }
                 return true;
             }
             // The server rejects a Message request with this error while its
