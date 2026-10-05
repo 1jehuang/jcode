@@ -185,6 +185,7 @@ impl App {
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
+                                let key = crate::tui::app::normalize_key_event(key);
                                 self.update_copy_badge_key_event(key);
                                 self.observe_voice_key_release(&key);
                                 if self.handle_voice_key_event(&key) {
@@ -381,6 +382,7 @@ impl App {
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
+                                let key = crate::tui::app::normalize_key_event(key);
                                 self.update_copy_badge_key_event(key);
                                 self.observe_voice_key_release(&key);
                                 if self.handle_voice_key_event(&key) {
@@ -1456,6 +1458,7 @@ impl App {
                         event = event_stream.next() => {
                             match event {
                                 Some(Ok(Event::Key(key))) => {
+                                    let key = crate::tui::app::normalize_key_event(key);
                                     self.update_copy_badge_key_event(key);
                                     self.observe_voice_key_release(&key);
                                     if self.handle_voice_key_event(&key) {

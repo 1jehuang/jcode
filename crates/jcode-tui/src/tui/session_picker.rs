@@ -2382,6 +2382,7 @@ impl SessionPicker {
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) => {
+                        let key = crate::tui::app::normalize_key_event(key);
                         if key.kind != KeyEventKind::Press {
                             continue;
                         }

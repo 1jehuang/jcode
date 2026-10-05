@@ -6,7 +6,7 @@ pub(crate) mod model_names;
 use crate::todo::TodoItem;
 use crate::tui::info_widget::{AmbientWidgetData, GitInfo};
 use crate::tui::session_picker::ResumeTarget;
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -218,21 +218,20 @@ pub(super) fn partition_queued_messages(
 }
 
 /// Fold a Korean 2-Set jamo produced under a Ctrl/Alt/Cmd chord back to the physical
-/// letter key, so `cmd+b` and `ctrl+r` match with the Korean input source active.
-pub(super) fn hangul_chord_fallback_to_latin(code: &mut KeyCode, modifiers: &KeyModifiers) {
+/// letter key, so `cmd+b`, `ctrl+r` and voice chords match with the Korean input source.
+pub(crate) fn normalize_key_event(mut key: KeyEvent) -> KeyEvent {
     let chord = KeyModifiers::CONTROL
         | KeyModifiers::ALT
         | KeyModifiers::SUPER
         | KeyModifiers::META
         | KeyModifiers::HYPER;
-    if !modifiers.intersects(chord) {
-        return;
-    }
-    if let KeyCode::Char(c) = *code
+    if key.modifiers.intersects(chord)
+        && let KeyCode::Char(c) = key.code
         && let Some(latin) = jcode_tui_core::keybind::dubeolsik_jamo_to_latin(c)
     {
-        *code = KeyCode::Char(latin);
+        key.code = KeyCode::Char(latin);
     }
+    key
 }
 
 #[cfg(target_os = "macos")]

@@ -959,8 +959,11 @@ fn test_handle_key_korean_jamo_ctrl_chord_runs_the_latin_shortcut() {
 
     app.handle_key(KeyCode::Left, KeyModifiers::CONTROL)
         .unwrap();
-    app.handle_key(KeyCode::Char('ㅏ'), KeyModifiers::CONTROL)
-        .unwrap();
+    app.handle_key_press_event(crate::tui::app::normalize_key_event(crossterm::event::KeyEvent::new(
+        KeyCode::Char('ㅏ'),
+        KeyModifiers::CONTROL,
+    )))
+    .unwrap();
 
     assert_eq!(app.input(), "hello world ");
 }
@@ -970,8 +973,11 @@ fn test_handle_key_korean_jamo_cmd_chord_does_not_type_the_jamo() {
     let mut app = create_test_app();
     app.set_input_for_test("hi");
 
-    app.handle_key(KeyCode::Char('ㅍ'), KeyModifiers::SUPER)
-        .unwrap();
+    app.handle_key_press_event(crate::tui::app::normalize_key_event(crossterm::event::KeyEvent::new(
+        KeyCode::Char('ㅍ'),
+        KeyModifiers::SUPER,
+    )))
+    .unwrap();
 
     assert_eq!(app.input(), "hi");
 }
@@ -981,8 +987,11 @@ fn test_handle_key_plain_korean_jamo_still_types() {
     let mut app = create_test_app();
     app.set_input_for_test("");
 
-    app.handle_key(KeyCode::Char('ㅍ'), KeyModifiers::NONE)
-        .unwrap();
+    app.handle_key_press_event(crate::tui::app::normalize_key_event(crossterm::event::KeyEvent::new(
+        KeyCode::Char('ㅍ'),
+        KeyModifiers::NONE,
+    )))
+    .unwrap();
 
     assert_eq!(app.input(), "ㅍ");
 }

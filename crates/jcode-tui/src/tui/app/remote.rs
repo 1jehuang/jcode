@@ -2,9 +2,8 @@
 
 use super::{
     App, DisplayMessage, PendingReloadReconnectStatus, ProcessingStatus, RemoteResumeActivity,
-    SendAction, ctrl_bracket_fallback_to_esc, hangul_chord_fallback_to_latin, input,
-    parse_rate_limit_error, remote_notifications::present_swarm_notification,
-    spawn_in_new_terminal,
+    SendAction, ctrl_bracket_fallback_to_esc, input, parse_rate_limit_error,
+    remote_notifications::present_swarm_notification, spawn_in_new_terminal,
 };
 use crate::bus::BusEvent;
 use crate::message::ToolCall;
@@ -438,6 +437,7 @@ async fn apply_terminal_event(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
+            let key = crate::tui::app::normalize_key_event(key);
             // Start the key-to-paint clock at the moment the key is read, which is
             // the only point that corresponds to the user's press.
             crate::tui::ui::note_key_event_read();
@@ -840,6 +840,7 @@ fn handle_terminal_event_while_disconnected(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
+            let key = crate::tui::app::normalize_key_event(key);
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
@@ -1974,7 +1975,6 @@ fn handle_disconnected_key_internal(
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
-    hangul_chord_fallback_to_latin(&mut code, &modifiers);
 
     if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
         return Ok(());
