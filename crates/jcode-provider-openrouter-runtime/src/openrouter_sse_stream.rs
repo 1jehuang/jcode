@@ -28,9 +28,7 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
     match status {
         // A 429 means the server answered: the request reached the provider
         // and was rejected for quota, not connectivity. Point at the limit.
-        429 => {
-            "Hint: the provider rate limited this request (per-minute or quota cap), not a network problem. jcode backs off automatically, honoring any provider-requested delay, within its retry budget; if it keeps failing, wait a minute, lower request frequency, or switch to another provider with /model."
-        }
+        429 => RATE_LIMIT_HINT,
         401 | 403 => {
             "Hint: the provider rejected the API key. Check that the key is valid and allowed to use this model, or switch to another provider with /model."
         }
@@ -86,12 +84,7 @@ pub(super) async fn run_stream_with_retries(
             return;
         }
         if attempt > 0 {
-            let delay = jcode_provider_core::retry_after::retry_delay(
-                attempt,
-                RETRY_BASE_DELAY_MS,
-                next_retry_delay.take(),
-            )
-            .min(retry_backoff_cap);
+            let delay = retry_wait(attempt, next_retry_delay.take(), retry_backoff_cap);
             // Also wake mid-wait: a cancelled turn must not sit out a long
             // rate-limit or exponential backoff before noticing.
             tokio::select! {
@@ -350,6 +343,26 @@ fn parsed_http_status(error_str: &str) -> Option<u16> {
     }
 }
 
+/// Wait before retry `attempt`. A provider-requested delay (Retry-After) is
+/// honored as sent, up to [`jcode_provider_core::retry_after::MAX_RETRY_AFTER`]
+/// (already applied when it was parsed): resending sooner only draws another
+/// rate limit. The configured backoff cap limits jcode's own exponential
+/// backoff, not the provider's request.
+fn retry_wait(
+    attempt: u32,
+    server_hint: Option<std::time::Duration>,
+    backoff_cap: std::time::Duration,
+) -> std::time::Duration {
+    match server_hint {
+        Some(hint) => hint.min(jcode_provider_core::retry_after::MAX_RETRY_AFTER),
+        None => jcode_provider_core::retry_after::retry_delay(attempt, RETRY_BASE_DELAY_MS, None)
+            .min(backoff_cap),
+    }
+}
+
+/// Hint for a 429. Kept next to [`retry_wait`] so the promise matches it.
+const RATE_LIMIT_HINT: &str = "Hint: the provider rate limited this request (per-minute or quota cap), not a network problem. jcode waits as long as the provider asks (up to 60s per retry) and backs off within its retry budget; if it keeps failing, wait a minute, lower request frequency, or switch to another provider with /model.";
+
 fn is_retryable_error(error_str: &str) -> bool {
     // Explicit non-retryable HTTP statuses take precedence over the loose
     // substring heuristics below. These are deterministic client-side failures
@@ -595,6 +608,28 @@ mod tests {
             assert!(delay <= Duration::from_secs(2), "{delay:?}");
             assert!(delay > Duration::from_millis(1500), "{delay:?}");
         });
+    }
+
+    /// A provider asking for 60s must get 60s, not the 30s default backoff
+    /// cap, or the resend draws another 429. The hint promises exactly this.
+    #[test]
+    fn retry_after_is_honored_past_the_backoff_cap() {
+        let cap = Duration::from_secs(30);
+        assert_eq!(
+            retry_wait(1, Some(Duration::from_secs(60)), cap),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            retry_wait(1, Some(Duration::from_secs(600)), cap),
+            jcode_provider_core::retry_after::MAX_RETRY_AFTER
+        );
+        assert!(retry_wait(10, None, cap) <= cap);
+        assert_eq!(
+            jcode_provider_core::retry_after::MAX_RETRY_AFTER,
+            Duration::from_secs(60),
+            "RATE_LIMIT_HINT names this bound"
+        );
+        assert!(RATE_LIMIT_HINT.contains("up to 60s"));
     }
 
     /// Dropping the consumer's receiver cancels the turn: the retry loop must
