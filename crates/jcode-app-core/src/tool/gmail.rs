@@ -112,8 +112,8 @@ impl Tool for GmailTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["connect", "search", "read", "list", "draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
-                    "description": "Action. 'connect' sets up Gmail access via a browser OAuth screen the user approves."
+                    "enum": ["connect", "search", "read", "list", "draft", "update_draft", "list_drafts", "delete_draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
+                    "description": "Action. 'connect' runs browser OAuth. Revise drafts with 'update_draft' + draft_id, not a new draft."
                 },
                 "query": { "type": "string" },
                 "message_id": { "type": "string" },
@@ -498,6 +498,135 @@ impl Tool for GmailTool {
                 )))
             }
 
+            "update_draft" => {
+                let draft_id = params.draft_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("'draft_id' is required for update_draft action")
+                })?;
+
+                let attachments: Vec<std::path::PathBuf> = params
+                    .attachments
+                    .as_deref()
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                for path in &attachments {
+                    if !path.is_file() {
+                        return Ok(ToolOutput::new(format!(
+                            "Attachment not found or not a file: {}",
+                            path.display()
+                        )));
+                    }
+                }
+
+                // Merge: any field the caller omits keeps the draft's current
+                // value, including reply threading, so a revision stays a reply.
+                let existing = self.client.get_draft(draft_id).await?;
+                let current = existing.message.as_ref();
+                let merged = merge_draft_fields(
+                    current,
+                    params.to.as_deref(),
+                    params.subject.as_deref(),
+                    params.body.as_deref(),
+                );
+                let Some(to) = merged.to else {
+                    anyhow::bail!(
+                        "Draft {} has no recipient; pass 'to' to update it.",
+                        draft_id
+                    );
+                };
+
+                let (reply_header, reply_thread) = if params.in_reply_to.is_some() {
+                    self.resolve_reply(params.in_reply_to.as_deref(), params.thread_id.as_deref())
+                        .await?
+                } else {
+                    (
+                        merged.in_reply_to,
+                        params
+                            .thread_id
+                            .clone()
+                            .or_else(|| current.and_then(|m| m.thread_id.clone())),
+                    )
+                };
+
+                let dropped_attachments = attachments.is_empty()
+                    && current
+                        .map(|m| !m.attachments().is_empty())
+                        .unwrap_or(false);
+
+                let draft = self
+                    .client
+                    .update_draft(
+                        draft_id,
+                        &to,
+                        &merged.subject,
+                        &merged.body,
+                        reply_header.as_deref(),
+                        reply_thread.as_deref(),
+                        &attachments,
+                    )
+                    .await?;
+
+                let warn = if dropped_attachments {
+                    "\nNote: the previous draft had attachments; they were not carried over. Pass 'attachments' to re-attach."
+                } else {
+                    ""
+                };
+                Ok(ToolOutput::new(format!(
+                    "Draft updated in place.\nDraft ID: {}\nTo: {}\nSubject: {}\nBody:\n{}{}\n\nTo send this draft, use action 'send_draft' with draft_id '{}' and confirmed: true.",
+                    draft.id, to, merged.subject, merged.body, warn, draft.id
+                )))
+            }
+
+            "list_drafts" => {
+                let drafts = self.client.list_drafts(max).await?;
+                if drafts.is_empty() {
+                    return Ok(ToolOutput::new("No drafts found."));
+                }
+                let mut results = Vec::new();
+                for (i, d) in drafts.iter().enumerate() {
+                    match self.client.get_draft(&d.id).await {
+                        Ok(full) => {
+                            let m = full.message.as_ref();
+                            results.push(format!(
+                                "{}. {}\n   To: {}\n   Snippet: {}\n   Draft ID: {}",
+                                i + 1,
+                                m.and_then(|m| m.subject()).unwrap_or("(no subject)"),
+                                m.and_then(|m| m.header("To")).unwrap_or("(none)"),
+                                m.and_then(|m| m.snippet.as_deref()).unwrap_or(""),
+                                d.id,
+                            ));
+                        }
+                        Err(e) => results.push(format!(
+                            "{}. [error fetching draft {}: {}]",
+                            i + 1,
+                            d.id,
+                            e
+                        )),
+                    }
+                }
+                Ok(ToolOutput::new(format!(
+                    "Drafts ({}):\n\n{}",
+                    drafts.len(),
+                    results.join("\n\n")
+                )))
+            }
+
+            "delete_draft" => {
+                let draft_id = params.draft_id.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("'draft_id' is required for delete_draft action")
+                })?;
+                if params.confirmed != Some(true) {
+                    return Ok(ToolOutput::new(format!(
+                        "CONFIRMATION REQUIRED: Permanently delete draft {}? Drafts do not go to Trash.\n\n\
+                         To confirm, call gmail again with action 'delete_draft', draft_id '{}', and confirmed: true.",
+                        draft_id, draft_id
+                    )));
+                }
+                self.client.delete_draft(draft_id).await?;
+                Ok(ToolOutput::new(format!("Draft {} deleted.", draft_id)))
+            }
+
             "send_draft" => {
                 if !self.client.can_send() {
                     return Ok(ToolOutput::new(
@@ -576,9 +705,91 @@ impl Tool for GmailTool {
             }
 
             other => Ok(ToolOutput::new(format!(
-                "Unknown gmail action: '{}'. Valid actions: search, read, list, draft, send, send_draft, threads, thread, labels, trash, modify_labels",
+                "Unknown gmail action: '{}'. Valid actions: search, read, list, draft, update_draft, list_drafts, delete_draft, send, send_draft, threads, thread, labels, trash, modify_labels",
                 other
             ))),
         }
+    }
+}
+
+/// Resolved fields for a draft update after merging caller input over the
+/// draft's current content.
+#[derive(Debug, PartialEq)]
+struct MergedDraft {
+    to: Option<String>,
+    subject: String,
+    body: String,
+    in_reply_to: Option<String>,
+}
+
+fn merge_draft_fields(
+    current: Option<&gmail::Message>,
+    to: Option<&str>,
+    subject: Option<&str>,
+    body: Option<&str>,
+) -> MergedDraft {
+    MergedDraft {
+        to: to
+            .map(str::to_string)
+            .or_else(|| current.and_then(|m| m.header("To")).map(str::to_string)),
+        subject: subject
+            .map(str::to_string)
+            .or_else(|| current.and_then(|m| m.subject()).map(str::to_string))
+            .unwrap_or_default(),
+        body: body
+            .map(str::to_string)
+            .or_else(|| current.and_then(|m| m.body_text()))
+            .unwrap_or_default(),
+        in_reply_to: current
+            .and_then(|m| m.header("In-Reply-To"))
+            .map(str::to_string),
+    }
+}
+
+#[cfg(test)]
+mod draft_merge_tests {
+    use super::*;
+
+    fn draft_message() -> gmail::Message {
+        serde_json::from_value(json!({
+            "id": "m1",
+            "threadId": "t1",
+            "payload": {
+                "headers": [
+                    {"name": "To", "value": "richard@varrock.vc"},
+                    {"name": "Subject", "value": "Re: Intro"},
+                    {"name": "In-Reply-To", "value": "<abc@mail.gmail.com>"}
+                ],
+                "mimeType": "text/plain",
+                "body": {"data": "SGVsbG8"}
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn omitted_fields_keep_current_values_and_threading() {
+        let msg = draft_message();
+        let merged = merge_draft_fields(Some(&msg), None, None, Some("New body"));
+        assert_eq!(merged.to.as_deref(), Some("richard@varrock.vc"));
+        assert_eq!(merged.subject, "Re: Intro");
+        assert_eq!(merged.body, "New body");
+        assert_eq!(merged.in_reply_to.as_deref(), Some("<abc@mail.gmail.com>"));
+    }
+
+    #[test]
+    fn explicit_fields_override() {
+        let msg = draft_message();
+        let merged = merge_draft_fields(Some(&msg), Some("a@b.c"), Some("Hi"), None);
+        assert_eq!(merged.to.as_deref(), Some("a@b.c"));
+        assert_eq!(merged.subject, "Hi");
+        assert_eq!(merged.body, "Hello");
+    }
+
+    #[test]
+    fn no_current_message() {
+        let merged = merge_draft_fields(None, None, None, None);
+        assert_eq!(merged.to, None);
+        assert_eq!(merged.subject, "");
     }
 }
