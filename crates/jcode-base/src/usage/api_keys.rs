@@ -102,7 +102,7 @@ pub(super) fn enqueue_api_key_usage_tasks(
         }
 
         let source_key = format!("openai-compatible:{}", profile.id);
-        let has_balance_api = matches!(profile.id, "deepseek" | "moonshotai");
+        let has_balance_api = matches!(profile.id, "deepseek" | "moonshotai" | "kimi" | "zai");
         // Only surface profiles jcode has actually used (or that expose a real
         // balance API); listing every configured-but-idle key is noise.
         let used_before = provider_activity::last_used_unix_secs(&source_key).is_some()
@@ -205,6 +205,8 @@ async fn fetch_compatible_profile_report(
 ) -> ProviderUsage {
     let source_key = format!("openai-compatible:{}", profile.id);
     let mut extra_info = Vec::new();
+    let mut limits: Vec<UsageLimit> = Vec::new();
+    let mut error: Option<String> = None;
 
     match profile.id {
         "deepseek" => {
@@ -228,6 +230,40 @@ async fn fetch_compatible_profile_report(
                 }
             }
         }
+        "kimi" => {
+            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+                match fetch_kimi_usage_limits(&api_key).await {
+                    Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
+                    Ok(_) => {
+                        // Unknown capacity must not look healthy in the
+                        // usage overlay, so report it as an error.
+                        error = Some("no quota windows returned".to_string());
+                    }
+                    Err(e) => {
+                        extra_info.push(("Usage".to_string(), format!("unavailable ({})", e)))
+                    }
+                }
+            }
+            // Kimi for Coding is a flat-rate subscription, so the
+            // pay-as-you-go equivalent from the local spend ledger is
+            // meaningless here; skip push_local_spend.
+        }
+        "zai" => {
+            if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
+                match fetch_zai_coding_plan_limits(&api_key).await {
+                    Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
+                    _ => {
+                        // Not a Coding Plan key (or quota API unavailable):
+                        // fall back to the pay-as-you-go key probe below.
+                        let resolved =
+                            crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                        let status =
+                            probe_openai_compatible_key(&resolved.api_base, &api_key).await;
+                        extra_info.push(("Key status".to_string(), status));
+                    }
+                }
+            }
+        }
         _ => {
             // No provider-specific balance API: do a free `GET /models` probe
             // against the profile's own endpoint so the key status is real
@@ -240,11 +276,18 @@ async fn fetch_compatible_profile_report(
         }
     }
 
-    push_local_spend(&mut extra_info, &source_key);
+    // Local pay-as-you-go spend is meaningless next to a flat-rate plan
+    // quota (Kimi, or a Z.ai Coding Plan key that returned windows).
+    let plan_quota_shown = profile.id == "kimi" || (profile.id == "zai" && !limits.is_empty());
+    if !plan_quota_shown {
+        push_local_spend(&mut extra_info, &source_key);
+    }
 
     let mut report = ProviderUsage {
         provider_name: format!("{} (API key)", profile.display_name),
+        limits,
         extra_info,
+        error,
         ..Default::default()
     };
     attach_activity(&mut report, &source_key);
@@ -353,6 +396,243 @@ async fn fetch_moonshot_balance(api_key: &str, api_base: &str) -> Result<Vec<(St
         anyhow::bail!("no balance fields in response");
     }
     Ok(lines)
+}
+
+/// Kimi Code exposes per-window quota through the coding usage endpoint.
+async fn fetch_kimi_usage_limits(api_key: &str) -> Result<Vec<UsageLimit>> {
+    let client = crate::provider::shared_http_client();
+    let response = client
+        .get("https://api.kimi.com/coding/v1/usages")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Accept", "application/json")
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .context("usage request failed")?;
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+    let json: serde_json::Value = response.json().await.context("invalid usage response")?;
+    Ok(parse_kimi_usage_limits(&json))
+}
+
+/// Pure parse of the Kimi usage payload: a `usage` summary plus `limits[]`
+/// (each with a `window` descriptor) or a legacy `usages` map (`limit_5h` /
+/// `limit_7d` / `limit_30d`). Every documented shape is accepted because the
+/// backend has shipped all of them at different times. Explicit windows win
+/// over the summary when both describe the same bucket.
+pub(super) fn parse_kimi_usage_limits(json: &serde_json::Value) -> Vec<UsageLimit> {
+    let mut limits: Vec<UsageLimit> = Vec::new();
+
+    if let Some(raw_limits) = json.get("limits").and_then(|v| v.as_array()) {
+        for raw in raw_limits {
+            let window = raw
+                .get("window")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let duration = window.get("duration").and_then(|v| v.as_f64());
+            let unit = window
+                .get("timeUnit")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            let minutes = duration.map(|d| {
+                if unit.contains("HOUR") {
+                    d * 60.0
+                } else if unit.contains("DAY") {
+                    d * 1440.0
+                } else {
+                    d
+                }
+            });
+            let fallback = format!("Limit {}", limits.len() + 1);
+            let label = kimi_window_label(minutes, &fallback);
+            let detail = raw.get("detail").unwrap_or(raw);
+            if let Some(limit) = kimi_parse_row(detail, &label) {
+                limits.push(limit);
+            }
+        }
+    }
+
+    if let Some(usages) = json.get("usages").and_then(|v| v.as_object()) {
+        for (key, raw) in usages {
+            let minutes = match key.as_str() {
+                "limit_5h" => Some(300.0),
+                "limit_7d" => Some(10080.0),
+                "limit_30d" => Some(43200.0),
+                _ => None,
+            };
+            let label = kimi_window_label(minutes, key);
+            let usage_percent = raw
+                .get("used_ratio")
+                .and_then(|v| v.as_f64())
+                .map(|ratio| (ratio * 100.0).clamp(0.0, 100.0) as f32);
+            let resets_at = ["reset_time", "resetTime"]
+                .iter()
+                .find_map(|k| raw.get(k).and_then(reset_timestamp_from_json_value));
+            if let Some(usage_percent) = usage_percent {
+                limits.push(UsageLimit {
+                    name: label,
+                    usage_percent,
+                    resets_at,
+                });
+            }
+        }
+    }
+
+    // The summary row only fills in Weekly when no explicit window reported
+    // it; dedup below keeps the first occurrence, so this must come last.
+    if let Some(usage) = json.get("usage")
+        && let Some(limit) = kimi_parse_row(usage, "Weekly")
+    {
+        limits.push(limit);
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    limits.retain(|limit| seen.insert(limit.name.clone()));
+
+    let rank = |name: &str| match name {
+        "5-hour" => 0,
+        "Weekly" => 1,
+        "Monthly" => 2,
+        _ => 3,
+    };
+    limits.sort_by_key(|limit| rank(&limit.name));
+    limits
+}
+
+fn kimi_parse_row(raw: &serde_json::Value, label: &str) -> Option<UsageLimit> {
+    let limit = raw.get("limit").and_then(|v| v.as_f64());
+    let used = raw.get("used").and_then(|v| v.as_f64()).or_else(|| {
+        match (limit, raw.get("remaining").and_then(|v| v.as_f64())) {
+            (Some(limit), Some(remaining)) => Some((limit - remaining).max(0.0)),
+            _ => None,
+        }
+    });
+    if used.is_none() && limit.is_none() {
+        return None;
+    }
+    let usage_percent = raw
+        .get("percentage")
+        .and_then(|v| v.as_f64())
+        .map(|pct| pct.clamp(0.0, 100.0) as f32)
+        .or_else(|| match (used, limit) {
+            (Some(used), Some(limit)) => Some(usage_percent_from_used_limit(used, limit)),
+            _ => None,
+        })?;
+    let resets_at = ["resetTime", "resetAt", "reset_time"]
+        .iter()
+        .find_map(|key| raw.get(key).and_then(reset_timestamp_from_json_value));
+    Some(UsageLimit {
+        name: label.to_string(),
+        usage_percent,
+        resets_at,
+    })
+}
+
+fn kimi_window_label(minutes: Option<f64>, fallback: &str) -> String {
+    match minutes {
+        Some(300.0) => "5-hour".to_string(),
+        Some(10080.0) => "Weekly".to_string(),
+        Some(m) if (43200.0..=44640.0).contains(&m) => "Monthly".to_string(),
+        Some(m) if m > 0.0 && m % 1440.0 == 0.0 => format!("{}d limit", kimi_fmt_num(m / 1440.0)),
+        Some(m) if m > 0.0 && m % 60.0 == 0.0 => format!("{}h limit", kimi_fmt_num(m / 60.0)),
+        _ => fallback.to_string(),
+    }
+}
+
+fn kimi_fmt_num(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        format!("{}", value)
+    }
+}
+
+/// Z.ai GLM Coding Plan exposes plan quota windows (5-hour, weekly, and MCP
+/// monthly) through the monitor quota endpoint. Pay-as-you-go keys are
+/// rejected, which the caller uses as the fallback signal.
+async fn fetch_zai_coding_plan_limits(api_key: &str) -> Result<Vec<UsageLimit>> {
+    let client = crate::provider::shared_http_client();
+    let response = client
+        .get("https://open.bigmodel.cn/api/monitor/usage/quota/limit")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Accept", "application/json")
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .context("usage request failed")?;
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {}", response.status());
+    }
+    let json: serde_json::Value = response.json().await.context("invalid usage response")?;
+    Ok(parse_zai_coding_plan_limits(&json))
+}
+
+/// Pure parse of the Coding Plan quota payload: `limits[]` rows are either
+/// `TOKENS_LIMIT` windows (`unit` 6 is the weekly bucket, anything else the
+/// 5-hour bucket) or a `TIME_LIMIT` row for MCP monthly usage.
+pub(super) fn parse_zai_coding_plan_limits(json: &serde_json::Value) -> Vec<UsageLimit> {
+    let root = json.get("data").filter(|v| v.is_object()).unwrap_or(json);
+    let Some(raw_limits) = root.get("limits").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    let mut limits = Vec::new();
+    for raw in raw_limits {
+        let resets_at = ["nextResetTime", "resetAt", "reset_time"]
+            .iter()
+            .find_map(|key| raw.get(key).and_then(reset_timestamp_from_json_value));
+        let percent = raw
+            .get("percentage")
+            .and_then(|v| v.as_f64())
+            .map(|pct| pct.clamp(0.0, 100.0) as f32);
+        let (name, usage_percent) = match raw.get("type").and_then(|v| v.as_str()) {
+            Some("TOKENS_LIMIT") => {
+                let unit = raw.get("unit").and_then(|v| v.as_f64());
+                let name = if unit == Some(6.0) {
+                    "Weekly"
+                } else {
+                    "5-hour"
+                };
+                let Some(usage_percent) = percent else {
+                    continue;
+                };
+                (name, usage_percent)
+            }
+            Some("TIME_LIMIT") => {
+                let usage_percent = percent.or_else(|| {
+                    match (
+                        raw.get("currentValue").and_then(|v| v.as_f64()),
+                        raw.get("usage").and_then(|v| v.as_f64()),
+                    ) {
+                        (Some(current), Some(limit)) if limit > 0.0 => {
+                            Some(((current / limit) * 100.0).clamp(0.0, 100.0) as f32)
+                        }
+                        _ => None,
+                    }
+                });
+                let Some(usage_percent) = usage_percent else {
+                    continue;
+                };
+                ("MCP monthly", usage_percent)
+            }
+            _ => continue,
+        };
+        limits.push(UsageLimit {
+            name: name.to_string(),
+            usage_percent,
+            resets_at,
+        });
+    }
+
+    let rank = |name: &str| match name {
+        "5-hour" => 0,
+        "Weekly" => 1,
+        _ => 2,
+    };
+    limits.sort_by_key(|limit| rank(&limit.name));
+    limits
 }
 
 /// Anthropic org-wide cost for the current month. Requires an *admin* API key

@@ -1268,6 +1268,15 @@ impl App {
             lines.push(String::new());
         }
 
+        // One width for every provider block so bars align across sections,
+        // not just within them.
+        let name_width = reports
+            .iter()
+            .flat_map(|provider| provider.limits.iter())
+            .map(|limit| limit.name.chars().count())
+            .max()
+            .unwrap_or(0);
+
         for (idx, provider) in reports.iter().enumerate() {
             if idx > 0 {
                 lines.push(String::new());
@@ -1296,10 +1305,11 @@ impl App {
                     .map(|value| format!(" · resets in {}", value))
                     .unwrap_or_default();
                 lines.push(format!(
-                    "  {}: {}{}",
+                    "  {:<width$}: {}{}",
                     limit.name,
                     crate::usage::format_usage_bar(limit.usage_percent, 14),
-                    reset
+                    reset,
+                    width = name_width
                 ));
             }
 
