@@ -223,11 +223,11 @@ async fn refresh_for_pinned_label_persists_to_that_label_only() {
             .to_string(),
     )
     .await;
-    oauth::set_token_url_override_for_tests("claude", Some(url));
+    oauth::set_token_url_override_for_tests(oauth::TokenUrlProvider::Claude, Some(url));
     let fox = claude::pin_for_label("claude-fox").expect("pin fox");
     let result =
         oauth::refresh_claude_tokens_scoped("fox-refresh", AccountScope::Pinned(&fox)).await;
-    oauth::set_token_url_override_for_tests("claude", None);
+    oauth::set_token_url_override_for_tests(oauth::TokenUrlProvider::Claude, None);
     result.expect("claude refresh");
     let request = tokio::time::timeout(std::time::Duration::from_secs(5), server)
         .await
@@ -246,11 +246,11 @@ async fn refresh_for_pinned_label_persists_to_that_label_only() {
         r#"{"access_token":"of-new","refresh_token":"f-refresh-2","expires_in":3600}"#.to_string(),
     )
     .await;
-    oauth::set_token_url_override_for_tests("openai", Some(url));
+    oauth::set_token_url_override_for_tests(oauth::TokenUrlProvider::OpenAi, Some(url));
     let ofox = codex::pin_for_label("openai-fox").expect("pin openai fox");
     let result =
         oauth::refresh_openai_tokens_scoped("f-refresh", AccountScope::Pinned(&ofox)).await;
-    oauth::set_token_url_override_for_tests("openai", None);
+    oauth::set_token_url_override_for_tests(oauth::TokenUrlProvider::OpenAi, None);
     result.expect("openai refresh");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server)
         .await

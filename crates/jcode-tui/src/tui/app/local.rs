@@ -246,7 +246,7 @@ pub(super) fn handle_bus_event(
             app.session.provider_session_id = None;
             app.upstream_provider = None;
             app.invalidate_model_picker_cache();
-            app.update_context_limit_for_model(&model);
+            app.update_context_limit_for_model(&model, None);
             app.session.provider_key = provider_key.or_else(|| {
                 crate::provider::MultiProvider::session_provider_key_after_model_switch(
                     &model,

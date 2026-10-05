@@ -473,8 +473,7 @@ impl App {
             pinned: label.is_some(),
         });
         crate::auth::AuthStatus::invalidate_cache();
-        self.context_limit = self.provider.context_window() as u64;
-        self.context_warning_shown = false;
+        self.set_context_limit_and_sync_budget(self.provider.context_window());
         let held = if family == "claude" {
             "anthropic"
         } else {

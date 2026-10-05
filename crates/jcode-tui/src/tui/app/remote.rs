@@ -294,7 +294,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
-    if app.pending_queued_dispatch {
+    // Esc redirect hold. On timeout this arms pending_queued_dispatch, which
+    // the next check hands to the normal follow-up path.
+    let holding_for_interrupt = app.awaiting_remote_interrupt_ack();
+    if holding_for_interrupt || app.pending_queued_dispatch {
         return needs_redraw;
     }
 
@@ -510,15 +513,13 @@ async fn apply_terminal_event(
                 if let Some(selection) = app.pending_account_picker_action.take()
                     && let Some(command) =
                         crate::tui::app::auth::account_command_from_inline_action(&selection)
-                {
-                    if let Err(error) = app
+                    && let Err(error) = app
                         .execute_window_account_command_remote(command, remote)
                         .await
-                    {
-                        app.push_display_message(DisplayMessage::error(format!(
-                            "Failed to update this window's account: {error}"
-                        )));
-                    }
+                {
+                    app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to update this window's account: {error}"
+                    )));
                 }
             }
             needs_redraw = true;
@@ -1295,6 +1296,12 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 
     if !remote.has_loaded_history() {
         note_startup_submit_deferred(app, "remote history not loaded yet");
+        return;
+    }
+
+    // Esc redirected to a pending prompt: the server sends Done before
+    // Interrupted. Sending now would let the late Interrupted end the new turn.
+    if app.awaiting_remote_interrupt_ack() {
         return;
     }
 

@@ -33,16 +33,23 @@ const CLAUDE_TOKEN_TIMEOUT_SECS: u64 = 15;
 static TOKEN_URL_OVERRIDES: std::sync::RwLock<(Option<String>, Option<String>)> =
     std::sync::RwLock::new((None, None));
 
-/// Point Claude (`claude`) or OpenAI (`openai`) token refreshes at `url`.
+/// Which provider's token endpoint a test override applies to.
 #[cfg(any(test, feature = "test-support"))]
-pub fn set_token_url_override_for_tests(provider: &str, url: Option<String>) {
+#[derive(Debug, Clone, Copy)]
+pub enum TokenUrlProvider {
+    Claude,
+    OpenAi,
+}
+
+/// Point Claude or OpenAI token refreshes at `url`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_token_url_override_for_tests(provider: TokenUrlProvider, url: Option<String>) {
     let mut guard = TOKEN_URL_OVERRIDES
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     match provider {
-        "claude" => guard.0 = url,
-        "openai" => guard.1 = url,
-        other => panic!("unknown token url override provider {other}"),
+        TokenUrlProvider::Claude => guard.0 = url,
+        TokenUrlProvider::OpenAi => guard.1 = url,
     }
 }
 

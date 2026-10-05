@@ -712,7 +712,10 @@ async fn openai_refresh_writes_back_to_pinned_label_not_default() {
         socket.write_all(resp.as_bytes()).await.unwrap();
         String::from_utf8_lossy(&buf[..read]).to_string()
     });
-    jcode_base::auth::oauth::set_token_url_override_for_tests("openai", Some(url));
+    jcode_base::auth::oauth::set_token_url_override_for_tests(
+        jcode_base::auth::oauth::TokenUrlProvider::OpenAi,
+        Some(url),
+    );
 
     let session = openai_session_from_store();
     session
@@ -722,7 +725,10 @@ async fn openai_refresh_writes_back_to_pinned_label_not_default() {
         )
         .unwrap();
     let token = session.resolve_access_token().await;
-    jcode_base::auth::oauth::set_token_url_override_for_tests("openai", None);
+    jcode_base::auth::oauth::set_token_url_override_for_tests(
+        jcode_base::auth::oauth::TokenUrlProvider::OpenAi,
+        None,
+    );
     assert_eq!(token.unwrap(), "fox-refreshed");
     let request = tokio::time::timeout(Duration::from_secs(5), server)
         .await
