@@ -1,0 +1,32 @@
+{
+  "version": "0.90.1",
+  "date": "2026-10-04",
+  "title": "Provider reliability and fixes",
+  "highlights": [
+    "OpenAI-compatible providers that answer 529 or another 5xx \"heavy usage\" error are now retried automatically instead of failing the turn, and the error no longer blames your network",
+    "/usage shows real quota windows for Kimi Code, Cursor, and the Z.ai Coding Plan (thanks @ghoker143)",
+    "Pressing Esc while a follow-up prompt is pending stops the current turn and runs the follow-up (thanks @SiavZ)"
+  ],
+  "improvements": [
+    "Copilot accepts reasoning effort for every model whose catalog advertises it and sends it on both the Responses and Chat Completions APIs",
+    "Saved API keys stay in their env files instead of the running process, so editing a key file takes effect without a restart",
+    "The client shows the context window the server resolved instead of a placeholder",
+    "The jcode log records which binary actually launched, to diagnose stale copies on PATH",
+    "Gmail can update, list, and delete drafts",
+    "Undo in the composer reverts a whole typing burst at once, including Korean and other IME input (thanks @mg-mg-mg)",
+    "Cost estimates for OpenAI-compatible profiles fall back to a matching model from another provider's price catalog (thanks @ogodevonline)",
+    "Edit tool rows show their intent, and the expand badge appears in every diff mode"
+  ],
+  "fixes": [
+    "DeepSeek enabled through --provider auto uses its own default model and 1M context instead of anthropic/claude-sonnet-4 with 200K",
+    "In-app updates on Termux patch the glibc ELF interpreter like the installer does, and refuse to switch to a binary that cannot run",
+    "Configured /colors roles now apply on 256-color terminals",
+    "Images in formats providers reject are no longer stored or sent, and sessions self-heal from the resulting 400 errors",
+    "Session saves are drained on SIGTERM, and an interrupted checkpoint can no longer duplicate history",
+    "Anthropic history repair: orphaned or late tool results and orphaned native web searches no longer cause request errors",
+    "Malformed tool calls are corrected within a bounded number of retries instead of looping",
+    "Auto-poke re-arms when new open work appears after the completion gate trips",
+    "/accounting is no longer parsed as /account",
+    "The crash detector no longer reports a session that closed while idle as interrupted (thanks @SK-DEV-AI)"
+  ]
+}

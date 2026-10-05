@@ -1685,6 +1685,25 @@ pub(super) async fn handle_resume_session(
             )
             .await;
 
+            // Captured before the history call, which takes the agent, so the restored
+            // route can still be reported to a client that has never been told.
+            let (
+                resumed_model,
+                resumed_provider_name,
+                resumed_context_window,
+                resumed_credential,
+                resumed_reasoning_effort,
+            ) = {
+                let guard = agent.lock().await;
+                (
+                    guard.provider_model(),
+                    guard.provider_name(),
+                    guard.provider_context_window(),
+                    guard.active_resolved_credential(),
+                    guard.provider_reasoning_effort(),
+                )
+            };
+
             handle_get_history(
                 id,
                 &session_id,
@@ -1706,6 +1725,20 @@ pub(super) async fn handle_resume_session(
             // clears its plan snapshot on session change, so without this the
             // plan graph would stay blank until the next plan mutation.
             send_swarm_plan_to_session(&session_id, swarm_members, swarm_plans).await;
+            // Report the restored route for the same reason: a resuming client
+            // never saw a ModelChanged, so it would keep budgeting the session
+            // from its own inert provider and fall back to the generic 200K
+            // default. Measured: a route whose catalog entry carries 1000000
+            // displayed 200000 after every resume.
+            let _ = client_event_tx.send(ServerEvent::ModelChanged {
+                id,
+                model: resumed_model,
+                provider_name: Some(resumed_provider_name),
+                context_window: Some(resumed_context_window as u64),
+                error: None,
+                resolved_credential: resumed_credential,
+                reasoning_effort: resumed_reasoning_effort,
+            });
             // Resolve project-local MCP config against the restored session's
             // working dir, not the server process cwd (issue #420).
             let mcp_working_dir = {
