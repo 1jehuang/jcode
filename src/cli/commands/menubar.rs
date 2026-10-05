@@ -294,12 +294,12 @@ fn real_user_home() -> Option<std::path::PathBuf> {
     passwd_home_dir()
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", all(unix, test)))]
 fn passwd_home_dir() -> Option<std::path::PathBuf> {
     passwd_home_dir_for_uid(unsafe { libc::getuid() })
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "macos", all(unix, test)))]
 fn passwd_home_dir_for_uid(uid: libc::uid_t) -> Option<std::path::PathBuf> {
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;
