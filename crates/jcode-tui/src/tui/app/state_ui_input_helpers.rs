@@ -1727,6 +1727,7 @@ impl App {
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
+        self.input_typing_undo = None;
         let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
         if self.input_undo_stack.last() == Some(&snapshot) {
             return;
@@ -1739,10 +1740,12 @@ impl App {
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.input_typing_undo = None;
         self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
+        self.input_typing_undo = None;
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
             // The composer now holds a restored draft, so the copy stashed by a
             // history jump is stale: a later Down must not resurrect it.

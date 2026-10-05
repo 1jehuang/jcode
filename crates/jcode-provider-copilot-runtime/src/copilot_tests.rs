@@ -15,6 +15,7 @@ fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
         premium_mode: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         reasoning_effort: Arc::new(RwLock::new(None)),
+        model_efforts: Arc::new(RwLock::new(Default::default())),
         created_at: std::time::Instant::now(),
     }
 }
@@ -684,7 +685,7 @@ fn sonnet5_reasoning_effort_serialized_when_set() {
     let provider = sonnet5_provider();
     Provider::set_reasoning_effort(&provider, "high").unwrap();
     let mut body = serde_json::json!({"model": "claude-sonnet-5"});
-    provider.add_reasoning_effort_parameter(&mut body, "claude-sonnet-5");
+    provider.add_reasoning_effort_parameter(&mut body, "claude-sonnet-5", false);
     assert_eq!(body["reasoning_effort"], "high");
     assert_eq!(
         Provider::reasoning_effort(&provider).as_deref(),
@@ -696,7 +697,7 @@ fn sonnet5_reasoning_effort_serialized_when_set() {
 fn sonnet5_reasoning_effort_absent_when_unset() {
     let provider = sonnet5_provider();
     let mut body = serde_json::json!({"model": "claude-sonnet-5"});
-    provider.add_reasoning_effort_parameter(&mut body, "claude-sonnet-5");
+    provider.add_reasoning_effort_parameter(&mut body, "claude-sonnet-5", false);
     assert!(body.get("reasoning_effort").is_none());
     assert_eq!(Provider::reasoning_effort(&provider), None);
 }
@@ -738,7 +739,7 @@ fn non_sonnet_models_have_no_reasoning_effort() {
     let err = Provider::set_reasoning_effort(&provider, "high").unwrap_err();
     assert!(err.to_string().contains("not supported"));
     let mut body = serde_json::json!({"model": "gpt-5.1-codex"});
-    provider.add_reasoning_effort_parameter(&mut body, "gpt-5.1-codex");
+    provider.add_reasoning_effort_parameter(&mut body, "gpt-5.1-codex", false);
     assert!(body.get("reasoning_effort").is_none());
 }
 
@@ -748,7 +749,7 @@ fn effort_not_serialized_after_switching_away_from_sonnet5() {
     Provider::set_reasoning_effort(&provider, "max").unwrap();
     provider.set_model("gpt-5.1-codex").unwrap();
     let mut body = serde_json::json!({"model": "gpt-5.1-codex"});
-    provider.add_reasoning_effort_parameter(&mut body, "gpt-5.1-codex");
+    provider.add_reasoning_effort_parameter(&mut body, "gpt-5.1-codex", false);
     assert!(body.get("reasoning_effort").is_none());
     assert_eq!(Provider::reasoning_effort(&provider), None);
 }
@@ -759,4 +760,52 @@ fn fork_preserves_reasoning_effort() {
     Provider::set_reasoning_effort(&provider, "xhigh").unwrap();
     let forked = Provider::fork(&provider);
     assert_eq!(forked.reasoning_effort().as_deref(), Some("xhigh"));
+}
+
+#[test]
+fn catalog_reasoning_efforts_parse_from_models_payload() {
+    let info: copilot_auth::CopilotModelInfo = serde_json::from_value(json!({
+        "id": "gpt-6.1-sol",
+        "capabilities": {"supports": {"reasoning_effort": ["low", "Medium", "high"]}}
+    }))
+    .unwrap();
+    assert_eq!(info.reasoning_efforts(), vec!["low", "medium", "high"]);
+    let bare: copilot_auth::CopilotModelInfo =
+        serde_json::from_value(json!({"id": "gpt-4o", "capabilities": {}})).unwrap();
+    assert!(bare.reasoning_efforts().is_empty());
+}
+
+#[test]
+fn reasoning_effort_validated_against_catalog_and_sent_per_api() {
+    let provider = make_test_provider(vec![]);
+    provider.model_efforts.write().unwrap().insert(
+        "gpt-6.1-sol".to_string(),
+        vec!["low".into(), "medium".into(), "high".into()],
+    );
+    provider.set_model("gpt-6.1-sol").unwrap();
+    assert!(provider.set_reasoning_effort("max").is_err());
+    provider.set_reasoning_effort("High").unwrap();
+    assert_eq!(provider.available_efforts(), vec!["low", "medium", "high"]);
+
+    let mut responses = json!({});
+    provider.add_reasoning_effort_parameter(&mut responses, "gpt-6.1-sol", true);
+    assert_eq!(responses, json!({"reasoning": {"effort": "high"}}));
+    let mut chat = json!({});
+    provider.add_reasoning_effort_parameter(&mut chat, "gpt-6.1-sol", false);
+    assert_eq!(chat, json!({"reasoning_effort": "high"}));
+
+    // Switching to a model without catalog support never sends the level.
+    let mut other = json!({});
+    provider.add_reasoning_effort_parameter(&mut other, "gpt-4o", false);
+    assert_eq!(other, json!({}));
+}
+
+#[test]
+fn sonnet5_effort_fallback_without_catalog() {
+    let provider = make_test_provider(vec![]);
+    provider.set_model("claude-sonnet-5").unwrap();
+    provider.set_reasoning_effort("max").unwrap();
+    provider.set_model("gpt-6.1-sol").unwrap();
+    assert!(provider.set_reasoning_effort("high").is_err());
+    assert_eq!(provider.reasoning_effort(), None);
 }

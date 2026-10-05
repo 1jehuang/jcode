@@ -908,6 +908,166 @@ async fn test_dangling_tool_use_repair() {
 }
 
 #[tokio::test]
+async fn test_orphaned_tool_result_is_rewritten_as_text() {
+    // Mirrors a real stuck session: the assistant called tool_a, the interrupt
+    // repair answered it, then a late result for a tool_use that is not in the
+    // transcript was persisted right after. Anthropic 400s on that orphan.
+    let provider = AnthropicProvider::new();
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let messages = vec![
+        msg(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "go".to_string(),
+                cache_control: None,
+            }],
+        ),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_a".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        ),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_a".to_string(),
+                content: "ok".to_string(),
+                is_error: None,
+            }],
+        ),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_ghost".to_string(),
+                content: "no leftovers".to_string(),
+                is_error: None,
+            }],
+        ),
+    ];
+
+    let formatted = provider.format_messages(&messages, false, &[]);
+    let last = formatted.last().unwrap();
+    assert_eq!(last.role, "user");
+    assert!(matches!(
+        &last.content[0],
+        ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tool_a"
+    ));
+    for block in &last.content {
+        if let ApiContentBlock::ToolResult { tool_use_id, .. } = block {
+            assert_ne!(tool_use_id, "tool_ghost");
+        }
+    }
+    assert!(last.content.iter().any(|b| matches!(
+        b,
+        ApiContentBlock::Text { text, .. } if text.contains("tool_ghost") && text.contains("no leftovers")
+    )));
+}
+
+/// Assert the formatted history alternates roles and that every tool_use is
+/// answered by a tool_result in the immediately following user message.
+fn assert_tool_uses_answered_in_next_message(formatted: &[ApiMessage]) {
+    for pair in formatted.windows(2) {
+        assert_ne!(pair[0].role, pair[1].role, "roles must alternate");
+    }
+    for (i, msg) in formatted.iter().enumerate() {
+        if msg.role != "assistant" {
+            continue;
+        }
+        for block in &msg.content {
+            let ApiContentBlock::ToolUse { id, .. } = block else {
+                continue;
+            };
+            let next = formatted
+                .get(i + 1)
+                .unwrap_or_else(|| panic!("tool_use {id} has no next message"));
+            assert_eq!(next.role, "user", "tool_use {id} not followed by user");
+            assert!(
+                next.content.iter().any(|b| matches!(
+                    b,
+                    ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+                )),
+                "tool_use {id} not answered in message {}",
+                i + 1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_displaced_tool_result_still_answers_tool_use_in_place() {
+    // The only result for tool_x arrives after another assistant turn. The
+    // dangling repair sees a result somewhere and skips it, and the orphan
+    // rewrite turns the late result into text, so tool_x would otherwise be
+    // left without a tool_result right after it (HTTP 400).
+    let provider = AnthropicProvider::new();
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let text = |t: &str| ContentBlock::Text {
+        text: t.to_string(),
+        cache_control: None,
+    };
+    let messages = vec![
+        msg(Role::User, vec![text("go")]),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_x".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        ),
+        msg(Role::User, vec![text("are you there?")]),
+        msg(Role::Assistant, vec![text("yes")]),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_x".to_string(),
+                content: "late output".to_string(),
+                is_error: None,
+            }],
+        ),
+    ];
+
+    let formatted = provider.format_messages(&messages, false, &[]);
+
+    let next = &formatted[2];
+    assert_eq!(formatted[1].role, "assistant");
+    assert_eq!(next.role, "user");
+    // The late result is now moved up to directly follow its call (real
+    // output, not a synthetic error), ahead of the interjected user text.
+    assert!(matches!(
+        &next.content[0],
+        ApiContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "tool_x"
+    ));
+    assert!(next.content.iter().any(|b| matches!(
+        b,
+        ApiContentBlock::Text { text, .. } if text == "are you there?"
+    )));
+    let dump = serde_json::to_string(&formatted).unwrap();
+    assert!(dump.contains("late output"), "{dump}");
+    assert!(
+        !dump.contains("Recovered orphaned tool output"),
+        "the result was paired, nothing should be rewritten: {dump}"
+    );
+
+    assert_tool_uses_answered_in_next_message(&formatted);
+}
+
+#[tokio::test]
 async fn test_no_repair_when_tool_results_present() {
     let provider = AnthropicProvider::new();
 
