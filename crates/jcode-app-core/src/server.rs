@@ -16,6 +16,7 @@ mod client_session;
 mod client_state;
 mod client_writer;
 mod comm_auth;
+mod subscribe_working_dir;
 pub(crate) use self::comm_auth::{CAPABILITY_FIELD, claimed_session_id, mint};
 mod comm_await;
 mod comm_control;

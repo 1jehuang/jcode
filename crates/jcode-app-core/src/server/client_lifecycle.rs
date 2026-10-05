@@ -19,9 +19,7 @@ use super::client_lifecycle_logging::{
 use super::client_lightweight_control::{
     LightweightControlContext, handle_lightweight_control_request, parse_swarm_spawn_mode,
 };
-use super::client_session::{
-    handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
-};
+use super::client_session::{handle_clear_session, handle_resume_session};
 use super::client_state::{
     handle_get_compacted_history, handle_get_history, handle_get_model_catalog, handle_get_state,
 };
@@ -47,6 +45,7 @@ use super::provider_control::{
     handle_set_service_tier, handle_set_transport, handle_switch_anthropic_account,
     handle_switch_openai_account, try_available_models_updated_event,
 };
+use super::subscribe_working_dir::{handle_reload, handle_subscribe};
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
     SessionControlHandle, SessionInterruptQueues, SharedContext, SwarmEvent, SwarmMember,
