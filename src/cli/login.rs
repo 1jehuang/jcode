@@ -633,7 +633,22 @@ fn validate_claude_code_method(
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only answer for the Claude Code reuse prompt.
+    static CLAUDE_CODE_REUSE_TEST_APPROVAL: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn confirm_claude_code_reuse(native: bool) -> Result<()> {
+    #[cfg(test)]
+    if let Some(approved) = CLAUDE_CODE_REUSE_TEST_APPROVAL.with(std::cell::Cell::get) {
+        anyhow::ensure!(
+            approved,
+            "Claude Code signed in, but Jcode was not granted access to its credentials."
+        );
+        return Ok(());
+    }
     eprintln!(
         "\nClaude Code signed in. Jcode makes direct Anthropic requests, so it needs permission to reuse the CLI's OAuth credentials."
     );
@@ -689,7 +704,15 @@ fn reuse_claude_code_file(
     if !already_trusted {
         auth::claude::trust_external_auth_source(source)?;
     }
-    ensure_claude_code_credentials_selected(&credentials)?;
+    if let Err(err) = ensure_claude_code_credentials_selected(&credentials) {
+        // Do not leave a file trusted by a login that did not take effect: a
+        // later update could otherwise make Jcode select it without approval.
+        if !already_trusted {
+            crate::config::Config::revoke_external_auth_source_for_path(source.source_id(), path)?;
+            auth::AuthStatus::invalidate_cache();
+        }
+        return Err(err);
+    }
     Ok(true)
 }
 
@@ -734,10 +757,19 @@ fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
             "Using the Claude Code environment token without copying it; it must remain configured for future sessions."
         );
     }
-    if !auth::claude::native_source_allowed() {
+    let native_newly_trusted = !auth::claude::native_source_allowed();
+    if native_newly_trusted {
         auth::claude::trust_native_source()?;
     }
-    ensure_claude_code_credentials_selected(&credentials)?;
+    if let Err(err) = ensure_claude_code_credentials_selected(&credentials) {
+        if native_newly_trusted {
+            crate::config::Config::revoke_external_auth_source(
+                auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+            )?;
+            auth::AuthStatus::invalidate_cache();
+        }
+        return Err(err);
+    }
     Ok(true)
 }
 
