@@ -46,7 +46,6 @@ pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
-pub use jcode_session_types::prompt_title;
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
@@ -70,6 +69,7 @@ pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
+pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
@@ -1198,6 +1198,9 @@ request in this new forked session, using the inherited conversation only as con
                         *content = crate::message::redact_secrets(content);
                     }
                     ContentBlock::ToolUse { input, .. } => redact_json_value(input),
+                    // Export copy only: the stored item stays verbatim for
+                    // replay, but queries can carry pasted credentials.
+                    ContentBlock::ProviderNative { item, .. } => redact_json_value(item),
                     ContentBlock::Image { .. } => {}
                     ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
                 }

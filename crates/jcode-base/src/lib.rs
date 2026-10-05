@@ -48,6 +48,7 @@ pub mod gmail;
 pub mod goal;
 pub mod hooks;
 pub mod id;
+pub mod image_normalize;
 pub mod import;
 pub mod jev;
 pub mod kv_cache_monitor;

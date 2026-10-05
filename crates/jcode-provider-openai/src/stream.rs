@@ -730,6 +730,14 @@ pub fn handle_openai_output_item(
                 return Some(event);
             }
         }
+        "web_search_call" => {
+            // Hosted web search already ran on OpenAI's side. Keep the item
+            // verbatim so it is replayed in later requests.
+            return Some(StreamEvent::ProviderNative {
+                provider: jcode_message_types::provider_native::PROVIDER_NATIVE_OPENAI.to_string(),
+                item,
+            });
+        }
         "message" => {
             if *saw_text_delta {
                 return None;
@@ -1365,5 +1373,33 @@ mod text_framing_tests {
             StreamEvent::TextDone, StreamEvent::TextDelta(c), StreamEvent::TextDone,
             StreamEvent::MessageEnd { .. }
         ] if a == "The cause is " && b == "the retry loop." && c == "Second message"));
+    }
+
+    #[test]
+    fn web_search_call_item_is_emitted_verbatim() {
+        let item = serde_json::json!({
+            "type": "web_search_call", "id": "ws_1", "status": "completed",
+            "action": {"type": "search", "query": "jcode"}
+        });
+        let mut pending = VecDeque::new();
+        let event = parse_openai_response_event(
+            &serde_json::json!({"type": "response.output_item.done", "item": item}).to_string(),
+            &mut false,
+            &mut false,
+            &mut HashMap::new(),
+            &mut HashSet::new(),
+            &mut pending,
+        );
+        match event {
+            Some(StreamEvent::ProviderNative {
+                provider,
+                item: got,
+            }) => {
+                assert_eq!(provider, "openai");
+                assert_eq!(got, item);
+            }
+            other => panic!("expected provider-native item, got {other:?}"),
+        }
+        assert!(pending.is_empty());
     }
 }
