@@ -215,6 +215,9 @@ impl Agent {
             event = event.field("LAST_ASSISTANT_TEXT", snippet);
         }
         if let Some(usage) = turn_token_usage_after(&self.session.messages, start_message_index) {
+            if let Some(value) = usage.prompt_tokens {
+                event = event.field("PROMPT_TOKENS", value.to_string());
+            }
             event = event
                 .field("INPUT_TOKENS", usage.input_tokens.to_string())
                 .field("OUTPUT_TOKENS", usage.output_tokens.to_string());
@@ -497,8 +500,7 @@ impl Agent {
             self.locked_tools = None;
             self.mcp_late_register_resolved = false;
             self.cache_tracker.reset();
-            self.kv_cache_monitor.reset();
-        }
+            self.kv_cache_monitor.reset();        }
         if native {
             return self.native_deferred_tool_definitions().await;
         }
@@ -997,8 +999,7 @@ impl Agent {
         tool_name: String,
         input: serde_json::Value,
     ) -> Result<String> {
-        let message_id = self.add_message(
-            Role::Assistant,
+        let message_id = self.add_message(            Role::Assistant,
             vec![ContentBlock::ToolUse {
                 id: tool_call_id,
                 name: tool_name,
@@ -1494,17 +1495,18 @@ impl Agent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TurnTokenUsage {
+    prompt_tokens: Option<u64>,
     input_tokens: u64,
     output_tokens: u64,
     cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-}
+    cache_creation_input_tokens: Option<u64>,}
 
 fn turn_token_usage_after(
     messages: &[crate::session::StoredMessage],
     start_message_index: usize,
 ) -> Option<TurnTokenUsage> {
     let mut usage = TurnTokenUsage {
+        prompt_tokens: None,
         input_tokens: 0,
         output_tokens: 0,
         cache_read_input_tokens: None,
@@ -1521,6 +1523,9 @@ fn turn_token_usage_after(
         };
 
         saw_usage = true;
+        if let Some(value) = message_usage.prompt_tokens {
+            usage.prompt_tokens = Some(usage.prompt_tokens.unwrap_or(0).saturating_add(value));
+        }
         usage.input_tokens = usage
             .input_tokens
             .saturating_add(message_usage.input_tokens);
@@ -1558,6 +1563,7 @@ mod turn_token_usage_tests {
         id: &str,
         input_tokens: u64,
         output_tokens: u64,
+        prompt_tokens: Option<u64>,
         cache_read_input_tokens: Option<u64>,
         cache_creation_input_tokens: Option<u64>,
     ) -> crate::session::StoredMessage {
@@ -1569,7 +1575,7 @@ mod turn_token_usage_tests {
             timestamp: None,
             tool_duration_ms: None,
             token_usage: Some(StoredTokenUsage {
-                prompt_tokens: None,
+                prompt_tokens,
                 input_tokens,
                 output_tokens,
                 cache_read_input_tokens,
@@ -1581,7 +1587,7 @@ mod turn_token_usage_tests {
     #[test]
     fn sums_assistant_usage_only_from_the_turn_start() {
         let messages = vec![
-            assistant_message("before", 100, 20, Some(30), Some(4)),
+            assistant_message("before", 100, 20, Some(100), Some(30), Some(4)),
             crate::session::StoredMessage {
                 id: "user".to_string(),
                 role: Role::User,
@@ -1591,11 +1597,12 @@ mod turn_token_usage_tests {
                 tool_duration_ms: None,
                 token_usage: None,
             },
-            assistant_message("first", 10, 2, Some(3), None),
-            assistant_message("second", 20, 4, Some(5), Some(7)),
+            assistant_message("first", 10, 2, Some(12), Some(3), None),
+            assistant_message("second", 20, 4, Some(25), Some(5), Some(7)),
         ];
 
         let usage = turn_token_usage_after(&messages, 1).expect("turn usage");
+        assert_eq!(usage.prompt_tokens, Some(37));
         assert_eq!(usage.input_tokens, 30);
         assert_eq!(usage.output_tokens, 6);
         assert_eq!(usage.cache_read_input_tokens, Some(8));
