@@ -13,6 +13,14 @@ pub enum WebSearchEngine {
     /// `JCODE_SEARXNG_URL` env var) to point at a SearXNG instance. Useful on
     /// hosts where DuckDuckGo/Bing block the request via TLS fingerprinting.
     Searxng,
+    /// Tavily search API (JSON API designed for LLM agents). Requires an API
+    /// key via `tavily_api_key` or the `JCODE_TAVILY_API_KEY` env var. Free
+    /// tier available.
+    Tavily,
+    /// Exa search API (neural search designed for LLM agents). Requires an API
+    /// key via `exa_api_key` or the `JCODE_EXA_API_KEY` env var. Free tier
+    /// available.
+    Exa,
     /// Provider-native server-side search (Anthropic `web_search`, OpenAI
     /// Responses `web_search`). Search runs on the model provider's side, so it
     /// works on hosts where scraping is blocked and needs no extra API key.
@@ -27,6 +35,8 @@ impl WebSearchEngine {
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
             Self::Searxng => "searxng",
+            Self::Tavily => "tavily",
+            Self::Exa => "exa",
             Self::Native => "native",
         }
     }
@@ -36,6 +46,8 @@ impl WebSearchEngine {
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
             "searxng" | "searx" => Some(Self::Searxng),
+            "tavily" => Some(Self::Tavily),
+            "exa" => Some(Self::Exa),
             "native" | "provider" => Some(Self::Native),
             _ => None,
         }
@@ -53,7 +65,8 @@ impl WebSearchEngine {
 pub struct WebSearchConfig {
     /// Preferred engine when the tool input does not specify one.
     pub engine: WebSearchEngine,
-    /// Keyless HTML engines to try after the preferred engine fails.
+    /// Engines to try after the preferred engine fails. Keyed engines without
+    /// a configured key fail with a clear error and the next engine is tried.
     pub fallback_engines: Vec<WebSearchEngine>,
     /// Optional Bing API key for primary Bing searches. Fallback Bing uses keyless HTML search.
     pub bing_api_key: Option<String>,
@@ -71,6 +84,14 @@ pub struct WebSearchConfig {
     /// header for authenticated instances). Headers are only sent over HTTPS,
     /// or over plaintext HTTP to loopback hosts.
     pub searxng_headers: std::collections::HashMap<String, String>,
+    /// Optional Tavily API key, used by the `tavily` engine.
+    pub tavily_api_key: Option<String>,
+    /// Environment variable containing the Tavily API key.
+    pub tavily_api_key_env: String,
+    /// Optional Exa API key, used by the `exa` engine.
+    pub exa_api_key: Option<String>,
+    /// Environment variable containing the Exa API key.
+    pub exa_api_key_env: String,
     /// Prefer the model provider's own server-side search whenever the active
     /// provider/model supports it (Anthropic first-party API, OpenAI
     /// Responses). The local `websearch` tool is then replaced by the hosted
@@ -104,6 +125,10 @@ impl Default for WebSearchConfig {
             searxng_url: None,
             searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
             searxng_headers: std::collections::HashMap::new(),
+            tavily_api_key: None,
+            tavily_api_key_env: "JCODE_TAVILY_API_KEY".to_string(),
+            exa_api_key: None,
+            exa_api_key_env: "JCODE_EXA_API_KEY".to_string(),
             prefer_native: true,
             native_max_uses: Some(DEFAULT_NATIVE_WEB_SEARCH_MAX_USES),
             native_allowed_domains: Vec::new(),

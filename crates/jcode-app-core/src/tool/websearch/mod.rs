@@ -7,8 +7,10 @@ use serde_json::{Value, json};
 
 mod bing;
 mod duckduckgo;
+mod exa;
 mod html;
 mod searxng;
+mod tavily;
 #[cfg(test)]
 mod tests;
 
@@ -76,8 +78,8 @@ impl Tool for WebSearchTool {
                 },
                 "engine": {
                     "type": "string",
-                    "enum": ["duckduckgo", "bing", "searxng"],
-                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL (optional websearch.searxng_headers for authenticated instances)."
+                    "enum": ["duckduckgo", "bing", "searxng", "tavily", "exa"],
+                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL (optional websearch.searxng_headers for authenticated instances), tavily uses JCODE_TAVILY_API_KEY, exa uses JCODE_EXA_API_KEY."
                 },
                 "bing_market": {
                     "type": "string",
@@ -144,7 +146,8 @@ impl Tool for WebSearchTool {
                  - Point at a SearXNG instance: set `websearch.searxng_url` (or \
                  JCODE_SEARXNG_URL) and use engine \"searxng\". Authenticated \
                  instances can be configured via `websearch.searxng_headers`.\n\
-                 - Or provide a Bing Search API key via JCODE_BING_API_KEY.",
+                 - Or use a key-based API engine: Bing (JCODE_BING_API_KEY), \
+                 Tavily (JCODE_TAVILY_API_KEY), or Exa (JCODE_EXA_API_KEY).",
                 params.query
             )));
         }
@@ -181,6 +184,8 @@ impl WebSearchTool {
                     .await
             }
             WebSearchEngine::Searxng => self.search_searxng(query, num_results).await,
+            WebSearchEngine::Tavily => self.search_tavily(query, num_results).await,
+            WebSearchEngine::Exa => self.search_exa(query, num_results).await,
             // Provider-native search never reaches the local tool: engine order
             // filters it out. Kept for exhaustiveness.
             WebSearchEngine::Native => Ok(Vec::new()),
@@ -191,6 +196,19 @@ impl WebSearchTool {
 /// Apply user-configured extra HTTP headers (e.g. an `Authorization` header
 /// for authenticated SearXNG instances) to a request, rejecting invalid header
 /// names or values.
+/// Resolve an API key from the config field, falling back to its environment
+/// variable. Empty values count as unset.
+pub(super) fn resolve_api_key(configured: Option<&str>, env: &str) -> Option<String> {
+    configured
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+        .or_else(|| match std::env::var(env) {
+            Ok(k) if !k.trim().is_empty() => Some(k.trim().to_string()),
+            _ => None,
+        })
+}
+
 pub(super) fn apply_extra_headers(
     mut request: reqwest::RequestBuilder,
     headers: &std::collections::HashMap<String, String>,

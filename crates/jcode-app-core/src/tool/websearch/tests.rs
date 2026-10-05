@@ -1,8 +1,10 @@
 use super::bing::BingApiResponse;
 use super::bing::{parse_bing_api_results, parse_bing_html_results};
 use super::duckduckgo::parse_ddg_results;
+use super::exa::{ExaResponse, parse_exa_results};
 use super::html::detect_anti_bot_page;
 use super::searxng::{SearxngResponse, parse_searxng_results};
+use super::tavily::{TavilyResponse, parse_tavily_results};
 use super::*;
 
 #[test]
@@ -289,4 +291,87 @@ fn searxng_insecure_remote_http_detection() {
     assert!(!is_insecure_remote_http("http://searx.localhost"));
     // HTTPS is fine anywhere.
     assert!(!is_insecure_remote_http("https://searx.example.org"));
+}
+
+#[test]
+fn websearch_engine_parses_tavily_exa_aliases() {
+    assert_eq!(
+        WebSearchEngine::parse("tavily"),
+        Some(WebSearchEngine::Tavily)
+    );
+    assert_eq!(WebSearchEngine::parse("exa"), Some(WebSearchEngine::Exa));
+    assert_eq!(WebSearchEngine::Tavily.as_str(), "tavily");
+    assert_eq!(WebSearchEngine::Exa.as_str(), "exa");
+}
+
+#[test]
+fn parses_tavily_json_results() {
+    let body = serde_json::json!({
+        "results": [
+            {
+                "url": "https://www.rust-lang.org/",
+                "title": "Rust Programming Language",
+                "content": "A language empowering everyone."
+            },
+            // Entry with empty url is dropped; missing content tolerated.
+            { "url": "", "title": "junk" },
+            { "url": "https://crates.io", "title": "" }
+        ]
+    });
+    let parsed: TavilyResponse = serde_json::from_value(body).unwrap();
+    let results = parse_tavily_results(parsed, 10);
+    assert_eq!(results.len(), 2, "empty-url entry should be dropped");
+    assert_eq!(results[0].url, "https://www.rust-lang.org/");
+    assert_eq!(results[0].title, "Rust Programming Language");
+    assert_eq!(results[0].snippet, "A language empowering everyone.");
+    // Missing title falls back to the URL.
+    assert_eq!(results[1].title, "https://crates.io");
+    assert_eq!(results[1].snippet, "");
+}
+
+#[test]
+fn tavily_results_respect_limit() {
+    let body = serde_json::json!({
+        "results": (0..10)
+            .map(|i| serde_json::json!({"url": format!("https://x/{i}"), "title": "t"}))
+            .collect::<Vec<_>>()
+    });
+    let parsed: TavilyResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(parse_tavily_results(parsed, 3).len(), 3);
+}
+
+#[test]
+fn parses_exa_json_results() {
+    let body = serde_json::json!({
+        "results": [
+            {
+                "url": "https://www.rust-lang.org/",
+                "title": "Rust Programming Language",
+                "text": "A language empowering everyone."
+            },
+            // Entry with empty url is dropped; missing text tolerated.
+            { "url": "", "title": "junk" },
+            { "url": "https://crates.io", "title": null }
+        ]
+    });
+    let parsed: ExaResponse = serde_json::from_value(body).unwrap();
+    let results = parse_exa_results(parsed, 10);
+    assert_eq!(results.len(), 2, "empty-url entry should be dropped");
+    assert_eq!(results[0].url, "https://www.rust-lang.org/");
+    assert_eq!(results[0].title, "Rust Programming Language");
+    assert_eq!(results[0].snippet, "A language empowering everyone.");
+    // Null title falls back to the URL.
+    assert_eq!(results[1].title, "https://crates.io");
+    assert_eq!(results[1].snippet, "");
+}
+
+#[test]
+fn exa_results_respect_limit() {
+    let body = serde_json::json!({
+        "results": (0..10)
+            .map(|i| serde_json::json!({"url": format!("https://x/{i}")}))
+            .collect::<Vec<_>>()
+    });
+    let parsed: ExaResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(parse_exa_results(parsed, 3).len(), 3);
 }
