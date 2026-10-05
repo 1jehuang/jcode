@@ -500,7 +500,8 @@ impl Agent {
             self.locked_tools = None;
             self.mcp_late_register_resolved = false;
             self.cache_tracker.reset();
-            self.kv_cache_monitor.reset();        }
+            self.kv_cache_monitor.reset();
+        }
         if native {
             return self.native_deferred_tool_definitions().await;
         }
@@ -999,7 +1000,8 @@ impl Agent {
         tool_name: String,
         input: serde_json::Value,
     ) -> Result<String> {
-        let message_id = self.add_message(            Role::Assistant,
+        let message_id = self.add_message(
+            Role::Assistant,
             vec![ContentBlock::ToolUse {
                 id: tool_call_id,
                 name: tool_name,
@@ -1499,7 +1501,8 @@ struct TurnTokenUsage {
     input_tokens: u64,
     output_tokens: u64,
     cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,}
+    cache_creation_input_tokens: Option<u64>,
+}
 
 fn turn_token_usage_after(
     messages: &[crate::session::StoredMessage],
