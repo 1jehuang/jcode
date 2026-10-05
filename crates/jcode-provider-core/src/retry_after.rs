@@ -61,6 +61,12 @@ impl RetryAfter {
         }
     }
 
+    /// A hint for a wait jcode chooses itself (for example from a provider's
+    /// body wording), capped like a header value.
+    pub fn after(delay: Duration) -> Self {
+        Self::new(delay.min(MAX_RETRY_AFTER))
+    }
+
     /// Time still remaining on the hint. Time spent reading and classifying an
     /// error response counts toward the requested wait.
     pub fn remaining(self) -> Duration {

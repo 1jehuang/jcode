@@ -294,6 +294,30 @@ async fn stream_response(
 
     loop {
         let event = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
+            // An error event inside a 200 stream (a proxy relaying the
+            // upstream's 503, or a provider's "deploying" notice) ends the
+            // turn if forwarded. When it is transient, fail this attempt
+            // instead so the retry loop resends it.
+            Ok(Some(Ok(StreamEvent::Error {
+                message,
+                retry_after_secs,
+            }))) if is_retryable_error(&message.to_lowercase()) => {
+                let wait = retry_after_secs
+                    .map(std::time::Duration::from_secs)
+                    .or_else(|| {
+                        is_deploy_message(&message.to_lowercase()).then_some(deploy_retry_wait())
+                    });
+                return Err(jcode_provider_core::retry_after::error_with_retry_after(
+                    format!(
+                        "OpenAI-compatible stream error\n  endpoint: {}\n  model: {}\n  auth: {}\n  error: {}",
+                        url,
+                        model,
+                        auth.label(),
+                        message
+                    ),
+                    wait.map(jcode_provider_core::retry_after::RetryAfter::after),
+                ));
+            }
             Ok(Some(Ok(event))) => event,
             Ok(Some(Err(e))) => anyhow::bail!(
                 "OpenAI-compatible stream error\n  endpoint: {}\n  model: {}\n  auth: {}\n  error: {}",
@@ -333,8 +357,14 @@ async fn stream_response(
 /// it reaches here, so matching is case-insensitive.
 fn parsed_http_status(error_str: &str) -> Option<u16> {
     let lower = error_str.to_ascii_lowercase();
-    let idx = lower.find("status:")?;
-    let rest = lower[idx + "status:".len()..].trim_start();
+    // `status: 503 ...` from this module, or `HTTP 503: ...` when a proxy
+    // relays the upstream failure inside the stream.
+    let rest = if let Some(idx) = lower.find("status:") {
+        lower[idx + "status:".len()..].trim_start()
+    } else {
+        let idx = lower.find("http ")?;
+        &lower[idx + "http ".len()..]
+    };
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.len() == 3 {
         digits.parse().ok()
@@ -389,6 +419,38 @@ fn is_retryable_error(error_str: &str) -> bool {
                 || error_str.contains("internal server error"))
         || error_str.contains("overloaded")
         || is_provider_overload_message(error_str)
+        || is_deploy_message(error_str)
+}
+
+/// Wait between retries while a provider says it is deploying. Deploys take
+/// minutes, so the default exponential backoff would spend the whole retry
+/// budget in under a minute. With 8 attempts this covers about 3.5 minutes.
+const DEPLOY_RETRY_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(not(test))]
+fn deploy_retry_wait() -> std::time::Duration {
+    DEPLOY_RETRY_WAIT
+}
+
+/// Tests exercise the real retry loop against a local server; a 30s wait
+/// would only slow them down.
+#[cfg(test)]
+fn deploy_retry_wait() -> std::time::Duration {
+    std::time::Duration::from_millis(50)
+}
+
+/// Wording for a provider that is mid-deploy and asks to retry shortly
+/// ("We're deploying an update right now ... Please try again shortly.",
+/// `"code":"DEPLOYING"`). `error_str` is already lowercased by the caller.
+fn is_deploy_message(error_str: &str) -> bool {
+    [
+        "deploying",
+        "try again shortly",
+        "under maintenance",
+        "maintenance mode",
+    ]
+    .iter()
+    .any(|marker| error_str.contains(marker))
 }
 
 /// Wording providers use for a temporary capacity problem, sometimes inside
@@ -695,6 +757,117 @@ mod tests {
                 connections.load(Ordering::SeqCst) <= 1,
                 "cancelled turn must not retry the request"
             );
+        });
+    }
+
+    /// The exact error a local proxy relayed while its upstream was
+    /// deploying: a 200 SSE stream carrying `HTTP 503: {...DEPLOYING...}`.
+    const PROXY_DEPLOYING_503: &str = r#"HTTP 503: {"error":"We're deploying an update right now ⚙️ It only takes a few minutes and everything comes back on its own. Please try again shortly.","code":"DEPLOYING"}"#;
+
+    #[test]
+    fn in_stream_deploying_503_is_retryable_with_a_long_wait() {
+        let lower = PROXY_DEPLOYING_503.to_lowercase();
+        assert_eq!(parsed_http_status(&lower), Some(503));
+        assert!(is_retryable_error(&lower));
+        assert!(is_deploy_message(&lower));
+        assert_eq!(DEPLOY_RETRY_WAIT, Duration::from_secs(30));
+        assert!(DEPLOY_RETRY_WAIT <= jcode_provider_core::retry_after::MAX_RETRY_AFTER);
+        // Wording alone, without a status, still retries.
+        assert!(is_retryable_error(
+            "we're deploying an update right now. please try again shortly."
+        ));
+        // An in-stream permanent failure keeps failing fast.
+        assert!(!is_retryable_error(
+            r#"http 401: {"error":"invalid api key"}"#
+        ));
+        // URLs never look like an `HTTP <code>` status.
+        assert_eq!(
+            parsed_http_status("endpoint: http://127.0.0.1:8317/v1 failed"),
+            None
+        );
+    }
+
+    /// End to end: the first attempt gets a 200 stream whose only event is
+    /// the relayed deploy 503, the second gets a normal answer. The turn must
+    /// see the answer, not the error.
+    #[test]
+    fn in_stream_deploying_503_is_retried_until_the_provider_answers() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let connections = Arc::new(AtomicUsize::new(0));
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind deploying server");
+            let addr = listener.local_addr().expect("deploying server addr");
+            let counted = Arc::clone(&connections);
+            std::thread::spawn(move || {
+                for attempt in 0..2 {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        return;
+                    };
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .expect("set read timeout");
+                    let mut request = vec![0u8; 65536];
+                    let _ = stream.read(&mut request);
+                    let body = if attempt == 0 {
+                        format!(
+                            "data: {}\n\ndata: [DONE]\n\n",
+                            serde_json::json!({"error": {"message": PROXY_DEPLOYING_503}})
+                        )
+                    } else {
+                        concat!(
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"back online\"}}]}\n\n",
+                            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                            "data: [DONE]\n\n"
+                        )
+                        .to_string()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+
+            let (tx, mut rx) = mpsc::channel(64);
+            let api_base = format!("http://{addr}/v1");
+            let run = tokio::spawn(async move {
+                run_stream_with_retries(
+                    Client::new(),
+                    api_base,
+                    ProviderAuth::None {
+                        label: "test".to_string(),
+                    },
+                    false,
+                    "conv".to_string(),
+                    serde_json::json!({"model": "ntl/claude", "messages": [], "stream": true}),
+                    tx,
+                    Arc::new(Mutex::new(None)),
+                    "ntl/claude".to_string(),
+                )
+                .await;
+            });
+
+            let mut text = String::new();
+            let mut errors = Vec::new();
+            while let Some(item) = rx.recv().await {
+                match item {
+                    Ok(StreamEvent::TextDelta(delta)) => text.push_str(&delta),
+                    Ok(StreamEvent::Error { message, .. }) => errors.push(message),
+                    Err(error) => errors.push(format!("{error:#}")),
+                    Ok(_) => {}
+                }
+            }
+            run.await.expect("retry loop task");
+
+            assert!(errors.is_empty(), "deploy 503 must not reach the turn: {errors:?}");
+            assert_eq!(text, "back online");
+            assert_eq!(connections.load(Ordering::SeqCst), 2, "one retry");
         });
     }
 

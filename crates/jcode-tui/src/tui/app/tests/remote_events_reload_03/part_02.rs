@@ -635,6 +635,11 @@ fn test_provider_overload_classifier_excludes_permanent_errors() {
         "status: 503 Service Unavailable\n  response: temporarily unavailable"
     ));
     assert!(overload("stream error: server is busy, try again in a moment"));
+    // A provider mid-deploy, relayed inside the stream by a local proxy, is
+    // held and resent by the TUI when the runtime's retries run out.
+    assert!(overload(
+        r#"HTTP 503: {"error":"We're deploying an update right now ⚙️ It only takes a few minutes and everything comes back on its own. Please try again shortly.","code":"DEPLOYING"}"#
+    ));
 }
 
 /// The overload budget is its own counter: earlier ordinary retries on the

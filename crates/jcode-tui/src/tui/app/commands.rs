@@ -187,6 +187,10 @@ pub(super) fn is_provider_overload_error(error: &str) -> bool {
             "503 service unavailable",
             "502 bad gateway",
             "504 gateway timeout",
+            // A provider mid-deploy ("We're deploying an update right now
+            // ... Please try again shortly.", "code":"DEPLOYING").
+            "deploying",
+            "try again shortly",
         ]
         .iter()
         .any(|marker| lower.contains(marker))
