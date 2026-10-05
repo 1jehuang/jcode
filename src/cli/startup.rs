@@ -29,8 +29,8 @@ fn process_working_dir_or_warn() -> Option<std::path::PathBuf> {
         Ok(dir) => Some(dir),
         Err(err) => {
             logging::warn(&format!(
-                "Could not read the process working directory ({err}); synthetic memory "
-                "entries will come from global skills only, so project skills are missing."
+                "Could not read the process working directory ({err}); synthetic memory \
+                 entries will come from global skills only, so project skills are missing."
             ));
             None
         }

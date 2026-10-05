@@ -117,7 +117,7 @@ async fn run_unix(args: Args) -> Result<()> {
     let cleanup = connection.close().await;
     let result = result.and(cleanup);
     if result.is_ok()
-        && let Some(handoff) = super::cloud_move::take_stashed_handoff()
+        && let Some(handoff) = take_stashed_handoff()
     {
         return super::cloud_move::exec_handoff(handoff);
     }
@@ -213,4 +213,16 @@ mod tests {
             }
         }
     }
+}
+
+/// Take the handoff stashed by an in-process `/cloud` or `/local` command.
+///
+/// SSH-only: the remote client is the only path that replaces the running
+/// process after the TUI exits, so nobody else drains this slot.
+#[cfg(unix)]
+fn take_stashed_handoff() -> Option<crate::tui::CloudHandoff> {
+    super::cloud_move::STASHED_HANDOFF
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
 }

@@ -1,9 +1,10 @@
 //! Private, bounded stdin receiver for explicitly approved credential transfers.
 //! There is deliberately no CLI export command that could print credentials.
 use super::provider_init::ProviderChoice;
-use crate::auth::transfer::{self, MAX_TRANSFER_BYTES, TransferProvider};
+#[cfg(unix)]
+use crate::auth::transfer::MAX_TRANSFER_BYTES;
+use crate::auth::transfer::{self, TransferProvider};
 use anyhow::Result;
-use std::io::IsTerminal;
 
 fn selected_provider(choice: &ProviderChoice) -> Result<TransferProvider, &'static str> {
     match choice {
