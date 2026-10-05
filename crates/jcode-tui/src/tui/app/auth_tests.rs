@@ -3,6 +3,73 @@ use super::{
     save_tui_openai_compatible_key,
 };
 
+#[test]
+fn claude_method_choice_can_cancel_or_retry_without_running_cli() {
+    use super::PendingLogin;
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.start_claude_login();
+    assert!(matches!(
+        app.pending_login,
+        Some(PendingLogin::ClaudeMethodChoice)
+    ));
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Claude Code CLI")
+    );
+
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, "invalid".into());
+    assert!(matches!(
+        app.pending_login,
+        Some(PendingLogin::ClaudeMethodChoice)
+    ));
+    app.pending_login = None;
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, "/cancel".into());
+    assert!(app.pending_login.is_none());
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Login cancelled")
+    );
+}
+
+#[test]
+fn claude_code_choice_offers_host_command_when_terminal_cannot_open() {
+    use super::PendingLogin;
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, "2".into());
+    assert!(app.pending_login.is_none());
+    let message = &app.display_messages().last().unwrap().content;
+    assert!(message.contains("jcode login --provider claude --claude-code"));
+    assert!(
+        message.contains("No new terminal was available")
+            || message.contains("remote host")
+            || message.contains("same environment settings")
+    );
+}
+
+#[test]
+fn claude_code_choice_does_not_launch_terminal_with_custom_profile() {
+    use super::PendingLogin;
+    let _lock = crate::storage::lock_test_env();
+    let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    crate::env::set_var("CLAUDE_CONFIG_DIR", "/synthetic/claude-profile");
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, "2".into());
+    let message = &app.display_messages().last().unwrap().content;
+    assert!(message.contains("same environment settings"));
+    assert!(message.contains("jcode login --provider claude --claude-code"));
+    if let Some(value) = old_config {
+        crate::env::set_var("CLAUDE_CONFIG_DIR", value);
+    } else {
+        crate::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+}
+
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -232,4 +299,48 @@ fn tui_openai_compatible_local_key_save_allows_empty_key() -> anyhow::Result<()>
         );
         Ok(())
     })
+}
+
+/// Claude Code CLI is the default Claude sign-in when `claude` is installed:
+/// the prompt marks it as the default and Enter picks it. The env override
+/// keeps Jcode OAuth as the default for users who opt out.
+#[test]
+fn claude_login_defaults_to_claude_code_cli_and_enter_picks_default() {
+    use super::PendingLogin;
+    let _lock = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_CLAUDE_LOGIN_METHOD");
+
+    crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", "cli");
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.start_claude_login();
+    let prompt = app.display_messages().last().unwrap().content.clone();
+    assert!(prompt.contains("Claude Code CLI (default)"), "{prompt}");
+    assert!(prompt.contains("Enter for 2"));
+    // The input loop takes the pending login before dispatching the reply.
+    app.pending_login = None;
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, String::new());
+    assert!(
+        app.pending_login.is_none(),
+        "Enter must start the default method"
+    );
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("jcode login --provider claude --claude-code"),
+        "Enter must start the Claude Code CLI method"
+    );
+
+    crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", "oauth");
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.start_claude_login();
+    let prompt = app.display_messages().last().unwrap().content.clone();
+    assert!(prompt.contains("Jcode OAuth (default)"), "{prompt}");
+    assert!(prompt.contains("Enter for 1"));
+
+    match previous {
+        Some(value) => crate::env::set_var("JCODE_CLAUDE_LOGIN_METHOD", value),
+        None => crate::env::remove_var("JCODE_CLAUDE_LOGIN_METHOD"),
+    }
 }

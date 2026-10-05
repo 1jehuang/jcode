@@ -34,6 +34,26 @@ Key facts that trip people up:
   availability. Having a Claude subscription login (OAuth) does **not** make
   `anthropic-api` usable, and vice versa.
 
+To sign in through the installed Claude Code CLI instead of Jcode's OAuth
+browser flow, run `jcode login --provider claude --claude-code` in an interactive
+terminal on the machine running Jcode. When the `claude` binary is installed,
+this is the default: `jcode login --provider claude` and the local `/login`
+Claude choice (press Enter) both use the Claude Code CLI. Use
+`jcode login --provider claude --oauth`, choose 1 in `/login`, or set
+`JCODE_CLAUDE_LOGIN_METHOD=oauth` to keep Jcode's OAuth flow. Account labels,
+`--no-browser`, scriptable flags, and non-interactive shells
+always use Jcode's OAuth flow. Jcode asks permission before using Claude Code's login.
+Claude Code retains its own credential; on macOS, Jcode copies its Keychain
+credential into `~/.jcode/auth.json` so Jcode's direct API runtime can use it.
+With a custom `CLAUDE_CONFIG_DIR` or `JCODE_HOME`, run the command in a shell
+with the same environment as Jcode. The TUI will not open a new terminal in
+that case because a new login shell can lose those settings.
+Because both tools may refresh the same initial token, a copied login may need
+to be renewed independently. Over SSH, run this command on the remote host;
+the SSH login bridge does not transfer the CLI's credentials.
+This method does not select a Jcode account label. Choose Jcode's OAuth login
+for managed per-account defaults.
+
 ### How to actually check (don't guess)
 
 ```sh

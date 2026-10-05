@@ -282,6 +282,16 @@ struct OpenCodeAnthropicAuth {
 }
 
 fn claude_code_path() -> Result<PathBuf> {
+    if let Some(config_dir) =
+        std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
+    {
+        let config_dir = PathBuf::from(config_dir);
+        anyhow::ensure!(
+            config_dir.is_absolute(),
+            "CLAUDE_CONFIG_DIR must be absolute to reuse Claude Code credentials across Jcode processes."
+        );
+        return Ok(config_dir.join(".credentials.json"));
+    }
     crate::storage::user_home_path(".claude/.credentials.json")
 }
 
@@ -656,7 +666,7 @@ fn load_jcode_credentials() -> Result<ClaudeCredentials> {
     })
 }
 
-fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
+pub fn load_claude_code_credentials() -> Result<ClaudeCredentials> {
     let path = crate::storage::validate_external_auth_file(&claude_code_path()?)?;
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("Could not read credentials from {:?}", path))?;
@@ -770,6 +780,23 @@ fn read_claude_code_keychain_blob() -> Option<String> {
             }
             Err(_) => return None,
         }
+    }
+}
+
+/// Whether Claude sign-in should default to the installed Claude Code CLI
+/// (`claude auth login`) instead of Jcode's own OAuth browser flow.
+///
+/// On by default whenever the `claude` binary is installed, so Claude Code
+/// accounts sign in the way Claude Code itself does. Opt out with
+/// `JCODE_CLAUDE_LOGIN_METHOD=oauth`, or force it with `=cli`.
+pub fn prefer_claude_code_cli_login() -> bool {
+    match std::env::var("JCODE_CLAUDE_LOGIN_METHOD")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Ok("oauth" | "jcode") => false,
+        Ok("cli" | "claude-code" | "claude_code") => true,
+        _ => crate::auth::command_exists("claude"),
     }
 }
 
@@ -887,7 +914,11 @@ pub fn trust_native_source() -> Result<()> {
 pub fn import_native_credentials_into_account() -> Result<String> {
     let creds = load_native_credentials()
         .context("Could not read Claude Code native credentials to import")?;
+    import_native_credentials_into_account_from(creds)
+}
 
+/// Store the credential snapshot read after the user approved native import.
+pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> Result<String> {
     if creds.refresh_token.trim().is_empty() {
         // Without a refresh token we cannot keep the account alive past the
         // current access token, so we do not persist a dead-end account.
@@ -897,7 +928,29 @@ pub fn import_native_credentials_into_account() -> Result<String> {
         );
     }
 
-    let label = login_target_label(None)?;
+    // Never overwrite a different saved account: reuse the account that
+    // already holds these tokens, otherwise store the login under a new label.
+    let accounts = list_accounts()?;
+    let label = accounts
+        .iter()
+        .find(|account| {
+            account.refresh == creds.refresh_token
+                || (!creds.access_token.is_empty() && account.access == creds.access_token)
+        })
+        .map(|account| account.label.clone())
+        .unwrap_or_else(|| {
+            (accounts.len() + 1..)
+                .map(|index| {
+                    crate::auth::account_store::canonical_account_label(ACCOUNT_LABEL_PREFIX, index)
+                })
+                .find(|label| !accounts.iter().any(|account| &account.label == label))
+                .unwrap_or_else(|| {
+                    crate::auth::account_store::next_account_label(
+                        ACCOUNT_LABEL_PREFIX,
+                        accounts.len(),
+                    )
+                })
+        });
     upsert_account(AnthropicAccount {
         label: label.clone(),
         access: creds.access_token,
