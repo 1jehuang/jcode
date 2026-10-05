@@ -181,6 +181,22 @@ fn optimized_test_shell_command_routes_compile_subcommands_only() {
     assert!(shell.ends_with("cargo test -p jcode-base && cargo fmt --all -- --check"));
 }
 
+#[test]
+fn test_shell_command_avoids_bash_on_windows() {
+    let cmd = SelfDevTool::test_shell_command("cargo test -p demo --lib");
+    if cfg!(windows) {
+        // `bash` on Windows resolves to the WSL stub, which cannot run the
+        // native toolchain; the test command must go through cmd.exe instead.
+        assert_eq!(cmd.program, "cmd");
+        assert_eq!(cmd.args.first().map(String::as_str), Some("/C"));
+    } else {
+        assert_eq!(cmd.program, "bash");
+        assert_eq!(cmd.args.first().map(String::as_str), Some("-lc"));
+    }
+    // The user-visible command is the bare command either way.
+    assert_eq!(cmd.display, "cargo test -p demo --lib");
+}
+
 #[cfg(unix)]
 #[test]
 fn optimized_test_shell_command_executes_raw_cargo_test_through_wrapper() {
