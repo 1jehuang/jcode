@@ -42,6 +42,29 @@ fn test_handle_server_event_transcript_replace_updates_input() {
 }
 
 #[test]
+fn test_transcript_replacement_starts_new_typing_undo_step() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    for c in ['d', 'o', 'g'] {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty()).unwrap();
+    }
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Transcript {
+            text: "cat".to_string(),
+            mode: crate::protocol::TranscriptMode::Replace,
+        },
+        &mut remote,
+    );
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input(), "cats");
+    app.undo_input_change();
+    assert_eq!(app.input(), "cat");
+}
+
+#[test]
 fn test_local_bus_dictation_completion_applies_transcript() {
     let mut app = create_test_app();
     let session_id = app.session.id.clone();

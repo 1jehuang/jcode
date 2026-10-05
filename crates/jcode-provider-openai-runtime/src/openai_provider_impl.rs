@@ -95,6 +95,17 @@ impl Provider for OpenAIProvider {
 
         let mut input = build_responses_input(messages);
         insert_additional_tools(&mut input, messages, tools);
+        {
+            // Stored hosted-search items are replayed only when this request
+            // also declares the hosted tool; otherwise send their summary.
+            let model_id = self.model_id().await;
+            let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
+            if native_web_search::hosted_tools_for_request(&model_id, is_chatgpt_mode, tools)
+                .is_empty()
+            {
+                native_web_search::downgrade_web_search_calls(&mut input);
+            }
+        }
         let input_item_count = input.len();
         let request = self.response_request(&input, tools, system).await;
         let model_id = openai_request_model(&request);
@@ -1153,6 +1164,9 @@ impl Provider for OpenAIProvider {
             }));
         }
         input.extend(build_responses_input(messages));
+        // The compact request declares no tools, so hosted-search history
+        // goes as its text summary.
+        native_web_search::downgrade_web_search_calls(&mut input);
 
         let mut builder = self
             .client

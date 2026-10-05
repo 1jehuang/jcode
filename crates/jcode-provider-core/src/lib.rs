@@ -475,31 +475,114 @@ pub trait Provider: Send + Sync {
 
     /// Simple completion that returns text directly (no streaming).
     async fn complete_simple(&self, prompt: &str, system: &str) -> Result<String> {
-        use futures::StreamExt;
+        collect_simple_completion(self, prompt, system)
+            .await
+            .map(|(text, _)| text)
+    }
 
-        let messages = vec![Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: prompt.to_string(),
-                cache_control: None,
-            }],
-            timestamp: None,
-            tool_duration_ms: None,
-        }];
+    /// Like [`Provider::complete_simple`], but also returns the provider-reported
+    /// token usage so side calls (compaction summaries, memory sidecar) can be
+    /// accounted for.
+    ///
+    /// Internal callers use this method, so a provider that customizes simple
+    /// completion must override this method (and may override `complete_simple`
+    /// to match). The default streams through `complete`.
+    async fn complete_simple_with_usage(
+        &self,
+        prompt: &str,
+        system: &str,
+    ) -> Result<(String, SimpleCompletionUsage)> {
+        collect_simple_completion(self, prompt, system).await
+    }
+}
 
-        let response = self.complete(&messages, &[], system, None).await?;
-        let mut result = String::new();
-        tokio::pin!(response);
+/// Drive `Provider::complete` for a single user prompt and collect the text and
+/// provider-reported usage.
+pub async fn collect_simple_completion<P: Provider + ?Sized>(
+    provider: &P,
+    prompt: &str,
+    system: &str,
+) -> Result<(String, SimpleCompletionUsage)> {
+    use futures::StreamExt;
 
-        while let Some(event) = response.next().await {
-            match event {
-                Ok(StreamEvent::TextDelta(text)) => result.push_str(&text),
-                Ok(_) => {}
-                Err(err) => return Err(err),
-            }
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text {
+            text: prompt.to_string(),
+            cache_control: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let response = provider.complete(&messages, &[], system, None).await?;
+    let mut result = String::new();
+    let mut usage = SimpleCompletionUsage::default();
+    tokio::pin!(response);
+
+    while let Some(event) = response.next().await {
+        match event {
+            Ok(StreamEvent::TextDelta(text)) => result.push_str(&text),
+            Ok(StreamEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            }) => usage.observe(
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            ),
+            Ok(_) => {}
+            Err(err) => return Err(err),
         }
+    }
 
-        Ok(result)
+    Ok((result, usage))
+}
+
+/// Provider-reported usage for a non-agent completion.
+///
+/// Streams may report usage more than once (for example a start event with
+/// input tokens and a final event with output tokens). Each field keeps the
+/// latest value reported, matching how the agent turn loop treats repeated
+/// `TokenUsage` events (they are cumulative snapshots, not deltas).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SimpleCompletionUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+}
+
+impl SimpleCompletionUsage {
+    pub fn observe(
+        &mut self,
+        input: Option<u64>,
+        output: Option<u64>,
+        cache_read: Option<u64>,
+        cache_creation: Option<u64>,
+    ) {
+        if input.is_some() {
+            self.input_tokens = input;
+        }
+        if output.is_some() {
+            self.output_tokens = output;
+        }
+        if cache_read.is_some() {
+            self.cache_read_input_tokens = cache_read;
+        }
+        if cache_creation.is_some() {
+            self.cache_creation_input_tokens = cache_creation;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.cache_read_input_tokens.is_none()
+            && self.cache_creation_input_tokens.is_none()
     }
 }
 
@@ -1380,6 +1463,21 @@ fn reference_request_cost_micros(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn simple_completion_usage_keeps_latest_reported_values() {
+        let mut usage = SimpleCompletionUsage::default();
+        assert!(usage.is_empty());
+        // Start event: input only.
+        usage.observe(Some(1_000), None, Some(700), None);
+        // Final event: output and a refreshed input snapshot.
+        usage.observe(Some(1_050), Some(90), None, Some(12));
+        assert_eq!(usage.input_tokens, Some(1_050));
+        assert_eq!(usage.output_tokens, Some(90));
+        assert_eq!(usage.cache_read_input_tokens, Some(700));
+        assert_eq!(usage.cache_creation_input_tokens, Some(12));
+        assert!(!usage.is_empty());
+    }
 
     #[test]
     fn metered_estimate_computes_reference_cost() {

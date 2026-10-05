@@ -2722,6 +2722,18 @@ async fn handle_remote_key_internal(
             {
                 app.inline_interactive_state = None;
                 input::clear_input_for_escape(app);
+            } else if app.is_processing && app.has_pending_user_followup() {
+                // The user typed a new prompt while this turn ran, then hit
+                // Esc: stop this turn and run the new prompt next. The server
+                // leaves an unsent soft interrupt queued on cancel, and the
+                // follow-up recovery path sends it as the next turn. Auto-poke
+                // stays on: this is a redirect, not "stop everything".
+                remote
+                    .cancel_with_reason("keyboard_escape_redirect")
+                    .await?;
+                app.remote_interrupt_ack_deadline =
+                    Some(Instant::now() + std::time::Duration::from_secs(3));
+                app.set_status_notice("Interrupting... sending your next prompt");
             } else if app.is_processing {
                 let disabled_auto_poke = app.auto_poke_incomplete_todos
                     || app

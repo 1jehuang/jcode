@@ -1,3 +1,5 @@
+pub mod provider_native;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     #[serde(default)]
@@ -216,6 +218,17 @@ pub enum ContentBlock {
     ToolReference {
         tool_use_id: String,
         tool_name: String,
+    },
+    /// Provider-native (server-side) tool item, stored verbatim.
+    ///
+    /// Examples: Anthropic `server_tool_use` / `web_search_tool_result`
+    /// blocks, OpenAI Responses `web_search_call` items. These can carry
+    /// encrypted payloads that the provider requires back unmodified on later
+    /// turns, so jcode never rewrites `item`. Only the provider named by
+    /// `provider` replays it; others ignore it. See [`provider_native`].
+    ProviderNative {
+        provider: String,
+        item: serde_json::Value,
     },
 }
 
@@ -626,14 +639,17 @@ impl ToolCall {
 
     pub fn parse_streamed_input_to_object(input: &str) -> serde_json::Value {
         let trimmed = input.trim();
+        // No argument text at all is how providers stream a no-argument call.
         if trimmed.is_empty() {
             return serde_json::Value::Object(serde_json::Map::new());
         }
 
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(value) => Self::normalize_input_to_object(value),
-            Err(_) => serde_json::Value::Null,
-        }
+        // Keep explicit non-object arguments (`null`, numbers, arrays,
+        // strings) and unparseable JSON as-is. Coercing them to `{}` ran the
+        // tool with missing arguments and hid the malformed call from
+        // `validation_error`, so the model never got a schema correction and
+        // could repeat the same bad call indefinitely.
+        serde_json::from_str::<serde_json::Value>(trimmed).unwrap_or(serde_json::Value::Null)
     }
 
     pub fn validation_error(&self) -> Option<String> {
@@ -822,6 +838,14 @@ pub enum StreamEvent {
         request_id: String,
         tool_name: String,
         input: serde_json::Value,
+    },
+    /// A complete provider-native (server-side) tool item, e.g. an Anthropic
+    /// `server_tool_use` or `web_search_tool_result` block. The provider has
+    /// already run the tool; consumers store it verbatim as
+    /// [`ContentBlock::ProviderNative`] for replay and render it for display.
+    ProviderNative {
+        provider: String,
+        item: serde_json::Value,
     },
 }
 
