@@ -190,6 +190,7 @@ fn parse_background_report(body: &str) -> Option<ThemeMode> {
 struct RuntimeTheme {
     reports: ColorReports,
     last_query: Option<Instant>,
+    cache_query_at: Option<Instant>,
 }
 
 fn runtime() -> &'static Mutex<RuntimeTheme> {
@@ -197,8 +198,68 @@ fn runtime() -> &'static Mutex<RuntimeTheme> {
     RUNTIME.get_or_init(|| Mutex::new(RuntimeTheme::default()))
 }
 
+fn background_query(passthrough: bool) -> &'static [u8] {
+    if passthrough {
+        // tmux caches ordinary OSC 11 replies at attachment. Ask the outer
+        // terminal directly, doubling ESC bytes inside its DCS envelope.
+        b"\x1bPtmux;\x1b\x1b]11;?\x1b\x1b\\\x1b\\"
+    } else {
+        b"\x1b]11;?\x1b\\"
+    }
+}
+
+fn tmux_passthrough_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let term = std::env::var("TERM").unwrap_or_default();
+        if std::env::var_os("TMUX").is_none()
+            || !(term.starts_with("tmux") || term.starts_with("screen"))
+        {
+            return false;
+        }
+        use std::process::{Command, Stdio};
+        let Ok(mut child) = Command::new("tmux")
+            .args(["show-options", "-Apv", "allow-passthrough"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        // Only once per TUI, bounded so a broken/missing mux cannot stall input.
+        let deadline = Instant::now() + Duration::from_millis(150);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    return child
+                        .wait_with_output()
+                        .is_ok_and(|output| matches!(output.stdout.trim_ascii(), b"on" | b"all"));
+                }
+                Ok(Some(_)) => return false,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
+    })
+}
+
 fn query_if_due(state: &mut RuntimeTheme, now: Instant, focused: bool) {
     if !super::theme_detect::runtime_queries_enabled() {
+        return;
+    }
+    if state.cache_query_at.is_some_and(|at| now >= at) {
+        state.cache_query_at = None;
+        // tmux consumes outer-terminal color replies to update its cache.
+        // Read that refreshed cache on the next timer tick, without blocking
+        // the input stream or competing for stdin.
+        write_background_query(state, now, false);
         return;
     }
     let interval = if focused {
@@ -213,10 +274,19 @@ fn query_if_due(state: &mut RuntimeTheme, now: Instant, focused: bool) {
         return;
     }
     state.last_query = Some(now);
+    let passthrough = tmux_passthrough_enabled();
+    if passthrough {
+        state.cache_query_at = Some(now + PREFIX_TIMEOUT);
+    }
+    write_background_query(state, now, passthrough);
+}
+
+fn write_background_query(state: &mut RuntimeTheme, now: Instant, passthrough: bool) {
     // Query only the background. No stdin read and no blocking response wait.
+    let query = background_query(passthrough);
     let mut stdout = io::stdout().lock();
     if stdout
-        .write_all(b"\x1b]11;?\x1b\\")
+        .write_all(query)
         .and_then(|()| stdout.flush())
         .is_ok()
     {
@@ -323,6 +393,14 @@ impl Stream for EventStream {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_queries_bypass_tmux_cache_only_with_passthrough() {
+        assert_eq!(super::background_query(false), b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            super::background_query(true),
+            b"\x1bPtmux;\x1b\x1b]11;?\x1b\x1b\\\x1b\\"
+        );
+    }
     use super::*;
     use crossterm::event::KeyEvent;
 
