@@ -1684,6 +1684,12 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if super::commands_cloud::parse_cloud_command(trimmed).is_some() {
+        let session_id = active_session_id(app);
+        super::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
+        return true;
+    }
+
     if trimmed == "/commit" {
         handle_commit_command_local(app);
         return true;

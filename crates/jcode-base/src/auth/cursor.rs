@@ -298,8 +298,8 @@ pub fn load_api_key() -> Result<String> {
 pub fn save_api_key(key: &str) -> Result<()> {
     let file_path = config_file_path()?;
     crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(key))?;
-
-    crate::env::set_var("CURSOR_API_KEY", key);
+    // File only (#1386): `load_api_key` falls back to this file, and a process
+    // env copy would shadow later edits and leak into child processes.
     Ok(())
 }
 
@@ -338,8 +338,8 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        return crate::storage::user_home_path(".cursor/auth.json")
-            .context("No home directory found for Cursor auth.json");
+        crate::storage::user_home_path(".cursor/auth.json")
+            .context("No home directory found for Cursor auth.json")
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]

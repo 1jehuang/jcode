@@ -1014,3 +1014,95 @@ fn test_outbound_tool_result_secret_redaction() {
     assert!(!hay.contains(raw_secret));
     assert!(hay.contains("[REDACTED"));
 }
+
+/// Regression: Cursor's AgentService now sends `McpStateExecArgs` (exec field
+/// 36) for the `ccbridge` server before dispatching an MCP call. jcode used to
+/// decode it as `Unknown` and never answer, so the turn stalled on heartbeats.
+#[test]
+fn mcp_state_request_decodes_and_reports_bridge_tools_ready() {
+    let mut state_args = wire::field_str(1, wire::JCODE_TOOL_PROVIDER);
+    state_args.extend(wire::field_varint(2, 0));
+    let mut exec = wire::field_varint(1, 7);
+    exec.extend(wire::field_str(15, "exec-state"));
+    exec.extend(wire::field_ld(36, &state_args));
+
+    let decoded = wire::decode_exec_server_message(&exec).expect("decode mcp_state");
+    let args = match decoded.variant {
+        wire::ExecServerMessageVariant::McpState(args) => args,
+        other => panic!("expected McpState, got {other:?}"),
+    };
+    assert_eq!(args.server_identifiers, vec![wire::JCODE_TOOL_PROVIDER]);
+    assert!(!args.kick_only);
+
+    let tools = vec![jcode_message_types::ToolDefinition {
+        name: "mcp__chrome-devtools__list_pages".to_string(),
+        description: "List pages".to_string(),
+        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        defer_loading: false,
+    }];
+    let reply = wire::encode_mcp_state_result(7, "exec-state", &args, &tools)
+        .expect("encode mcp_state result");
+
+    // ExecClientMessage: id=1, exec_id=15, mcp_state_exec_result=36
+    let fields: Vec<_> = wire::iter_fields(&reply).collect();
+    assert!(fields.iter().any(|f| f.field == 1 && f.varint == 7));
+    let result = fields
+        .iter()
+        .find(|f| f.field == 36)
+        .expect("mcp_state_exec_result field 36");
+    // McpStateExecResult.success(1) -> McpStateSuccess.servers(1) -> McpStateServer
+    let success = wire::iter_fields(result.data)
+        .find(|f| f.field == 1)
+        .expect("success case");
+    let server = wire::iter_fields(success.data)
+        .find(|f| f.field == 1)
+        .expect("one server");
+    let server_fields: Vec<_> = wire::iter_fields(server.data).collect();
+    let ident = server_fields
+        .iter()
+        .find(|f| f.field == 2)
+        .map(|f| std::str::from_utf8(f.data).unwrap());
+    assert_eq!(ident, Some(wire::JCODE_TOOL_PROVIDER));
+    let tool_defs: Vec<_> = server_fields.iter().filter(|f| f.field == 5).collect();
+    assert_eq!(tool_defs.len(), 1, "bridged tools are listed on the server");
+    let tool_name = wire::iter_fields(tool_defs[0].data)
+        .find(|f| f.field == 5)
+        .map(|f| std::str::from_utf8(f.data).unwrap().to_string());
+    assert!(tool_name.unwrap().contains("list_pages"));
+}
+
+/// Cursor may precheck tool allowlisting before dispatching (exec fields
+/// 41/42/43). An unanswered precheck stalls the turn the same way an
+/// unanswered mcp_state did, so each must decode and get a reply.
+#[test]
+fn allowlist_prechecks_decode_and_reply_on_matching_field() {
+    let mut mcp = wire::field_str(1, wire::JCODE_TOOL_PROVIDER);
+    mcp.extend(wire::field_str(2, "cc_list_pages"));
+    let mut exec = wire::field_varint(1, 9);
+    exec.extend(wire::field_ld(42, &mcp));
+    match wire::decode_exec_server_message(&exec).unwrap().variant {
+        wire::ExecServerMessageVariant::McpAllowlistPrecheck {
+            provider_identifier,
+        } => {
+            assert_eq!(provider_identifier, wire::JCODE_TOOL_PROVIDER)
+        }
+        other => panic!("expected McpAllowlistPrecheck, got {other:?}"),
+    }
+    for field in [41u64, 43] {
+        let mut exec = wire::field_varint(1, 9);
+        exec.extend(wire::field_ld(field, &wire::field_str(1, "x")));
+        assert_eq!(
+            wire::decode_exec_server_message(&exec).unwrap().variant,
+            wire::ExecServerMessageVariant::OtherAllowlistPrecheck(field)
+        );
+    }
+
+    let reply = wire::encode_allowlist_precheck_result(9, "e", 42, true);
+    let result = wire::iter_fields(&reply)
+        .find(|f| f.field == 42)
+        .expect("mcp_allowlist_precheck_result field 42");
+    let allowed = wire::iter_fields(result.data)
+        .find(|f| f.field == 1)
+        .unwrap();
+    assert_eq!(allowed.varint, 1);
+}

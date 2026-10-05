@@ -198,6 +198,26 @@ For manual dispatch, send a wire-level `configure_tools` request via
 `client.submitToolResult(sessionId, callId, result)`. Do not manually answer calls
 that already have an `execute` callback.
 
+### Web search
+
+The built-in `websearch` tool uses the model provider's own server-side search
+when the provider supports it (Anthropic first-party API, OpenAI API or ChatGPT
+login on non-codex models). Otherwise it scrapes locally with the configured
+engines. It needs no SDK code:
+
+- Provider searches stream as ordinary tool rows named `web_search`:
+  `tool_start`, `tool_input_delta` (`{"query": ...}`), `tool_exec`, then
+  `tool_done` with the result titles and URLs as `output`. No `tool_call` is
+  sent, because the provider already ran the search. They also appear in
+  `getHistory`.
+- `enabled` and `disabled` govern provider search too. A session without
+  `websearch` never gets provider search.
+- A `custom` tool named `websearch` replaces search entirely. It is called
+  through your callback and is never swapped for provider search.
+- Set `websearch.prefer_native = false` in `config.toml`, or
+  `JCODE_WEBSEARCH_PREFER_NATIVE=0` in `launch({ env })`, to always search
+  locally (unless `websearch.engine = "native"` is set explicitly).
+
 ### Assistant messages and final answers
 
 `turn.text` is the concatenation of **all** assistant text in the turn, including

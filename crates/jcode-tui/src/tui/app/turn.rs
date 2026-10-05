@@ -319,6 +319,9 @@ impl App {
             let mut first_event = true;
             let mut saw_message_end = false;
             let mut call_output_tokens_seen: u64 = 0;
+            // Latest provider-reported usage for this API call, for usage_report.
+            let mut call_usage = jcode_provider_core::SimpleCompletionUsage::default();
+            let model_at_request_start = self.provider.model();
             let mut interleaved = false; // Track if we interleaved a message mid-stream
             // Track tool results from provider (already executed by Claude Code CLI)
             let mut sdk_tool_results: std::collections::HashMap<String, (String, bool)> =
@@ -329,6 +332,10 @@ impl App {
             let mut reasoning_content = String::new();
             let mut reasoning_signature = String::new();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
+            // Provider-executed tool items (e.g. native web search), stored
+            // verbatim at their position in the response for exact replay.
+            let mut provider_native_items =
+                crate::message::provider_native::ProviderNativeItems::default();
             let mut openai_native_compaction: Option<(String, usize)> = None;
 
             // Stream with input handling
@@ -729,6 +736,12 @@ impl App {
                                         cache_read_input_tokens,
                                         cache_creation_input_tokens,
                                     } => {
+                                        call_usage.observe(
+                                            input_tokens,
+                                            output_tokens,
+                                            cache_read_input_tokens,
+                                            cache_creation_input_tokens,
+                                        );
                                         let mut usage_changed = self
                                             .apply_stream_usage_input_report(
                                                 input_tokens,
@@ -818,6 +831,7 @@ impl App {
                                         reasoning_content.clear();
                                         reasoning_signature.clear();
                                         openai_reasoning_items.clear();
+                                        provider_native_items.clear();
                                         openai_native_compaction = None;
                                         saw_message_end = false;
                                         self.rollback_streaming_attempt();
@@ -1009,6 +1023,38 @@ impl App {
 
                                         sdk_tool_results.insert(tool_use_id, (content, is_error));
                                     }
+                                    StreamEvent::ProviderNative { provider: native_provider, item } => {
+                                        if let Some(display) =
+                                            crate::message::provider_native::provider_native_display(
+                                                &native_provider,
+                                                &item,
+                                            )
+                                            && let Some(output) = display.output
+                                        {
+                                            self.pause_streaming_tps(false);
+                                            self.commit_pending_streaming_assistant_message();
+                                            let input = display
+                                                .input
+                                                .unwrap_or_else(|| provider_native_items.call_input(&display.id));
+                                            let tool_call = ToolCall {
+                                                intent: ToolCall::intent_from_input(&input),
+                                                id: display.id,
+                                                name: display.name,
+                                                input,
+                                                thought_signature: None,
+                                            };
+                                            self.push_display_message(DisplayMessage {
+                                                role: "tool".to_string(),
+                                                content: output,
+                                                tool_calls: vec![],
+                                                duration_secs: None,
+                                                title: None,
+                                                tool_data: Some(tool_call),
+                                            });
+                                            self.status = ProcessingStatus::Streaming;
+                                        }
+                                        provider_native_items.push(text_content.len(), native_provider, item);
+                                    }
                                     StreamEvent::GeneratedImage {
                                         id,
                                         path,
@@ -1162,6 +1208,16 @@ impl App {
                 }
             }
 
+            // Record before the interleave early-continue: an interrupted call
+            // still consumed whatever the provider reported.
+            crate::telemetry::record_simple_completion_usage(
+                Some(&self.session.id),
+                &provider_name,
+                &model_at_request_start,
+                crate::telemetry::UsageSource::Agent,
+                call_usage,
+            );
+
             // If we interleaved a message, skip post-processing and go straight to new API call
             if interleaved {
                 continue;
@@ -1169,7 +1225,9 @@ impl App {
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
-            if !text_content.is_empty() {
+            if !provider_native_items.is_empty() {
+                content_blocks.extend(provider_native_items.interleave(&text_content));
+            } else if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,

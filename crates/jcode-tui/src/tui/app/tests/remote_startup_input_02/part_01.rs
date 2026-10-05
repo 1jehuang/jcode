@@ -1026,8 +1026,84 @@ fn test_handle_key_super_z_undoes_input_change() {
     app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
         .unwrap();
 
-    assert_eq!(app.input(), "a");
-    assert_eq!(app.cursor_pos(), 1);
+    assert_eq!(app.input(), "");
+    assert_eq!(app.cursor_pos(), 0);
+}
+
+#[test]
+fn test_korean_typing_undo_groups_contiguous_syllables() {
+    let mut app = create_test_app();
+    for syllable in ['가', '나', '다'] {
+        app.handle_key(KeyCode::Char(syllable), KeyModifiers::empty())
+            .unwrap();
+    }
+    assert_eq!(app.input(), "가나다");
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "");
+    assert_eq!(app.cursor_pos(), 0);
+
+    input::handle_text_input(&mut app, "가");
+    input::handle_text_input(&mut app, "나다");
+    assert_eq!(app.input(), "가나다");
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "");
+}
+
+#[test]
+fn test_typing_undo_preserves_space_and_cursor_edit_boundaries() {
+    let mut app = create_test_app();
+    for c in ['가', '나', ' ', '다'] {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "가나 ");
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "가나");
+    app.handle_key(KeyCode::Left, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Char('다'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
+        .unwrap();
+    assert_eq!(app.input(), "가나");
+}
+
+#[test]
+fn test_typing_undo_does_not_merge_paste_or_later_burst() {
+    let mut app = create_test_app();
+    app.handle_key(KeyCode::Char('가'), KeyModifiers::empty())
+        .unwrap();
+    input::insert_input_text(&mut app, "붙여넣기");
+    app.handle_key(KeyCode::Char('나'), KeyModifiers::empty())
+        .unwrap();
+    app.undo_input_change();
+    assert_eq!(app.input(), "가붙여넣기");
+    app.undo_input_change();
+    assert_eq!(app.input(), "가");
+
+    app.input_typing_undo = Some((Instant::now() - Duration::from_secs(2), app.cursor_pos()));
+    app.handle_key(KeyCode::Char('다'), KeyModifiers::empty())
+        .unwrap();
+    app.undo_input_change();
+    assert_eq!(app.input(), "가");
+}
+
+#[test]
+fn test_picker_swallowed_space_starts_new_typing_undo_step() {
+    let mut app = create_test_app();
+    for c in "/model".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty()).unwrap();
+    }
+    assert_eq!(app.input(), "/model ");
+    app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Char('g'), KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input(), "/model g");
+    app.undo_input_change();
+    assert_eq!(app.input(), "/model ");
 }
 
 #[test]
@@ -1102,13 +1178,13 @@ fn test_handle_key_ctrl_z_undoes_typing() {
 
     app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
         .unwrap();
-    assert_eq!(app.input(), "ab");
-    assert_eq!(app.cursor_pos(), 2);
+    assert_eq!(app.input(), "");
+    assert_eq!(app.cursor_pos(), 0);
 
     app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
         .unwrap();
-    assert_eq!(app.input(), "a");
-    assert_eq!(app.cursor_pos(), 1);
+    assert_eq!(app.input(), "");
+    assert_eq!(app.cursor_pos(), 0);
 }
 
 #[test]
@@ -1241,30 +1317,36 @@ fn test_ctrl_tab_toggles_queue_mode() {
 
 #[test]
 fn test_auto_poke_starts_enabled_by_default() {
-    let app = create_test_app();
+    // Hold the shared env lock with a clean home so a concurrent test that
+    // saves `features.auto_poke = false` cannot leak into this app's config.
+    with_temp_jcode_home(|| {
+        let app = create_test_app();
 
-    assert!(app.auto_poke_incomplete_todos);
+        assert!(app.auto_poke_incomplete_todos);
+    });
 }
 
 #[test]
 fn test_ctrl_p_toggles_auto_poke_locally() {
-    let mut app = create_test_app();
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
 
-    assert!(app.auto_poke_incomplete_todos);
+        assert!(app.auto_poke_incomplete_todos);
 
-    app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
-        .unwrap();
-    assert!(!app.auto_poke_incomplete_todos);
-    assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
+        app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(!app.auto_poke_incomplete_todos);
+        assert_eq!(app.status_notice(), Some("Poke: OFF".to_string()));
 
-    app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
-        .unwrap();
-    assert!(app.auto_poke_incomplete_todos);
-    assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
-    assert!(app.display_messages().iter().any(|msg| {
-        msg.content
-            .contains("Auto-poke enabled. Nothing unfinished right now")
-    }));
+        app.handle_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.auto_poke_incomplete_todos);
+        assert_eq!(app.status_notice(), Some("Poke: ON".to_string()));
+        assert!(app.display_messages().iter().any(|msg| {
+            msg.content
+                .contains("Auto-poke enabled. Nothing unfinished right now")
+        }));
+    });
 }
 
 #[test]

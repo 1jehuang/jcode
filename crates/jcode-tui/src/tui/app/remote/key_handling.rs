@@ -970,6 +970,25 @@ async fn handle_remote_key_internal(
                 let prepared = input::take_prepared_input(app);
                 let trimmed = prepared.expanded.trim();
 
+                // Before the SSH gate: `/local` must work from a client attached
+                // to the cloud copy, because the return is coordinated locally.
+                if app_mod::commands_cloud::parse_cloud_command(trimmed).is_some() {
+                    let session_id = app_mod::commands::active_session_id(app);
+                    if crate::tui::is_ssh_remote()
+                        && matches!(
+                            app_mod::commands_cloud::parse_cloud_command(trimmed),
+                            Some(app_mod::commands_cloud::CloudCommand::Move { .. })
+                        )
+                    {
+                        app.push_display_message(DisplayMessage::error(
+                            "This session already runs on a remote host. Use /local to bring it back first.".to_string(),
+                        ));
+                        return Ok(());
+                    }
+                    app_mod::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
+                    return Ok(());
+                }
+
                 if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
                     return Ok(());
                 }
@@ -2714,6 +2733,18 @@ async fn handle_remote_key_internal(
             {
                 app.inline_interactive_state = None;
                 input::clear_input_for_escape(app);
+            } else if app.is_processing && app.has_pending_user_followup() {
+                // The user typed a new prompt while this turn ran, then hit
+                // Esc: stop this turn and run the new prompt next. The server
+                // leaves an unsent soft interrupt queued on cancel, and the
+                // follow-up recovery path sends it as the next turn. Auto-poke
+                // stays on: this is a redirect, not "stop everything".
+                remote
+                    .cancel_with_reason("keyboard_escape_redirect")
+                    .await?;
+                app.remote_interrupt_ack_deadline =
+                    Some(Instant::now() + std::time::Duration::from_secs(3));
+                app.set_status_notice("Interrupting... sending your next prompt");
             } else if app.is_processing {
                 let disabled_auto_poke = app.auto_poke_incomplete_todos
                     || app

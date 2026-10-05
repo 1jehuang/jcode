@@ -900,7 +900,7 @@ impl App {
         if let Some(model) = snapshot.provider_model
             && self.remote_provider_model.as_deref() != Some(model.as_str())
         {
-            self.update_context_limit_for_model(&model);
+            self.update_context_limit_for_model(&model, None);
             self.remote_provider_model = Some(model);
             provider_meta_changed = true;
         }
@@ -3453,7 +3453,7 @@ impl App {
                     self.status_detail = None;
                     self.invalidate_model_picker_cache();
                     let active_model = self.provider.model();
-                    self.update_context_limit_for_model(&active_model);
+                    self.update_context_limit_for_model(&active_model, None);
                     self.session.provider_key =
                         crate::provider::MultiProvider::session_provider_key_after_model_switch(
                             &spec,
