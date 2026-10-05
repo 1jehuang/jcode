@@ -332,13 +332,17 @@ pub enum Request {
         model: Option<String>,
     },
 
-    /// Set session routing for a worker role. None clears to global default.
+    /// Set routing for a worker role. None clears to the global default.
+    /// With `global`, the server updates its own configuration instead of the
+    /// session, so remote clients never write a default only they can see.
     #[serde(rename = "set_agent_model")]
     SetAgentModel {
         id: u64,
         target: String,
         #[serde(default)]
         model: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        global: bool,
     },
 
     /// Launch a subagent immediately in the active session.

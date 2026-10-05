@@ -792,9 +792,21 @@ impl RemoteConnection {
         self.send_request(request).await
     }
 
-    pub async fn set_agent_model(&mut self, target: String, model: Option<String>) -> Result<u64> {
+    /// Set a worker model on the server, for this session or (with `global`)
+    /// as the server's own default.
+    pub async fn set_agent_model(
+        &mut self,
+        target: String,
+        model: Option<String>,
+        global: bool,
+    ) -> Result<u64> {
         let id = self.next_request_id;
-        let request = Request::SetAgentModel { id, target, model };
+        let request = Request::SetAgentModel {
+            id,
+            target,
+            model,
+            global,
+        };
         self.next_request_id += 1;
         self.send_request(request).await?;
         Ok(id)

@@ -3613,13 +3613,19 @@ impl App {
                     } => {
                         self.inline_interactive_state = None;
                         let spec = (!clear_override).then(|| model_entry_saved_spec(&entry));
-                        let result = if self.agent_models_global_scope {
-                            save_agent_model_override(target, spec.as_deref())
-                        } else if self.is_remote {
-                            // Only AgentModelsChanged confirms persistence. Generic Ack
+                        let result = if self.is_remote {
+                            // The server owns both scopes in remote mode: global
+                            // defaults go to its config, not this client's. Only
+                            // AgentModelsChanged confirms persistence. Generic Ack
                             // is sent by the server before request dispatch.
-                            self.set_status_notice("Applying agent model [session]…");
+                            self.set_status_notice(if self.agent_models_global_scope {
+                                "Applying agent model [global]…"
+                            } else {
+                                "Applying agent model [session]…"
+                            });
                             return Ok(());
+                        } else if self.agent_models_global_scope {
+                            save_agent_model_override(target, spec.as_deref())
                         } else {
                             self.session
                                 .set_agent_model_override(agent_model_target_slug(target), spec)

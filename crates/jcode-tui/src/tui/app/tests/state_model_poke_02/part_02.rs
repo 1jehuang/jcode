@@ -86,9 +86,26 @@ fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         configure_test_remote_models(&mut app);
+        // Remote global changes belong to the server: this client must not
+        // write its own config (the server write is sent by key handling).
         app.input = "/agents default review".into();
         app.submit_input();
         assert!(app.agent_models_global_scope);
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(crate::config::Config::load().autoreview.model, None);
+        assert!(app.session.agent_model_overrides.is_empty());
+
+        // Locally, the global scope still saves this machine's config.
+        app.input = "/agents default review".into();
+        app.submit_input();
+        app.is_remote = false;
         let picker = app.inline_interactive_state.as_mut().unwrap();
         picker.selected = picker
             .filtered
@@ -102,6 +119,7 @@ fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
             Some("inherit")
         );
         assert!(app.session.agent_model_overrides.is_empty());
+        configure_test_remote_models(&mut app);
 
         app.input = "/agents review".into();
         app.submit_input();

@@ -738,15 +738,27 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
 fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
     let clear = parse_request_json(r#"{"type":"set_agent_model","id":31,"target":"swarm"}"#)?;
     assert!(matches!(clear, Request::SetAgentModel { model: None, .. }));
+    assert!(matches!(clear, Request::SetAgentModel { global: false, .. }));
     let request = Request::SetAgentModel {
         id: 32,
         target: "review".into(),
         model: Some("inherit".into()),
+        global: false,
     };
-    let decoded = parse_request_json(&serde_json::to_string(&request)?)?;
+    let encoded = serde_json::to_string(&request)?;
+    assert!(!encoded.contains("global"), "session updates keep the old wire shape");
+    let decoded = parse_request_json(&encoded)?;
     assert!(
         matches!(decoded, Request::SetAgentModel { model: Some(model), .. } if model == "inherit")
     );
+    let global = Request::SetAgentModel {
+        id: 33,
+        target: "swarm".into(),
+        model: Some("server-default".into()),
+        global: true,
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&global)?)?;
+    assert!(matches!(decoded, Request::SetAgentModel { global: true, .. }));
     let event = ServerEvent::AgentModelsChanged {
         id: 32,
         session_id: "session-a".into(),

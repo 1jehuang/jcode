@@ -843,6 +843,50 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
 }
 
 #[tokio::test]
+async fn global_agent_model_request_updates_server_config_not_session() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let agent = test_agent_with_working_dir("routing_global", "/tmp/coord").await;
+    let overrides = crate::server::client_actions::set_global_agent_model(
+        &agent,
+        "routing_global",
+        "swarm",
+        Some("openai-api:gpt-5.5".into()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        overrides.is_empty(),
+        "a global change must not pin the session"
+    );
+    assert_eq!(
+        crate::config::Config::load().agents.swarm_model.as_deref(),
+        Some("openai-api:gpt-5.5")
+    );
+    crate::server::client_actions::set_global_agent_model(&agent, "routing_global", "swarm", None)
+        .await
+        .unwrap();
+    assert_eq!(crate::config::Config::load().agents.swarm_model, None);
+    assert!(
+        crate::server::client_actions::set_global_agent_model(
+            &agent,
+            "routing_global",
+            "bogus",
+            Some("m".into())
+        )
+        .await
+        .is_err()
+    );
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
 async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
     let _env = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();

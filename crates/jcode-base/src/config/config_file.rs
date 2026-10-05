@@ -86,6 +86,24 @@ impl Config {
         super::invalidate_config_cache();
     }
 
+    /// Persist a worker-model default (`/agents global`). None clears it.
+    pub fn set_agent_model_default(target: &str, model: Option<&str>) -> anyhow::Result<()> {
+        let value = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let mut cfg = Self::load_for_update()?;
+        match target {
+            "swarm" => cfg.agents.swarm_model = value,
+            "review" => cfg.autoreview.model = value,
+            "judge" => cfg.autojudge.model = value,
+            "memory" => cfg.agents.memory_model = value,
+            "ambient" => cfg.ambient.model = value,
+            other => anyhow::bail!("Unknown agent model target: {other}"),
+        }
+        cfg.save()
+    }
+
     /// Persist the Anthropic cache duration for clients and the shared daemon.
     pub fn set_anthropic_cache_ttl_1h(enabled: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;

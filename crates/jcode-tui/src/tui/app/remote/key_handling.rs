@@ -352,33 +352,33 @@ async fn handle_remote_key_internal(
             if let Some(model) = subagent_model {
                 remote.set_subagent_model(model).await?;
             }
-            if !app.agent_models_global_scope
-                && let Some((target, model)) = picker
-                    .filtered
-                    .get(picker.selected)
-                    .and_then(|index| picker.entries.get(*index))
-                    .and_then(|entry| match entry.action {
-                        crate::tui::PickerAction::AgentModelChoice {
-                            target,
-                            clear_override,
-                        } => Some((
-                            match target {
-                                crate::tui::AgentModelTarget::Swarm => "swarm",
-                                crate::tui::AgentModelTarget::Review => "review",
-                                crate::tui::AgentModelTarget::Judge => "judge",
-                                crate::tui::AgentModelTarget::Memory => "memory",
-                                crate::tui::AgentModelTarget::Ambient => "ambient",
-                            }
-                            .to_string(),
-                            (!clear_override).then(|| {
-                                super::super::inline_interactive::subagent_picker_model_spec(entry)
-                            }),
-                        )),
-                        _ => None,
-                    })
+            if let Some((target, model)) = picker
+                .filtered
+                .get(picker.selected)
+                .and_then(|index| picker.entries.get(*index))
+                .and_then(|entry| match entry.action {
+                    crate::tui::PickerAction::AgentModelChoice {
+                        target,
+                        clear_override,
+                    } => Some((
+                        match target {
+                            crate::tui::AgentModelTarget::Swarm => "swarm",
+                            crate::tui::AgentModelTarget::Review => "review",
+                            crate::tui::AgentModelTarget::Judge => "judge",
+                            crate::tui::AgentModelTarget::Memory => "memory",
+                            crate::tui::AgentModelTarget::Ambient => "ambient",
+                        }
+                        .to_string(),
+                        (!clear_override).then(|| {
+                            super::super::inline_interactive::subagent_picker_model_spec(entry)
+                        }),
+                    )),
+                    _ => None,
+                })
             {
+                let global = app.agent_models_global_scope;
                 app.pending_agent_model_request_id =
-                    Some(remote.set_agent_model(target, model).await?);
+                    Some(remote.set_agent_model(target, model, global).await?);
             }
         }
         return app.handle_inline_interactive_key(code, modifiers);

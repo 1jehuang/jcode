@@ -1047,7 +1047,11 @@ pub(in crate::tui::app) fn handle_server_event(
             app.session.agent_model_overrides = overrides;
             if app.pending_agent_model_request_id == Some(id) {
                 app.pending_agent_model_request_id = None;
-                app.set_status_notice("Agent model saved [session]");
+                app.set_status_notice(if app.agent_models_global_scope {
+                    "Agent model saved [global on server]"
+                } else {
+                    "Agent model saved [session]"
+                });
             }
             true
         }
