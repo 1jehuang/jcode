@@ -14,15 +14,34 @@ fn path(id: &str) -> Result<std::path::PathBuf> {
     if id.is_empty() || id.contains('/') || id.contains('\\') || id == ".." {
         bail!("Invalid session id");
     }
-    Ok(super::storage_paths::session_path(id)?.with_extension("agent-models"))
+    // A distinct stem keeps this file's `.bak` (written by `write_json`) from
+    // replacing the transcript snapshot backup at `<id>.bak`.
+    Ok(super::storage_paths::session_path(id)?.with_file_name(format!("{id}.agent-models.meta")))
+}
+
+/// Read saved overrides. Unreadable metadata degrades to "no override" with a
+/// warning, so a damaged preference never blocks transcript load or save.
+fn read_saved(path: &std::path::Path) -> Option<AgentModelOverrides> {
+    if !path.exists() {
+        return None;
+    }
+    match crate::storage::read_json(path) {
+        Ok(saved) => Some(saved),
+        Err(err) => {
+            crate::logging::warn(&format!(
+                "Ignoring unreadable session agent-model overrides at {}: {err}",
+                path.display()
+            ));
+            Some(AgentModelOverrides::new())
+        }
+    }
 }
 
 impl Session {
     /// Reload lock-independent routing metadata, including explicit clears.
     pub fn refresh_agent_model_overrides(&mut self) -> Result<()> {
-        let path = path(&self.id)?;
-        if path.exists() {
-            self.agent_model_overrides = crate::storage::read_json(&path)?;
+        if let Some(saved) = read_saved(&path(&self.id)?) {
+            self.agent_model_overrides = saved;
         }
         Ok(())
     }
@@ -57,13 +76,10 @@ impl Session {
     /// Resolve session > global. "inherit" remains explicit for downstream
     /// routing, rather than becoming indistinguishable from use-global.
     pub fn effective_agent_model(&self, target: &str, global: Option<String>) -> Option<String> {
-        let mut current = self.agent_model_overrides.clone();
-        if let Ok(path) = path(&self.id)
-            && path.exists()
-            && let Ok(saved) = crate::storage::read_json::<AgentModelOverrides>(&path)
-        {
-            current = saved;
-        }
+        let current = path(&self.id)
+            .ok()
+            .and_then(|path| read_saved(&path))
+            .unwrap_or_else(|| self.agent_model_overrides.clone());
         current.get(target).cloned().or(global)
     }
 }
@@ -71,6 +87,83 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_temp_home(f: impl FnOnce(&std::path::Path)) {
+        let _lock = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(temp.path())));
+        if let Some(previous) = previous {
+            crate::env::set_var("JCODE_HOME", previous);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn override_writes_keep_transcript_backup_intact() {
+        with_temp_home(|_| {
+            let mut session = Session::create_with_id("bak_owner".into(), None, None);
+            session.save_prepared().unwrap();
+            let transcript_backup = super::super::storage_paths::session_path("bak_owner")
+                .unwrap()
+                .with_extension("bak");
+            // Stand-in for the snapshot backup written by transcript saves.
+            std::fs::write(&transcript_backup, b"transcript backup").unwrap();
+            let before = std::fs::read(&transcript_backup).unwrap();
+            for model in ["a", "b", "c"] {
+                session
+                    .set_agent_model_override("swarm", Some(model.into()))
+                    .unwrap();
+            }
+            assert_eq!(
+                std::fs::read(&transcript_backup).unwrap(),
+                before,
+                "override writes must not replace the transcript backup"
+            );
+            assert!(
+                path("bak_owner").unwrap().with_extension("bak").exists(),
+                "override file keeps its own backup"
+            );
+        });
+    }
+
+    #[test]
+    fn corrupt_override_file_without_backup_does_not_block_session() {
+        with_temp_home(|_| {
+            let mut session = Session::create_with_id("corrupt_meta".into(), None, None);
+            session.save_prepared().unwrap();
+            let meta = path("corrupt_meta").unwrap();
+            std::fs::write(&meta, b"{ not json").unwrap();
+            let _ = std::fs::remove_file(meta.with_extension("bak"));
+
+            let mut loaded = Session::load("corrupt_meta").expect("load must not fail");
+            assert!(loaded.agent_model_overrides.is_empty());
+            assert!(Session::load_startup_stub("corrupt_meta").is_ok());
+            assert!(Session::load_for_remote_startup("corrupt_meta").is_ok());
+            loaded.save_prepared().expect("save must not fail");
+            assert_eq!(
+                loaded.effective_agent_model("swarm", Some("global".into())),
+                Some("global".into())
+            );
+            // An explicit write replaces the damaged file.
+            loaded
+                .set_agent_model_override("swarm", Some("fresh".into()))
+                .unwrap();
+            assert_eq!(
+                Session::load("corrupt_meta")
+                    .unwrap()
+                    .agent_model_overrides
+                    .get("swarm")
+                    .map(String::as_str),
+                Some("fresh")
+            );
+        });
+    }
 
     #[test]
     fn session_agent_models_isolate_clear_inherit_and_resume() {
