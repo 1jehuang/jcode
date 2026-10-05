@@ -982,6 +982,13 @@ fn test_side_panel_button_close_stays_closed_after_split_view_refresh() {
 fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, _) = make_edit_badge_test_app(30);
+    // The File diff cache is process-global and keyed by path and message
+    // index. Sibling tests render shorter `demo.txt` edits at the same index,
+    // so use a path of our own to always render this 30-line diff.
+    if let Some(tool) = app.display_messages[1].tool_data.as_mut() {
+        tool.input["file_path"] = serde_json::json!("side-close-file-diff.txt");
+    }
+    app.bump_display_messages_version();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diff_mode = crate::config::DiffDisplayMode::File;
     app.side_panel = test_side_panel_snapshot("plan", "Plan");
