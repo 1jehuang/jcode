@@ -21,16 +21,17 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
 
 /// Hint for an error response. Some providers send 429 for an outage of
 /// their own upstream ("The model provider is temporarily unavailable"),
-/// which is not the caller's rate limit: name the outage instead.
+/// which is not the caller's rate limit: name the outage instead. A local
+/// proxy relaying that outage gets the same hint, since the proxy is up.
 fn response_hint(status: u16, body: &str, api_base: &str, model: &str) -> &'static str {
-    if status == 429
-        && is_provider_overload_message(&body.to_lowercase())
-        && !body.to_lowercase().contains("rate limit")
-    {
-        return http_status_hint(503, api_base, model);
+    let lower = body.to_lowercase();
+    if status == 429 && is_provider_overload_message(&lower) && !lower.contains("rate limit") {
+        return PROVIDER_OUTAGE_HINT;
     }
     http_status_hint(status, api_base, model)
 }
+
+const PROVIDER_OUTAGE_HINT: &str = "Hint: the provider is overloaded or having a temporary server problem, not a network problem. jcode already retried; try again shortly or switch to another provider with /model.";
 
 /// Hint for a request the server answered with an error status. The network
 /// is working (a response came back), so connectivity advice would mislead:
@@ -55,9 +56,7 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
         }
         // The provider answered, so this is server-side overload or failure,
         // not connectivity (#1596). These are retried before surfacing.
-        500..=599 if !is_local => {
-            "Hint: the provider is overloaded or having a temporary server problem, not a network problem. jcode already retried; try again shortly or switch to another provider with /model."
-        }
+        500..=599 if !is_local => PROVIDER_OUTAGE_HINT,
         _ => endpoint_hint,
     }
 }
@@ -1008,6 +1007,10 @@ mod tests {
         let hint = response_hint(429, outage, api, "glm-5.3");
         assert!(hint.contains("temporary server problem"), "{hint}");
         assert!(!hint.contains("rate limited"), "{hint}");
+        // Through a local proxy (127.0.0.1:8317) it is the same outage, not
+        // a local server that is down.
+        let via_proxy = response_hint(429, outage, "http://127.0.0.1:8317/v1", "glm-5.3");
+        assert_eq!(via_proxy, PROVIDER_OUTAGE_HINT);
         // A real rate limit keeps the rate-limit hint.
         let limited = r#"{"error":"Rate limit exceeded. Too many requests per minute."}"#;
         assert_eq!(response_hint(429, limited, api, "glm-5.3"), RATE_LIMIT_HINT);
