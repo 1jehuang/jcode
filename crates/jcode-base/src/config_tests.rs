@@ -1759,7 +1759,7 @@ fn named_provider_model_reasoning_effort_is_saved_per_model() {
         .expect("save existing");
     Config::set_named_provider_model_reasoning_effort("custom", "gpt-5.5", Some("low"))
         .expect("save new");
-    let saved = Config::load_from_file_strict().unwrap().unwrap();
+    let saved: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     let profile = &saved.providers["Custom"];
     assert_eq!(profile.models.len(), 2);
     assert_eq!(profile.models[0].reasoning, Some(true));
