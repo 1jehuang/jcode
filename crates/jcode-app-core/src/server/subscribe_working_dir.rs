@@ -1,33 +1,48 @@
-use super::client_state::{handle_get_history, spawn_model_prefetch_update};
 use super::{
-    ClientConnectionInfo, ClientDebugState, FileTouchService, SessionInterruptQueues, SwarmEvent,
-    SwarmMember, SwarmState, VersionedPlan, broadcast_swarm_status, fanout_live_client_event,
-    persist_swarm_state_for, register_background_tool_signal, register_session_event_sender,
-    register_session_interrupt_queue, remove_background_tool_signal, remove_plan_participant,
+    ClientConnectionInfo, FileTouchService, SessionInterruptQueues, SwarmEvent, SwarmMember,
+    SwarmState, VersionedPlan, broadcast_swarm_status, fanout_live_client_event,
+    persist_swarm_state_for, remove_background_tool_signal, remove_plan_participant,
     remove_session_channel_subscriptions, remove_session_from_swarm,
-    remove_session_interrupt_queue, rename_background_tool_signal, rename_plan_participant,
-    rename_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_session,
+    remove_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_session,
     unregister_session_event_sender, update_member_status,
 };
 use crate::agent::Agent;
-use crate::message::ContentBlock;
 use crate::protocol::{NotificationType, ServerEvent};
-use crate::provider::Provider;
 use crate::tool::Registry;
-use crate::transport::WriteHalf;
-use anyhow::Result;
 use futures::FutureExt;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use super::client_session::{
     ChannelSubscriptions, SessionAgents, ensure_client_swarm_member, mark_remote_reload_started,
     session_working_dir_for_client,
 };
+
+/// Record a client event that could not be delivered, instead of discarding the failure.
+///
+/// A closed receiver means the client disconnected, which is routine and not worth a
+/// warning. It is still worth a debug line: these events are load-bearing, and losing one
+/// leaves the client with no way to learn it happened. Losing `SessionId` means a remote
+/// client cannot reattach; losing `Done` means the caller waits forever.
+///
+/// Returns whether the event was delivered, so callers and tests can observe delivery
+/// instead of assuming it.
+fn notify_client<T>(client_event_tx: &mpsc::UnboundedSender<T>, event: T, what: &str) -> bool {
+    match client_event_tx.send(event) {
+        Ok(()) => true,
+        Err(err) => {
+            crate::logging::debug(&format!(
+                "notify_client: {} undeliverable ({}); the client has disconnected",
+                what, err
+            ));
+            false
+        }
+    }
+}
 
 pub(super) fn effective_subscribe_working_dir(
     current: Option<&str>,
@@ -492,16 +507,20 @@ pub(super) async fn handle_subscribe(
                 if let Some(new_id) = new_coordinator.clone() {
                     let members = swarm_members.read().await;
                     if let Some(member) = members.get(&new_id) {
-                        let _ = member.event_tx.send(ServerEvent::Notification {
-                            from_session: new_id.clone(),
-                            from_name: member.friendly_name.clone(),
-                            notification_type: NotificationType::Message {
-                                scope: Some("swarm".to_string()),
-                                channel: None,
-                                tldr: None,
+                        notify_client(
+                            &member.event_tx,
+                            ServerEvent::Notification {
+                                from_session: new_id.clone(),
+                                from_name: member.friendly_name.clone(),
+                                notification_type: NotificationType::Message {
+                                    scope: Some("swarm".to_string()),
+                                    channel: None,
+                                    tldr: None,
+                                },
+                                message: "You are now the coordinator for this swarm.".to_string(),
                             },
-                            message: "You are now the coordinator for this swarm.".to_string(),
-                        });
+                            "swarm member notification",
+                        );
                     }
                 }
             }
@@ -612,10 +631,14 @@ pub(super) async fn handle_subscribe(
     // no other source, and without it a dropped connection cannot reattach:
     // the next Subscribe carries no `target_session_id`, so the server hands
     // it a brand-new session and the in-flight turn becomes unreachable.
-    let _ = client_event_tx.send(ServerEvent::SessionId {
-        session_id: client_session_id.to_string(),
-    });
-    let _ = client_event_tx.send(ServerEvent::Done { id });
+    notify_client(
+        client_event_tx,
+        ServerEvent::SessionId {
+            session_id: client_session_id.to_string(),
+        },
+        "SessionId",
+    );
+    notify_client(client_event_tx, ServerEvent::Done { id }, "Done");
     prewarm_idle_agent(agent);
 }
 
@@ -700,13 +723,17 @@ pub(super) async fn handle_reload(
         // Tell the requester this was a deliberate no-op (not a silent success)
         // so callers like `jcode server reload` can report "already up to date"
         // distinctly from an actual reload.
-        let _ = client_event_tx.send(ServerEvent::ReloadProgress {
-            step: "skip".to_string(),
-            message: "Server already running the newest binary; no reload needed.".to_string(),
-            success: Some(true),
-            output: None,
-        });
-        let _ = client_event_tx.send(ServerEvent::Done { id });
+        notify_client(
+            client_event_tx,
+            ServerEvent::ReloadProgress {
+                step: "skip".to_string(),
+                message: "Server already running the newest binary; no reload needed.".to_string(),
+                success: Some(true),
+                output: None,
+            },
+            "ReloadProgress",
+        );
+        notify_client(client_event_tx, ServerEvent::Done { id }, "Done");
         return;
     }
 
@@ -751,7 +778,11 @@ pub(super) async fn handle_reload(
         .await;
     }
     if delivered == 0 {
-        let _ = client_event_tx.send(ServerEvent::Reloading { new_socket: None });
+        notify_client(
+            client_event_tx,
+            ServerEvent::Reloading { new_socket: None },
+            "Reloading",
+        );
     }
 
     let hash = jcode_build_meta::git_hash().to_string();
@@ -768,7 +799,7 @@ pub(super) async fn handle_reload(
         delivered
     ));
 
-    let _ = client_event_tx.send(ServerEvent::Done { id });
+    notify_client(client_event_tx, ServerEvent::Done { id }, "Done");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -903,8 +934,19 @@ fn current_working_dir(agent: &Arc<Mutex<Agent>>, session_id: &str) -> Option<St
             ));
         }
     }
-    agent
-        .try_lock()
-        .ok()
-        .and_then(|guard| guard.working_dir().map(str::to_string))
+    let guard = match agent.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            crate::logging::debug(&format!(
+                "current_working_dir: agent {} is busy; falling back to the client's report",
+                session_id
+            ));
+            return None;
+        }
+    };
+    guard.working_dir().map(str::to_string)
 }
+
+#[cfg(test)]
+#[path = "subscribe_working_dir_tests.rs"]
+mod subscribe_working_dir_tests;

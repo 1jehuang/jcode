@@ -3,17 +3,16 @@
 use super::client_state::{handle_get_history, spawn_model_prefetch_update};
 use super::{
     ClientConnectionInfo, ClientDebugState, FileTouchService, SessionInterruptQueues, SwarmEvent,
-    SwarmMember, SwarmState, VersionedPlan, broadcast_swarm_status, fanout_live_client_event,
-    persist_swarm_state_for, register_background_tool_signal, register_session_event_sender,
+    SwarmMember, SwarmState, VersionedPlan, persist_swarm_state_for,
+    register_background_tool_signal, register_session_event_sender,
     register_session_interrupt_queue, remove_background_tool_signal, remove_plan_participant,
-    remove_session_channel_subscriptions, remove_session_from_swarm,
-    remove_session_interrupt_queue, rename_background_tool_signal, rename_plan_participant,
-    rename_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_session,
-    unregister_session_event_sender, update_member_status,
+    remove_session_channel_subscriptions, remove_session_interrupt_queue,
+    rename_background_tool_signal, rename_plan_participant, rename_session_interrupt_queue,
+    send_swarm_plan_to_session, swarm_id_for_session, update_member_status,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
-use crate::protocol::{NotificationType, ServerEvent};
+use crate::protocol::ServerEvent;
 use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::WriteHalf;
@@ -21,14 +20,13 @@ use anyhow::Result;
 use futures::FutureExt;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 use super::subscribe_working_dir::{
     cleanup_detached_source_session_if_unused, rename_swarm_member_session,
-    subscribe_working_dir_replacement,
 };
 pub(super) type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 pub(super) type ChannelSubscriptions =
