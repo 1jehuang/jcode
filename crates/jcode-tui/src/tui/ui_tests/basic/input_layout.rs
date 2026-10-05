@@ -1,5 +1,10 @@
 #[test]
 fn first_prompt_preserves_welcome_header_spacing() {
+    // Hold the env lock (before the render lock, matching the env-then-render
+    // order) so a sibling test's JCODE_IDLE_ANIMATION override cannot turn the
+    // idle donut on for the welcome frame only.
+    let _env = crate::storage::lock_test_env();
+    crate::config::invalidate_config_cache();
     let _lock = viewport_snapshot_test_lock();
     for (width, height) in [(80, 40), (100, 60), (60, 80)] {
         for centered in [false, true] {
@@ -30,7 +35,7 @@ fn first_prompt_preserves_welcome_header_spacing() {
                     .lines()
                     .position(|line| line.contains("/model to switch")),
                 Some(header_y),
-                "submitting must not jump the transcript to the top: {submitted}"
+                "submitting must not jump the transcript to the top ({width}x{height} centered={centered}):\nWELCOME:\n{welcome}\nSUBMITTED:\n{submitted}"
             );
             let prompt_y = submitted
                 .lines()
@@ -61,7 +66,8 @@ fn first_prompt_stays_visible_with_widgets_during_processing_at_47x51() {
                 centered_mode: centered,
                 chat_native_scrollbar: scrollbar,
                 info_widget_data: info_widget::InfoWidgetData {
-                    model: Some(WIDGET.into()),
+                    model: Some("gpt-5.6-sol".into()),
+                    session_name: Some(WIDGET.into()),
                     reasoning_effort: Some("high".into()),
                     context_limit: Some(256_000),
                     observed_context_tokens: Some(1_000),

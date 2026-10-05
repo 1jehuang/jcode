@@ -1,25 +1,22 @@
+use super::frame::{self, Framed};
 use super::{BackgroundInfo, InfoWidgetData, SwarmInfo, truncate_smart};
 use crate::protocol::SwarmMemberStatus;
 use crate::tui::color_support::rgb;
 use ratatui::prelude::*;
+use unicode_width::UnicodeWidthStr;
 
-pub(super) fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+pub(super) fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let Some(info) = &data.swarm_info else {
-        return Vec::new();
+        return Framed::default();
     };
 
-    // Dock mode: this session manages agents, render the compact two-line
-    // summary (agents tally + task-graph node bar).
+    // Dock mode: this session manages agents.
     if !info.managed_members.is_empty() {
-        return crate::tui::info_widget::swarm_gallery::render_swarm_compact_lines(
-            &info.managed_members,
-            info.plan_progress,
-            inner.width as usize,
-            inner.height as usize,
-        );
+        return render_swarm_dock(info, inner);
     }
 
-    let mut lines: Vec<Line> = vec![render_swarm_stats_line(info)];
+    let title = render_swarm_stats_line(info);
+    let mut lines: Vec<Line> = Vec::new();
 
     if info.members.is_empty()
         && let Some(status) = &info.subagent_status
@@ -45,15 +42,27 @@ pub(super) fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         }
     }
 
-    lines
+    Framed::body(lines).title(title)
 }
 
-pub(super) fn render_background_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Line<'static>> {
+/// Border layout: `⏳ Background · 3 running` top-left, task rows in the body,
+/// `+N more` bottom-left.
+pub(super) fn render_background_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let Some(info) = &data.background_info else {
-        return Vec::new();
+        return Framed::default();
     };
-
-    render_background_lines(info, inner.width as usize)
+    let Some(summary) = background_summary(info) else {
+        return Framed::default();
+    };
+    let (rows, hidden) = background_task_rows(info, inner.width as usize, "• ");
+    let mut framed = Framed::body(rows).title(Line::from(vec![
+        Span::styled("⏳ ", Style::default().fg(rgb(180, 140, 255))),
+        frame::label(summary),
+    ]));
+    if hidden > 0 {
+        framed = framed.footer(frame::more(hidden));
+    }
+    framed
 }
 
 pub(super) fn render_background_compact(info: &BackgroundInfo) -> Vec<Line<'static>> {
@@ -148,8 +157,30 @@ fn render_background_lines(info: &BackgroundInfo, width: usize) -> Vec<Line<'sta
         Span::styled("⏳ ", Style::default().fg(rgb(180, 140, 255))),
         Span::styled(summary, Style::default().fg(rgb(160, 160, 170))),
     ])];
+    let (rows, hidden) = background_task_rows(info, width, "  • ");
+    lines.extend(rows);
+    if hidden > 0 {
+        lines.push(Line::from(vec![
+            Span::styled("   ", Style::default().fg(rgb(100, 100, 110))),
+            Span::styled(
+                format!("+{} more", hidden),
+                Style::default().fg(rgb(140, 140, 150)),
+            ),
+        ]));
+    }
+    lines
+}
 
-    let row_width = width.saturating_sub(4).max(12);
+/// Up to three running-task rows plus how many were left out.
+fn background_task_rows(
+    info: &BackgroundInfo,
+    width: usize,
+    bullet: &'static str,
+) -> (Vec<Line<'static>>, usize) {
+    let mut lines = Vec::new();
+    let row_width = width
+        .saturating_sub(unicode_width::UnicodeWidthStr::width(bullet))
+        .max(12);
     for (index, task) in info.running_tasks.iter().take(3).enumerate() {
         let detail = if index == 0 {
             info.progress_detail.as_deref()
@@ -162,23 +193,12 @@ fn render_background_lines(info: &BackgroundInfo, width: usize) -> Vec<Line<'sta
             truncate_smart(task, row_width)
         };
         lines.push(Line::from(vec![
-            Span::styled("  • ", Style::default().fg(rgb(120, 120, 130))),
+            Span::styled(bullet, Style::default().fg(rgb(120, 120, 130))),
             Span::styled(row_text, Style::default().fg(rgb(180, 180, 190))),
         ]));
     }
 
-    let hidden = info.running_tasks.len().saturating_sub(3);
-    if hidden > 0 {
-        lines.push(Line::from(vec![
-            Span::styled("   ", Style::default().fg(rgb(100, 100, 110))),
-            Span::styled(
-                format!("+{} more", hidden),
-                Style::default().fg(rgb(140, 140, 150)),
-            ),
-        ]));
-    }
-
-    lines
+    (lines, info.running_tasks.len().saturating_sub(3))
 }
 
 fn background_summary(info: &BackgroundInfo) -> Option<String> {
@@ -187,4 +207,247 @@ fn background_summary(info: &BackgroundInfo) -> Option<String> {
     }
 
     Some(format!("Background · {} running", info.running_count))
+}
+
+/// Most agents the dock lists before collapsing the rest into the footer.
+const DOCK_MAX_ROWS: usize = 6;
+
+fn dock_status_rank(status: &str) -> u8 {
+    match status {
+        "blocked" | "waiting_network" | "failed" | "crashed" => 0,
+        "running" | "streaming" | "thinking" => 1,
+        "ready" | "spawned" => 2,
+        _ => 3, // completed, done, stopped
+    }
+}
+
+fn dock_is_finished(status: &str) -> bool {
+    dock_status_rank(status) == 3
+}
+
+fn dock_is_attention(status: &str) -> bool {
+    dock_status_rank(status) == 0
+}
+
+/// What the agent is doing, in the fewest words available: the error or
+/// blocker when it needs attention, otherwise the latest status detail, the
+/// last line it streamed, or the task it was spawned for.
+fn dock_activity(member: &SwarmMemberStatus) -> String {
+    let nonempty = |s: &Option<String>| {
+        s.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let tail = member
+        .output_tail
+        .as_deref()
+        .and_then(|t| t.lines().rev().map(str::trim).find(|l| !l.is_empty()))
+        .map(str::to_string);
+    let detail = nonempty(&member.detail);
+    let task = nonempty(&member.task_label);
+    let picked = if dock_is_finished(&member.status) {
+        task.or(detail)
+    } else if dock_is_attention(&member.status) {
+        detail.or(task).or(tail)
+    } else {
+        detail.or(tail).or(task)
+    };
+    picked.unwrap_or_else(|| member.status.clone())
+}
+
+/// Swarm dock. Border layout: `🐝 Swarm 2/4 active` top-left, attention count
+/// top-right, overflow bottom-left, task-graph meter bottom-right. Body: one
+/// row per agent, attention first, then working, idle, and finished.
+///
+/// ```text
+/// ╭ 🐝 Swarm 2/4 active ──────────── ⚠ 1 ╮
+/// │✗ reviewer  cargo test failed: 3 …    │
+/// │⠋ builder   wiring commits widget  2/5│
+/// │⠋ ★ lead    waiting on reviewer    1/3│
+/// │✓ research  map the swarm code      5m│
+/// ╰ +2 more ──────────── nodes 4/9 ▰▰▰▱▱ ╯
+/// ```
+fn render_swarm_dock(info: &SwarmInfo, inner: Rect) -> Framed {
+    use jcode_tui_render::swarm_gallery::{humanize_age, status_accent, status_glyph};
+    let members = &info.managed_members;
+    let width = inner.width as usize;
+
+    let mut order: Vec<&SwarmMemberStatus> = members.iter().collect();
+    order.sort_by(|a, b| {
+        dock_status_rank(&a.status)
+            .cmp(&dock_status_rank(&b.status))
+            .then_with(|| {
+                let coord = |m: &SwarmMemberStatus| m.role.as_deref() != Some("coordinator");
+                coord(a).cmp(&coord(b))
+            })
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+
+    let active = members
+        .iter()
+        .filter(|m| jcode_tui_render::swarm_gallery::is_active_status(&m.status))
+        .count();
+    let attention = members
+        .iter()
+        .filter(|m| dock_is_attention(&m.status))
+        .count();
+    let finished = members
+        .iter()
+        .filter(|m| dock_is_finished(&m.status))
+        .count();
+
+    let rows = (inner.height as usize)
+        .clamp(1, DOCK_MAX_ROWS)
+        .min(order.len());
+    let shown = &order[..rows];
+
+    let name_w = shown
+        .iter()
+        .map(|m| {
+            let star = if m.role.as_deref() == Some("coordinator") {
+                2
+            } else {
+                0
+            };
+            UnicodeWidthStr::width(swarm_member_label(m).as_str()) + star
+        })
+        .max()
+        .unwrap_or(0)
+        .min(12);
+
+    let mut lines = Vec::with_capacity(rows);
+    for member in shown {
+        let accent = status_accent(&member.status);
+        let glyph = status_glyph(&member.status, info.spinner_frame);
+        let finished = dock_is_finished(&member.status);
+
+        // Working agents show todo progress; finished or idle ones show how
+        // long ago they last changed.
+        let right = match member.todo_progress {
+            Some((done, total)) if total > 0 && !finished => format!("{done}/{total}"),
+            _ => member
+                .status_age_secs
+                .map(humanize_age)
+                .filter(|a| a != "now")
+                .unwrap_or_default(),
+        };
+
+        let star = member.role.as_deref() == Some("coordinator");
+        let label_budget = name_w - if star { 2 } else { 0 };
+        let label = truncate_smart(&swarm_member_label(member), label_budget.max(1));
+        let label_pad = name_w
+            .saturating_sub(UnicodeWidthStr::width(label.as_str()) + if star { 2 } else { 0 });
+
+        // glyph + space + name + gap, then activity, then " right".
+        let right_w = UnicodeWidthStr::width(right.as_str());
+        let fixed = 2 + name_w + 2 + if right_w > 0 { right_w + 1 } else { 0 };
+        let activity_w = width.saturating_sub(fixed);
+
+        let mut spans = vec![Span::styled(
+            format!("{glyph} "),
+            Style::default().fg(accent),
+        )];
+        if star {
+            spans.push(Span::styled("★ ", Style::default().fg(rgb(255, 200, 100))));
+        }
+        spans.push(Span::styled(
+            format!("{label}{}  ", " ".repeat(label_pad)),
+            Style::default().fg(if finished {
+                rgb(130, 130, 140)
+            } else {
+                rgb(210, 210, 220)
+            }),
+        ));
+        let activity = if activity_w >= 4 {
+            truncate_smart(&dock_activity(member), activity_w)
+        } else {
+            String::new()
+        };
+        let activity_color = if dock_is_attention(&member.status) {
+            rgb(255, 170, 110)
+        } else if finished {
+            rgb(110, 110, 120)
+        } else {
+            rgb(160, 160, 170)
+        };
+        let activity_len = UnicodeWidthStr::width(activity.as_str());
+        spans.push(Span::styled(activity, Style::default().fg(activity_color)));
+        if right_w > 0 && activity_w >= 4 {
+            let pad = activity_w.saturating_sub(activity_len) + 1;
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(right, Style::default().fg(rgb(120, 120, 130))));
+        }
+        let line = Line::from(spans);
+        lines.push(if line.width() <= width {
+            line
+        } else {
+            frame::fit(&line, width).unwrap_or_default()
+        });
+    }
+
+    let mut title = vec![
+        Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
+        frame::label("Swarm "),
+    ];
+    if active > 0 {
+        title.push(Span::styled(
+            format!("{active}/{} active", members.len()),
+            Style::default().fg(rgb(255, 200, 100)),
+        ));
+    } else if finished == members.len() {
+        title.push(Span::styled(
+            format!("{finished} done"),
+            Style::default().fg(rgb(100, 200, 100)),
+        ));
+    } else {
+        title.push(frame::dim(format!("{} idle", members.len())));
+    }
+    let mut framed = Framed::body(lines).title(Line::from(title));
+
+    if attention > 0 {
+        framed = framed.title_right(Span::styled(
+            format!("⚠ {attention}"),
+            Style::default().fg(rgb(255, 170, 80)).bold(),
+        ));
+    }
+
+    let hidden = order.len() - rows;
+    if hidden > 0 {
+        framed = framed.footer(frame::more(hidden));
+    }
+
+    if let Some((done, running, total)) = info.plan_progress
+        && total > 0
+    {
+        framed = framed.footer_right(plan_meter(done, running, total));
+    }
+    framed
+}
+
+/// `nodes 4/9 ▰▰▰▰▱▱▱▱` with green done, amber running, dim remainder.
+fn plan_meter(done: u32, running: u32, total: u32) -> Line<'static> {
+    const CELLS: u32 = 8;
+    let done = done.min(total);
+    let running = running.min(total - done);
+    let done_c = (done * CELLS / total).max(u32::from(done > 0));
+    let run_c = (((done + running) * CELLS / total).saturating_sub(done_c))
+        .max(u32::from(running > 0))
+        .min(CELLS - done_c);
+    let rest = CELLS - done_c - run_c;
+    Line::from(vec![
+        frame::dim(format!("nodes {done}/{total} ")),
+        Span::styled(
+            "▰".repeat(done_c as usize),
+            Style::default().fg(rgb(100, 200, 100)),
+        ),
+        Span::styled(
+            "▰".repeat(run_c as usize),
+            Style::default().fg(rgb(255, 200, 100)),
+        ),
+        Span::styled(
+            "▱".repeat(rest as usize),
+            Style::default().fg(rgb(80, 80, 90)),
+        ),
+    ])
 }

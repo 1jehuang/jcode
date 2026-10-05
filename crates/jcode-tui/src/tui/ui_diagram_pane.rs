@@ -826,8 +826,8 @@ pub(crate) fn draw_pinned_diagram(
     ));
     title_parts.push(Span::styled(
         format!(
-            " {} side panel",
-            crate::tui::keybind::side_panel_toggle_key_label()
+            " {} hide",
+            crate::tui::keybind::diagram_pane_visibility_key_label()
         ),
         Style::default().fg(dim_color()),
     ));

@@ -775,7 +775,9 @@ pub fn format_usage_bar(percent: f32, width: usize) -> String {
     let filled = filled.min(width);
     let empty = width.saturating_sub(filled);
     let bar: String = "█".repeat(filled) + &"░".repeat(empty);
-    format!("{} {:.0}%", bar, percent)
+    // Right-align the number so the `%` (and any "· resets" suffix) lines up
+    // across rows with different percentages.
+    format!("{} {:>3.0}%", bar, percent)
 }
 
 fn provider_detail_lines(report: &jcode_usage_types::ProviderUsage) -> Vec<String> {
@@ -806,6 +808,12 @@ fn provider_detail_lines(report: &jcode_usage_types::ProviderUsage) -> Vec<Strin
     if !report.limits.is_empty() {
         lines.push("".to_string());
         lines.push("## Limits".to_string());
+        let name_width = report
+            .limits
+            .iter()
+            .map(|limit| limit.name.chars().count())
+            .max()
+            .unwrap_or(0);
         for limit in &report.limits {
             let reset = limit
                 .resets_at
@@ -814,10 +822,11 @@ fn provider_detail_lines(report: &jcode_usage_types::ProviderUsage) -> Vec<Strin
                 .map(|value| format!(" · resets in {}", value))
                 .unwrap_or_default();
             lines.push(format!(
-                "• {}  {}{}",
+                "• {:<width$} {}{}",
                 limit.name,
                 format_usage_bar(limit.usage_percent, 18),
-                reset
+                reset,
+                width = name_width
             ));
         }
     }
@@ -924,5 +933,41 @@ mod tests {
         assert!(details.contains("## Limits"));
         assert!(details.contains("5h"));
         assert!(details.contains("now"));
+    }
+
+    #[test]
+    fn limit_lines_align_bars_to_longest_name() {
+        let report = jcode_usage_types::ProviderUsage {
+            provider_name: "Cursor Pro".to_string(),
+            limits: vec![
+                jcode_usage_types::UsageLimit {
+                    name: "Included".to_string(),
+                    usage_percent: 27.0,
+                    resets_at: None,
+                },
+                jcode_usage_types::UsageLimit {
+                    name: "Auto".to_string(),
+                    usage_percent: 29.0,
+                    resets_at: None,
+                },
+                jcode_usage_types::UsageLimit {
+                    name: "API".to_string(),
+                    usage_percent: 2.0,
+                    resets_at: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let lines = provider_detail_lines(&report);
+        let bar_columns: Vec<usize> = lines
+            .iter()
+            .filter_map(|line| line.find(['█', '░']))
+            .collect();
+        assert_eq!(bar_columns.len(), 3);
+        assert!(
+            bar_columns.windows(2).all(|pair| pair[0] == pair[1]),
+            "bars must start at the same column, got {:?}",
+            bar_columns
+        );
     }
 }

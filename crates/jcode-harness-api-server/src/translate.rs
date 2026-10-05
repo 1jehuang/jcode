@@ -41,6 +41,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "cancel",
     "soft_interrupt",
     "cancel_soft_interrupts",
+    "background_tool",
     "clear",
     "rewind",
     "rewind_undo",
@@ -50,6 +51,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "set_reasoning_effort",
     "compact",
     "rename_session",
+    "set_session_saved",
     "get_runtime_info",
     "fork_session",
     "read_file",
@@ -184,6 +186,8 @@ pub struct BridgeState {
     /// a picker can mark the active entry.
     current_model: Option<String>,
     current_provider: Option<String>,
+    /// Credential the daemon resolved for the session (`oauth`/`api_key`).
+    current_credential: Option<String>,
     /// Reasoning effort last reported by the daemon, so identity events can
     /// carry it without a round trip.
     current_effort: Option<String>,
@@ -237,6 +241,8 @@ impl PersistedSessionMetadata {
         self.custom_title
             .as_deref()
             .and_then(Self::normalized_title)
+            // Bookmarks labelled before labels doubled as titles.
+            .or_else(|| self.save_label())
             .or_else(|| self.todo_title.as_deref().and_then(Self::normalized_title))
             .or_else(|| self.title.as_deref().and_then(Self::normalized_title))
     }
@@ -340,6 +346,8 @@ impl BridgeState {
                             | "clear"
                             | "prepare_disconnect"
                             | "notify_auth_changed"
+                            | "applet_action"
+                            | "close_applet"
                             | "invalidate_openai_usage"
                             | "invalidate_anthropic_usage"
                     )
@@ -748,6 +756,8 @@ impl BridgeState {
                             .map(|metadata| (id.clone(), metadata))
                     })
                     .collect();
+                let mut metadata = metadata;
+                Self::backfill_prompt_titles(&ids, &indexed_metadata, &mut metadata);
                 let metadata_loaded = list_started.elapsed();
                 for id in &ids {
                     if !self.session_dirs.contains_key(id)
@@ -1098,6 +1108,58 @@ impl BridgeState {
                 }
                 vec![Outbound::Legacy(rename)]
             }
+            "applet_action" | "close_applet" => {
+                let session_id = request["session_id"]
+                    .as_str()
+                    .filter(|sid| !sid.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| self.session_id.clone());
+                let instance = request["instance"].as_str().unwrap_or_default();
+                let (Some(session_id), false) = (session_id, instance.is_empty()) else {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "session_id and instance are required",
+                    );
+                };
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                let mut out = json!({
+                    "type": req,
+                    "id": id,
+                    "session_id": session_id,
+                    "instance": instance,
+                });
+                if req == "applet_action" {
+                    if !request["action"].is_object() {
+                        self.pending_simple.pop();
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            "applet_action requires an action object",
+                        );
+                    }
+                    out["action"] = request["action"].clone();
+                    out["state"] = request.get("state").cloned().unwrap_or(json!({}));
+                    if let Some(key) = request["source_key"].as_str() {
+                        out["source_key"] = json!(key);
+                    }
+                }
+                vec![Outbound::Legacy(out)]
+            }
+            "set_session_saved" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                let mut save = json!({
+                    "type": "set_session_saved",
+                    "id": id,
+                    "saved": request["saved"].as_bool().unwrap_or(true),
+                });
+                if let Some(label) = request["label"].as_str() {
+                    save["label"] = json!(label);
+                }
+                vec![Outbound::Legacy(save)]
+            }
             "rewind_undo" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
@@ -1108,6 +1170,13 @@ impl BridgeState {
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
                 vec![Outbound::Legacy(
                     json!({"type": "cancel_soft_interrupts", "id": id}),
+                )]
+            }
+            "background_tool" => {
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(
+                    json!({"type": "background_tool", "id": id}),
                 )]
             }
             "detach_session" => {
@@ -1174,6 +1243,22 @@ impl BridgeState {
             session_id: event["session_id"].as_str()?.to_string(),
             continuation_message,
             reconnect_notice,
+        }))
+    }
+
+    fn applet_frame(session_id: &str, snapshot: &Value) -> Option<ServerFrame> {
+        if session_id.is_empty() {
+            return None;
+        }
+        // Missing means empty; malformed must not clear a valid snapshot.
+        let snapshot = if snapshot.is_null() {
+            jcode_harness_api::jcode_applet_types::AgentApplets::default()
+        } else {
+            serde_json::from_value(snapshot.clone()).ok()?
+        };
+        Some(ServerFrame::event(ApiEvent::AppletState {
+            session_id: session_id.to_string(),
+            snapshot,
         }))
     }
 
@@ -1398,6 +1483,7 @@ impl BridgeState {
                             self.current_model = None;
                             self.current_provider = None;
                             self.current_effort = None;
+                            self.current_credential = None;
                             self.model_catalog_loaded = false;
                         }
                         if self.session_id.as_deref() != Some(&session_id) {
@@ -1467,6 +1553,9 @@ impl BridgeState {
                     )];
                     if let Some(snapshot) = event.get("side_panel") {
                         frames.extend(Self::side_panel_frame(&session_id, snapshot));
+                    }
+                    if let Some(snapshot) = event.get("applets") {
+                        frames.extend(Self::applet_frame(&session_id, snapshot));
                     }
                     if fresh_activity {
                         frames.push(ServerFrame::event(ApiEvent::SessionStatus {
@@ -1573,6 +1662,17 @@ impl BridgeState {
                     _ => vec![],
                 }
             }
+            "applet_state" => {
+                let session_id = event["session_id"].as_str().or(self.session_id.as_deref());
+                match (session_id, event.get("snapshot")) {
+                    (Some(session_id), Some(snapshot)) if !snapshot.is_null() => {
+                        Self::applet_frame(session_id, snapshot)
+                            .into_iter()
+                            .collect()
+                    }
+                    _ => vec![],
+                }
+            }
             "side_pane_images" => vec![ServerFrame::event(ApiEvent::SidePaneImages {
                 session_id: event["session_id"]
                     .as_str()
@@ -1586,6 +1686,19 @@ impl BridgeState {
                 output: event["output"].as_u64().unwrap_or(0),
                 cache_read_input: event["cache_read_input"].as_u64(),
                 cache_creation_input: event["cache_creation_input"].as_u64(),
+            })],
+            "kv_cache_miss" => vec![ServerFrame::event(ApiEvent::KvCacheMiss {
+                session_id: session(self),
+                reason: event["reason"].as_str().unwrap_or("unknown").to_string(),
+                harness_caused: event["harness_caused"].as_bool().unwrap_or(false),
+                missed_tokens: event["missed_tokens"].as_u64().unwrap_or(0),
+                expected_tokens: event["expected_tokens"].as_u64().unwrap_or(0),
+                read_tokens: event["read_tokens"].as_u64().unwrap_or(0),
+                documented_cause: event["documented_cause"].as_str().map(str::to_string),
+                message: event["message"]
+                    .as_str()
+                    .unwrap_or("KV cache miss")
+                    .to_string(),
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
@@ -1770,6 +1883,10 @@ impl BridgeState {
                         event["session_id"].as_str().unwrap_or_default(),
                         &event["side_panel"],
                     ));
+                    frames.extend(Self::applet_frame(
+                        event["session_id"].as_str().unwrap_or_default(),
+                        &event["applets"],
+                    ));
                     return frames;
                 }
                 // The catalog probe rides the same `history` reply shape but
@@ -1852,6 +1969,7 @@ impl BridgeState {
                     .is_none_or(|sid| Some(sid) == self.session_id.as_deref())
                 {
                     frames.extend(Self::side_panel_frame(&session(self), &event["side_panel"]));
+                    frames.extend(Self::applet_frame(&session(self), &event["applets"]));
                 }
                 frames
             }
@@ -1880,11 +1998,19 @@ impl BridgeState {
                 if let Some(provider) = event["provider_name"].as_str() {
                     self.note_provider(provider);
                 }
+                self.note_credential(event);
+                // Newer daemons report the effort the switched-to model runs
+                // with (`null` when the switch cleared it). Older ones omit
+                // the key, so the cached value is kept as before.
+                if event.get("reasoning_effort").is_some() {
+                    self.current_effort = event["reasoning_effort"].as_str().map(str::to_string);
+                }
                 let info = ApiEvent::ModelInfo {
                     session_id: session(self),
                     provider: self.current_provider.clone(),
                     model: self.current_model.clone(),
                     reasoning_effort: self.current_effort.clone(),
+                    auth_method: self.current_credential.clone(),
                 };
                 // Both a reply and a broadcast: the caller needs its request
                 // resolved, and every other client watching the session needs
@@ -1901,13 +2027,14 @@ impl BridgeState {
                 let id = event["id"].as_u64().unwrap_or(0);
                 // Remember the new effort even when the change was requested by
                 // another client, so later identity events stay truthful.
-                let changed = event["error"].as_str().is_none()
-                    && event["effort"].as_str().is_some_and(|effort| {
-                        let effort = Some(effort.to_string());
-                        let moved = self.current_effort != effort;
-                        self.current_effort = effort;
-                        moved
-                    });
+                // A success without `effort` means the provider now runs with
+                // none (e.g. `none` normalised away), which is also a change.
+                let changed = event["error"].as_str().is_none() && {
+                    let effort = event["effort"].as_str().map(str::to_string);
+                    let moved = self.current_effort != effort;
+                    self.current_effort = effort;
+                    moved
+                };
                 // A successful change is also broadcast as identity, mirroring
                 // model_changed: every attached client needs to know the
                 // effort moved under it, not only the one that asked.
@@ -1917,6 +2044,7 @@ impl BridgeState {
                         provider: self.current_provider.clone(),
                         model: self.current_model.clone(),
                         reasoning_effort: self.current_effort.clone(),
+                        auth_method: self.current_credential.clone(),
                     })
                 });
                 let Some(api_id) = self.take_simple(id, SimpleKind::ReasoningEffort) else {
@@ -2206,6 +2334,7 @@ impl BridgeState {
         if let Some(provider) = event["provider_name"].as_str() {
             self.note_provider(provider);
         }
+        self.note_credential(event);
         if event.get("reasoning_effort").is_some() {
             self.current_effort = event["reasoning_effort"].as_str().map(str::to_string);
         }
@@ -2247,12 +2376,21 @@ impl BridgeState {
         self.current_provider = Some(provider.to_string());
     }
 
+    /// Remember the credential the daemon resolved, when the event says.
+    /// Older daemons omit the key, which keeps the last known value.
+    fn note_credential(&mut self, event: &Value) {
+        if let Some(credential) = event.get("resolved_credential") {
+            self.current_credential = credential.as_str().map(str::to_string);
+        }
+    }
+
     fn runtime_info(&self) -> ApiEvent {
         ApiEvent::RuntimeInfo {
             session_id: self.session_id.clone().unwrap_or_default(),
             provider: self.current_provider.clone(),
             model: self.current_model.clone(),
             reasoning_effort: self.current_effort.clone(),
+            auth_method: self.current_credential.clone(),
             routes: self.available_routes.clone(),
         }
     }
@@ -2266,6 +2404,7 @@ impl BridgeState {
                 .as_str()
                 .map(str::to_string)
                 .or_else(|| self.current_effort.clone()),
+            auth_method: self.current_credential.clone(),
         }
     }
 
@@ -2433,6 +2572,142 @@ impl BridgeState {
 
     fn recent_session_index_path() -> Option<std::path::PathBuf> {
         Some(Self::jcode_home()?.join("session-metadata-v1.sqlite3"))
+    }
+
+    /// Name sessions recorded before first-prompt titles existed. Each
+    /// session is derived once and cached in the shared index (an empty
+    /// value marks "no usable prompt"). The work is time-boxed per request,
+    /// newest first, so a large backlog is spread across list calls.
+    fn backfill_prompt_titles(
+        ids: &BTreeSet<String>,
+        indexed: &BTreeMap<String, RecentSessionIndexEntry>,
+        metadata: &mut BTreeMap<String, PersistedSessionMetadata>,
+    ) {
+        const BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let mut pending: Vec<_> = ids
+            .iter()
+            .filter_map(|id| indexed.get(id))
+            .filter(|entry| entry.generated_title.is_none())
+            .collect();
+        pending.sort_by_key(|entry| {
+            std::cmp::Reverse(entry.last_active_at_ms.unwrap_or(entry.updated_at_ms))
+        });
+        for entry in pending {
+            if started.elapsed() > BUDGET {
+                break;
+            }
+            let id = &entry.session_id;
+            let title = Self::first_prompt_title(id);
+            // Empty marks "no usable prompt" so the record is not rescanned.
+            if let Some(path) = Self::recent_session_index_path()
+                && let Ok(connection) = Connection::open(path)
+            {
+                let _ = connection.execute(
+                    "UPDATE recent_sessions SET generated_title = ?2
+                     WHERE session_id = ?1 AND generated_title IS NULL",
+                    params![id, title.clone().unwrap_or_default()],
+                );
+            }
+            if let Some(title) = title
+                && let Some(value) = metadata.get_mut(id)
+            {
+                value.title = Some(title);
+            }
+        }
+    }
+
+    /// Title derived from a session's first visible user prompt, matching the
+    /// runtime's own fallback. Streams the record so only that prompt's text
+    /// is materialized, then falls back to the append journal.
+    fn first_prompt_title(session_id: &str) -> Option<String> {
+        use serde::de::{IgnoredAny, SeqAccess, Visitor};
+
+        #[derive(Deserialize)]
+        struct LiteBlock {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            text: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct LiteMessage {
+            role: String,
+            #[serde(default)]
+            display_role: Option<IgnoredAny>,
+            #[serde(default)]
+            content: Vec<LiteBlock>,
+        }
+        impl LiteMessage {
+            fn title(&self) -> Option<String> {
+                if self.role != "user" || self.display_role.is_some() {
+                    return None;
+                }
+                let mut texts = self
+                    .content
+                    .iter()
+                    .filter(|block| block.kind == "text")
+                    .filter_map(|block| block.text.as_deref());
+                let first = texts.next()?;
+                if first.trim_start().starts_with("<system-reminder>") {
+                    return None;
+                }
+                std::iter::once(first)
+                    .chain(texts)
+                    .find_map(jcode_session_types::prompt_title)
+            }
+        }
+        #[derive(Default)]
+        struct FirstPrompt(Option<String>);
+        impl<'de> Deserialize<'de> for FirstPrompt {
+            fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+                struct Scan;
+                impl<'de> Visitor<'de> for Scan {
+                    type Value = FirstPrompt;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("a message list")
+                    }
+                    fn visit_seq<A: SeqAccess<'de>>(
+                        self,
+                        mut seq: A,
+                    ) -> Result<FirstPrompt, A::Error> {
+                        let mut found = None;
+                        while found.is_none() {
+                            match seq.next_element::<LiteMessage>()? {
+                                Some(message) => found = message.title(),
+                                None => return Ok(FirstPrompt(None)),
+                            }
+                        }
+                        while seq.next_element::<IgnoredAny>()?.is_some() {}
+                        Ok(FirstPrompt(found))
+                    }
+                }
+                de.deserialize_seq(Scan)
+            }
+        }
+        #[derive(Deserialize)]
+        struct Record {
+            #[serde(default)]
+            messages: FirstPrompt,
+        }
+        #[derive(Deserialize)]
+        struct JournalEntry {
+            #[serde(default)]
+            append_messages: FirstPrompt,
+        }
+
+        let path = Self::session_record_path(session_id)?;
+        let file = std::fs::File::open(&path).ok()?;
+        let mut de = serde_json::Deserializer::from_reader(std::io::BufReader::new(file));
+        if let Some(title) = Record::deserialize(&mut de).ok().and_then(|r| r.messages.0) {
+            return Some(title);
+        }
+        let journal = path.with_file_name(format!("{session_id}.journal.jsonl"));
+        let reader = std::io::BufReader::new(std::fs::File::open(journal).ok()?);
+        std::io::BufRead::lines(reader)
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str::<JournalEntry>(&line).ok())
+            .find_map(|entry| entry.append_messages.0)
     }
 
     fn recent_session_index_entries() -> Vec<RecentSessionIndexEntry> {

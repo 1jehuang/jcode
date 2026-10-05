@@ -1684,6 +1684,12 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if super::commands_cloud::parse_cloud_command(trimmed).is_some() {
+        let session_id = active_session_id(app);
+        super::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
+        return true;
+    }
+
     if trimmed == "/commit" {
         handle_commit_command_local(app);
         return true;
@@ -2857,6 +2863,18 @@ pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
 }
 
 pub(super) fn handle_dictation_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed == "/voice" {
+        app.toggle_voice_input();
+        return true;
+    }
+    if trimmed.starts_with("/voice ") {
+        let key = app.voice_input_key_label().unwrap_or("unbound").to_string();
+        app.push_display_message(DisplayMessage::error(format!(
+            "Usage: /voice (or {key}) starts recording, run it again to send, Esc cancels.\n\
+             Needs a Nari API key (NARI_API_KEY or ~/.config/jcode/nari.env)."
+        )));
+        return true;
+    }
     if trimmed == "/dictate" || trimmed == "/dictation" {
         app.handle_dictation_trigger();
         return true;

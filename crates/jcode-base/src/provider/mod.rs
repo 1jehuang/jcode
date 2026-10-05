@@ -629,6 +629,18 @@ impl MultiProvider {
         let clamped_messages = image_clamp::clamp_outbound_images(messages);
         let messages: &[Message] = clamped_messages.as_deref().unwrap_or(messages);
 
+        // Deferred definitions are only meaningful to providers with native
+        // deferred loading. Never let them reach a provider that would send
+        // them as ordinary eager tools (which would also defeat the point).
+        let eager_tools;
+        let tools: &[ToolDefinition] =
+            if !self.supports_deferred_tools() && tools.iter().any(|tool| tool.defer_loading) {
+                eager_tools = ToolDefinition::eager(tools);
+                &eager_tools
+            } else {
+                tools
+            };
+
         let active = self.active_provider();
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
@@ -1961,6 +1973,21 @@ impl Provider for MultiProvider {
         }
     }
 
+    fn supports_deferred_tools(&self) -> bool {
+        // Only first-party Anthropic and OpenAI Responses paths implement
+        // provider-native deferred loading. Every other route receives an
+        // eager-only tool list (see `complete_with_failover`).
+        match self.active_provider() {
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .is_some_and(|provider| provider.supports_deferred_tools()),
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .is_some_and(|provider| provider.supports_deferred_tools()),
+            _ => false,
+        }
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         self.spawn_anthropic_catalog_refresh_if_needed();
         self.spawn_openai_catalog_refresh_if_needed();
@@ -2441,10 +2468,9 @@ impl Provider for MultiProvider {
 
     fn service_tier(&self) -> Option<String> {
         match self.active_provider() {
-            ActiveProvider::Claude => {
-                self.anthropic_provider().and_then(|a| a.service_tier())
-            }
+            ActiveProvider::Claude => self.anthropic_provider().and_then(|a| a.service_tier()),
             ActiveProvider::OpenAI => self.openai_provider().and_then(|o| o.service_tier()),
+            ActiveProvider::Cursor => self.cursor_provider().and_then(|c| c.service_tier()),
             _ => None,
         }
     }
@@ -2459,8 +2485,12 @@ impl Provider for MultiProvider {
                 .openai_provider()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI provider not available"))?
                 .set_service_tier(service_tier),
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .ok_or_else(|| anyhow::anyhow!("Cursor provider not available"))?
+                .set_service_tier(service_tier),
             _ => Err(anyhow::anyhow!(
-                "Service tier switching is only supported for OpenAI models and Claude Opus 4.8"
+                "Service tier switching is only supported for OpenAI models, Cursor models, and Claude Opus 4.8"
             )),
         }
     }
@@ -2474,6 +2504,10 @@ impl Provider for MultiProvider {
             ActiveProvider::OpenAI => self
                 .openai_provider()
                 .map(|o| o.available_service_tiers())
+                .unwrap_or_default(),
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .map(|c| c.available_service_tiers())
                 .unwrap_or_default(),
             _ => vec![],
         }
@@ -2868,7 +2902,13 @@ impl Provider for MultiProvider {
             ActiveProvider::Copilot => None,
             ActiveProvider::Antigravity => None,
             ActiveProvider::Gemini => None,
-            ActiveProvider::Cursor => None,
+            // Cursor's AgentService keeps its bidirectional stream open until
+            // the MCP tool result is sent back over the same stream. Dropping
+            // the sender here made every Cursor tool call hang after the tool
+            // ran locally.
+            ActiveProvider::Cursor => self
+                .cursor_provider()
+                .and_then(|provider| provider.native_result_sender()),
             ActiveProvider::Bedrock => None,
             ActiveProvider::OpenRouter => None,
         }

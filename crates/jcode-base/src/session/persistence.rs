@@ -23,6 +23,112 @@ impl JournalReplayStats {
     }
 }
 
+/// Held (shared) for the duration of every session save. Shutdown takes it
+/// exclusively so `process::exit` cannot land between a checkpoint's snapshot
+/// write and its journal delete (#1632).
+static SAVES_IN_FLIGHT: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Block until no session save is in progress (or `timeout` elapses), then
+/// keep new saves from starting. Call right before exiting the process.
+/// Returns `true` when all in-flight saves finished in time.
+pub fn drain_saves_for_shutdown(timeout: std::time::Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match SAVES_IN_FLIGHT.try_write() {
+            Ok(guard) => {
+                // Leak the guard: saves stay blocked until the process exits.
+                std::mem::forget(guard);
+                return true;
+            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                std::mem::forget(poisoned.into_inner());
+                return true;
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+/// Makes journal replay idempotent with respect to the snapshot it is applied on.
+///
+/// A checkpoint writes the full snapshot and then deletes the journal. If the
+/// process dies between those two steps (SIGTERM during a container stop, for
+/// example), the next load replays a journal whose entries are already in the
+/// snapshot. Blindly extending would duplicate every journaled message, and a
+/// duplicated `tool_use`/`tool_result` run makes Anthropic reject every later
+/// request (#1632). Message ids are unique per session, so an entry whose
+/// messages are all already present is stale and is skipped entirely
+/// (including its metadata and side vectors, which the snapshot already holds).
+struct JournalReplayDedupe {
+    seen_message_ids: std::collections::HashSet<String>,
+    snapshot_updated_at: chrono::DateTime<Utc>,
+    /// Entries folded into the snapshot can only form a prefix of the
+    /// journal: once one entry is genuinely new, every later one is too.
+    in_stale_prefix: bool,
+    stale_entries: usize,
+    dropped_messages: usize,
+}
+
+impl JournalReplayDedupe {
+    fn new(session: &Session) -> Self {
+        Self {
+            seen_message_ids: session.messages.iter().map(|m| m.id.clone()).collect(),
+            snapshot_updated_at: session.updated_at,
+            in_stale_prefix: true,
+            stale_entries: 0,
+            dropped_messages: 0,
+        }
+    }
+
+    /// Returns `None` when the entry is already contained in the snapshot,
+    /// otherwise the entry with any already-present messages removed.
+    fn filter(&mut self, mut entry: SessionJournalEntry) -> Option<SessionJournalEntry> {
+        let stale = self.in_stale_prefix
+            && if entry.append_messages.is_empty() {
+                // Without messages there is no id to compare. Snapshots stamp
+                // `updated_at` at write time, so an entry written no later than the
+                // snapshot was folded into it.
+                entry.meta.updated_at <= self.snapshot_updated_at
+            } else {
+                entry
+                    .append_messages
+                    .iter()
+                    .all(|m| self.seen_message_ids.contains(&m.id))
+            };
+        if stale {
+            self.stale_entries += 1;
+            self.dropped_messages += entry.append_messages.len();
+            return None;
+        }
+        self.in_stale_prefix = false;
+        let before = entry.append_messages.len();
+        entry
+            .append_messages
+            .retain(|m| self.seen_message_ids.insert(m.id.clone()));
+        self.dropped_messages += before - entry.append_messages.len();
+        Some(entry)
+    }
+
+    fn found_duplicates(&self) -> bool {
+        self.stale_entries > 0 || self.dropped_messages > 0
+    }
+}
+
+/// Remove messages whose id already appeared earlier in the transcript,
+/// keeping the first copy. Repairs snapshots that were already written with a
+/// duplicated journal replay before replay became idempotent (#1632).
+fn dedupe_messages_by_id(messages: &mut Vec<super::StoredMessage>) -> usize {
+    let mut seen = std::collections::HashSet::with_capacity(messages.len());
+    let before = messages.len();
+    messages.retain(|m| seen.insert(m.id.clone()));
+    before - messages.len()
+}
+
 /// Attempt to recover complete entries from a journal line that failed the
 /// strict one-entry-per-line parse.
 ///
@@ -129,6 +235,19 @@ fn replay_journal_lines(
 }
 
 impl Session {
+    /// Replace every stored inline image with a text note, after a provider
+    /// deterministically rejected an image (#1712). Persisted on next save.
+    pub fn strip_all_images(&mut self) -> usize {
+        let mut contents: Vec<&mut Vec<crate::message::ContentBlock>> =
+            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let stripped = jcode_compaction_core::strip_all_images_in_contents(&mut contents);
+        if stripped > 0 {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+        stripped
+    }
+
     fn pre_wipe_backup_path(path: &Path, timestamp: i64) -> PathBuf {
         let file_name = path
             .file_name()
@@ -235,20 +354,40 @@ impl Session {
         let snapshot_start = Instant::now();
         let mut session: Session = storage::read_json(path)?;
         let snapshot_ms = snapshot_start.elapsed().as_millis();
+        let snapshot_duplicates = dedupe_messages_by_id(&mut session.messages);
         let journal_path = session_journal_path_from_snapshot(path);
         let journal_bytes = file_len_or_zero(&journal_path);
         let journal_start = Instant::now();
+        let mut dedupe = JournalReplayDedupe::new(&session);
         let replay_stats = replay_journal_lines(&journal_path, |entry| {
-            session.apply_journal_entry(entry);
+            if let Some(entry) = dedupe.filter(entry) {
+                session.apply_journal_entry(entry);
+            }
         })?;
         let journal_entries = replay_stats.entries;
         let journal_ms = journal_start.elapsed().as_millis();
         let finalize_start = Instant::now();
+        session.backfill_prompt_title();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
         if replay_stats.is_corrupt() {
             session.schedule_checkpoint_after_corrupt_journal(&journal_path);
+        }
+        if snapshot_duplicates > 0 || dedupe.found_duplicates() {
+            // Rewrite a clean snapshot (and drop the stale journal) on the next
+            // save so the repair is durable.
+            session.mark_messages_full_dirty();
+            crate::logging::event_warn(
+                "SESSION_PERSISTENCE",
+                vec![
+                    ("phase", "duplicate_messages_repaired".to_string()),
+                    ("session_id", session.id.clone()),
+                    ("snapshot_duplicates", snapshot_duplicates.to_string()),
+                    ("stale_journal_entries", dedupe.stale_entries.to_string()),
+                    ("journal_duplicates", dedupe.dropped_messages.to_string()),
+                ],
+            );
         }
         let finalize_ms = finalize_start.elapsed().as_millis();
         // Bulk scans of a large sessions directory can drive tens of thousands
@@ -323,18 +462,24 @@ impl Session {
         let snapshot: RemoteStartupSessionSnapshot = serde_json::from_reader(reader)?;
         let snapshot_ms = snapshot_start.elapsed().as_millis();
         let mut session = Self::session_from_remote_startup_snapshot(snapshot);
+        dedupe_messages_by_id(&mut session.messages);
         let journal_path = session_journal_path_from_snapshot(&path);
         let journal_bytes = file_len_or_zero(&journal_path);
         let journal_start = Instant::now();
         let mut journal_entries = 0usize;
+        let mut dedupe = JournalReplayDedupe::new(&session);
         replay_journal_lines(&journal_path, |entry| {
             journal_entries += 1;
+            let Some(entry) = dedupe.filter(entry) else {
+                return;
+            };
             session.apply_journal_meta(entry.meta);
             session.messages.extend(entry.append_messages);
             session.replay_events.extend(entry.append_replay_events);
         })?;
         let journal_ms = journal_start.elapsed().as_millis();
         let finalize_start = Instant::now();
+        session.backfill_prompt_title();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
@@ -384,6 +529,17 @@ impl Session {
     }
 
     fn save_inner(&mut self, force: bool) -> Result<()> {
+        // Shutdown waits for this guard so it cannot exit mid-checkpoint.
+        let _save_guard = SAVES_IN_FLIGHT
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A session that migrated to another machine (or whose on-disk copy was
+        // replaced by a newer returned transcript) must not be overwritten by
+        // this stale in-memory copy.
+        if let Some(block) = self.migration_lease_block() {
+            crate::logging::warn(&format!("Session {} not persisted: {}", self.id, block));
+            return Ok(());
+        }
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
         let journal_path = session_journal_path_from_snapshot(&path);

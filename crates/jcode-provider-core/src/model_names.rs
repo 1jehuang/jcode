@@ -346,9 +346,286 @@ fn title_case_word(word: &str) -> String {
     }
 }
 
+/// Brand spellings that plain title-casing gets wrong (`Deepseek`, `Glm`).
+const BRAND_TOKENS: [(&str, &str); 24] = [
+    ("gpt", "GPT"),
+    ("oss", "OSS"),
+    ("glm", "GLM"),
+    ("deepseek", "DeepSeek"),
+    ("minimax", "MiniMax"),
+    ("openai", "OpenAI"),
+    ("xai", "xAI"),
+    ("tts", "TTS"),
+    ("stt", "STT"),
+    ("api", "API"),
+    ("vl", "VL"),
+    ("ocr", "OCR"),
+    ("id", "ID"),
+    ("it", "IT"),
+    ("moe", "MoE"),
+    ("fp8", "FP8"),
+    ("fp4", "FP4"),
+    ("nvfp4", "NVFP4"),
+    ("awq", "AWQ"),
+    ("gguf", "GGUF"),
+    ("hd", "HD"),
+    ("r1", "R1"),
+    ("ai", "AI"),
+    ("lfm", "LFM"),
+];
+
+/// OpenRouter-style `:variant` suffixes rendered as a parenthetical.
+const PICKER_VARIANT_TAGS: [&str; 9] = [
+    "free", "batch", "thinking", "beta", "nitro", "floor", "online", "exacto", "extended",
+];
+
+/// Families whose official names hyphenate the family to its version
+/// (`GPT-5.5`, `GLM-5.1`, `GPT-OSS`).
+const HYPHENATED_FAMILIES: [&str; 2] = ["GPT", "GLM"];
+
+/// Render any model id as a readable picker title.
+///
+/// Unlike [`pretty_known_model_family`], this never returns the raw id for
+/// unfamiliar shapes. It is meant for surfaces that also show the exact id
+/// nearby (such as the `/model` picker's detail line), so a friendlier title
+/// cannot hide which route will actually run.
+///
+/// Examples:
+///   `openai-api:gpt-5.5`               -> `GPT-5.5`
+///   `anthropic/claude-opus-4.6`        -> `Claude Opus 4.6`
+///   `deepseek/deepseek-v4-pro`         -> `DeepSeek V4 Pro`
+///   `Llama-3.3-70B-Instruct`           -> `Llama 3.3 70B Instruct`
+///   `moonshotai/kimi-k2.5:free`        -> `Kimi K2.5 (free)`
+///   `gpt-oss-120b`                     -> `GPT-OSS 120B`
+///   `o3-mini`                          -> `o3 Mini`
+pub fn pretty_picker_model_name(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // Routing prefixes (`openai-api:`) and vendor namespaces (`anthropic/`)
+    // are shown by the picker's group header, not the title.
+    let bare = crate::selection::explicit_model_provider_prefix(trimmed)
+        .map_or(trimmed, |(_, _, bare)| bare);
+    if bare.starts_with("arn:") {
+        return bare.to_string();
+    }
+    if let Some(pretty) = pretty_known_model_family(bare) {
+        return pretty;
+    }
+    let mut bare = bare.rsplit('/').next().unwrap_or(bare);
+    // Profile or provider namespaces (`comtegra:glm-51`, `google:gemini-x`)
+    // are purely alphabetic heads. The picker's group header names them.
+    while let Some((head, rest)) = bare.split_once(':') {
+        if head.is_empty() || rest.is_empty() || !head.chars().all(|c| c.is_ascii_alphabetic()) {
+            break;
+        }
+        if PICKER_VARIANT_TAGS.contains(&rest.to_ascii_lowercase().as_str()) {
+            break;
+        }
+        bare = rest;
+    }
+    // A known `:tag` (`:free`, `:thinking`) is a variant marker. Anything else
+    // with a colon (Bedrock `-v1:0`) stays exact.
+    let (bare, tag) = match bare.split_once(':') {
+        Some((head, tag))
+            if !head.is_empty()
+                && PICKER_VARIANT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) =>
+        {
+            (head, Some(tag.to_ascii_lowercase()))
+        }
+        Some(_) => return bare.to_string(),
+        None => (bare, None),
+    };
+    if let Some(pretty) = pretty_known_model_family(bare) {
+        return append_markers(pretty, tag.into_iter().collect());
+    }
+    // Bedrock-style `vendor.model` namespaces: drop a purely alphabetic vendor
+    // segment that ends before the first dash (`google.gemma-3-27b-it`).
+    let bare = match bare.split_once('.') {
+        Some((vendor, rest))
+            if !rest.is_empty()
+                && vendor.chars().all(|c| c.is_ascii_alphabetic())
+                && !bare[..vendor.len()].contains('-')
+                && !rest.starts_with(|c: char| c.is_ascii_digit()) =>
+        {
+            rest
+        }
+        _ => bare,
+    };
+    if let Some(pretty) = pretty_known_model_family(bare) {
+        return append_markers(pretty, tag.into_iter().collect());
+    }
+    let (core, bracket) = split_bracket_suffix(bare);
+    let (core, date) = split_snapshot_date(core);
+    let parts: Vec<&str> = core
+        .split(['-', '_', ' '])
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut words: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < parts.len() {
+        let part = parts[i];
+        // `3-1` reads as version `3.1`, as Claude and Llama slugs intend.
+        if part.len() <= 2
+            && part.chars().all(|c| c.is_ascii_digit())
+            && i + 1 < parts.len()
+            && parts[i + 1].len() <= 2
+            && parts[i + 1].chars().all(|c| c.is_ascii_digit())
+        {
+            words.push(format!("{part}.{}", parts[i + 1]));
+            i += 2;
+            continue;
+        }
+        let word = pretty_picker_token(part);
+        match words.last_mut() {
+            Some(previous)
+                if HYPHENATED_FAMILIES.contains(&previous.as_str())
+                    && (word.starts_with(|c: char| c.is_ascii_digit()) || word == "OSS") =>
+            {
+                previous.push('-');
+                previous.push_str(&word);
+            }
+            _ => words.push(word),
+        }
+        i += 1;
+    }
+    if words.is_empty() {
+        return bare.to_string();
+    }
+    let markers = date.into_iter().chain(bracket).chain(tag).collect();
+    append_markers(words.join(" "), markers)
+}
+
+fn append_markers(base: String, markers: Vec<String>) -> String {
+    if markers.is_empty() {
+        return base;
+    }
+    match base.strip_suffix(')') {
+        Some(head) if head.contains(" (") => format!("{head}, {})", markers.join(", ")),
+        _ => format!("{base} ({})", markers.join(", ")),
+    }
+}
+
+/// Case one model-id token for a picker title.
+fn pretty_picker_token(token: &str) -> String {
+    let lower = token.to_ascii_lowercase();
+    if let Some((_, brand)) = BRAND_TOKENS.iter().find(|(raw, _)| *raw == lower) {
+        return (*brand).to_string();
+    }
+    let bytes = lower.as_bytes();
+    let digits_then = |suffix: &[u8]| {
+        bytes.len() > 1
+            && suffix.contains(&bytes[bytes.len() - 1])
+            && lower[..lower.len() - 1]
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == 'x')
+            && lower.starts_with(|c: char| c.is_ascii_digit())
+    };
+    // Parameter and context sizes: `70b` -> `70B`, `8x7b` -> `8x7B`, `200k`.
+    if digits_then(b"bmkt") {
+        let (head, unit) = lower.split_at(lower.len() - 1);
+        return format!("{head}{}", unit.to_ascii_uppercase());
+    }
+    // Active-parameter counts: `a35b` -> `A35B`.
+    if bytes.len() > 2
+        && bytes[0] == b'a'
+        && bytes[bytes.len() - 1] == b'b'
+        && lower[1..lower.len() - 1]
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.')
+    {
+        return lower.to_ascii_uppercase();
+    }
+    // OpenAI reasoning families stay lowercase: `o3`, `o4`.
+    if bytes[0] == b'o' && lower[1..].chars().all(|c| c.is_ascii_digit()) && bytes.len() > 1 {
+        return lower;
+    }
+    // Single-letter generations: `k2.5` -> `K2.5`, `v4` -> `V4`, `m2` -> `M2`.
+    if bytes.len() > 1
+        && bytes[0].is_ascii_alphabetic()
+        && lower[1..].chars().all(|c| c.is_ascii_digit() || c == '.')
+    {
+        return lower.to_ascii_uppercase();
+    }
+    // Mixed tokens: keep digits, capitalize a leading word (`qwen3` -> `Qwen3`).
+    if token.chars().any(|c| c.is_ascii_digit()) {
+        if token.starts_with(|c: char| c.is_ascii_lowercase()) {
+            let letters: String = token
+                .chars()
+                .take_while(|c| c.is_ascii_alphabetic())
+                .collect();
+            if letters.len() > 1 {
+                let mut chars = token.chars();
+                let first = chars.next().unwrap().to_ascii_uppercase();
+                return format!("{first}{}", chars.as_str());
+            }
+        }
+        return token.to_string();
+    }
+    // Preserve deliberate mixed case (`MiniMax`), title-case plain words.
+    if token.chars().any(|c| c.is_ascii_uppercase()) {
+        return token.to_string();
+    }
+    title_case_word(token)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{pretty_known_model_family, pretty_model_display_name};
+    use super::{pretty_known_model_family, pretty_model_display_name, pretty_picker_model_name};
+
+    #[test]
+    fn picker_names_are_readable_for_every_catalog_shape() {
+        for (raw, pretty) in [
+            ("openai-api:gpt-5.5", "GPT-5.5"),
+            ("claude-oauth:claude-opus-4-8", "Claude Opus 4.8"),
+            ("anthropic/claude-opus-4.6", "Claude Opus 4.6"),
+            ("google/gemini-3-pro-preview", "Gemini 3 Pro Preview"),
+            ("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro"),
+            ("Llama-3.3-70B-Instruct", "Llama 3.3 70B Instruct"),
+            ("MiniMax-M2.5-highspeed", "MiniMax M2.5 Highspeed"),
+            ("moonshotai/kimi-k2.5:free", "Kimi K2.5 (free)"),
+            ("gpt-oss-120b-medium", "GPT-OSS 120B Medium"),
+            ("GLM-5.1", "GLM-5.1"),
+            ("qwen3-coder-plus", "Qwen3 Coder Plus"),
+            ("qwen3-coder-480b-a35b", "Qwen3 Coder 480B A35B"),
+            ("o3-mini", "o3 Mini"),
+            ("grok-4", "Grok 4"),
+            ("composer-2.5", "Composer 2.5"),
+            ("sonnet-4.6-thinking", "Sonnet 4.6 Thinking"),
+            ("opus-4-6", "Opus 4.6"),
+            ("google.gemma-3-27b-it", "Gemma 3 27B IT"),
+            ("mixtral-8x7b", "Mixtral 8x7B"),
+            (
+                "anthropic/claude-fable-5.1:batch",
+                "Claude Fable 5.1 (batch)",
+            ),
+            ("atlas-04", "Atlas 04"),
+            ("mistral-large-2407", "Mistral Large 2407"),
+        ] {
+            assert_eq!(pretty_picker_model_name(raw), pretty, "{raw}");
+        }
+    }
+
+    #[test]
+    fn picker_names_keep_opaque_route_ids_exact() {
+        for raw in [
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-4-20250514-v1:0",
+            "meta.llama3-1-405b-instruct-v1:0",
+        ] {
+            assert_eq!(pretty_picker_model_name(raw), raw);
+        }
+        assert_eq!(
+            pretty_picker_model_name("comtegra:glm-51-nvfp4"),
+            "GLM-51 NVFP4"
+        );
+        assert_eq!(
+            pretty_picker_model_name("google:gemini-review"),
+            "Gemini Review"
+        );
+        assert_eq!(pretty_picker_model_name("openai:atlas-04"), "Atlas 04");
+        assert_eq!(pretty_picker_model_name("  "), "");
+    }
 
     #[test]
     fn pretty_model_display_name_formats_common_models() {

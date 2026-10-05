@@ -203,6 +203,31 @@ jcode is built to be as performant and resource efficient as possible. Every met
 
 </div>
 
+### Headless sessions (swarm workers)
+
+Swarm workers run headless, so this is the number that matters when you fan out
+agents. Each session completed 5 real model turns (file listing, file read, repo
+search, summary, reply) with tool calls, then total PSS of every process was
+measured. jcode sessions share one daemon; Claude Code runs one
+`claude -p --input-format stream-json` process per session. Both used
+`claude-sonnet-4-6`.
+
+<div align="center">
+
+| Concurrent headless sessions | jcode | Claude Code | Comparison |
+|---:|---:|---:|---:|
+| 1 | **32.6 MB** | 261.0 MB | **8.0× less RAM** |
+| 5 | **51.0 MB** | 908.6 MB | **17.8× less RAM** |
+| 10 | **66.7 MB** | 1749.7 MB | **26.2× less RAM** |
+| 20 | **90.6 MB** | 3376.8 MB | **37.3× less RAM** |
+| Each additional session | **~3.1 MB** | ~164 MB | **~54× less RAM** |
+
+</div>
+
+Measured 2026-09-29 on Linux with `jcode v0.89.19-dev` (default build, local
+embeddings not compiled in) and `Claude Code 2.1.267`. Reproduce with
+`python3 scripts/bench_headless_memory.py`.
+
 ### Time to first frame
 
 <div align="center">

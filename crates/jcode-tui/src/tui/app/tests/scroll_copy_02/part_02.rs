@@ -110,9 +110,14 @@ fn test_alt_shift_i_toggles_inline_images_and_persists() {
         KeyModifiers::ALT | KeyModifiers::SHIFT,
     ));
     assert!(!app.inline_images_visible, "Alt+Shift+I should hide images");
+    // The notice renders the platform chord via alt_chord (Option symbol on
+    // macOS, Alt elsewhere), so assert that instead of a hardcoded "Alt+...".
     assert_eq!(
         app.status_notice(),
-        Some("Inline images: hidden (Alt+Shift+I to show)".to_string())
+        Some(format!(
+            "Inline images: hidden ({} to show)",
+            jcode_tui_core::keybind::alt_chord("Shift+I")
+        ))
     );
 
     // The flag persists for the next app (e.g. resume after restart).
@@ -500,6 +505,25 @@ fn test_expand_badge_does_not_render_for_short_untruncated_edit_diff() {
         !rendered.contains("[E] expand"),
         "short full-visible edit diff should not show expand badge:\n{rendered}"
     );
+}
+
+#[test]
+fn test_expand_badge_renders_when_diffs_are_hidden() {
+    let _render_lock = scroll_render_test_lock();
+    for mode in [
+        crate::config::DiffDisplayMode::Off,
+        crate::config::DiffDisplayMode::File,
+    ] {
+        // Even a short diff is hidden outside inline mode, so the badge must
+        // stay visible as the way back to it.
+        let (mut app, mut terminal) = make_edit_badge_test_app(2);
+        app.diff_mode = mode;
+        let rendered = render_and_snap(&app, &mut terminal);
+        assert!(
+            rendered.contains("[E] expand"),
+            "{mode:?} should keep the expand badge on edit rows:\n{rendered}"
+        );
+    }
 }
 
 #[test]

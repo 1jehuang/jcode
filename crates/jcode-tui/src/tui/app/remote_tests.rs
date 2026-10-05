@@ -669,6 +669,7 @@ fn startup_history(session_id: &str) -> ServerEvent {
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        applets: Default::default(),
     }
 }
 

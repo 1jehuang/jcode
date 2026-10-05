@@ -247,6 +247,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         autojudge_enabled: None,
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
+        applets: Default::default(),
         side_panel: crate::side_panel::SidePanelSnapshot {
             focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),

@@ -116,6 +116,19 @@ pub enum HostMessage {
         revision: u64,
         reason: String,
     },
+    /// A tool call claimed by the manifest's tool_cards started or finished.
+    /// Mount an Inline instance anchored to call_id to render it as a card.
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        tool: String,
+        input: Value,
+        #[serde(default)]
+        output: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+        done: bool,
+    },
     /// Visibility changed. Providers may pause polling while hidden.
     Visibility { instance: InstanceId, visible: bool },
     /// The user or host closed the instance.

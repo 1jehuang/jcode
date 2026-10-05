@@ -169,6 +169,7 @@ fn save_test_openrouter_model_cache(namespace: &str, source_api_base: &str, mode
                 context_length: None,
                 pricing: jcode_provider_openrouter::ModelPricing::default(),
                 created: None,
+                ..Default::default()
             })
             .collect(),
     };
@@ -1026,6 +1027,68 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
         routes_memo: std::sync::Mutex::new(None),
         post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     }
+}
+
+struct NativeBridgeProvider {
+    tx: NativeToolResultSender,
+}
+
+#[async_trait::async_trait]
+impl Provider for NativeBridgeProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        anyhow::bail!("native bridge provider must not complete")
+    }
+
+    fn name(&self) -> &'static str {
+        "cursor"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            tx: self.tx.clone(),
+        })
+    }
+
+    fn native_result_sender(&self) -> Option<NativeToolResultSender> {
+        Some(self.tx.clone())
+    }
+}
+
+/// Regression: Cursor's AgentService only resumes a turn after the MCP tool
+/// result is written back onto its stream. The agent loop reaches the runtime
+/// through `MultiProvider`, so a `None` here silently dropped every result and
+/// hung Cursor turns right after the local tool finished.
+#[test]
+fn cursor_native_result_sender_reaches_the_active_cursor_runtime() {
+    let runtime = enter_test_runtime();
+    runtime.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let provider = test_multi_provider_with_cursor();
+        *provider
+            .cursor
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(NativeBridgeProvider { tx }));
+
+        let sender = provider
+            .native_result_sender()
+            .expect("Cursor must expose its native tool result bridge");
+        sender
+            .send(NativeToolResult::success(
+                "stream:1:exec".to_string(),
+                "ok".to_string(),
+            ))
+            .await
+            .expect("send native result");
+        let received = rx.recv().await.expect("runtime receives the result");
+        assert_eq!(received.request_id, "stream:1:exec");
+    });
 }
 
 struct PrewarmRecordingProvider {

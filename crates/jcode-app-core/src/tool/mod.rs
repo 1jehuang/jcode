@@ -24,6 +24,7 @@ mod file_diff;
 pub(crate) mod file_lock;
 mod gmail;
 // The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
+pub mod applet;
 #[allow(dead_code)]
 mod goal;
 pub mod inflight;
@@ -385,6 +386,7 @@ impl Registry {
                 side_panel::SidePanelTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "applet", applet::AppletTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
             // Both old names still resolve through `resolve_tool_name`.
@@ -552,9 +554,6 @@ impl Registry {
         &self,
         allowed_tools: Option<&HashSet<String>>,
     ) -> Vec<ToolDefinition> {
-        if allowed_tools.is_none_or(|allowed| allowed.contains("compile_remote")) {
-            self.remote_compile_definition().await;
-        }
         let tools = self.tools.read().await;
         let mut defs: Vec<ToolDefinition> = tools
             .iter()
@@ -574,15 +573,6 @@ impl Registry {
         // Sort by name for deterministic ordering - critical for prompt cache hits
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
-    }
-
-    /// Subscription guidance is the one built-in definition that can change
-    /// after sign-in, sign-out, or entitlement refresh. Do not hold the registry
-    /// lock during the bounded account request.
-    pub(crate) async fn remote_compile_definition(&self) -> Option<ToolDefinition> {
-        let tool = self.tools.read().await.get("compile_remote").cloned()?;
-        compile_remote::refresh_access().await;
-        Some(tool.to_definition())
     }
 
     pub async fn tool_names(&self) -> Vec<String> {
@@ -1210,6 +1200,17 @@ impl Registry {
             .any(|name| tool_name_is_disabled(disabled, name))
     }
 
+    /// Original `(server, tool)` for a registered MCP alias. Aliases are
+    /// sanitized for providers, so they cannot be split back reliably.
+    pub(crate) fn mcp_identity_for_alias(&self, alias: &str) -> Option<(String, String)> {
+        self.mcp_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .get(alias)
+            .cloned()
+    }
+
     fn mcp_dispatch_is_allowed(
         &self,
         session: &str,
@@ -1460,7 +1461,12 @@ impl Registry {
             let registry = self.clone();
             tokio::spawn(async move {
                 let (successes, failures) = {
-                    let manager = mcp_manager.write().await;
+                    // `connect_all` mutates the manager's internal connection
+                    // maps but does not mutate the manager object itself. A
+                    // read guard lets MCP list and other management actions
+                    // inspect those maps while a slow initialize handshake is
+                    // in flight.
+                    let manager = mcp_manager.read().await;
                     manager.connect_all().await.unwrap_or((0, Vec::new()))
                 };
 

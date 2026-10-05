@@ -32,6 +32,37 @@ fn token_usage_preserves_cache_creation_and_missing_counters() {
     }
 }
 
+#[test]
+fn kv_cache_miss_is_forwarded_with_session() {
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
+    let wire = serde_json::to_value(jcode_protocol_like_kv_miss()).unwrap();
+    let frames = state.legacy_event_to_api(&wire);
+    assert_eq!(
+        frames.iter().map(|f| f.event.clone()).collect::<Vec<_>>(),
+        vec![ApiEvent::KvCacheMiss {
+            session_id: "s1".into(),
+            reason: "prefix_changed".into(),
+            harness_caused: true,
+            missed_tokens: 46_000,
+            expected_tokens: 50_000,
+            read_tokens: 4_000,
+            documented_cause: None,
+            message: "KV cache miss: ~46K tokens resent".into(),
+        }]
+    );
+}
+
+fn jcode_protocol_like_kv_miss() -> Value {
+    json!({
+        "type": "kv_cache_miss", "reason": "prefix_changed", "harness_caused": true,
+        "missed_tokens": 46_000, "expected_tokens": 50_000, "read_tokens": 4_000,
+        "message": "KV cache miss: ~46K tokens resent"
+    })
+}
+
 struct ScopedJcodeHome {
     path: PathBuf,
     previous: Option<OsString>,
@@ -1323,6 +1354,33 @@ fn a_scheduled_compaction_reports_its_status() {
     }
 }
 
+/// Saving forwards the flag and label so the daemon can title the session.
+#[test]
+fn set_session_saved_forwards_flag_and_label() {
+    let mut state = state_with_session();
+    let save = state.api_request_to_legacy(&json!({
+        "id": 7, "req": "set_session_saved", "saved": true, "label": "yc mcp",
+    }));
+    match &save[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["type"], "set_session_saved");
+            assert_eq!(value["saved"], true);
+            assert_eq!(value["label"], "yc mcp");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    let unsave = state.api_request_to_legacy(&json!({
+        "id": 8, "req": "set_session_saved", "saved": false,
+    }));
+    match &unsave[0] {
+        Outbound::Legacy(value) => {
+            assert_eq!(value["saved"], false);
+            assert!(value.get("label").is_none());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Clearing a title is distinct from setting an empty one, so an absent title
 /// must not be sent as `""`, which the daemon would store as a real title.
 #[test]
@@ -1379,6 +1437,7 @@ fn capability_requests_need_an_attached_session() {
         ("rename_session", json!({})),
         ("rewind_undo", json!({})),
         ("cancel_soft_interrupts", json!({})),
+        ("background_tool", json!({})),
     ] {
         let mut state = BridgeState::default();
         let mut request = json!({"id": 1, "req": req});
@@ -1696,12 +1755,19 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
     assert_eq!(newest.save_label.as_deref(), Some("investor catch up"));
     assert_eq!(newest.updated_at_ms, Some(99));
     assert_eq!(newest.last_active_at_ms, Some(99));
-    assert!(sessions.iter().all(|session| {
-        session
-            .title
-            .as_deref()
-            .is_some_and(|title| title.starts_with("Indexed goal "))
-    }));
+    // A save label is the name the user chose, so it outranks derived titles.
+    assert_eq!(newest.title.as_deref(), Some("investor catch up"));
+    assert!(
+        sessions
+            .iter()
+            .filter(|session| session.session_id != "indexed_099")
+            .all(|session| {
+                session
+                    .title
+                    .as_deref()
+                    .is_some_and(|title| title.starts_with("Indexed goal "))
+            })
+    );
 }
 
 #[test]
@@ -1712,6 +1778,7 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
         "provider_name": "anthropic",
         "provider_model": "claude-sonnet",
         "reasoning_effort": "high",
+        "resolved_credential": "oauth",
         "available_models": ["claude-sonnet", "gemini-pro"],
         "available_model_routes": [
             {
@@ -1741,6 +1808,7 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
         provider,
         model,
         reasoning_effort,
+        auth_method,
         routes,
     } = event
     else {
@@ -1750,6 +1818,9 @@ fn runtime_info_reports_the_active_provider_and_complete_route_catalog() {
     assert_eq!(provider.as_deref(), Some("anthropic"));
     assert_eq!(model.as_deref(), Some("claude-sonnet"));
     assert_eq!(reasoning_effort.as_deref(), Some("high"));
+    // The daemon's resolved credential travels with the identity, so a
+    // client never has to guess it from a model that has both routes.
+    assert_eq!(auth_method.as_deref(), Some("oauth"));
     assert_eq!(routes.len(), 2);
     assert_eq!(routes[1].provider, "gemini");
     assert!(!routes[1].available);
@@ -2270,6 +2341,53 @@ fn model_change_without_provider_preserves_known_provider() {
     );
 }
 
+/// A successful change that leaves no effort must clear the cache, or later
+/// identity events would keep advertising the old level.
+#[test]
+fn a_successful_change_to_no_effort_clears_the_cached_effort() {
+    let mut state = state_with_session();
+    state.note_models(&json!({"reasoning_effort": "high"}));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "reasoning_effort_changed", "id": 999,
+    }));
+    assert!(state.current_effort.is_none());
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::ModelInfo {
+            reasoning_effort: None,
+            ..
+        }
+    ));
+}
+
+/// A model switch can clear or change the effort (the new model may not
+/// advertise the old level). The daemon now reports it on `model_changed`,
+/// and the broadcast identity must follow it instead of the stale cache.
+#[test]
+fn model_change_reports_the_effort_the_new_model_runs_with() {
+    let mut state = state_with_session();
+    state.note_models(&json!({"provider_name": "known", "reasoning_effort": "max"}));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "new", "reasoning_effort": "high",
+    }));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { reasoning_effort, .. }
+        if reasoning_effort.as_deref() == Some("high"))
+    );
+
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "plain", "reasoning_effort": null,
+    }));
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::ModelInfo {
+            reasoning_effort: None,
+            ..
+        }
+    ));
+    assert!(state.current_effort.is_none());
+}
+
 #[test]
 fn observer_and_server_initiated_turns_finish_without_a_local_message_id() {
     for id in [0, 999_999] {
@@ -2378,7 +2496,11 @@ fn delayed_history_activity_cannot_resurrect_or_stop_a_newer_turn() {
             state.legacy_event_to_api(&json!({"type":"text_delta", "text":"next"}));
         }
         let frames = state.legacy_event_to_api(&json!({"type":"history", "id":probe["id"], "messages":[], "activity":{"is_processing":active}}));
-        assert_eq!(frames.len(), 2, "history and panel only, no stale activity");
+        assert_eq!(
+            frames.len(),
+            3,
+            "history, panel and applets only, no stale activity"
+        );
         assert_eq!(state.observed_turn_active, !active);
     }
 }
@@ -2635,7 +2757,8 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
                 assert!(matches!(frames[0].event, ApiEvent::Attached { .. }));
             }
             let frames = state.legacy_event_to_api(&history);
-            assert_eq!(frames.len(), 2);
+            assert_eq!(frames.len(), 3);
+            assert!(matches!(frames[2].event, ApiEvent::AppletState { .. }));
             assert_eq!(
                 frames[0],
                 ServerFrame::event(ApiEvent::SessionRecovery {
@@ -2671,7 +2794,7 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
             );
             // Each new attachment gets its own single opportunity.
             let (history, _) = recovery_attach(&mut state, target);
-            assert_eq!(state.legacy_event_to_api(&history).len(), 2);
+            assert_eq!(state.legacy_event_to_api(&history).len(), 3);
         }
     }
 }
@@ -2714,10 +2837,16 @@ fn attachment_recovery_suppresses_empty_active_completed_and_blank_directives_on
         assert!(
             matches!(
                 state.legacy_event_to_api(&history).as_slice(),
-                [ServerFrame {
-                    event: ApiEvent::SidePanelState { .. },
-                    ..
-                }]
+                [
+                    ServerFrame {
+                        event: ApiEvent::SidePanelState { .. },
+                        ..
+                    },
+                    ServerFrame {
+                        event: ApiEvent::AppletState { .. },
+                        ..
+                    }
+                ]
             ),
             "{case}"
         );
@@ -3029,6 +3158,37 @@ fn text_framing_preserves_chunks_and_reasoning_then_separates_messages() {
             event: ApiEvent::TurnDone { .. },
             ..
         }]
+    ));
+}
+
+#[test]
+fn provider_native_web_search_reaches_sdk_as_tool_events_without_tool_call() {
+    // The agent renders a provider-executed search (Anthropic `srvtoolu_*`,
+    // OpenAI `ws_*`) as a normal tool row. SDK clients must see the full
+    // start/input/exec/done sequence and never a `tool_call` to answer.
+    let mut state = state_with_session();
+    let mut frames = Vec::new();
+    for event in [
+        json!({"type":"tool_start","id":"srvtoolu_1","name":"web_search"}),
+        json!({"type":"tool_input","id":"srvtoolu_1","delta":"{\"query\":\"rust news\"}"}),
+        json!({"type":"tool_exec","id":"srvtoolu_1","name":"web_search"}),
+        json!({"type":"tool_done","id":"srvtoolu_1","name":"web_search",
+            "output":"Rust Blog - https://blog.rust-lang.org/"}),
+    ] {
+        frames.extend(state.legacy_event_to_api(&event));
+    }
+    let events: Vec<_> = frames.iter().map(|frame| &frame.event).collect();
+    assert!(matches!(
+        events.as_slice(),
+        [
+            ApiEvent::ToolStart { call_id: a, name: n1, .. },
+            ApiEvent::ToolInputDelta { call_id: b, delta, .. },
+            ApiEvent::ToolExec { call_id: c, .. },
+            ApiEvent::ToolDone { call_id: d, name: n2, output, error: None, .. },
+        ] if [a, b, c, d].iter().all(|id| *id == "srvtoolu_1")
+            && n1 == "web_search" && n2 == "web_search"
+            && delta.contains("rust news")
+            && output.contains("https://blog.rust-lang.org/")
     ));
 }
 
@@ -3745,4 +3905,124 @@ fn limited_session_list_always_includes_saved_sessions() {
         .find(|session| session.session_id == "indexed_0")
         .expect("saved session beyond the limit is listed");
     assert_eq!(saved.save_label.as_deref(), Some("old bookmark"));
+}
+
+/// Applet actions and closes forward to the daemon with their payload, and
+/// live applet state reaches clients as a full snapshot.
+#[test]
+fn applet_requests_and_state_translate() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 3, "req": "applet_action", "session_id": "s", "instance": "chart-1",
+        "action": {"action": "select", "args": {"i": 2}}, "state": {"q": "x"}, "source_key": "row",
+    }));
+    match &out[0] {
+        Outbound::Legacy(v) => {
+            assert_eq!(v["type"], "applet_action");
+            assert_eq!(v["instance"], "chart-1");
+            assert_eq!(v["action"]["action"], "select");
+            assert_eq!(v["state"]["q"], "x");
+            assert_eq!(v["source_key"], "row");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    let out = state.api_request_to_legacy(&json!({
+        "id": 4, "req": "close_applet", "session_id": "s", "instance": "chart-1",
+    }));
+    assert!(matches!(&out[0], Outbound::Legacy(v) if v["type"] == "close_applet"));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "applet_state", "session_id": "s", "snapshot": {"instances": []},
+    }));
+    assert!(matches!(
+        &frames[..],
+        [ServerFrame { event: ApiEvent::AppletState { snapshot, .. }, .. }] if snapshot.instances.is_empty()
+    ));
+}
+
+#[test]
+fn untitled_indexed_sessions_are_named_after_their_first_prompt_once() {
+    let home = ScopedJcodeHome::new("first-prompt-title");
+    std::fs::create_dir_all(home.path.join("sessions")).unwrap();
+    std::fs::write(
+        home.path.join("sessions/session_fox_1_aa.json"),
+        json!({
+            "id": "session_fox_1_aa",
+            "title": null,
+            "messages": [
+                {"id": "m0", "role": "user", "content": [{"type": "text", "text": "<system-reminder>\n# Session Context\n</system-reminder>"}]},
+                {"id": "m1", "role": "user", "display_role": "background_task", "content": [{"type": "text", "text": "background done"}]},
+                {"id": "m2", "role": "user", "content": [{"type": "text", "text": "<transcription>\nRename the   sidebar rows\n</transcription>"}]},
+                {"id": "m3", "role": "user", "content": [{"type": "text", "text": "later prompt"}]}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.path.join("sessions/session_owl_2_bb.json"),
+        json!({"id": "session_owl_2_bb", "title": null, "messages": []}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.path.join("sessions/session_owl_2_bb.journal.jsonl"),
+        format!(
+            "{}\n",
+            json!({"meta": {}, "append_messages": [{"id": "j1", "role": "user", "content": [{"type": "text", "text": "Journal prompt"}]}]})
+        ),
+    )
+    .unwrap();
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
+    for (id, at) in [("session_fox_1_aa", 2), ("session_owl_2_bb", 1)] {
+        connection
+            .execute(
+                "INSERT INTO recent_sessions (session_id, updated_at_ms) VALUES (?1, ?2)",
+                params![id, at],
+            )
+            .unwrap();
+    }
+
+    let list = || {
+        let event = only_reply_event(
+            BridgeState::default()
+                .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 10})),
+        );
+        let ApiEvent::Sessions { sessions } = event else {
+            panic!("expected sessions reply, got {event:?}");
+        };
+        sessions
+            .into_iter()
+            .map(|session| (session.session_id, session.title))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let titles = list();
+    assert_eq!(
+        titles["session_fox_1_aa"].as_deref(),
+        Some("Rename the sidebar rows")
+    );
+    assert_eq!(
+        titles["session_owl_2_bb"].as_deref(),
+        Some("Journal prompt")
+    );
+    let cached: String = connection
+        .query_row(
+            "SELECT generated_title FROM recent_sessions WHERE session_id = 'session_fox_1_aa'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(cached, "Rename the sidebar rows");
+    // A cached title is served without rescanning the transcript.
+    std::fs::write(
+        home.path.join("sessions/session_fox_1_aa.json"),
+        json!({"id": "session_fox_1_aa", "title": null, "messages": [
+            {"id": "x", "role": "user", "content": [{"type": "text", "text": "different"}]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        list()["session_fox_1_aa"].as_deref(),
+        Some("Rename the sidebar rows")
+    );
 }

@@ -138,6 +138,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/refactor", "Run a safe refactor loop"),
     RegisteredCommand::public("/compact", "Compact context"),
     RegisteredCommand::public("/fix", "Recover when the model cannot continue"),
+    RegisteredCommand::public("/voice", "Voice input: speak, then send (Ctrl+Space)"),
     RegisteredCommand::public("/dictate", "Run configured external dictation command"),
     RegisteredCommand::public("/dictation", "Alias for /dictate"),
     RegisteredCommand::public("/memory", "Toggle memory feature"),
@@ -206,6 +207,11 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/fork", "Fork session into a new window (optional prompt)"),
     RegisteredCommand::hidden("/split", "Alias for /fork"),
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
+    RegisteredCommand::public(
+        "/cloud",
+        "Move this session to a cloud machine and keep working",
+    ),
+    RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
     RegisteredCommand::public("/quit", "Exit jcode"),
     RegisteredCommand::public("/auth", "Show authentication status"),
@@ -1720,6 +1726,7 @@ impl App {
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
+        self.input_typing_undo = None;
         let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
         if self.input_undo_stack.last() == Some(&snapshot) {
             return;
@@ -1732,10 +1739,12 @@ impl App {
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.input_typing_undo = None;
         self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
+        self.input_typing_undo = None;
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
             // The composer now holds a restored draft, so the copy stashed by a
             // history jump is stale: a later Down must not resurrect it.

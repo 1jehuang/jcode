@@ -49,20 +49,26 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     match fetch_anthropic_usage_data(access_token.clone(), cache_key).await {
         Ok(data) => {
             let mut report = provider_report_from_usage_data(display_name, &data);
-            // The session reset only applies at the five-hour wall, and the
-            // server declines the lookup elsewhere. Read-only either way.
-            if report.error.is_none() && data.five_hour >= 0.99 {
+            // Availability can be inspected before reaching the five-hour wall.
+            // Looking it up is read-only and does not imply a reset can be spent.
+            if report.error.is_none() {
                 // External Claude Code logins report as "default" but are not
                 // stored accounts. Pin those to the default scope instead.
                 let stored = auth::claude::list_accounts()
                     .unwrap_or_default()
                     .iter()
                     .any(|account| account.label == account_label);
-                report.anthropic_limit_reset = super::anthropic_reset::fetch_limit_reset_offer(
+                let (offer, ineligible) = super::anthropic_reset::fetch_limit_reset_offer(
                     &access_token,
                     stored.then_some(account_label.as_str()),
                 )
                 .await;
+                report.anthropic_limit_reset = offer;
+                if ineligible {
+                    report
+                        .extra_info
+                        .push(("Session resets".into(), "Not eligible".into()));
+                }
             }
             report
         }
@@ -562,11 +568,115 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
     })
 }
 
-/// Cursor API-key report. Cursor's admin/usage API requires a paid plan; for
-/// free keys the `/v0/me` error body still tells us the key is live and which
-/// plan tier it is on, so we surface that.
+/// Cursor monthly plan usage from the dashboard endpoint. Works with any
+/// direct credential (auth.json token, vscdb token, or an exchanged API
+/// key). When the usage call fails, falls back to the `/v0/me` probe so the
+/// key status / plan tier is still surfaced.
 pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
-    let api_key = auth::cursor::load_api_key().ok()?;
+    if !auth::cursor::has_cursor_native_auth() {
+        return None;
+    }
+
+    let client = crate::provider::shared_http_client();
+    let tokens = match auth::cursor::resolve_direct_tokens(&client).await {
+        Ok(tokens) => tokens,
+        // A valid API key whose exchange is temporarily down should still
+        // surface key status instead of only a credentials error.
+        Err(_) => return Some(cursor_key_status_report().await),
+    };
+
+    let response = client
+        .post("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage")
+        .header("Authorization", format!("Bearer {}", tokens.access_token))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .timeout(std::time::Duration::from_secs(10))
+        .body("{}")
+        .send()
+        .await;
+
+    match response {
+        Ok(response) if response.status().is_success() => {
+            let json: serde_json::Value = response.json().await.unwrap_or_default();
+            let report = cursor_plan_usage_report(&json);
+            // A 200 with neither usage fields nor membership info carries
+            // nothing usable; fall back to the key-status probe. Membership
+            // without usage still shows the plan label.
+            let has_membership =
+                json.get("membershipType").is_some() || json.get("spendLimitUsage").is_some();
+            if report.limits.is_empty() && !has_membership {
+                return Some(cursor_key_status_report().await);
+            }
+            Some(report)
+        }
+        _ => Some(cursor_key_status_report().await),
+    }
+}
+
+pub(super) fn cursor_plan_usage_report(json: &serde_json::Value) -> ProviderUsage {
+    let plan = json
+        .get("planUsage")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let membership = json
+        .get("spendLimitUsage")
+        .filter(|usage| usage.get("limitType").and_then(|v| v.as_str()) == Some("team"))
+        .map(|_| "Team")
+        .or_else(|| json.get("membershipType").and_then(|v| v.as_str()))
+        .unwrap_or("Pro");
+    let mut chars = membership.chars();
+    let membership_title: String = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Pro".to_string(),
+    };
+
+    let resets_at = json
+        .get("billingCycleEnd")
+        .and_then(reset_timestamp_from_json_value);
+
+    let mut limits = Vec::new();
+    for (name, key) in [
+        ("Included", "totalPercentUsed"),
+        ("Auto", "autoPercentUsed"),
+        ("API", "apiPercentUsed"),
+    ] {
+        let Some(percent) = plan.get(key).and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        limits.push(UsageLimit {
+            name: name.to_string(),
+            usage_percent: percent.clamp(0.0, 100.0) as f32,
+            resets_at: resets_at.clone(),
+        });
+    }
+
+    ProviderUsage {
+        provider_name: format!("Cursor {}", membership_title),
+        limits,
+        extra_info: Vec::new(),
+        hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
+        error: None,
+        last_used_unix_secs: None,
+    }
+}
+
+/// Fallback key-status probe. The `/v0/me` error body still tells us the key
+/// is live and which plan tier it is on when the usage endpoint is out of
+/// reach.
+async fn cursor_key_status_report() -> ProviderUsage {
+    let api_key = match auth::cursor::load_api_key() {
+        Ok(api_key) => api_key,
+        Err(e) => {
+            return ProviderUsage {
+                provider_name: "Cursor".to_string(),
+                error: Some(format!("Cursor usage unavailable: {}", e)),
+                ..Default::default()
+            };
+        }
+    };
 
     let client = crate::provider::shared_http_client();
     let response = client
@@ -614,7 +724,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         }
     }
 
-    Some(ProviderUsage {
+    ProviderUsage {
         provider_name: "Cursor".to_string(),
         limits: Vec::new(),
         extra_info,
@@ -623,7 +733,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
-    })
+    }
 }
 
 pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
@@ -747,4 +857,72 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         error: None,
         last_used_unix_secs: None,
     })
+}
+
+/// Jcode subscription: included daily feature allowances plus an upgrade hint
+/// when an allowance is running low, so users see the limit before a feature
+/// stops working rather than after.
+pub(super) async fn fetch_jcode_usage_report() -> Option<ProviderUsage> {
+    match crate::subscription_api::fetch_subscription_me().await {
+        Ok(me) => Some(jcode_usage_report(&me)),
+        Err(error) => Some(ProviderUsage {
+            provider_name: "Jcode subscription".to_string(),
+            error: Some(format!("{error:#}")),
+            ..Default::default()
+        }),
+    }
+}
+
+/// Share of a daily allowance at which Jcode starts suggesting an upgrade.
+pub(crate) const JCODE_UPGRADE_HINT_PERCENT: f32 = 80.0;
+
+pub(crate) fn jcode_usage_report(me: &crate::subscription_api::SubscriptionMe) -> ProviderUsage {
+    let mut limits = Vec::new();
+    let mut extra_info = vec![(
+        "Plan".to_string(),
+        crate::subscription_catalog::JcodeTier::parse(&me.tier)
+            .map(|tier| tier.display_name().to_string())
+            .unwrap_or_else(|| me.tier.clone()),
+    )];
+    let mut hard_limit_reached = false;
+    if let Some(jev) = &me.jev_usage {
+        let mut worst = 0.0f32;
+        for (label, feature) in [
+            ("Memory recall (daily)", &jev.memory),
+            ("Browser automation (daily)", &jev.browser),
+        ] {
+            if feature.limit == 0 {
+                continue;
+            }
+            let percent = usage_percent_from_used_limit(feature.used as f64, feature.limit as f64);
+            worst = worst.max(percent);
+            hard_limit_reached |= feature.used >= feature.limit;
+            limits.push(UsageLimit {
+                name: label.to_string(),
+                usage_percent: percent,
+                resets_at: jev.resets_at.clone(),
+            });
+        }
+        let upgrade_link = jev.upgrade_url.as_deref().filter(|url| {
+            url.starts_with("https://jcode.sh/") || url.starts_with("https://www.jcode.sh/")
+        });
+        if worst >= JCODE_UPGRADE_HINT_PERCENT
+            && let (Some(tier), Some(url)) = (jev.upgrade_tier.as_deref(), upgrade_link)
+        {
+            let name = crate::subscription_catalog::JcodeTier::parse(tier)
+                .map(|tier| tier.display_name().to_string())
+                .unwrap_or_else(|| tier.to_string());
+            extra_info.push((
+                "Upgrade".to_string(),
+                format!("{name} raises daily limits: {url}"),
+            ));
+        }
+    }
+    ProviderUsage {
+        provider_name: "Jcode subscription".to_string(),
+        limits,
+        extra_info,
+        hard_limit_reached,
+        ..Default::default()
+    }
 }

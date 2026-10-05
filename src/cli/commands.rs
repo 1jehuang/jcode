@@ -2156,6 +2156,38 @@ pub fn run_server_promote_command(version: Option<&str>, emit_json: bool) -> Res
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+struct ServerReloadReport {
+    socket: String,
+    had_listener: bool,
+    forced: bool,
+    reloaded: bool,
+    already_current: bool,
+    handoff_ready: bool,
+    detail: String,
+}
+
+fn validate_server_reload_report(report: &ServerReloadReport) -> Result<()> {
+    // A reload that asked the old server to hand over, and then never saw the
+    // new one take the socket, did not succeed. It is the one outcome a caller
+    // cannot infer from the exit status alone: until now every path here
+    // returned Ok(()), and the distinction lived only inside the JSON body.
+    //
+    // Scope is deliberately narrow, because the comment below documents that
+    // an installer may call `jcode server reload` unconditionally. The two
+    // states that are arguably a success keep exit 0: there was nothing
+    // running (`had_listener == false`), or the binary was already current
+    // (`already_current`). Only the not-ready handoff, where the daemon is
+    // genuinely not serving yet, reports failure.
+    if report.had_listener && !report.already_current && !report.handoff_ready {
+        anyhow::bail!(
+            "jcode server reload was requested but the new server never became ready: {}",
+            report.detail
+        );
+    }
+    Ok(())
+}
+
 /// Gracefully reload the running background server onto the newest binary.
 ///
 /// This is the preferred upgrade path (issue #291): instead of killing the
@@ -2172,29 +2204,31 @@ pub fn run_server_promote_command(version: Option<&str>, emit_json: bool) -> Res
 /// - If no server is running, this is a successful no-op so installers can call
 ///   it unconditionally.
 pub async fn run_server_reload_command(force: bool, emit_json: bool) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    run_server_reload_command_to(force, emit_json, &mut stdout).await
+}
+
+async fn run_server_reload_command_to(
+    force: bool,
+    emit_json: bool,
+    stdout: &mut impl Write,
+) -> Result<()> {
     use crate::protocol::ServerEvent;
     use std::time::Duration;
 
     let socket = crate::server::socket_path();
 
-    #[derive(Serialize)]
-    struct ServerReloadReport {
-        socket: String,
-        had_listener: bool,
-        forced: bool,
-        reloaded: bool,
-        already_current: bool,
-        handoff_ready: bool,
-        detail: String,
-    }
-
-    let emit = |report: ServerReloadReport| -> Result<()> {
+    let mut emit = |report: ServerReloadReport| -> Result<()> {
+        let outcome = validate_server_reload_report(&report);
         if emit_json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            serde_json::to_writer_pretty(&mut *stdout, &report)?;
+            stdout.write_all(b"\n")?;
         } else if !report.detail.is_empty() {
-            println!("{}", report.detail);
+            writeln!(stdout, "{}", report.detail)?;
         }
-        Ok(())
+        // Keep printing the report above the status check so --json output is
+        // byte-identical for callers that parse it.
+        outcome
     };
 
     // No server? Nothing to reload. This is a success so an installer can call
@@ -3493,9 +3527,7 @@ fn filter_cli_model_routes_for_choice(
     use super::provider_init::ProviderChoice;
 
     let keep = |route: &&crate::provider::ModelRoute| match choice {
-        ProviderChoice::Claude => {
-            route.api_method_kind().is_anthropic_credential_route()
-        }
+        ProviderChoice::Claude => route.api_method_kind().is_anthropic_credential_route(),
         ProviderChoice::Openai => {
             let method = route.api_method_kind();
             matches!(method, crate::provider::ModelRouteApiMethod::OpenAIOAuth)

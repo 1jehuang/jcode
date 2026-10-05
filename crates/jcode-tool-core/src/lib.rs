@@ -175,6 +175,7 @@ pub trait Tool: Send + Sync {
             name: self.name().to_string(),
             description: self.description().to_string(),
             input_schema: ensure_intent_in_schema(self.parameters_schema()),
+            defer_loading: false,
         }
     }
 }

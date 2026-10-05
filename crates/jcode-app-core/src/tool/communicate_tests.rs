@@ -1379,6 +1379,12 @@ impl EnvGuard {
         crate::env::set_var(key, value);
         Self { key, original }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        crate::env::remove_var(key);
+        Self { key, original }
+    }
 }
 
 impl Drop for EnvGuard {

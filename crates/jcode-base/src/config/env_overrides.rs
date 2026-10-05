@@ -78,6 +78,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_DIAGRAM_PANE_TOGGLE_KEY") {
             self.keybindings.diagram_pane_toggle = v;
         }
+        if let Ok(v) = std::env::var("JCODE_DIAGRAM_PANE_VISIBILITY_TOGGLE_KEY") {
+            self.keybindings.diagram_pane_visibility_toggle = v;
+        }
         if let Ok(v) = std::env::var("JCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY") {
             self.keybindings.typing_scroll_lock_toggle = v;
         }
@@ -89,6 +92,12 @@ impl Config {
         }
         if let Ok(v) = std::env::var("JCODE_NEW_TERMINAL_KEY") {
             self.keybindings.new_terminal = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_VOICE_INPUT_KEY") {
+            self.keybindings.voice_input = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_DICTATION_RECORDER") {
+            self.dictation.recorder = v;
         }
 
         // Dictation
@@ -554,6 +563,22 @@ impl Config {
         {
             self.websearch.searxng_url = Some(v);
         }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_PREFER_NATIVE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.websearch.prefer_native = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_MAX_USES")
+            && let Ok(parsed) = v.trim().parse::<u32>()
+        {
+            self.websearch.native_max_uses = (parsed > 0).then_some(parsed);
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_ALLOWED_DOMAINS") {
+            self.websearch.native_allowed_domains = parse_env_list(&v);
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_BLOCKED_DOMAINS") {
+            self.websearch.native_blocked_domains = parse_env_list(&v);
+        }
 
         if let Ok(v) = std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES") {
             let mut source_ids = Vec::new();
@@ -746,6 +771,11 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_WHILE_STREAMING") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.power.prevent_sleep_while_streaming = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_BLOCK_LID_CLOSE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.power.block_lid_close = parsed;
             }
         }
 

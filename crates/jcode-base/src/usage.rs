@@ -7,6 +7,7 @@ mod accessors;
 mod anthropic_reset;
 mod api_keys;
 mod cache;
+mod disk_cache;
 mod display;
 mod model;
 mod openai_helpers;
@@ -67,6 +68,15 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     if let Some(cached) = cached_anthropic_usage(&cache_key) {
         return Ok(cached);
     }
+    // Short-lived CLI processes (`jcode usage --json`) share one fetch cadence
+    // and one 429 backoff through the persisted cache.
+    if let Some(shared) = disk_cache::fresh(&cache_key) {
+        store_anthropic_usage(cache_key, shared.clone());
+        return match &shared.last_error {
+            Some(error) => Err(anyhow::anyhow!(error.clone())),
+            None => Ok(shared),
+        };
+    }
 
     let client = crate::provider::shared_http_client();
     let response = crate::provider::anthropic::apply_oauth_attribution_headers(
@@ -100,7 +110,16 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        let err = anthropic_usage_error(format!("Usage API error ({}): {}", status, error_text));
+        let message = format!("Usage API error ({}): {}", status, error_text);
+        disk_cache::store_error(&cache_key, &message);
+        // A throttled usage endpoint does not change the real quota: keep
+        // showing the last good limits rather than blanking the meters.
+        if let Some(mut last_good) = disk_cache::last_good(&cache_key) {
+            last_good.fetched_at = Some(Instant::now());
+            store_anthropic_usage(cache_key, last_good.clone());
+            return Ok(last_good);
+        }
+        let err = anthropic_usage_error(message);
         store_anthropic_usage(cache_key, err.clone());
         anyhow::bail!(err.last_error.unwrap_or_else(|| "Usage API error".into()));
     }
@@ -152,6 +171,7 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
         last_error: None,
     };
 
+    disk_cache::store_success(&cache_key, &usage);
     store_anthropic_usage(cache_key, usage.clone());
     Ok(usage)
 }
@@ -362,10 +382,20 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
-    if auth::cursor::has_cursor_api_key() {
+    if auth::cursor::has_cursor_native_auth() {
         tasks.spawn(async {
             fetch_cursor_usage_report().await.map(|mut report| {
                 attach_activity(&mut report, "cursor");
+                report
+            })
+        });
+        total += 1;
+    }
+
+    if crate::subscription_catalog::configured_api_key().is_some() {
+        tasks.spawn(async {
+            fetch_jcode_usage_report().await.map(|mut report| {
+                attach_activity(&mut report, "jcode");
                 report
             })
         });
@@ -391,7 +421,8 @@ fn activity_source_has_dedicated_report(source_key: &str) -> bool {
         "copilot" => auth::copilot::has_copilot_credentials(),
         "antigravity" => auth::antigravity::has_cached_auth(),
         "gemini" => auth::gemini::has_api_key(),
-        "cursor" => auth::cursor::has_cursor_api_key(),
+        "cursor" => auth::cursor::has_cursor_native_auth(),
+        "jcode" => crate::subscription_catalog::configured_api_key().is_some(),
         _ => {
             // Direct OpenAI-compatible profiles are reported by the API-key
             // module whenever their key is configured.
