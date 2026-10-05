@@ -468,6 +468,7 @@ impl StatusSpinnerRenderer {
         // Painting a frame is progress, including during long streaming turns.
         crate::logging::watchdog::beat("tui.draw");
         app.refresh_terminal_title_metrics();
+        app.sync_herdr_agent_state();
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the

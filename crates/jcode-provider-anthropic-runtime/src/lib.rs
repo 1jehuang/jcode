@@ -1215,6 +1215,7 @@ impl AnthropicProvider {
 
     /// Convert our Message type to Anthropic API format
     /// Also repairs dangling tool_uses by injecting synthetic tool_results
+    #[cfg(test)]
     fn format_messages(
         &self,
         messages: &[Message],
@@ -1222,6 +1223,29 @@ impl AnthropicProvider {
         api_tools: &[ApiTool],
     ) -> Vec<ApiMessage> {
         jcode_provider_anthropic::format_messages_with_tools(messages, is_oauth, api_tools)
+    }
+
+    /// Format messages, replaying stored server tool blocks verbatim when the
+    /// matching server tool is attached to this request (`native_replay`).
+    fn format_messages_native(
+        &self,
+        messages: &[Message],
+        is_oauth: bool,
+        api_tools: &[ApiTool],
+        native_replay: bool,
+    ) -> Vec<ApiMessage> {
+        jcode_provider_anthropic::format_messages_with_native(
+            messages,
+            is_oauth,
+            api_tools,
+            native_replay,
+        )
+    }
+
+    /// True when requests go to Anthropic's own Messages API rather than a
+    /// custom gateway, which may not implement server tools.
+    fn first_party_api(&self) -> bool {
+        self.direct_transport.api_url == API_URL
     }
 
     /// Convert our ContentBlock to Anthropic API format
@@ -1321,8 +1345,16 @@ impl Provider for AnthropicProvider {
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
-        let api_tools = self.format_tools(tools, is_oauth);
-        let api_messages = self.format_messages(messages, is_oauth, &api_tools);
+        let server_tools = native_web_search::server_tools_for_request(
+            // OAuth always targets api.anthropic.com, regardless of a gateway
+            // base URL configured for API-key use.
+            is_oauth || self.first_party_api(),
+            tools,
+        );
+        let tools = native_web_search::without_local_websearch(tools, &server_tools);
+        let api_tools = self.format_tools(&tools, is_oauth);
+        let api_messages =
+            self.format_messages_native(messages, is_oauth, &api_tools, !server_tools.is_empty());
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
 
@@ -1331,11 +1363,7 @@ impl Provider for AnthropicProvider {
             max_tokens: self.max_tokens_for(&model),
             system: build_system_param(system, is_oauth),
             messages: format_messages_with_identity(api_messages, is_oauth),
-            tools: if api_tools.is_empty() {
-                None
-            } else {
-                Some(api_tools)
-            },
+            tools: jcode_provider_anthropic::request_tools(api_tools, server_tools),
             metadata: if is_oauth {
                 Some(oauth_request_metadata(&self.oauth_session_id))
             } else {
@@ -1578,14 +1606,23 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        if self.direct_transport.api_url != API_URL {
-            // Never send named gateway credentials to Anthropic's catalog.
-            return Ok(());
-        }
+        // A custom messages URL (ANTHROPIC_BASE_URL / named profile) must not
+        // leak gateway API keys to Anthropic's official model-catalog
+        // endpoint. Genuine Anthropic OAuth credentials are a different case:
+        // users often route /v1/messages through a local proxy (e.g. a
+        // caching proxy) while authenticating with their real subscription,
+        // and skipping the refresh for them silently freezes the model list
+        // at the last disk snapshot, hiding newly released models. The
+        // catalog fetch itself always goes directly to api.anthropic.com.
+        let custom_gateway = self.direct_transport.api_url != API_URL;
         // Discovery is independent of the selected chat credential mode. Do not
         // mutate that mode on this shared provider just to inspect another route.
         // API discovery gets first opportunity, OAuth still runs on API failure.
         for oauth in [false, true] {
+            if custom_gateway && !oauth {
+                // Never send named gateway API keys to Anthropic's catalog.
+                continue;
+            }
             let configured = if oauth {
                 auth::claude::load_credentials().is_ok()
             } else {
@@ -1693,8 +1730,16 @@ impl Provider for AnthropicProvider {
         let api_model = strip_1m_suffix(&model).to_string();
 
         // Format request
-        let api_tools = self.format_tools(tools, is_oauth);
-        let api_messages = self.format_messages(messages, is_oauth, &api_tools);
+        let server_tools = native_web_search::server_tools_for_request(
+            // OAuth always targets api.anthropic.com, regardless of a gateway
+            // base URL configured for API-key use.
+            is_oauth || self.first_party_api(),
+            tools,
+        );
+        let tools = native_web_search::without_local_websearch(tools, &server_tools);
+        let api_tools = self.format_tools(&tools, is_oauth);
+        let api_messages =
+            self.format_messages_native(messages, is_oauth, &api_tools, !server_tools.is_empty());
         let (thinking, output_config, temperature) =
             self.build_reasoning_request_parts(&model, is_oauth);
 
@@ -1703,11 +1748,7 @@ impl Provider for AnthropicProvider {
             max_tokens: self.max_tokens_for(&model),
             system: build_system_param_split(system_static, system_dynamic, is_oauth),
             messages: format_messages_with_identity(api_messages, is_oauth),
-            tools: if api_tools.is_empty() {
-                None
-            } else {
-                Some(api_tools)
-            },
+            tools: jcode_provider_anthropic::request_tools(api_tools, server_tools),
             metadata: if is_oauth {
                 Some(oauth_request_metadata(&self.oauth_session_id))
             } else {
@@ -2759,6 +2800,10 @@ struct SseEvent {
 #[derive(Default)]
 struct SseStreamState {
     current_tool_use: Option<ToolUseAccumulator>,
+    /// Server tool block (`server_tool_use`) being streamed. Its input arrives
+    /// as `input_json_delta` like a client tool, but the provider runs it, so it
+    /// is emitted as a provider-native item instead of a jcode tool call.
+    current_server_block: Option<native_web_search::ServerBlockAccumulator>,
     current_thinking_block: bool,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
@@ -2865,12 +2910,26 @@ fn process_sse_event(
                         });
                     }
                     ApiContentBlockStart::Unknown => {
-                        // Newer/unsupported block type. Parsing succeeded, so
-                        // the rest of the stream stays intact; there is simply
-                        // nothing for this build to surface.
-                        jcode_base::logging::warn(
-                            "Anthropic stream sent an unrecognized content_block_start type; ignoring the block",
-                        );
+                        // Server tool blocks are kept verbatim for replay; any
+                        // other newer block type is ignored. Parsing succeeded
+                        // either way, so the rest of the stream stays intact.
+                        match native_web_search::server_block_start(&event.data) {
+                            native_web_search::ServerBlockStart::Streaming(acc) => {
+                                state.current_server_block = Some(acc);
+                            }
+                            native_web_search::ServerBlockStart::Complete(item) => {
+                                events.push(StreamEvent::ProviderNative {
+                                    provider: jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC
+                                        .to_string(),
+                                    item,
+                                });
+                            }
+                            native_web_search::ServerBlockStart::Other => {
+                                jcode_base::logging::warn(
+                                    "Anthropic stream sent an unrecognized content_block_start type; ignoring the block",
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -2882,6 +2941,10 @@ fn process_sse_event(
                         events.push(StreamEvent::TextDelta(text));
                     }
                     ApiDelta::InputJson { partial_json } => {
+                        if let Some(block) = state.current_server_block.as_mut() {
+                            block.push_input(&partial_json);
+                            return events;
+                        }
                         if let Some(tool) = state.current_tool_use.as_mut() {
                             tool.input_json.push_str(&partial_json);
                         }
@@ -2897,6 +2960,14 @@ fn process_sse_event(
             }
         }
         "content_block_stop" => {
+            if let Some(block) = state.current_server_block.take() {
+                events.push(StreamEvent::ProviderNative {
+                    provider: jcode_message_types::provider_native::PROVIDER_NATIVE_ANTHROPIC
+                        .to_string(),
+                    item: block.finish(),
+                });
+                return events;
+            }
             // If we were accumulating a tool_use, it's complete now
             if state.current_tool_use.take().is_some() {
                 events.push(StreamEvent::ToolUseEnd);
@@ -2982,6 +3053,9 @@ use sse_types::{
 };
 
 mod context_window;
+mod native_web_search;
+#[cfg(test)]
+mod native_web_search_sse_tests;
 
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
@@ -2991,3 +3065,7 @@ mod tests;
 #[cfg(test)]
 #[path = "usage_limit_reset_tests.rs"]
 mod usage_limit_reset_tests;
+
+#[cfg(test)]
+#[path = "late_tool_result_tests.rs"]
+mod late_tool_result_tests;

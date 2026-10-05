@@ -42,6 +42,7 @@ const CLI_EVENTS = [
   "session_concurrency",
   "discovery",
   "todo_session",
+  "usage_report",
 ];
 
 const KNOWN_EVENTS = [
@@ -561,6 +562,13 @@ export default {
       }
     }
 
+    if (body.event === "usage_report") {
+      const problem = normalizeUsageReportEvent(body);
+      if (problem) {
+        return jsonResponse({ error: problem }, 400, cors);
+      }
+    }
+
     // Firehose first: even if D1 is at its size cap, the raw event is
     // recorded in Analytics Engine and the day is reconstructable.
     const firehoseOk = writeFirehose(env, body);
@@ -1016,6 +1024,14 @@ async function insertConcurrencyDetails(env, body) {
 }
 
 async function insertEvent(env, body) {
+  // usage_report is high volume (one per provider response). It is kept in
+  // the firehose for per-session detail and rolled up here; no raw events row.
+  if (body.event === "usage_report") {
+    await recordDailyModelUsage(env, body);
+    await recordCountryDaily(env, body);
+    return;
+  }
+
   const columns = await getEventColumns(env);
   const sessionDetailColumns = await getSessionDetailColumns(env);
   const turnDetailColumns = await getTurnDetailColumns(env);
@@ -2121,6 +2137,88 @@ async function insertDynamic(env, table, entries) {
 
 function boolToInt(value) {
   return value ? 1 : 0;
+}
+
+const USAGE_REPORT_SOURCES = new Set(["agent", "compaction", "sidecar"]);
+const USAGE_TOKEN_FIELDS = [
+  "input_tokens",
+  "output_tokens",
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+  "total_tokens",
+];
+// One provider response cannot plausibly exceed this; rejects garbage that
+// would otherwise poison the spend rollup.
+const MAX_USAGE_TOKENS_PER_REPORT = 50_000_000;
+
+function normalizeUsageLabel(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().slice(0, 120);
+}
+
+// Validates a `usage_report` and maps it onto the shared firehose blobs:
+// provider/model go to provider_end/model_end (the model that served the
+// response) and source goes to `step`, so per-response detail stays queryable
+// in Analytics Engine without widening the full FIREHOSE_SCHEMA.
+export function normalizeUsageReportEvent(body) {
+  if (!USAGE_REPORT_SOURCES.has(body.source)) {
+    return "Invalid usage_report source";
+  }
+  body.provider = normalizeUsageLabel(body.provider);
+  body.model = normalizeUsageLabel(body.model);
+  if (!body.model) {
+    return "Missing usage_report model";
+  }
+  for (const field of USAGE_TOKEN_FIELDS) {
+    const value = body[field] ?? 0;
+    if (!Number.isInteger(value) || value < 0 || value > MAX_USAGE_TOKENS_PER_REPORT) {
+      return `Invalid usage_report ${field}`;
+    }
+    body[field] = value;
+  }
+  const responses = body.responses ?? 1;
+  if (!Number.isInteger(responses) || responses < 1 || responses > 10_000) {
+    return "Invalid usage_report responses";
+  }
+  body.responses = responses;
+  body.provider_end = body.provider;
+  body.model_end = body.model;
+  body.step = body.source;
+  return null;
+}
+
+async function recordDailyModelUsage(env, body) {
+  const usageDate = new Date().toISOString().slice(0, 10);
+  await env.DB.prepare(`
+    INSERT INTO daily_model_usage (
+      usage_date, source, provider, model, build_channel, is_ci, responses,
+      input_tokens, output_tokens, cache_read_input_tokens,
+      cache_creation_input_tokens, total_tokens
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(usage_date, source, provider, model, build_channel, is_ci) DO UPDATE SET
+      responses = responses + excluded.responses,
+      input_tokens = input_tokens + excluded.input_tokens,
+      output_tokens = output_tokens + excluded.output_tokens,
+      cache_read_input_tokens = cache_read_input_tokens + excluded.cache_read_input_tokens,
+      cache_creation_input_tokens = cache_creation_input_tokens + excluded.cache_creation_input_tokens,
+      total_tokens = total_tokens + excluded.total_tokens,
+      updated_at = datetime('now')
+  `).bind(
+    usageDate,
+    body.source,
+    body.provider || "",
+    body.model,
+    body.build_channel || "",
+    boolToInt(body.is_ci),
+    body.responses,
+    body.input_tokens,
+    body.output_tokens,
+    body.cache_read_input_tokens,
+    body.cache_creation_input_tokens,
+    body.total_tokens,
+  ).run();
 }
 
 function jsonResponse(data, status = 200, cors = null) {

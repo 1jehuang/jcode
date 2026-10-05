@@ -530,6 +530,7 @@ impl App {
             deferred_stream_done_id: None,
             remote_resume_activity: None,
             queued_followup_starved_since: None,
+            remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
             status: ProcessingStatus::default(),
             subagent_status: None,
@@ -772,6 +773,7 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_typing_undo: None,
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -991,6 +993,7 @@ impl App {
             deferred_stream_done_id: None,
             remote_resume_activity: None,
             queued_followup_starved_since: None,
+            remote_interrupt_ack_deadline: None,
             pending_reload_reconnect_status: None,
             status: ProcessingStatus::default(),
             subagent_status: None,
@@ -1233,6 +1236,7 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            input_typing_undo: None,
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -1408,7 +1412,7 @@ impl App {
             .autojudge_enabled
             .unwrap_or(crate::config::config().autojudge.enabled);
         if let Some(model) = self.session.model.clone() {
-            self.update_context_limit_for_model(&model);
+            self.update_context_limit_for_model(&model, None);
         }
         self.follow_chat_bottom();
         crate::logging::info(&format!(

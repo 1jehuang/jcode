@@ -317,6 +317,23 @@ This is a privacy-safe per-prompt summary event. It contains no prompt text, no 
 | `turn_abandoned` | `false` | Whether the turn appears to have ended without success |
 | `turn_end_reason` | `"next_user_prompt"` | Why the turn was finalized |
 
+### Usage Report Event
+
+Sent in the background once per completed model response, so spend can be measured accurately even when a session never ends cleanly and when many agents run inside one jcode process (swarm workers, background tasks, desktop panels). It contains token counts and model labels only: no prompt text, no response text, no tool inputs/outputs, and no file paths.
+
+| Field | Example | Purpose |
+|-------|---------|----------|
+| `event` | `"usage_report"` | Event type |
+| `session_id` | `"uuid"` | The calling agent's own session, so concurrent agents are attributed separately |
+| `source` | `"agent"` / `"compaction"` / `"sidecar"` | What made the call: a normal agent turn, a context-compaction summary, or a memory helper request |
+| `provider` / `model` | `"openai"` / `"gpt-5.6-luna"` | The provider and model that served this response |
+| `input_tokens` / `output_tokens` | `1200` / `180` | Provider-reported token usage for this response |
+| `cache_read_input_tokens` / `cache_creation_input_tokens` | `8000` / `600` | Provider-reported prompt-cache tokens when available |
+| `total_tokens` | `9980` | Sum of the token fields above |
+| `responses` | `1` | Number of model responses covered by this report |
+
+The receiving worker adds these counts into a per-day, per-model total (keyed by date, source, provider, model, build channel, and CI flag) instead of storing a separate row per response. That daily total does not include your telemetry ID.
+
 ### Shared Event Metadata
 
 Most events also carry a few coarse quality / cleanup fields:
@@ -458,4 +475,4 @@ This is open source. The telemetry implementation is in [`crates/jcode-telemetry
 
 Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts), and in the de-identified investor summaries described under [How We Use and Share Data](#how-we-use-and-share-data). Individual event records are retained for up to 12 months and then deleted.
 
-High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months.
+High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months. Usage report events are not stored as individual records in the database; only the per-day, per-model token totals described above are kept.
