@@ -3,7 +3,9 @@ use jcode_message_types::{
 };
 use jcode_provider_core::anthropic_map_tool_name_for_oauth as map_tool_name_for_oauth;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
 mod history_repair;
 use history_repair::*;
@@ -446,32 +448,6 @@ pub fn format_content_blocks_with_native(
     result
 }
 
-/// Convert tool definitions to Anthropic API format
-/// Adds cache_control to the last tool for prompt caching
-/// Local tool names that are represented by the curated Claude-Code builtin
-/// definitions in OAuth mode. These keep their hand-tuned schemas/descriptions
-/// (which the Anthropic subscription endpoint expects) instead of the raw
-/// registry definitions; every other tool is forwarded as-is (see #409).
-/// Local tool names that already have a hand-tuned curated OAuth definition
-/// above, so the registry pass must not forward them a second time.
-///
-/// `schedule` is deliberately absent: its curated `ScheduleWakeup` schema had
-/// drifted from the real tool (it advertised `delaySeconds`/`reason`/`prompt`
-/// while the handler requires `task` + `wake_in_minutes`/`wake_at`), so every
-/// call failed with "task is required for action=create" (#706). Forwarding the
-/// real schema under the remapped name keeps the two in sync by construction.
-/// `bash` is likewise forwarded: its curated schema omitted timeout units and
-/// execution options (#1223). Only its OAuth name changes, not its definition.
-const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
-    "subagent",
-    "edit",
-    "glob",
-    "grep",
-    "read",
-    "skill_manage",
-    "write",
-];
-
 /// Normalize a tool schema for Anthropic's `input_schema`.
 ///
 /// Anthropic accepts JSON Schema combinators inside object properties but
@@ -487,125 +463,22 @@ fn anthropic_input_schema(schema: &Value) -> Value {
     jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::ANTHROPIC)
 }
 
+/// Convert tool definitions to Anthropic API format.
+///
+/// Every provider and auth route advertises the same registry tools with the
+/// same schemas. OAuth (subscription) only renames a few tools to their
+/// Claude-Code builtin names (`bash` -> `Bash`, ...); the definition itself is
+/// never replaced. Hand-curated OAuth schemas drifted from the real tools and
+/// silently dropped options like `intent` (#706, #1223).
 pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool) -> Vec<ApiTool> {
-    if is_oauth {
-        // A curated builtin may only be advertised when at least one backing
-        // local tool is actually registered. Otherwise the model calls e.g.
-        // `Agent`/`Glob`, the reverse mapping resolves to `subagent`/`glob`,
-        // and the registry lookup fails with "Unknown tool" (see #572).
-        let has_backing = |candidates: &[&str]| {
-            candidates
-                .iter()
-                .any(|candidate| tools.iter().any(|tool| tool.name == *candidate))
-        };
-        // Curated Claude-Code builtin tool definitions. These remain hand-tuned
-        // because the Anthropic OAuth (subscription) endpoint expects the
-        // builtin names with compatible schemas. Anything not represented here
-        // is appended from the real registry below so OAuth users keep the full
-        // toolset (websearch, webfetch, browser, codesearch, memory, ...).
-        let curated: Vec<(&[&str], ApiTool)> = vec![
-            (
-                &["subagent"],
-                ApiTool {
-                    name: "Agent".to_string(),
-                    description: "Launch a new agent to handle complex, multi-step tasks."
-                        .to_string(),
-                    input_schema: json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["edit"],
-                ApiTool {
-                    name: "Edit".to_string(),
-                    description: "Performs exact string replacements in files.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["glob"],
-                ApiTool {
-                    name: "Glob".to_string(),
-                    description: "Fast file pattern matching tool.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["grep"],
-                ApiTool {
-                    name: "Grep".to_string(),
-                    description: "A powerful search tool built on ripgrep.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"-B":{"type":"number"},"-A":{"type":"number"},"-C":{"type":"number"},"context":{"type":"number"},"-n":{"type":"boolean"},"-i":{"type":"boolean"},"type":{"type":"string"},"head_limit":{"type":"number"},"offset":{"type":"number"},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["read"],
-                ApiTool {
-                    name: "Read".to_string(),
-                    description: "Reads a file from the local filesystem.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["skill_manage"],
-                ApiTool {
-                    name: "Skill".to_string(),
-                    description: "Execute a skill within the main conversation".to_string(),
-                    input_schema: json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-            (
-                &["write"],
-                ApiTool {
-                    name: "Write".to_string(),
-                    description: "Writes a file to the local filesystem.".to_string(),
-                    input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
-                    cache_control: None,
-                    defer_loading: false,
-                },
-            ),
-        ];
-        let mut out: Vec<ApiTool> = curated
-            .into_iter()
-            .filter(|(backing, _)| has_backing(backing))
-            .map(|(_, tool)| tool)
-            .collect();
-
-        // Forward every other registered tool, remapping its name to the
-        // OAuth-accepted form. This restores websearch/webfetch/browser/
-        // codesearch/memory/swarm/multiedit/open/etc. for subscription users,
-        // matching the documented "remap names, keep the full toolset" behavior.
-        for tool in tools {
-            if OAUTH_BUILTIN_LOCAL_TOOLS.contains(&tool.name.as_str()) {
-                continue;
-            }
-            out.push(ApiTool {
-                name: map_tool_name_for_oauth(&tool.name),
-                description: tool.description.clone(),
-                input_schema: anthropic_input_schema(&tool.input_schema),
-                cache_control: None,
-                defer_loading: tool.defer_loading,
-            });
-        }
-
-        return finish_tool_list(out, cache_ttl_1h);
-    }
-
     let out = tools
         .iter()
         .map(|tool| ApiTool {
-            name: tool.name.clone(),
+            name: if is_oauth {
+                map_tool_name_for_oauth(&tool.name)
+            } else {
+                tool.name.clone()
+            },
             description: tool.description.clone(),
             input_schema: anthropic_input_schema(&tool.input_schema),
             cache_control: None,
