@@ -1726,6 +1726,7 @@ impl App {
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
+        self.input_typing_undo = None;
         let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
         if self.input_undo_stack.last() == Some(&snapshot)
             && self.input_undo_image_counts.last() == Some(&self.pending_images.len())
@@ -1762,11 +1763,13 @@ impl App {
         self.input_undo_stack.clear();
         self.input_undo_image_counts.clear();
         self.cleared_draft_images.clear();
+        self.input_typing_undo = None;
         self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
         let depth = self.input_undo_stack.len();
+        self.input_typing_undo = None;
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
             let image_count = self.input_undo_image_counts.pop();
             // The composer now holds a restored draft, so the copy stashed by a
