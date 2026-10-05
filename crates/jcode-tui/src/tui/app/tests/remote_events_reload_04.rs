@@ -2615,6 +2615,63 @@ fn test_setting_context_limit_also_syncs_the_compaction_budget() {
     );
 }
 
+/// The server re-sends ModelChanged on resume so the client learns the resolved
+/// context window. Re-reporting the model the client already runs must adopt the
+/// window without announcing a phantom "Switched to model" line.
+#[test]
+fn test_remote_model_changed_for_same_model_adopts_window_silently() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.is_remote = true;
+    app.remote_provider_model = Some("gpt-5.6-terra".to_string());
+    let before = app.display_messages().len();
+
+    let crate::protocol::ServerEvent::ModelChanged {
+        id,
+        model,
+        provider_name,
+        error,
+        resolved_credential,
+        reasoning_effort,
+        ..
+    } = model_changed_event(None, None)
+    else {
+        unreachable!()
+    };
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            id,
+            model,
+            provider_name,
+            context_window: Some(1_000_000),
+            error,
+            resolved_credential,
+            reasoning_effort,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.context_limit, 1_000_000);
+    assert!(
+        !app.display_messages()[before..]
+            .iter()
+            .any(|msg| msg.content.contains("Switched to model")),
+        "a resume re-report of the same model must not announce a switch"
+    );
+
+    app.remote_provider_model = Some("other-model".to_string());
+    app.handle_server_event(model_changed_event(None, None), &mut remote);
+    assert!(
+        app.display_messages()[before..]
+            .iter()
+            .any(|msg| msg.content.contains("Switched to model: gpt-5.6-terra")),
+        "a real switch is still announced"
+    );
+}
+
 /// Issue #1504: the effort chip must follow the effort the server reports for
 /// the switched-to model: adopt a new level, clear on `None`, and leave the
 /// running model's effort untouched when the switch fails.

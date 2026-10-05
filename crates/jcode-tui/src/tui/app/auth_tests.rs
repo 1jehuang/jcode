@@ -115,6 +115,10 @@ fn tui_openai_compatible_key_save_persists_key_for_current_session() -> anyhow::
             .as_deref(),
             Some("sk-test-tui-login")
         );
+        assert!(
+            std::env::var_os(&resolved.api_key_env).is_none(),
+            "saving must not poison the process env (issue #1386)"
+        );
         Ok(())
     })
 }
@@ -129,10 +133,17 @@ fn tui_api_key_logout_clears_saved_key_and_process_env() -> anyhow::Result<()> {
         )
         .map(|_| resolved)?;
 
+        // Saving is file-only (#1386), so the key is readable from the env file
+        // and never copied into the process environment.
         assert_eq!(
-            std::env::var(&resolved.api_key_env).as_deref(),
-            Ok("sk-test-tui-login")
+            crate::provider_catalog::load_api_key_from_env_or_config(
+                &resolved.api_key_env,
+                &resolved.env_file,
+            )
+            .as_deref(),
+            Some("sk-test-tui-login")
         );
+        assert!(std::env::var_os(&resolved.api_key_env).is_none());
 
         App::clear_api_key_login(&resolved.api_key_env, &resolved.env_file)?;
 

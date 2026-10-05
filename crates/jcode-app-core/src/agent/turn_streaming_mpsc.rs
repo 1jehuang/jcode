@@ -1,3 +1,4 @@
+use super::response_recovery::MalformedToolCallInfo;
 use super::*;
 
 /// Largest byte index `<= index` that is a UTF-8 char boundary in `text`.
@@ -146,6 +147,7 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        let mut consecutive_malformed_tool_rounds = 0u32;
 
         loop {
             // Never open a new provider request after a cancel. Several paths
@@ -1545,6 +1547,8 @@ impl Agent {
 
             // Execute tools and add results
             let tool_count = tool_calls.len();
+            let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
+            let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
             for tool_index in 0..tool_count {
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
@@ -1591,6 +1595,10 @@ impl Agent {
                     .unwrap_or_else(|| self.session.id.clone());
 
                 if let Some(error_msg) = tc.validation_error() {
+                    malformed_calls.push(MalformedToolCallInfo {
+                        name: tc.name.clone(),
+                        error: error_msg.clone(),
+                    });
                     logging::warn(&error_msg);
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),
@@ -1610,6 +1618,10 @@ impl Agent {
                     continue;
                 }
 
+                // A call that passed validation is genuinely valid even if
+                // the tool itself later fails: it resets the malformed-round
+                // bound in handle_malformed_tool_round below.
+                executed_valid_call = true;
                 self.validate_tool_allowed(&tc.name)?;
 
                 let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
@@ -1891,6 +1903,18 @@ impl Agent {
                 self.session.save()?;
             }
 
+            // Bounded recovery for repeated malformed tool calls (e.g. a
+            // model emitting null arguments): correct with the expected
+            // schema, then end the turn with an actionable error instead of
+            // retrying the same malformed round forever. Mirrors the blocking
+            // loop (turn_loops.rs) via the shared helper.
+            self.handle_malformed_tool_round(
+                &malformed_calls,
+                executed_valid_call,
+                &mut consecutive_malformed_tool_rounds,
+                &tools,
+            )?;
+
             // === INJECTION POINT D: All tools done, before next API call ===
             // This is the safest point for non-urgent injection since all tool_results
             // have been added and the conversation is in a valid state.
@@ -1908,129 +1932,5 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn abnormal_incomplete_stop_excludes_natural_completion() {
-        for reason in [None, Some("end_turn"), Some("stop")] {
-            assert!(super::incomplete_turn_stop(reason).is_none());
-        }
-        for reason in ["max_tokens", "length", "tool_use"] {
-            assert!(
-                matches!(super::incomplete_turn_stop(Some(reason)), Some(crate::protocol::ServerEvent::TurnStopped {
-                reason: crate::protocol::TurnStopReason::LimitReached,
-                provider_stop_reason: Some(raw), ..
-            }) if raw == reason)
-            );
-        }
-    }
-
-    use super::*;
-    use serde_json::json;
-
-    fn tool_call(name: &str, input: serde_json::Value) -> ToolCall {
-        ToolCall {
-            id: "toolu_test".to_string(),
-            name: name.to_string(),
-            input,
-            intent: None,
-            thought_signature: None,
-        }
-    }
-
-    #[test]
-    fn reload_interrupted_bg_wait_is_non_error_and_resumable() {
-        let tc = tool_call(
-            "bg",
-            json!({"action": "wait", "task_id": "bg-123", "max_wait_seconds": 300}),
-        );
-
-        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
-
-        assert!(!is_error);
-        assert!(message.contains("Resume the wait"));
-        assert!(message.contains("\"task_id\":\"bg-123\""));
-    }
-
-    #[test]
-    fn reload_interrupted_non_wait_tool_remains_error() {
-        let tc = tool_call("bash", json!({"command": "sleep 10"}));
-
-        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
-
-        assert!(is_error);
-        assert!(message.contains("interrupted by server reload"));
-    }
-
-    /// Reference O(n) full scan, preserving the original precedence: the
-    /// `to=functions.` marker is checked before `+#+#`.
-    fn find_wrap_marker_full(text: &str) -> Option<usize> {
-        text.find("to=functions.").or_else(|| text.find("+#+#"))
-    }
-
-    /// Simulate streaming `full` in arbitrary deltas and assert the incremental
-    /// scan finds the first marker position, matching a full rescan each step.
-    fn assert_incremental_matches(full: &str, chunk: usize) {
-        let mut acc = String::new();
-        let mut incremental_hit: Option<usize> = None;
-        let bytes = full.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let mut end = (i + chunk).min(bytes.len());
-            while end < bytes.len() && !full.is_char_boundary(end) {
-                end += 1;
-            }
-            let delta = &full[i..end];
-            acc.push_str(delta);
-            if incremental_hit.is_none() {
-                incremental_hit = find_wrap_marker_incremental(&acc, delta.len());
-            }
-            i = end;
-        }
-        // The earliest of either marker in the full text.
-        let fn_pos = full.find("to=functions.");
-        let plus_pos = full.find("+#+#");
-        let expected = match (fn_pos, plus_pos) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        assert_eq!(
-            incremental_hit, expected,
-            "incremental scan mismatch for {full:?} chunk={chunk}"
-        );
-    }
-
-    #[test]
-    fn wrap_marker_incremental_detects_markers_across_chunk_sizes() {
-        let cases = [
-            "plain answer with no marker at all",
-            "answer then to=functions.foo({})",
-            "answer then +#+# wrapped",
-            "prefix +#+# and later to=functions.bar",
-            "unicode 🔄 résumé then to=functions.baz",
-            "",
-            "to=functions.first",
-            "+#+#",
-        ];
-        for case in cases {
-            for chunk in [1usize, 2, 3, 5, 7, 100] {
-                assert_incremental_matches(case, chunk);
-            }
-        }
-    }
-
-    #[test]
-    fn wrap_marker_incremental_finds_marker_straddling_delta_boundary() {
-        // Feed "to=functions." split right in the middle so the marker only
-        // exists once both halves are appended; the overlap window must catch it.
-        let mut acc = String::new();
-        acc.push_str("answer to=fun");
-        assert_eq!(
-            find_wrap_marker_incremental(&acc, "answer to=fun".len()),
-            None
-        );
-        acc.push_str("ctions.tool");
-        let hit = find_wrap_marker_incremental(&acc, "ctions.tool".len());
-        assert_eq!(hit, find_wrap_marker_full(&acc));
-        assert_eq!(hit, Some("answer ".len()));
-    }
-}
+#[path = "turn_streaming_mpsc_tests.rs"]
+mod tests;

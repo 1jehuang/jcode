@@ -330,6 +330,21 @@ impl Agent {
     /// Inject all pending soft interrupt messages into the conversation.
     /// Returns the combined message content and clears the queue.
     pub(super) fn inject_soft_interrupts(&mut self) -> Vec<InjectedSoftInterrupt> {
+        // A cancelled turn never makes another request. Injecting now would
+        // put the user's next prompt into history with no reply, and the
+        // client would treat it as delivered. Esc after typing a follow-up
+        // must stop this turn and run that prompt, so leave it queued: the
+        // client recovers it and sends it as the next turn.
+        if self.is_graceful_shutdown() {
+            if self.has_soft_interrupts() {
+                logging::info(&format!(
+                    "AGENT_SOFT_INTERRUPT_INJECT_SKIPPED_CANCELLED session={} pending_count={}",
+                    self.session_id(),
+                    self.soft_interrupt_count()
+                ));
+            }
+            return Vec::new();
+        }
         let messages: Vec<SoftInterruptMessage> = {
             let mut queue = match self.soft_interrupt_queue.lock() {
                 Ok(queue) => queue,

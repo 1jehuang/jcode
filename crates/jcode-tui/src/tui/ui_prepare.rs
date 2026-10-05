@@ -1567,8 +1567,13 @@ fn render_message_into(
                                 })
                         })
                         .unwrap_or_else(|| "unknown".to_string());
-                    let expandable =
-                        messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width);
+                    // Outside the inline modes the diff body is hidden entirely,
+                    // so any edit with a diff can be expanded into full inline.
+                    let expandable = if app.diff_mode().is_inline() {
+                        messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width)
+                    } else {
+                        messages::edit_tool_has_inline_diff(tc, &msg.content)
+                    };
                     acc.edit_tool_line_ranges.push((
                         msg_global_idx,
                         file_path,

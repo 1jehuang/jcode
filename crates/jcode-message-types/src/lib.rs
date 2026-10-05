@@ -656,14 +656,17 @@ impl ToolCall {
 
     pub fn parse_streamed_input_to_object(input: &str) -> serde_json::Value {
         let trimmed = input.trim();
+        // No argument text at all is how providers stream a no-argument call.
         if trimmed.is_empty() {
             return serde_json::Value::Object(serde_json::Map::new());
         }
 
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(value) => Self::normalize_input_to_object(value),
-            Err(_) => serde_json::Value::Null,
-        }
+        // Keep explicit non-object arguments (`null`, numbers, arrays,
+        // strings) and unparseable JSON as-is. Coercing them to `{}` ran the
+        // tool with missing arguments and hid the malformed call from
+        // `validation_error`, so the model never got a schema correction and
+        // could repeat the same bad call indefinitely.
+        serde_json::from_str::<serde_json::Value>(trimmed).unwrap_or(serde_json::Value::Null)
     }
 
     pub fn validation_error(&self) -> Option<String> {
