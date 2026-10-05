@@ -454,7 +454,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
                     }
                 }
             }
-            return copy_to_clipboard_osc52(text);
+            copy_to_clipboard_osc52(text)
         }
 
         // Linux has the same failure class (issue #504, Kali/X11): wl-copy fails
@@ -944,13 +944,13 @@ fn clipboard_image_impl(allow_html_fallback: bool) -> Option<(String, String)> {
             .output()
         {
             let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if result == "ok" {
-                if let Ok(data) = std::fs::read(&temp_path) {
-                    let _ = std::fs::remove_file(&temp_path);
-                    if !data.is_empty() {
-                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                        return Some(("image/png".to_string(), b64));
-                    }
+            if result == "ok"
+                && let Ok(data) = std::fs::read(&temp_path)
+            {
+                let _ = std::fs::remove_file(&temp_path);
+                if !data.is_empty() {
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                    return Some(("image/png".to_string(), b64));
                 }
             }
         }
