@@ -19,10 +19,9 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
     "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
 }
 
-/// Hint for a request the server answered with an error status. For a 5xx
-/// the server answered but is overloaded or failing on its side, and the
-/// request is retried automatically, so point at the provider, not the
-/// network. Other statuses keep the endpoint-specific advice.
+/// Hint for a request the server answered with an error status. The network
+/// is working (a response came back), so connectivity advice would mislead:
+/// point at the rate limit, the key, the account balance, or the model.
 fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
     let endpoint_hint = local_endpoint_troubleshooting_hint(api_base, model);
     let is_local = !endpoint_hint.starts_with("Hint: check network");
@@ -32,8 +31,21 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
         429 => {
             "Hint: the provider rate limited this request (per-minute or quota cap), not a network problem. jcode backs off automatically, honoring any provider-requested delay, within its retry budget; if it keeps failing, wait a minute, lower request frequency, or switch to another provider with /model."
         }
+        401 | 403 => {
+            "Hint: the provider rejected the API key. Check that the key is valid and allowed to use this model, or switch to another provider with /model."
+        }
+        402 => {
+            "Hint: this is a billing limit, not a network problem. The key's balance or token allowance is used up: raise the limit or top up in the provider's dashboard, use another key, or switch to another provider with /model."
+        }
+        // Local servers (Ollama, LM Studio) answer 404 for a model that is
+        // not installed or loaded, which their own hint already explains.
+        404 if !is_local => {
+            "Hint: the endpoint or model was not found. Check that the base URL includes the API version (usually /v1) and that the model exists on the provider."
+        }
+        // The provider answered, so this is server-side overload or failure,
+        // not connectivity (#1596). These are retried before surfacing.
         500..=599 if !is_local => {
-            "Hint: the provider is overloaded or having a temporary server problem. jcode retries automatically, or switch to another provider with /model."
+            "Hint: the provider is overloaded or having a temporary server problem, not a network problem. jcode already retried; try again shortly or switch to another provider with /model."
         }
         _ => endpoint_hint,
     }
@@ -346,9 +358,9 @@ fn is_retryable_error(error_str: &str) -> bool {
     // not depend on provider-specific body wording.
     match parsed_http_status(error_str) {
         Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422) => return false,
-        // 429 rate limit, and every 5xx: the server is up but overloaded or
-        // failing on its side (500, 502, 503, 504, and the non-standard 529
-        // "overloaded" some providers send). Waiting and resending can help.
+        // 429 rate limit, and every 5xx: the server answered but is overloaded
+        // or failing on its side. This includes non-standard codes such as the
+        // 529 "overloaded" some OpenAI-compatible providers send (#1596).
         Some(429 | 500..=599) => return true,
         _ => {}
     }
@@ -407,6 +419,33 @@ mod tests {
         assert!(hint.contains("LM Studio"));
         assert!(hint.contains("Local Server"));
         assert!(hint.contains("/v1/models"));
+    }
+
+    /// #1596: an OpenAI-compatible provider answering 529 "heavy usage" (or
+    /// any other 5xx) must be retried, not fail the turn on the first try.
+    #[test]
+    fn every_5xx_status_including_529_is_retryable() {
+        let body = r#"data: {"error":{"message":"We're experiencing heavy usage right now, please try again in a moment.","type":"server_error"}}"#;
+        for status in [
+            "500 internal server error",
+            "502 bad gateway",
+            "503 service unavailable",
+            "520 <unknown status code>",
+            "529 <unknown status code>",
+        ] {
+            let err = format!(
+                "openai-compatible chat request failed\n  endpoint: https://compat.example.test/v1/chat/completions\n  model: glm-5.3\n  auth: compat_api_key\n  status: {status}\n  response: {body}"
+            )
+            .to_lowercase();
+            assert!(is_retryable_error(&err), "{status} must be retried");
+        }
+    }
+
+    #[test]
+    fn server_error_hint_points_at_provider_not_network() {
+        let hint = http_status_hint(529, "https://compat.example.test/v1", "glm-5.3");
+        assert!(hint.contains("overloaded"), "{hint}");
+        assert!(!hint.contains("check network"), "{hint}");
     }
 
     #[test]
@@ -652,10 +691,30 @@ mod tests {
         assert!(
             http_status_hint(503, "http://localhost:11434/v1", "llama3.2").contains("ollama serve")
         );
-        // Other statuses keep the endpoint advice as before.
-        assert_eq!(
-            http_status_hint(404, "https://api.example.com/v1", "m"),
-            local_endpoint_troubleshooting_hint("https://api.example.com/v1", "m")
+    }
+
+    /// A 402 means the server answered: the hint must name the billing limit,
+    /// not send the user to check their network.
+    #[test]
+    fn status_hint_names_billing_for_402_not_network() {
+        let hint = http_status_hint(402, "https://apiduck.servepics.com/v1", "glm-5.3");
+        assert!(hint.contains("billing limit"), "{hint}");
+        assert!(hint.contains("/model"), "{hint}");
+        assert!(!hint.contains("network connectivity"), "{hint}");
+
+        for status in [401u16, 403] {
+            let hint = http_status_hint(status, "https://api.example.com/v1", "m");
+            assert!(hint.contains("API key"), "{status}: {hint}");
+            assert!(!hint.contains("network connectivity"), "{status}: {hint}");
+        }
+        assert!(http_status_hint(404, "https://api.example.com/v1", "m").contains("/v1"));
+        // Local servers keep their own advice (e.g. `ollama pull` for a 404).
+        assert!(
+            http_status_hint(404, "http://localhost:11434/v1", "llama3.2").contains("ollama pull")
+        );
+        // Server errors keep the endpoint-specific advice.
+        assert!(
+            http_status_hint(503, "http://localhost:11434/v1", "llama3.2").contains("ollama serve")
         );
     }
 }
