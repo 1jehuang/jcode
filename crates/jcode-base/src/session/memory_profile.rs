@@ -123,6 +123,13 @@ impl ContentBlockMemoryStats {
             ContentBlock::ToolReference { tool_name, .. } => {
                 self.record_bytes(tool_name.len());
             }
+            ContentBlock::ProviderNative { item, .. } => {
+                self.tool_result_blocks += 1;
+                let bytes = estimate_json_bytes(item);
+                self.tool_result_bytes += bytes;
+                self.max_tool_result_bytes = self.max_tool_result_bytes.max(bytes);
+                self.record_bytes(bytes);
+            }
         }
     }
 

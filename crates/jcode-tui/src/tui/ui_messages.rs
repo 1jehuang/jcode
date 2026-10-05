@@ -3375,6 +3375,10 @@ fn edit_tool_inline_diff_lines(tc: &ToolCall, content: &str) -> Option<Vec<Parse
     (!change_lines.is_empty()).then_some(change_lines)
 }
 
+pub(super) fn edit_tool_has_inline_diff(tc: &ToolCall, content: &str) -> bool {
+    edit_tool_inline_diff_lines(tc, content).is_some()
+}
+
 pub(super) fn edit_tool_inline_diff_is_expandable(
     tc: &ToolCall,
     content: &str,
@@ -4086,6 +4090,18 @@ pub(crate) fn render_tool_message(
             })
     } else {
         tools_ui::get_tool_summary_with_budget(tc, 50, Some(technical_summary_width))
+    };
+    // Edit rows read like every other tool row: the intent. The file path is
+    // already shown on the inline diff header right below, so repeating it on
+    // the row is noise. Errors keep their summary so failures stay diagnosable.
+    let edit_path_on_diff_header = is_edit_tool
+        && !is_error
+        && diff_mode.is_inline()
+        && edit_tool_has_inline_diff(tc, &msg.content);
+    let summary = if edit_path_on_diff_header {
+        String::new()
+    } else {
+        summary
     };
 
     let mut tool_line = vec![

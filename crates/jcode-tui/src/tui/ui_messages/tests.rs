@@ -3401,3 +3401,51 @@ fn render_todos_message_draws_rounded_border_with_counts_title() {
             .all(|r| unicode_width::UnicodeWidthStr::width(r.as_str()) <= 80)
     );
 }
+
+/// The edit row must not repeat the file path that the inline diff header
+/// directly below already shows. With an intent it reads like any other tool
+/// row, and without one it falls back to the bare name plus change counts.
+#[test]
+fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
+    for intent in [Some("Fix the network hint"), None] {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content: "Edited".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_edit".to_string(),
+                name: "edit".to_string(),
+                input: serde_json::json!({
+                    "file_path": "/repo/src/very_specific_name.rs",
+                    "old_string": "old\n",
+                    "new_string": "new\n",
+                }),
+                intent: intent.map(str::to_string),
+                thought_signature: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Inline);
+        let text: Vec<String> = lines.iter().map(extract_line_text).collect();
+        let occurrences = text
+            .iter()
+            .filter(|line| line.contains("very_specific_name.rs"))
+            .count();
+        assert_eq!(occurrences, 1, "path should appear once: {text:#?}");
+        assert!(
+            text[1].contains("diff · /repo/src/very_specific_name.rs"),
+            "{text:#?}"
+        );
+        if let Some(intent) = intent {
+            assert!(text[0].contains(&format!("edit · {intent}")), "{text:#?}");
+        }
+
+        // With diffs hidden the row is the only place the path can appear.
+        let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Off);
+        if intent.is_none() {
+            assert!(extract_line_text(&lines[0]).contains("very_specific_name.rs"));
+        }
+    }
+}

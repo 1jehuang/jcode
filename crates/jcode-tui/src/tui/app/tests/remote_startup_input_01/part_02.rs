@@ -297,6 +297,7 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 91,
             model: "gpt-5.6-sol".to_string(),
             provider_name: Some("OpenAI".to_string()),

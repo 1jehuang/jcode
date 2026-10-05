@@ -464,11 +464,10 @@ pub(super) fn draw_messages(
     } else {
         None
     };
-    let active_inline_edit_context = if app.diff_mode().is_inline() || expand_feedback_active {
-        active_file_diff_context(prepared.as_ref(), scroll, visible_height)
-    } else {
-        None
-    };
+    // The expand badge applies in every diff mode: from Off/File it opens the
+    // hidden diff in full inline, so resolve the visible edit regardless.
+    let active_inline_edit_context =
+        active_file_diff_context(prepared.as_ref(), scroll, visible_height);
 
     let visible_end = (scroll + visible_height).min(total_lines);
     let visible_user_start = lower_bound(wrapped_user_indices, scroll);
