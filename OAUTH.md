@@ -147,7 +147,7 @@ default_provider = "claude-code"   # optional; otherwise pick a Claude Code rout
 
 [provider.claude_code]
 binary = "claude"                  # path or name on PATH (env: JCODE_CLAUDE_CODE_BIN)
-permission_mode = "default"        # default | acceptEdits | bypassPermissions | plan | auto | dontAsk
+permission_mode = "bypassPermissions"  # bypassPermissions | default | acceptEdits | plan | auto | dontAsk
 setting_sources = ["user", "project", "local"]
 expose_jcode_tools = true
 default_instance = "default"
@@ -184,11 +184,12 @@ plan. jcode reads them from an init-only `claude` process (`get_usage`, no
 prompt, no tokens). Instances that resolve to the same account are listed once.
 A signed-out instance shows its own `claude auth login` command.
 
-Permissions: Claude Code still applies its own allow and deny rules. For a
-tool it would ask about, jcode answers using `permission_mode`. `default`,
-`acceptEdits`, `auto` and `bypassPermissions` allow it. `dontAsk` and `plan`
-deny it. `ExitPlanMode` always stops so the plan reaches you, and
-`AskUserQuestion` is turned into a normal reply.
+Permissions: like every other jcode provider, Claude Code mode runs tools
+without asking. The default `permission_mode = "bypassPermissions"` starts
+the CLI in that mode. With `default`, `acceptEdits` or `auto`, Claude Code
+applies its own allow and deny rules and jcode approves anything it would
+ask about. `dontAsk` and `plan` deny it instead. `ExitPlanMode` always stops
+so the plan reaches you, and `AskUserQuestion` is turned into a normal reply.
 
 Limitations (first version):
 - No interactive per-tool approval prompt in jcode yet. Use `permission_mode`

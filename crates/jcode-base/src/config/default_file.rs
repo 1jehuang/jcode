@@ -457,7 +457,7 @@ cross_provider_failover = "countdown"
 # Env override for the binary: JCODE_CLAUDE_CODE_BIN.
 # [provider.claude_code]
 # binary = "claude"
-# permission_mode = "default"   # default | acceptEdits | bypassPermissions | plan | auto | dontAsk
+# permission_mode = "bypassPermissions"   # bypassPermissions | default | acceptEdits | plan | auto | dontAsk
 # setting_sources = ["user", "project", "local"]
 # expose_jcode_tools = true
 # default_instance = "default"

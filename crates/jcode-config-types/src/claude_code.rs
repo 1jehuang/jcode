@@ -24,7 +24,8 @@ pub const CLAUDE_CODE_BIN_ENV: &str = "JCODE_CLAUDE_CODE_BIN";
 pub struct ClaudeCodeConfig {
     /// Path to the `claude` binary, or a name resolved on `PATH`.
     pub binary: String,
-    /// Claude Code permission mode: default | acceptEdits | bypassPermissions | plan | auto | dontAsk.
+    /// Claude Code permission mode: bypassPermissions (default, like the rest
+    /// of jcode) | default | acceptEdits | plan | auto | dontAsk.
     pub permission_mode: String,
     /// Value passed to `--setting-sources`.
     pub setting_sources: Vec<String>,
@@ -40,7 +41,8 @@ impl Default for ClaudeCodeConfig {
     fn default() -> Self {
         Self {
             binary: CLAUDE_CODE_DEFAULT_BINARY.to_string(),
-            permission_mode: "default".to_string(),
+            // jcode runs tools without per-call prompts on every provider.
+            permission_mode: "bypassPermissions".to_string(),
             setting_sources: vec!["user".into(), "project".into(), "local".into()],
             expose_jcode_tools: true,
             default_instance: CLAUDE_CODE_DEFAULT_INSTANCE_ID.to_string(),
@@ -201,6 +203,10 @@ mod tests {
         assert_eq!(config.binary, "claude");
         assert!(config.expose_jcode_tools);
         assert_eq!(config.setting_sources, ["user", "project", "local"]);
+        // Claude Code mode runs tools without prompts, like the rest of jcode.
+        assert_eq!(config.permission_mode, "bypassPermissions");
+        let parsed: Wrapper = toml_like(r#"{"claude_code":{"binary":"claude"}}"#);
+        assert_eq!(parsed.claude_code.permission_mode, "bypassPermissions");
     }
 
     #[test]
