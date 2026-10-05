@@ -51,6 +51,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
+mod request_headers;
+use request_headers::*;
+
 /// Base delay for exponential backoff (in milliseconds)
 const RETRY_BASE_DELAY_MS: u64 = 1000;
 
@@ -59,8 +62,6 @@ const DEFAULT_API_BASE: &str = "https://openrouter.ai/api/v1";
 const DEFAULT_API_KEY_NAME: &str = "OPENROUTER_API_KEY";
 const DEFAULT_ENV_FILE: &str = "openrouter.env";
 const OPENROUTER_TRANSPORT_STATE_ENV: &str = "JCODE_OPENROUTER_TRANSPORT_STATE";
-const KIMI_CODING_USER_AGENT: &str = "claude-cli/1.0.0";
-const KIMI_CODING_X_APP: &str = "cli";
 
 /// Default model (Claude Sonnet via OpenRouter)
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
@@ -390,78 +391,6 @@ impl OpenRouterTransportState {
         matches!(self, Self::OpenRouterApiKey)
     }
 }
-
-fn is_kimi_coding_api_base(api_base: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(api_base) else {
-        return false;
-    };
-    matches!(url.host_str(), Some("api.kimi.com"))
-        && url.path().trim_end_matches('/').starts_with("/coding")
-}
-
-fn is_coding_agent_api_base(api_base: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(api_base) else {
-        return false;
-    };
-    let host = url.host_str().unwrap_or_default();
-    let path = url.path().trim_end_matches('/');
-    is_kimi_coding_api_base(api_base)
-        || host == "coding.dashscope.aliyuncs.com"
-        || host == "coding-intl.dashscope.aliyuncs.com"
-        || (host == "api.z.ai" && path.starts_with("/api/coding/paas"))
-}
-
-fn is_kimi_model_name(model: &str) -> bool {
-    model.to_ascii_lowercase().contains("kimi")
-}
-
-fn should_send_kimi_coding_agent_headers(api_base: &str, model: Option<&str>) -> bool {
-    is_coding_agent_api_base(api_base) || model.map(is_kimi_model_name).unwrap_or(false)
-}
-
-fn apply_kimi_coding_agent_headers(
-    req: reqwest::RequestBuilder,
-    api_base: &str,
-    model: Option<&str>,
-) -> reqwest::RequestBuilder {
-    if should_send_kimi_coding_agent_headers(api_base, model) {
-        req.header("User-Agent", KIMI_CODING_USER_AGENT)
-            .header("x-app", KIMI_CODING_X_APP)
-    } else {
-        req
-    }
-}
-
-/// Hosts that require the `x-opencode-session` header (issue #1167).
-fn is_opencode_api_base(api_base: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(api_base) else {
-        return false;
-    };
-    matches!(
-        url.host_str(),
-        Some(host) if host == "opencode.ai" || host.ends_with(".opencode.ai")
-    )
-}
-
-pub(crate) fn new_conversation_id() -> String {
-    uuid::Uuid::new_v4().to_string()
-}
-
-/// OpenCode Go/Zen require a stable per-conversation `x-opencode-session`
-/// header on inference requests (rejected from 2026-09-05 without it).
-fn apply_opencode_session_header(
-    req: reqwest::RequestBuilder,
-    api_base: &str,
-    conversation_id: &str,
-) -> reqwest::RequestBuilder {
-    if is_opencode_api_base(api_base) {
-        req.header(OPENCODE_SESSION_HEADER, conversation_id)
-    } else {
-        req
-    }
-}
-
-pub(crate) const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
 
 /// Models the Grok CLI chat proxy serves to Grok Build subscribers.
 pub const GROK_BUILD_MODELS: &[&str] = &["grok-4.6", "grok-4.5", "grok-code-fast-1"];
@@ -1684,7 +1613,7 @@ impl OpenRouterProvider {
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
-        let auth: AuthResolver = Arc::new(|| Self::resolve_auth());
+        let auth: AuthResolver = Arc::new(Self::resolve_auth);
         auth()?;
         let profile_id = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
             .ok()
@@ -2983,28 +2912,5 @@ mod openrouter_input_modalities_tests;
 mod issue_1056_tests;
 
 #[cfg(test)]
-mod profile_catalog_backoff_tests {
-    use super::{MODEL_CATALOG_REFRESH_RETRY_SECS, profile_catalog_retry_delay_secs};
-
-    #[test]
-    fn healthy_profile_uses_base_retry_interval() {
-        assert_eq!(
-            profile_catalog_retry_delay_secs(0),
-            MODEL_CATALOG_REFRESH_RETRY_SECS
-        );
-    }
-
-    #[test]
-    fn repeated_failures_back_off_exponentially_and_cap() {
-        assert_eq!(
-            profile_catalog_retry_delay_secs(1),
-            MODEL_CATALOG_REFRESH_RETRY_SECS * 2
-        );
-        assert_eq!(
-            profile_catalog_retry_delay_secs(3),
-            MODEL_CATALOG_REFRESH_RETRY_SECS * 8
-        );
-        // Capped at one hour no matter how many failures accumulate.
-        assert_eq!(profile_catalog_retry_delay_secs(20), 60 * 60);
-    }
-}
+#[path = "profile_catalog_backoff_tests.rs"]
+mod profile_catalog_backoff_tests;
