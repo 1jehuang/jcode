@@ -1448,6 +1448,18 @@ pub enum ServerEvent {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
+        /// The server's resolved context window for the active route, in tokens.
+        ///
+        /// A remote client cannot derive this itself: its local provider is an
+        /// inert placeholder with no model catalog, so asking it returns the
+        /// generic 200K default. The server owns the real provider, so it
+        /// reports the number directly. Measured on a pinned
+        /// `stealth/space-bunny-alpha@Stealth` route whose catalog entry carries
+        /// context_length 1000000, the panel showed 200000 with this absent.
+        ///
+        /// Omitted when unknown, so older peers stay compatible.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         /// Credential the switched-to route will bill against (OAuth vs API

@@ -1087,6 +1087,111 @@ fn test_journal_replay_skips_corrupt_line_and_keeps_tail() -> Result<()> {
     Ok(())
 }
 
+fn text_block(text: &str) -> ContentBlock {
+    ContentBlock::Text {
+        text: text.to_string(),
+        cache_control: None,
+    }
+}
+
+/// #1632: a process killed between writing the checkpoint snapshot and
+/// deleting the journal must not duplicate the journaled messages on the next
+/// load, and later genuinely-new journal entries must still replay.
+#[test]
+fn test_interrupted_checkpoint_does_not_duplicate_journal_messages() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-journal-interrupted-checkpoint-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_interrupted_checkpoint_test";
+    let mut session = Session::create_with_id(session_id.to_string(), None, Some("t".into()));
+    session.add_message(Role::User, vec![text_block("start")]);
+    session.save()?;
+
+    session.add_message(
+        Role::Assistant,
+        vec![ContentBlock::ToolUse {
+            id: "toolu_1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+            thought_signature: None,
+        }],
+    );
+    session.save()?;
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "ok".into(),
+            is_error: None,
+        }],
+    );
+    session.save()?;
+
+    let journal_path = session_journal_path(session_id)?;
+    let stale_journal = std::fs::read_to_string(&journal_path)?;
+    assert_eq!(stale_journal.lines().count(), 2);
+
+    // Checkpoint, then put the journal back as if the delete never happened.
+    session.mark_messages_full_dirty();
+    session.save()?;
+    assert!(!journal_path.exists());
+    std::fs::write(&journal_path, &stale_journal)?;
+
+    let loaded = Session::load(session_id)?;
+    assert_eq!(
+        loaded.messages.len(),
+        3,
+        "journal replay duplicated messages"
+    );
+    let remote = Session::load_for_remote_startup(session_id)?;
+    assert_eq!(remote.messages.len(), 3);
+
+    // A genuinely new entry after the stale prefix still replays.
+    let mut resumed = loaded;
+    resumed.add_message(Role::Assistant, vec![text_block("after restart")]);
+    resumed.save()?;
+    let reloaded = Session::load(session_id)?;
+    assert_eq!(reloaded.messages.len(), 4);
+    assert_eq!(reloaded.messages[3].content_preview(), "after restart");
+    let mut ids: Vec<_> = reloaded.messages.iter().map(|m| m.id.clone()).collect();
+    ids.dedup();
+    assert_eq!(ids.len(), 4);
+    Ok(())
+}
+
+/// #1632: snapshots that were already written with duplicated messages (by
+/// builds before idempotent replay) are repaired on load and on the next save.
+#[test]
+fn test_load_repairs_snapshot_with_duplicated_message_ids() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::Builder::new()
+        .prefix("jcode-session-duplicate-ids-")
+        .tempdir()
+        .map_err(|e| anyhow!(e))?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+
+    let session_id = "session_duplicate_ids_test";
+    let mut session = Session::create_with_id(session_id.to_string(), None, Some("t".into()));
+    session.add_message(Role::User, vec![text_block("one")]);
+    session.add_message(Role::Assistant, vec![text_block("two")]);
+    let dup = session.messages[1].clone();
+    session.messages.push(dup);
+    session.mark_messages_full_dirty();
+    session.save()?;
+
+    let mut loaded = Session::load(session_id)?;
+    assert_eq!(loaded.messages.len(), 2);
+    loaded.save()?;
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(session_path(session_id)?)?)?;
+    assert_eq!(raw["messages"].as_array().map(Vec::len), Some(2));
+    Ok(())
+}
+
 #[test]
 fn test_journal_replay_salvages_glued_entries_on_torn_line() -> Result<()> {
     let _env_lock = lock_env();

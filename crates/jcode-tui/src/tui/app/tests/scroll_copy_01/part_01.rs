@@ -1541,5 +1541,17 @@ fn changes_widget_end_to_end_on_real_git_repo() {
     crate::tui::app::helpers::seed_git_info_cache_for_tests(None);
     assert!(frame2.contains("src/lib.rs"), "{frame2}");
     assert!(!frame2.contains("● agent"), "{frame2}");
-    assert!(!frame2.contains('●'), "{frame2}");
+    let changes_rows: Vec<_> = frame2
+        .lines()
+        .filter(|line| {
+            ["src/lib.rs", "new.rs", "logo.bin", "new_name.rs", "gone.txt"]
+                .iter()
+                .any(|path| line.contains(path))
+        })
+        .collect();
+    assert_eq!(changes_rows.len(), 5, "{frame2}");
+    assert!(
+        changes_rows.iter().all(|line| !line.contains('●')),
+        "no agent-edit dot on clean Changes rows:\n{frame2}"
+    );
 }
