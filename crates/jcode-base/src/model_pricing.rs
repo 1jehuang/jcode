@@ -157,6 +157,25 @@ fn normalize_model_id(model: &str) -> &str {
 /// when the catalog has no entry; never blocks on the network. Schedules a
 /// background refresh when the disk cache is missing or stale.
 pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
+    lookup_with_provenance(jcode_provider, model).map(|(cost, _)| cost)
+}
+
+/// Where a [`lookup_with_provenance`] price came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PricingMatch {
+    /// The provider's own models.dev table listed the model.
+    ProviderTable,
+    /// Inferred from other providers' listings of the same model id (reseller
+    /// fallback). Plausible but not authoritative for this route.
+    CrossProvider,
+}
+
+/// Like [`lookup`], but also reports whether the price came from the
+/// provider's own table or from the cross-provider reseller fallback.
+pub fn lookup_with_provenance(
+    jcode_provider: &str,
+    model: &str,
+) -> Option<(ModelCost, PricingMatch)> {
     let is_openai_compatible = jcode_provider.trim().starts_with("openai-compatible:");
     let cache = ensure_cache_fresh()?;
     let mapped_provider = models_dev_provider_id(jcode_provider);
@@ -165,14 +184,14 @@ pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
     {
         let model = normalize_model_id(model);
         if let Some(cost) = models.get(model) {
-            return Some(*cost);
+            return Some((*cost, PricingMatch::ProviderTable));
         }
         // OpenRouter-style ids (`anthropic/claude-...`) may reach here with the
         // provider prefix still attached; retry on the bare model name.
         if let Some((_, bare)) = model.rsplit_once('/')
             && let Some(cost) = models.get(bare)
         {
-            return Some(*cost);
+            return Some((*cost, PricingMatch::ProviderTable));
         }
     }
     // Reseller/aggregator keys that models.dev does not list as a provider at
@@ -181,11 +200,62 @@ pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
     // of assuming unpriced. A profile that *does* have a models.dev mapping
     // keeps its own table as the authority: a model missing there is left
     // unpriced rather than billed at an unrelated provider's rate. First-party
-    // providers never take this path either.
-    if is_openai_compatible && mapped_provider.is_none() {
-        return cross_provider_lookup(&cache, model);
+    // providers never take this path either, and neither do local/keyless
+    // endpoints (Ollama, LM Studio, localhost profiles): they serve vendor
+    // model ids for free, so borrowing a hosted price would invent spend.
+    if is_openai_compatible
+        && mapped_provider.is_none()
+        && !openai_compatible_profile_is_local(jcode_provider)
+    {
+        return cross_provider_lookup(&cache, model)
+            .map(|cost| (cost, PricingMatch::CrossProvider));
     }
     None
+}
+
+/// True when an `openai-compatible:<id>` profile runs locally or without an
+/// API key, so its traffic is not billed at hosted rates. Unknown ids (not a
+/// built-in profile and not a configured `[providers.<id>]`) are treated as
+/// hosted resellers.
+fn openai_compatible_profile_is_local(jcode_provider: &str) -> bool {
+    let Some(id) = jcode_provider
+        .trim()
+        .strip_prefix("openai-compatible:")
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if let Some(profile) = crate::provider_catalog::openai_compatible_profile_by_id(id) {
+        return !profile.requires_api_key || api_base_is_local(profile.api_base);
+    }
+    if let Some(named) = crate::config::config().providers.get(id) {
+        return api_base_is_local(&named.base_url)
+            || named.requires_api_key == Some(false)
+            || named.auth == crate::config::NamedProviderAuth::None;
+    }
+    false
+}
+
+/// Loopback, private-network, link-local, and `.local`/`.lan` hosts.
+fn api_base_is_local(api_base: &str) -> bool {
+    let Ok(url) = url::Url::parse(api_base.trim()) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+        Some(url::Host::Domain(host)) => {
+            let host = host.to_ascii_lowercase();
+            host == "localhost"
+                || host.ends_with(".localhost")
+                || host.ends_with(".local")
+                || host.ends_with(".lan")
+                || host == "host.docker.internal"
+        }
+        None => false,
+    }
 }
 
 /// Match `model` (normalized, then bare after a `vendor/` split) against
@@ -528,6 +598,64 @@ mod tests {
             crate::env::set_var("JCODE_HOME", prev);
         } else {
             crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn local_profiles_do_not_borrow_hosted_pricing() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        save_test_cache(&[(
+            "ollama-cloud",
+            "gpt-oss:20b",
+            ModelCost {
+                input_usd_per_mtok: 0.07,
+                output_usd_per_mtok: 0.3,
+                cache_read_usd_per_mtok: None,
+                cache_write_usd_per_mtok: None,
+            },
+        )]);
+
+        // Built-in local/keyless profiles run the model for free.
+        assert!(lookup("openai-compatible:ollama", "gpt-oss:20b").is_none());
+        assert!(lookup("openai-compatible:lmstudio", "gpt-oss:20b").is_none());
+        // An unknown hosted reseller still gets the inferred price, flagged
+        // as cross-provider.
+        let (_, matched) =
+            lookup_with_provenance("openai-compatible:kilocode", "gpt-oss:20b").expect("priced");
+        assert_eq!(matched, PricingMatch::CrossProvider);
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn local_api_bases_are_detected() {
+        for base in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://[::1]:8080/v1",
+            "http://192.168.1.20:1234/v1",
+            "http://10.0.0.5/v1",
+            "http://gpu-box.local:8000/v1",
+            "http://host.docker.internal:11434/v1",
+        ] {
+            assert!(api_base_is_local(base), "{base} should be local");
+        }
+        for base in [
+            "https://api.kilo.ai/api/openrouter",
+            "https://openrouter.ai/api/v1",
+            "not a url",
+        ] {
+            assert!(!api_base_is_local(base), "{base} should be hosted");
         }
     }
 

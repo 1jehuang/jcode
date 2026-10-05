@@ -225,14 +225,25 @@ pub fn metered_pricing_for_source_with_tier(
     }
 
     // 3. Live models.dev catalog (disk cache; refreshes in the background).
-    let cost = crate::model_pricing::lookup(source_key, model)?;
+    let (cost, matched) = crate::model_pricing::lookup_with_provenance(source_key, model)?;
+    // A price borrowed from other providers' listings (reseller fallback) is
+    // a reasonable estimate, not the route's own published rate.
+    let (confidence, note) = match matched {
+        crate::model_pricing::PricingMatch::ProviderTable => {
+            (RouteCostConfidence::High, "models.dev pricing catalog")
+        }
+        crate::model_pricing::PricingMatch::CrossProvider => (
+            RouteCostConfidence::Medium,
+            "models.dev pricing catalog (inferred from other providers)",
+        ),
+    };
     Some(RouteCheapnessEstimate::metered(
         RouteCostSource::ModelsDevCatalog,
-        RouteCostConfidence::High,
+        confidence,
         usd_to_micros(cost.input_usd_per_mtok),
         usd_to_micros(cost.output_usd_per_mtok),
         cost.cache_read_usd_per_mtok.map(usd_to_micros),
-        Some("models.dev pricing catalog".to_string()),
+        Some(note.to_string()),
     ))
 }
 
