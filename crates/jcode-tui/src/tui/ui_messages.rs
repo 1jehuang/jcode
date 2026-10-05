@@ -1125,7 +1125,7 @@ pub(crate) fn render_todo_card_body(content: &str, width: u16) -> Option<Vec<Lin
     let (todos, plan, goals) = payload.into_parts();
 
     let meta_style = Style::default().fg(todo_meta_color());
-    let card_width = (width as usize).min(120).max(1);
+    let card_width = (width as usize).clamp(1, 120);
     let base_indent = "";
     let inner_width = card_width.saturating_sub(base_indent.width()).max(1);
     // Long assessment prose is useful in a wide transcript, but wrapping it
