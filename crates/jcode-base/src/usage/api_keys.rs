@@ -250,13 +250,12 @@ async fn fetch_compatible_profile_report(
         }
         "zai" => {
             if let Some(api_key) = configured_key(profile.api_key_env, profile.env_file) {
-                match fetch_zai_coding_plan_limits(&api_key).await {
+                let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+                match fetch_zai_coding_plan_limits(&resolved.api_base, &api_key).await {
                     Ok(fetched) if !fetched.is_empty() => limits.extend(fetched),
                     _ => {
                         // Not a Coding Plan key (or quota API unavailable):
                         // fall back to the pay-as-you-go key probe below.
-                        let resolved =
-                            crate::provider_catalog::resolve_openai_compatible_profile(profile);
                         let status =
                             probe_openai_compatible_key(&resolved.api_base, &api_key).await;
                         extra_info.push(("Key status".to_string(), status));
@@ -549,13 +548,30 @@ fn kimi_fmt_num(value: f64) -> String {
     }
 }
 
+/// Quota endpoint for the region the Z.ai profile talks to. Keys are
+/// region-specific: international (`api.z.ai`) keys are rejected by the
+/// mainland Zhipu host (`open.bigmodel.cn`) and vice versa, so follow the
+/// profile's API base. Unknown hosts (custom proxies) default to `api.z.ai`.
+pub(super) fn zai_quota_url(api_base: &str) -> String {
+    let host = url::Url::parse(api_base)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+    let origin = match host.as_deref() {
+        Some(host) if host == "bigmodel.cn" || host.ends_with(".bigmodel.cn") => {
+            "https://open.bigmodel.cn"
+        }
+        _ => "https://api.z.ai",
+    };
+    format!("{}/api/monitor/usage/quota/limit", origin)
+}
+
 /// Z.ai GLM Coding Plan exposes plan quota windows (5-hour, weekly, and MCP
 /// monthly) through the monitor quota endpoint. Pay-as-you-go keys are
 /// rejected, which the caller uses as the fallback signal.
-async fn fetch_zai_coding_plan_limits(api_key: &str) -> Result<Vec<UsageLimit>> {
+async fn fetch_zai_coding_plan_limits(api_base: &str, api_key: &str) -> Result<Vec<UsageLimit>> {
     let client = crate::provider::shared_http_client();
     let response = client
-        .get("https://open.bigmodel.cn/api/monitor/usage/quota/limit")
+        .get(zai_quota_url(api_base))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Accept", "application/json")
         .timeout(HTTP_TIMEOUT)

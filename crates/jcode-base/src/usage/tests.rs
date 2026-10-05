@@ -1128,3 +1128,24 @@ fn cursor_plan_usage_report_keeps_membership_without_usage_fields() {
     assert!(report.limits.is_empty());
     assert!(report.error.is_none());
 }
+
+#[test]
+fn zai_quota_url_follows_profile_region() {
+    assert_eq!(
+        api_keys::zai_quota_url("https://api.z.ai/api/coding/paas/v4"),
+        "https://api.z.ai/api/monitor/usage/quota/limit"
+    );
+    assert_eq!(
+        api_keys::zai_quota_url("https://open.bigmodel.cn/api/coding/paas/v4"),
+        "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
+    );
+    // Custom proxies and unparsable bases default to the international host.
+    assert_eq!(
+        api_keys::zai_quota_url("https://proxy.example.com/v1"),
+        "https://api.z.ai/api/monitor/usage/quota/limit"
+    );
+    assert_eq!(
+        api_keys::zai_quota_url("not a url"),
+        "https://api.z.ai/api/monitor/usage/quota/limit"
+    );
+}
