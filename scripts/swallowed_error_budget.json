@@ -1,7 +1,7 @@
 {
-  "total": 3666,
+  "total": 3667,
   "totals_by_pattern": {
-    "dot_ok": 1401,
+    "dot_ok": 1402,
     "let_underscore": 1359,
     "unwrap_or_default": 906
   },
@@ -2517,7 +2517,7 @@
       "unwrap_or_default": 9
     },
     "src/cli/commands/menubar.rs": {
-      "dot_ok": 3,
+      "dot_ok": 4,
       "let_underscore": 2,
       "unwrap_or_default": 0
     },
