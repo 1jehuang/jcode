@@ -240,6 +240,180 @@ async fn swarm_task_hitting_a_usage_limit_is_requeued_when_the_resume_is_superse
     );
     assert_eq!(item.assigned_to, None);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let mut available = false;
+    for _ in 0..20_000 {
+        if swarm_members.read().await[worker].status == "ready" {
+            available = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        available,
+        "a requeued task needs an assignable worker, got status {:?}",
+        swarm_members.read().await[worker].status
+    );
+
+    match prev_home {
+        Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// The superseding turn may already own the worker when the old task requeues
+/// its node. Its `running` status must not be overwritten with `ready`.
+#[tokio::test]
+async fn conditional_member_status_keeps_a_newer_status() {
+    let swarm_id = "swarm-status-if";
+    let worker = "worker-status-if";
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+        worker.to_string(),
+        member(worker, swarm_id, "running"),
+    )])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        HashSet::from([worker.to_string()]),
+    )])));
+
+    crate::server::swarm::update_member_status_if(
+        worker,
+        "rate_limited",
+        "ready",
+        None,
+        &swarm_members,
+        &swarms_by_id,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(swarm_members.read().await[worker].status, "running");
+
+    swarm_members.write().await.get_mut(worker).unwrap().status = "rate_limited".to_string();
+    crate::server::swarm::update_member_status_if(
+        worker,
+        "rate_limited",
+        "ready",
+        None,
+        &swarm_members,
+        &swarms_by_id,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(swarm_members.read().await[worker].status, "ready");
+}
+
+/// After a resumed turn completes, the task keeps the agent reserved until it
+/// has finalized the plan and the member status. Otherwise a new turn can
+/// start in the gap and then be reported `completed` by the old task.
+#[tokio::test(start_paused = true)]
+async fn resumed_swarm_task_keeps_the_agent_reserved_until_finalized() {
+    let (_env, _runtime) = RuntimeEnvGuard::new();
+    let home = tempfile::TempDir::new().expect("jcode home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let swarm_id = "swarm-usage-limit-hold";
+    let coord = "coord-ul-hold";
+    let worker = "worker-ul-hold";
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(LimitedOnceProvider {
+        calls: Arc::clone(&calls),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        (coord.to_string(), {
+            let mut m = member(coord, swarm_id, "ready");
+            m.role = "coordinator".to_string();
+            m
+        }),
+        (worker.to_string(), owned_member(worker, swarm_id, "queued", coord)),
+    ])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        HashSet::from([coord.to_string(), worker.to_string()]),
+    )])));
+    let mut plan = VersionedPlan::new();
+    plan.items.push(plan_item("task-1", "queued", "high", &[]));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::from([(swarm_id.to_string(), plan)])));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+        swarm_id.to_string(),
+        coord.to_string(),
+    )])));
+
+    super::spawn_assigned_task_run(
+        Arc::clone(&agent),
+        worker.to_string(),
+        swarm_id.to_string(),
+        "task-1".to_string(),
+        "summarize the logs".to_string(),
+        Arc::clone(&swarm_members),
+        Arc::clone(&swarms_by_id),
+        Arc::clone(&swarm_plans),
+        Arc::clone(&swarm_coordinators),
+        Arc::new(RwLock::new(VecDeque::new())),
+        Arc::new(AtomicU64::new(1)),
+        broadcast::channel(256).0,
+    );
+
+    let mut waited = false;
+    for _ in 0..20_000 {
+        if swarm_members.read().await[worker].status == "rate_limited"
+            && crate::server::usage_limit_resume::has_pending_resume(worker)
+        {
+            waited = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(waited, "worker should wait for the usage-limit reset");
+    // Let the wait callback publish its progress before blocking the plan.
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+
+    // Block plan finalization so the window between the resumed turn ending
+    // and the task publishing its result stays open.
+    let plans_guard = swarm_plans.write().await;
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    for _ in 0..20_000 {
+        if calls.load(std::sync::atomic::Ordering::SeqCst) == 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    for _ in 0..1_000 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        agent.try_lock().is_err(),
+        "the agent must stay reserved until the task is finalized"
+    );
+    drop(plans_guard);
+
+    let mut finalized = false;
+    for _ in 0..20_000 {
+        if swarm_members.read().await[worker].status == "completed" {
+            finalized = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(finalized, "the task should finish after the plan unblocks");
+    let mut released = false;
+    for _ in 0..20_000 {
+        if agent.try_lock().is_ok() {
+            released = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(released, "the agent is released once the task is finalized");
 
     match prev_home {
         Some(prev) => crate::env::set_var("JCODE_HOME", prev),

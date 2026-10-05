@@ -899,7 +899,10 @@ fn spawn_assigned_task_run(
         // A usage limit that resets later keeps the task in progress: wait
         // for the reset (the heartbeat keeps the task from going stale) and
         // continue the same turn. Other errors fail the task as before.
-        let (result, completion_report) = match result {
+        // A resumed turn hands back its reservation of the agent. Keep it until
+        // the plan and member status are final so a new turn cannot start in
+        // between and then be reported `completed` by this task.
+        let (result, completion_report, _resume_guard) = match result {
             Err(error) => {
                 let on_wait = {
                     let swarm_id = swarm_id.clone();
@@ -961,17 +964,14 @@ fn spawn_assigned_task_run(
                 )
                 .await
                 {
-                    super::usage_limit_resume::ResumeOutcome::NotUsageLimit { error, .. }
-                    | super::usage_limit_resume::ResumeOutcome::Failed { error, .. } => {
-                        (Err(error), None)
+                    super::usage_limit_resume::ResumeOutcome::NotUsageLimit { error, guard }
+                    | super::usage_limit_resume::ResumeOutcome::Failed { error, guard, .. } => {
+                        (Err(error), None, guard)
                     }
                     super::usage_limit_resume::ResumeOutcome::Completed {
                         guard,
                         completion_report,
-                    } => {
-                        drop(guard);
-                        (Ok(()), completion_report)
-                    }
+                    } => (Ok(()), completion_report, Some(guard)),
                     super::usage_limit_resume::ResumeOutcome::Superseded => {
                         // The user (or another turn) took the worker over.
                         // Release the task back to the queue, like the
@@ -1026,6 +1026,21 @@ fn spawn_assigned_task_run(
                             &swarms_by_id,
                         )
                         .await;
+                        // The wait left the worker `rate_limited`, which
+                        // assignment skips. Make it available again unless the
+                        // turn that superseded the resume already claimed it.
+                        super::swarm::update_member_status_if(
+                            &target_session,
+                            "rate_limited",
+                            "ready",
+                            None,
+                            &swarm_members,
+                            &swarms_by_id,
+                            Some(&event_history),
+                            Some(&event_counter),
+                            Some(&swarm_event_tx),
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -1035,6 +1050,7 @@ fn spawn_assigned_task_run(
                 (
                     Ok(()),
                     agent.latest_assistant_text_after(start_message_index),
+                    None,
                 )
             }
         };
