@@ -19,6 +19,19 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
     "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
 }
 
+/// Hint for an error response. Some providers send 429 for an outage of
+/// their own upstream ("The model provider is temporarily unavailable"),
+/// which is not the caller's rate limit: name the outage instead.
+fn response_hint(status: u16, body: &str, api_base: &str, model: &str) -> &'static str {
+    if status == 429
+        && is_provider_overload_message(&body.to_lowercase())
+        && !body.to_lowercase().contains("rate limit")
+    {
+        return http_status_hint(503, api_base, model);
+    }
+    http_status_hint(status, api_base, model)
+}
+
 /// Hint for a request the server answered with an error status. The network
 /// is working (a response came back), so connectivity advice would mislead:
 /// point at the rate limit, the key, the account balance, or the model.
@@ -262,7 +275,7 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        let hint = http_status_hint(status.as_u16(), &api_base, &model);
+        let hint = response_hint(status.as_u16(), &body, &api_base, &model);
         return Err(jcode_provider_core::retry_after::error_with_retry_after(
             format!(
                 "OpenAI-compatible chat request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\n{}",
@@ -420,6 +433,7 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("overloaded")
         || is_provider_overload_message(error_str)
         || is_deploy_message(error_str)
+        || is_interrupted_stream_message(error_str)
 }
 
 /// Wait between retries while a provider says it is deploying. Deploys take
@@ -448,6 +462,21 @@ fn is_deploy_message(error_str: &str) -> bool {
         "try again shortly",
         "under maintenance",
         "maintenance mode",
+    ]
+    .iter()
+    .any(|marker| error_str.contains(marker))
+}
+
+/// Wording for a provider that dropped its own upstream mid-response and
+/// reports it as an error event inside the 200 stream (Openference: "The
+/// model provider's stream was interrupted. Please retry."). The request was
+/// fine, so resending it works. `error_str` is already lowercased.
+fn is_interrupted_stream_message(error_str: &str) -> bool {
+    [
+        "stream was interrupted",
+        "stream interrupted",
+        "response was interrupted",
+        "connection was interrupted",
     ]
     .iter()
     .any(|marker| error_str.contains(marker))
@@ -787,19 +816,34 @@ mod tests {
         );
     }
 
-    /// End to end: the first attempt gets a 200 stream whose only event is
-    /// the relayed deploy 503, the second gets a normal answer. The turn must
-    /// see the answer, not the error.
-    #[test]
-    fn in_stream_deploying_503_is_retried_until_the_provider_answers() {
+    /// The answer a provider streams once it is healthy again.
+    const HEALTHY_ANSWER_SSE: &str = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"back online\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+
+    /// What the turn received from one `run_stream_with_retries` call.
+    struct RetryRun {
+        /// Text deltas, with any rolled-back partial attempt discarded the way
+        /// the agent discards it on `RetryRollback`.
+        text: String,
+        errors: Vec<String>,
+        rollbacks: usize,
+        connections: usize,
+    }
+
+    /// Serve `first_body` as a 200 SSE response to the first request and a
+    /// healthy answer to the second, then run the real retry loop against it.
+    fn run_with_failing_first_attempt(first_body: String) -> RetryRun {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         rt.block_on(async {
             let connections = Arc::new(AtomicUsize::new(0));
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind deploying server");
-            let addr = listener.local_addr().expect("deploying server addr");
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let addr = listener.local_addr().expect("test server addr");
             let counted = Arc::clone(&connections);
             std::thread::spawn(move || {
                 for attempt in 0..2 {
@@ -812,17 +856,9 @@ mod tests {
                     let mut request = vec![0u8; 65536];
                     let _ = stream.read(&mut request);
                     let body = if attempt == 0 {
-                        format!(
-                            "data: {}\n\ndata: [DONE]\n\n",
-                            serde_json::json!({"error": {"message": PROXY_DEPLOYING_503}})
-                        )
+                        first_body.clone()
                     } else {
-                        concat!(
-                            "data: {\"choices\":[{\"delta\":{\"content\":\"back online\"}}]}\n\n",
-                            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-                            "data: [DONE]\n\n"
-                        )
-                        .to_string()
+                        HEALTHY_ANSWER_SSE.to_string()
                     };
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -853,22 +889,84 @@ mod tests {
                 .await;
             });
 
-            let mut text = String::new();
-            let mut errors = Vec::new();
+            let mut result = RetryRun {
+                text: String::new(),
+                errors: Vec::new(),
+                rollbacks: 0,
+                connections: 0,
+            };
             while let Some(item) = rx.recv().await {
                 match item {
-                    Ok(StreamEvent::TextDelta(delta)) => text.push_str(&delta),
-                    Ok(StreamEvent::Error { message, .. }) => errors.push(message),
-                    Err(error) => errors.push(format!("{error:#}")),
+                    Ok(StreamEvent::TextDelta(delta)) => result.text.push_str(&delta),
+                    Ok(StreamEvent::RetryRollback { .. }) => {
+                        result.rollbacks += 1;
+                        result.text.clear();
+                    }
+                    Ok(StreamEvent::Error { message, .. }) => result.errors.push(message),
+                    Err(error) => result.errors.push(format!("{error:#}")),
                     Ok(_) => {}
                 }
             }
             run.await.expect("retry loop task");
+            result.connections = connections.load(Ordering::SeqCst);
+            result
+        })
+    }
 
-            assert!(errors.is_empty(), "deploy 503 must not reach the turn: {errors:?}");
-            assert_eq!(text, "back online");
-            assert_eq!(connections.load(Ordering::SeqCst), 2, "one retry");
-        });
+    /// End to end: the first attempt gets a 200 stream whose only event is
+    /// the relayed deploy 503, the second gets a normal answer. The turn must
+    /// see the answer, not the error.
+    #[test]
+    fn in_stream_deploying_503_is_retried_until_the_provider_answers() {
+        let run = run_with_failing_first_attempt(format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"error": {"message": PROXY_DEPLOYING_503}})
+        ));
+        assert!(
+            run.errors.is_empty(),
+            "deploy 503 must not reach the turn: {:?}",
+            run.errors
+        );
+        assert_eq!(run.text, "back online");
+        assert_eq!(run.connections, 2, "one retry");
+    }
+
+    /// Openference ends a long stream with this error event when its own
+    /// upstream drops mid-response.
+    const INTERRUPTED_STREAM: &str = "The model provider's stream was interrupted. Please retry.";
+
+    #[test]
+    fn interrupted_stream_message_is_retryable() {
+        let lower = INTERRUPTED_STREAM.to_lowercase();
+        assert!(is_interrupted_stream_message(&lower));
+        assert!(is_retryable_error(&lower));
+        // The retry loop sees it wrapped in the attempt's error context.
+        assert!(is_retryable_error(
+            &format!(
+                "openai-compatible stream error\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: glm-5.3\n  auth: key\n  error: {INTERRUPTED_STREAM}"
+            )
+            .to_lowercase()
+        ));
+    }
+
+    /// End to end: the provider streams part of an answer, then reports the
+    /// interruption. The partial attempt is rolled back and the request
+    /// resent, so the turn sees one clean answer and no error.
+    #[test]
+    fn interrupted_stream_mid_answer_is_rolled_back_and_retried() {
+        let run = run_with_failing_first_attempt(format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices": [{"delta": {"content": "half an ans"}}]}),
+            serde_json::json!({"error": {"message": INTERRUPTED_STREAM}})
+        ));
+        assert!(
+            run.errors.is_empty(),
+            "an interrupted stream must not end the turn: {:?}",
+            run.errors
+        );
+        assert_eq!(run.rollbacks, 1, "partial attempt rolled back");
+        assert_eq!(run.text, "back online");
+        assert_eq!(run.connections, 2, "one retry");
     }
 
     /// Openference answered a busy period with a 529 and a server_error body
@@ -899,6 +997,21 @@ mod tests {
         assert!(
             http_status_hint(503, "http://localhost:11434/v1", "llama3.2").contains("ollama serve")
         );
+    }
+
+    /// Openference answers an outage of its own upstream with a 429. The
+    /// hint must name the outage, not tell the user they hit a rate limit.
+    #[test]
+    fn unavailable_429_gets_the_outage_hint_not_the_rate_limit_hint() {
+        let api = "https://api.openference.com/v1";
+        let outage = r#"data: {"error":{"message":"The model provider is temporarily unavailable. Please try again in a moment.","type":"server_error"}}data: [DONE]"#;
+        let hint = response_hint(429, outage, api, "glm-5.3");
+        assert!(hint.contains("temporary server problem"), "{hint}");
+        assert!(!hint.contains("rate limited"), "{hint}");
+        // A real rate limit keeps the rate-limit hint.
+        let limited = r#"{"error":"Rate limit exceeded. Too many requests per minute."}"#;
+        assert_eq!(response_hint(429, limited, api, "glm-5.3"), RATE_LIMIT_HINT);
+        assert_eq!(response_hint(429, "", api, "glm-5.3"), RATE_LIMIT_HINT);
     }
 
     /// A 402 means the server answered: the hint must name the billing limit,

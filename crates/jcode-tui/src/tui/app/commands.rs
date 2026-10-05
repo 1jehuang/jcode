@@ -191,6 +191,9 @@ pub(super) fn is_provider_overload_error(error: &str) -> bool {
             // ... Please try again shortly.", "code":"DEPLOYING").
             "deploying",
             "try again shortly",
+            // The provider lost its own upstream mid-response ("The model
+            // provider's stream was interrupted. Please retry.").
+            "stream was interrupted",
         ]
         .iter()
         .any(|marker| lower.contains(marker))

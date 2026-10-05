@@ -1394,9 +1394,8 @@ pub(in crate::tui::app) fn handle_server_event(
             // problem, but the same request usually succeeds a little later.
             // Hold the turn and resend it, also for turns the user typed,
             // before any path below can fail it or stop auto-poke.
-            // Only when this attempt streamed nothing: otherwise the resent
-            // answer would be appended to the partial one (the error path
-            // gets no rollback event), so that case fails as before.
+            // A turn that already streamed output or ran tools is continued
+            // from the server's saved history instead of resent in full.
             if !is_connectivity_error
                 && crate::tui::app::commands::is_provider_overload_error(&message)
                 && app.schedule_pending_remote_overload_retry(&message)

@@ -1801,6 +1801,10 @@ impl App {
     /// longer: about 3.5 minutes in total before giving up.
     const OVERLOAD_RETRY_MAX_ATTEMPTS: u8 = 4;
     const OVERLOAD_RETRY_DELAYS_SECS: [u64; 4] = [15, 30, 60, 120];
+    /// Hidden reminder sent instead of a full resend when a provider failure
+    /// hits a turn that already streamed output or ran tools. The server saved
+    /// every completed step, so the model can pick up from there.
+    const PROVIDER_ERROR_CONTINUATION: &str = "[The model provider failed mid-turn with a temporary error. Everything up to your last completed tool result is saved; the reply you were writing when it failed was lost. Continue the task from where you left off.]";
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one

@@ -532,12 +532,17 @@ fn held_user_turn(content: &str, auto_retry: bool, retry_attempts: u8) -> Pendin
     }
 }
 
-/// If the failed attempt already streamed part of an answer, a full-turn
-/// resend would append the new answer to the half answer (and could redo
-/// tool calls). The overload hold must only apply when nothing was streamed;
-/// otherwise the turn fails as before and the prompt goes back to the input.
+/// The exact error that stalled two auto-poked sessions: a 429 whose body
+/// says the provider is temporarily unavailable, after the stream layer's own
+/// retries ran out.
+const OPENFERENCE_429_UNAVAILABLE: &str = "OpenAI-compatible chat request failed\n  endpoint: https://api.openference.com/v1/chat/completions\n  model: GLM-5.3\n  auth: JCODE_PROVIDER_OPENCODE_OPENFERENCE_API_KEY\n  status: 429 Too Many Requests\n  response: data: {\"error\":{\"message\":\"The model provider is temporarily unavailable. Please try again in a moment.\",\"type\":\"server_error\"}}data: [DONE]\nHint: the provider rate limited this request (per-minute or quota cap), not a network problem. jcode backs off automatically, honoring any provider-requested delay, within its retry budget; if it keeps failing, wait a minute, lower request frequency, or switch to another provider with /model.";
+
+/// If the failed attempt already streamed part of an answer (or ran tools),
+/// a full resend would redo that work and append a second answer. The server
+/// saved every completed step, so the turn is continued with a hidden
+/// reminder instead, and the partial reply the model never saw is dropped.
 #[test]
-fn test_remote_provider_overload_after_partial_output_does_not_resend() {
+fn test_remote_provider_overload_after_partial_output_continues_turn() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -561,18 +566,98 @@ fn test_remote_provider_overload_after_partial_output_does_not_resend() {
         },
         &mut remote,
     );
-    assert!(
-        app.rate_limit_pending_message.is_none(),
-        "a turn that already streamed output must not be held for a full resend"
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("the turn is held, not failed");
+    assert!(pending.content.is_empty(), "the user message is not resent");
+    assert!(pending.is_system && pending.auto_retry);
+    assert_eq!(
+        pending.system_reminder.as_deref(),
+        Some(App::PROVIDER_ERROR_CONTINUATION)
     );
-    assert!(app.rate_limit_reset.is_none(), "no resend scheduled");
+    assert_eq!(pending.overload_attempts, 1);
+    assert!(app.rate_limit_reset.is_some(), "a continuation is scheduled");
     assert!(
-        !app
-            .display_messages()
+        app.streaming.streaming_text.is_empty(),
+        "the partial reply the model never saw is dropped"
+    );
+    assert!(
+        app.display_messages()
             .iter()
-            .any(|m| m.content.contains("Retrying automatically in")),
-        "no overload resend notice"
+            .any(|m| m.content.contains("Continuing from the last saved step")),
+        "continuation notice"
     );
+    assert!(app.input.is_empty(), "nothing restored to the input box");
+}
+
+/// Auto-poke sent a continuation, the model ran a tool, then the provider
+/// went down (429 "temporarily unavailable") for longer than the stream
+/// layer retries. The turn must be continued later, not failed: a failed
+/// turn left auto-poke idle ("unchanged_todos") and the session stopped.
+#[test]
+fn test_remote_unavailable_429_after_tool_run_continues_auto_poked_turn() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.auto_poke_incomplete_todos = true;
+
+    let poke = crate::todo::build_auto_poke_message(1);
+    app.rate_limit_pending_message = Some(PendingRemoteMessage {
+        content: poke,
+        images: vec![],
+        is_system: true,
+        system_reminder: None,
+        auto_retry: false,
+        retry_attempts: 0,
+        retry_at: None,
+        overload_attempts: 0,
+    });
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(77);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolStart {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 77,
+            message: OPENFERENCE_429_UNAVAILABLE.to_string(),
+            retry_after_secs: None,
+        },
+        &mut remote,
+    );
+    let pending = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("the poked turn is held for a continuation");
+    assert!(pending.content.is_empty());
+    assert_eq!(
+        pending.system_reminder.as_deref(),
+        Some(App::PROVIDER_ERROR_CONTINUATION)
+    );
+    assert!(app.auto_poke_incomplete_todos, "auto-poke stays armed");
+
+    // When the wait ends, the tick sends the continuation and carries the
+    // overload budget so it still stops after four attempts.
+    app.rate_limit_reset = Some(std::time::Instant::now());
+    rt.block_on(crate::tui::app::remote::handle_tick(&mut app, &mut remote));
+    assert!(app.is_processing, "continuation sent");
+    let resent = app
+        .rate_limit_pending_message
+        .as_ref()
+        .expect("continuation is tracked");
+    assert!(resent.content.is_empty());
+    assert_eq!(
+        resent.system_reminder.as_deref(),
+        Some(App::PROVIDER_ERROR_CONTINUATION)
+    );
+    assert_eq!(resent.overload_attempts, 1);
 }
 
 /// Reasoning that is not shown (reasoning display off) puts nothing on screen,
@@ -639,6 +724,10 @@ fn test_provider_overload_classifier_excludes_permanent_errors() {
     // held and resent by the TUI when the runtime's retries run out.
     assert!(overload(
         r#"HTTP 503: {"error":"We're deploying an update right now ⚙️ It only takes a few minutes and everything comes back on its own. Please try again shortly.","code":"DEPLOYING"}"#
+    ));
+    // The provider lost its own upstream mid-response. Resending works.
+    assert!(overload(
+        "OpenAI-compatible stream error\n  error: The model provider's stream was interrupted. Please retry."
     ));
 }
 

@@ -148,18 +148,24 @@ impl App {
     /// so making the user resend it by hand is only friction. Bounded by
     /// [`Self::OVERLOAD_RETRY_MAX_ATTEMPTS`] with a growing delay; after that
     /// the turn fails as before and the prompt is restored.
+    ///
+    /// When the turn already streamed output or ran tools, a full resend would
+    /// redo that work and append a second answer. The server saved every
+    /// completed step, so the held turn becomes a hidden continuation instead
+    /// and the model resumes where it stopped.
     pub(super) fn schedule_pending_remote_overload_retry(&mut self, reason: &str) -> bool {
-        // Output from the failed attempt is already on screen (and tools may
-        // have run). A full resend would append a new answer to the partial
-        // one, so fail the turn as before instead.
-        if self.remote_turn_streamed_output {
-            return false;
-        }
+        let continues_turn = self.remote_turn_streamed_output;
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
         if pending.overload_attempts >= Self::OVERLOAD_RETRY_MAX_ATTEMPTS {
             return false;
+        }
+        if continues_turn {
+            pending.content = String::new();
+            pending.images.clear();
+            pending.is_system = true;
+            pending.system_reminder = Some(Self::PROVIDER_ERROR_CONTINUATION.to_string());
         }
         pending.auto_retry = true;
         pending.overload_attempts += 1;
@@ -176,10 +182,20 @@ impl App {
             Self::OVERLOAD_RETRY_MAX_ATTEMPTS
         ));
         let first_line = reason.lines().next().unwrap_or(reason).trim();
-        self.push_display_message(DisplayMessage::system(format!(
-            "⏳ The provider is overloaded. Retrying automatically in {delay_secs}s (attempt {attempt}/{}). {first_line}",
-            Self::OVERLOAD_RETRY_MAX_ATTEMPTS
-        )));
+        if continues_turn {
+            // The model never saw the reply it was writing when the provider
+            // failed, so it writes it again. Drop the partial copy on screen.
+            self.rollback_streaming_attempt();
+            self.push_display_message(DisplayMessage::system(format!(
+                "⏳ The provider failed mid-turn. Continuing from the last saved step in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+                Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )));
+        } else {
+            self.push_display_message(DisplayMessage::system(format!(
+                "⏳ The provider is overloaded. Retrying automatically in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+                Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )));
+        }
         self.set_status_notice(format!("Provider overloaded; retrying in {delay_secs}s"));
         true
     }
