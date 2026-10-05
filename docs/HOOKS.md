@@ -51,12 +51,12 @@ desktop, swarm workers, and headless sessions).
 
 Extra fields: `JCODE_HOOK_STATUS` (`ok`/`error`), `JCODE_HOOK_DURATION_MS`,
 `JCODE_HOOK_MODEL`, `JCODE_HOOK_LAST_ASSISTANT_TEXT` (first 4000 chars),
-`JCODE_HOOK_INPUT_TOKENS`, `JCODE_HOOK_OUTPUT_TOKENS`,
-`JCODE_HOOK_CACHE_READ_TOKENS`, `JCODE_HOOK_CACHE_WRITE_TOKENS`, and
+`JCODE_HOOK_PROMPT_TOKENS`, `JCODE_HOOK_INPUT_TOKENS`,
+`JCODE_HOOK_OUTPUT_TOKENS`, `JCODE_HOOK_CACHE_READ_TOKENS`,
+`JCODE_HOOK_CACHE_WRITE_TOKENS`, and
 `JCODE_HOOK_ERROR` (on failure).
 
-Token fields are summed from assistant messages in the current turn. Input tokens
-are the raw provider-reported input counts and are not normalized across
+Token fields are summed from assistant messages in the current turn. `PROMPT_TOKENS` is the provider-reported full prompt size when available; `INPUT_TOKENS` is the raw provider-reported input count. These values are not normalized across
 providers; for example, cached input may be included in the OpenAI input count
 but is reported separately by Anthropic. Cache fields are omitted when no
 assistant message in the turn reports that metric.
