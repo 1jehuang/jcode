@@ -89,6 +89,7 @@ pub(super) enum RemoteEventOutcome {
 
 pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) -> bool {
     app.refresh_terminal_title_metrics();
+    app.sync_herdr_agent_state();
     crate::tui::ui::set_frame_input_attribution(crate::tui::ui::FrameInputAttribution {
         event: Some("tick".to_string()),
         scroll_delta: None,
@@ -276,7 +277,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
-    if app.pending_queued_dispatch {
+    // Esc redirect hold. On timeout this arms pending_queued_dispatch, which
+    // the next check hands to the normal follow-up path.
+    let holding_for_interrupt = app.awaiting_remote_interrupt_ack();
+    if holding_for_interrupt || app.pending_queued_dispatch {
         return needs_redraw;
     }
 
@@ -502,8 +506,9 @@ async fn apply_terminal_event(
                                         )));
                                     } else {
                                         crate::auth::AuthStatus::invalidate_cache();
-                                        app.context_limit = app.provider.context_window() as u64;
-                                        app.context_warning_shown = false;
+                                        app.set_context_limit_and_sync_budget(
+                                            app.provider.context_window(),
+                                        );
                                         let _ = remote.switch_anthropic_account(&label).await;
                                         app.push_display_message(DisplayMessage::system(format!(
                                             "Switched to Anthropic account `{}`.",
@@ -523,8 +528,9 @@ async fn apply_terminal_event(
                                         )));
                                     } else {
                                         crate::auth::AuthStatus::invalidate_cache();
-                                        app.context_limit = app.provider.context_window() as u64;
-                                        app.context_warning_shown = false;
+                                        app.set_context_limit_and_sync_budget(
+                                            app.provider.context_window(),
+                                        );
                                         let _ = remote.switch_openai_account(&label).await;
                                         app.push_display_message(DisplayMessage::system(format!(
                                             "Switched to OpenAI account `{}`.",
@@ -1322,6 +1328,12 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
 
     if !remote.has_loaded_history() {
         note_startup_submit_deferred(app, "remote history not loaded yet");
+        return;
+    }
+
+    // Esc redirected to a pending prompt: the server sends Done before
+    // Interrupted. Sending now would let the late Interrupted end the new turn.
+    if app.awaiting_remote_interrupt_ack() {
         return;
     }
 

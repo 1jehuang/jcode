@@ -390,6 +390,17 @@ impl Provider for NativeAutoCompactionProvider {
     async fn complete_simple(&self, _prompt: &str, _system: &str) -> Result<String> {
         Ok("manual summary from native-auto provider".to_string())
     }
+
+    async fn complete_simple_with_usage(
+        &self,
+        prompt: &str,
+        system: &str,
+    ) -> Result<(String, jcode_provider_core::SimpleCompletionUsage)> {
+        Ok((
+            self.complete_simple(prompt, system).await?,
+            jcode_provider_core::SimpleCompletionUsage::default(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -2003,6 +2014,15 @@ fn output_budget_truncation_requests_a_continuation() {
 }
 
 #[test]
+fn anthropic_pause_turn_is_resumed() {
+    // Long server-tool (web search) turns stop with `pause_turn`; the turn
+    // must be resent to continue rather than treated as finished.
+    assert!(Agent::should_continue_after_stop_reason("pause_turn"));
+    assert!(Agent::is_pause_turn_stop_reason(" PAUSE_TURN "));
+    assert!(!Agent::is_pause_turn_stop_reason("max_tokens"));
+}
+
+#[test]
 fn stranded_tool_use_stop_is_detected() {
     // Second half of the Opus 5 DeepSWE incident: the provider reported
     // stop_reason="tool_use" while the parsed tool-call list was empty, so the
@@ -2900,4 +2920,102 @@ async fn late_mcp_announcement_uses_original_names_for_sanitized_aliases() {
         text.contains("server: yc  tool: hiring.create_job"),
         "{text}"
     );
+}
+
+#[test]
+fn skill_installed_mid_session_keeps_system_prompt_stable_and_is_announced_once() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let project = tempfile::tempdir().unwrap();
+    let write_skill = |name: &str, description: &str| {
+        let dir = project.path().join(".jcode/skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n\nBody of {name}.\n"),
+        )
+        .unwrap();
+    };
+    write_skill("early-skill", "Present when the session starts");
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new_with_initial_working_dir(
+        provider,
+        Registry::empty(),
+        Some(project.path().to_str().unwrap()),
+    );
+    let before = agent.build_system_prompt_split(None).static_part;
+    assert!(before.contains("/early-skill "), "{before}");
+
+    write_skill("late-skill", "Installed after the prompt was cached");
+
+    // The cached system prefix must not change when a skill is installed.
+    let after = agent.build_system_prompt_split(None).static_part;
+    assert_eq!(before, after);
+    assert!(!after.contains("late-skill"));
+
+    agent.announce_late_skills();
+    let announcements: Vec<String> = transcript_texts(&agent)
+        .into_iter()
+        .filter(|text| text.contains("New skills were installed."))
+        .collect();
+    assert_eq!(announcements.len(), 1);
+    assert!(announcements[0].contains("- `/late-skill ` - Installed after the prompt was cached"));
+    assert!(!announcements[0].contains("early-skill"));
+
+    // Nothing new: no second announcement, prompt still stable.
+    agent.announce_late_skills();
+    let count = transcript_texts(&agent)
+        .into_iter()
+        .filter(|text| text.contains("New skills were installed."))
+        .count();
+    assert_eq!(count, 1);
+    assert_eq!(agent.build_system_prompt_split(None).static_part, before);
+
+    // A restored agent (fresh in-memory state) must not re-announce.
+    agent.announced_skills.clear();
+    agent.announced_skills.insert("early-skill".to_string());
+    agent.announced_skills_scan_index = 0;
+    agent.announce_late_skills();
+    let count = transcript_texts(&agent)
+        .into_iter()
+        .filter(|text| text.contains("New skills were installed."))
+        .count();
+    assert_eq!(count, 1);
+}
+
+/// Esc after a queued follow-up: a cancelled turn must not swallow the
+/// follow-up into history. It stays queued so the next turn can send it.
+#[tokio::test]
+async fn cancelled_turn_leaves_soft_interrupt_queued() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.queue_soft_interrupt(
+        "do this instead".to_string(),
+        Vec::new(),
+        false,
+        SoftInterruptSource::User,
+    );
+
+    agent.request_graceful_shutdown();
+    assert!(agent.inject_soft_interrupts().is_empty());
+    assert_eq!(agent.soft_interrupt_count(), 1, "still queued after cancel");
+
+    agent.graceful_shutdown_signal().reset();
+    assert_eq!(agent.inject_soft_interrupts().len(), 1);
+    assert_eq!(agent.soft_interrupt_count(), 0);
 }

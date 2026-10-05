@@ -1271,3 +1271,92 @@ test("missing geo binding and missing cf never break the event insert", async ()
   assert.equal(response.status, 200);
   assert.equal(json.durable, true);
 });
+
+// --- usage_report: per-response spend signal rolled up into daily_model_usage.
+
+function makeUsageReportBody(overrides = {}) {
+  return makeBody({
+    event: "usage_report",
+    event_id: "usage-event-1",
+    session_id: "agent-session-a",
+    source: "agent",
+    provider: "OpenAI",
+    model: "gpt-6-astra",
+    input_tokens: 1000,
+    output_tokens: 200,
+    cache_read_input_tokens: 800,
+    cache_creation_input_tokens: 0,
+    total_tokens: 2000,
+    responses: 1,
+    build_channel: "release",
+    is_ci: false,
+    ...overrides,
+  });
+}
+
+test("usage_report upserts daily_model_usage and writes no raw events row", async () => {
+  const db = makeDb();
+  const env = { DB: db, ALLOWED_ORIGIN: "*" };
+  const response = await worker.fetch(
+    new Request(EVENT_URL, { method: "POST", body: JSON.stringify(makeUsageReportBody()) }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(response.status, 200);
+  const rollup = db.executed.filter(({ sql }) => /INSERT INTO daily_model_usage/.test(sql));
+  assert.equal(rollup.length, 1);
+  const [date, source, provider, model, channel, isCi, responses, input, output, cacheRead, cacheWrite, total] = rollup[0].values;
+  assert.match(date, /^\d{4}-\d{2}-\d{2}$/);
+  assert.deepEqual(
+    [source, provider, model, channel, isCi, responses, input, output, cacheRead, cacheWrite, total],
+    ["agent", "OpenAI", "gpt-6-astra", "release", 0, 1, 1000, 200, 800, 0, 2000],
+  );
+  assert.ok(/ON CONFLICT\(usage_date, source, provider, model, build_channel, is_ci\)/.test(rollup[0].sql));
+  assert.equal(
+    db.executed.filter(({ sql }) => /INSERT[\s\S]*INTO events\b/.test(sql)).length,
+    0,
+    "usage_report must not create raw events rows",
+  );
+});
+
+test("usage_report rejects invalid source, missing model, and bad token counts", async () => {
+  for (const [overrides, message] of [
+    [{ source: "prompt" }, "Invalid usage_report source"],
+    [{ model: "" }, "Missing usage_report model"],
+    [{ input_tokens: -5 }, "Invalid usage_report input_tokens"],
+    [{ output_tokens: 1.5 }, "Invalid usage_report output_tokens"],
+    [{ total_tokens: 60_000_000 }, "Invalid usage_report total_tokens"],
+    [{ responses: 0 }, "Invalid usage_report responses"],
+  ]) {
+    const db = makeDb();
+    const response = await worker.fetch(
+      new Request(EVENT_URL, { method: "POST", body: JSON.stringify(makeUsageReportBody(overrides)) }),
+      { DB: db, ALLOWED_ORIGIN: "*" },
+      { waitUntil() {} },
+    );
+    assert.equal(response.status, 400, JSON.stringify(overrides));
+    assert.equal((await response.json()).error, message);
+    assert.equal(db.executed.filter(({ sql }) => /daily_model_usage/.test(sql)).length, 0);
+  }
+});
+
+test("usage_report maps provider/model/source onto firehose blobs", async () => {
+  const points = [];
+  const env = {
+    DB: makeDb(),
+    ALLOWED_ORIGIN: "*",
+    FIREHOSE: { writeDataPoint(point) { points.push(point); } },
+  };
+  const response = await worker.fetch(
+    new Request(EVENT_URL, { method: "POST", body: JSON.stringify(makeUsageReportBody({ source: "compaction" })) }),
+    env,
+    { waitUntil() {} },
+  );
+  assert.equal(response.status, 200);
+  const point = points.find((p) => p.blobs.includes("usage_report"));
+  assert.ok(point, "firehose point written");
+  assert.ok(point.blobs.includes("gpt-6-astra"));
+  assert.ok(point.blobs.includes("OpenAI"));
+  assert.ok(point.blobs.includes("compaction"));
+  assert.ok(point.doubles.includes(1000) && point.doubles.includes(2000));
+});

@@ -369,7 +369,7 @@ impl App {
             if restored_model || self.session.model.is_none() {
                 self.session.model = Some(active_model.clone());
             }
-            self.update_context_limit_for_model(&active_model);
+            self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
             self.session.mark_active();
             self.set_side_panel_snapshot(

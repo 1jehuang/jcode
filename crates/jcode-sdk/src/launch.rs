@@ -700,14 +700,14 @@ fn home_dir() -> PathBuf {
 pub fn user_app_config_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        return home_dir().join("Library/Application Support/jcode");
+        home_dir().join("Library/Application Support/jcode")
     }
     #[cfg(target_os = "windows")]
     {
-        return std::env::var_os("APPDATA")
+        std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| home_dir().join("AppData/Roaming"))
-            .join("jcode");
+            .join("jcode")
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

@@ -70,6 +70,7 @@ pub(super) async fn process_turn_with_input(
 pub(super) fn handle_tick(app: &mut App) -> bool {
     let reset_redraw = app.poll_usage_reset();
     app.refresh_terminal_title_metrics();
+    app.sync_herdr_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
     // the last phase that made progress.
     crate::logging::watchdog::beat("tui.idle_tick");
@@ -252,7 +253,7 @@ pub(super) fn handle_bus_event(
             app.session.provider_session_id = None;
             app.upstream_provider = None;
             app.invalidate_model_picker_cache();
-            app.update_context_limit_for_model(&model);
+            app.update_context_limit_for_model(&model, None);
             app.session.provider_key = provider_key.or_else(|| {
                 crate::provider::MultiProvider::session_provider_key_after_model_switch(
                     &model,

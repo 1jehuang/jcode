@@ -334,6 +334,16 @@ pub struct Agent {
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
+    /// The "Available Skills" system-prompt section is session bootstrap input
+    /// too. Installing a skill mid-session must not rewrite the cached system
+    /// prefix (that forces a KV cache miss on everything after it), so the
+    /// list is frozen here and later installs are announced in the transcript.
+    prompt_skills_snapshot: Vec<crate::prompt::SkillInfo>,
+    /// Skill names already described to the model, either in the frozen
+    /// system-prompt list or by a late-skill transcript announcement.
+    announced_skills: HashSet<String>,
+    /// Transcript index already scanned for late-skill announcements.
+    announced_skills_scan_index: usize,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
@@ -366,6 +376,30 @@ impl Agent {
             .as_deref()
             .map(std::path::Path::new);
         self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+        self.refresh_prompt_skills_snapshot();
+    }
+
+    /// Re-capture the frozen skills list. Only called at session boundaries
+    /// (new/restored session, working directory change), never mid-turn.
+    fn refresh_prompt_skills_snapshot(&mut self) {
+        self.prompt_skills_snapshot = self.current_prompt_skill_infos();
+        self.announced_skills = self
+            .prompt_skills_snapshot
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
+        self.announced_skills_scan_index = 0;
+    }
+
+    fn current_prompt_skill_infos(&self) -> Vec<crate::prompt::SkillInfo> {
+        self.current_skills_snapshot()
+            .list()
+            .iter()
+            .map(|skill| crate::prompt::SkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+            })
+            .collect()
     }
 
     fn should_track_client_cache(&self) -> bool {
@@ -395,7 +429,7 @@ impl Agent {
             allowed_tools.clone(),
             disabled_tools.clone(),
         );
-        Self {
+        let mut agent = Self {
             provider,
             registry,
             skills,
@@ -426,6 +460,9 @@ impl Agent {
             announced_mcp_tools: HashSet::new(),
             announced_mcp_scan_index: 0,
             agents_md_snapshot,
+            prompt_skills_snapshot: Vec::new(),
+            announced_skills: HashSet::new(),
+            announced_skills_scan_index: 0,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
@@ -434,7 +471,9 @@ impl Agent {
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             concurrency_session: None,
-        }
+        };
+        agent.refresh_prompt_skills_snapshot();
+        agent
     }
 
     fn current_skills_snapshot(&self) -> Arc<SkillRegistry> {
@@ -1247,7 +1286,7 @@ impl Agent {
                     ContentBlock::OpenAICompaction { .. } => {
                         md.push_str("[OpenAI native compaction]\n\n");
                     }
-                    ContentBlock::ToolReference { .. } => {}
+                    ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
                 }
             }
         }
