@@ -112,6 +112,31 @@ pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Optio
     }
 }
 
+/// A token refresh rotates the access token of the same Claude login, which
+/// changes its usage cache key. Carry the cached usage and the shared 429
+/// backoff over to the new key so the refreshed login is not refetched (and
+/// rejected) as if it were a new account. A relogin under the same label does
+/// not go through here and still starts with a clean key.
+pub fn carry_anthropic_usage_across_token_refresh(
+    account_label: &str,
+    old_access_token: &str,
+    new_access_token: &str,
+) {
+    if old_access_token.trim().is_empty() || old_access_token == new_access_token {
+        return;
+    }
+    let from = anthropic_usage_cache_key(old_access_token, Some(account_label));
+    let to = anthropic_usage_cache_key(new_access_token, Some(account_label));
+    if let Ok(mut map) = anthropic_usage_cache().lock()
+        && !map.contains_key(&to)
+        && let Some(entry) = map.remove(&from)
+    {
+        map.insert(to.clone(), entry);
+    }
+    super::disk_cache::rename(&from, &to);
+    super::accessors::rename_active_usage_key(&from, &to);
+}
+
 pub(super) fn openai_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
     if let Some(label) = account_label
         .map(str::trim)
