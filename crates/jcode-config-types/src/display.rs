@@ -98,8 +98,9 @@ pub struct DisplayConfig {
     #[serde(default = "default_true")]
     pub keybinding_hints: bool,
     /// Color theme: "auto" (detect terminal background), "dark", or "light".
-    /// Auto queries the terminal's background color (OSC 11) at startup and
-    /// adapts jcode's palette for light backgrounds. Default: auto.
+    /// Auto queries the terminal's background color (OSC 11) at startup,
+    /// periodically during the session, and on focus. Adapts jcode's palette
+    /// when the terminal switches light/dark mode. Default: auto.
     #[serde(default)]
     pub theme: String,
     /// Per-role color overrides, e.g. `user = "#8ab4f8"`. Any TUI color can be

@@ -8,8 +8,9 @@ use crate::message::{
     format_background_task_notification_markdown,
 };
 use crate::session::StoredDisplayRole;
+use crate::tui::terminal_events::EventStream;
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::Receiver;
@@ -90,7 +91,9 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // draw site. Excluding it here instead would mean animation ticks request
     // no paint at all, which drops the animation to whatever unrelated events
     // happen to trigger (~4fps in practice).
-    let mut needs_redraw = reset_redraw | crate::tui::periodic_redraw_required(app);
+    let mut needs_redraw = reset_redraw
+        | crate::tui::periodic_redraw_required(app)
+        | crate::tui::terminal_events::theme_redraw_pending();
     needs_redraw |= app.poll_oauth_account_telemetry();
     needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
@@ -188,11 +191,10 @@ pub(super) fn handle_terminal_event(
     let mut needs_redraw = apply_terminal_event(app, terminal, event)?;
     const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
     for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
-        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-            break;
-        }
-        if let Ok(event) = crossterm::event::read() {
+        if let Ok(Some(event)) = crate::tui::terminal_events::try_read() {
             needs_redraw |= apply_terminal_event(app, terminal, Some(Ok(event)))?;
+        } else {
+            break;
         }
     }
     Ok(needs_redraw)
