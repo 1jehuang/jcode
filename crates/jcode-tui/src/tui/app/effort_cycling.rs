@@ -76,12 +76,12 @@ pub(crate) fn cycle_effort_index(
 ) -> CycledEffort {
     let (reasoning, swarm) = reasoning_split(efforts);
 
-    let default_index = default_effort_index(efforts).expect("non-empty ladder");
-
     let Some(current_index) = current.and_then(|c| efforts.iter().position(|e| *e == c)) else {
         // Unset or unknown: enter the reasoning sub-ladder at its top.
+        // A swarm-only ladder has no reasoning rungs: land on its last rung,
+        // matching `default_effort_index`. Callers reject empty ladders.
         let index = if reasoning.is_empty() {
-            default_index
+            efforts.len().saturating_sub(1)
         } else if direction > 0 || reasoning.len() == 1 {
             reasoning.len() - 1
         } else {
