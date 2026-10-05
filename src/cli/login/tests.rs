@@ -190,6 +190,112 @@ fn expired_claude_code_file_does_not_shadow_fresh_native_login() {
 }
 
 #[test]
+fn claude_code_native_import_preserves_active_saved_account() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    let old_native = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let config_dir = temp.path().join("claude-config");
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    crate::env::set_var(
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        r#"{"claudeAiOauth":{"accessToken":"native-token","refreshToken":"native-refresh","expiresAt":4102444800000}}"#,
+    );
+    auth::claude::set_active_account_override(None);
+    let saved = auth::claude::upsert_account(auth::claude::AnthropicAccount {
+        label: "saved".to_string(),
+        access: "saved-token".to_string(),
+        refresh: "saved-refresh".to_string(),
+        expires: 4_102_444_800_000,
+        email: None,
+        subscription_type: None,
+        scopes: Vec::new(),
+    })
+    .unwrap();
+    auth::claude::set_active_account(&saved).unwrap();
+    crate::config::Config::allow_external_auth_source(
+        auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
+    )
+    .unwrap();
+
+    let file = config_dir.join(".credentials.json");
+    assert!(reuse_claude_code_native(&file).unwrap());
+    let accounts = auth::claude::list_accounts().unwrap();
+    assert_eq!(
+        accounts.len(),
+        2,
+        "the native login must not replace a saved account"
+    );
+    let saved_account = accounts.iter().find(|a| a.label == saved).unwrap();
+    assert_eq!(saved_account.access, "saved-token");
+    assert_eq!(saved_account.refresh, "saved-refresh");
+    let imported = accounts.iter().find(|a| a.label != saved).unwrap();
+    assert_eq!(imported.refresh, "native-refresh");
+    assert_eq!(
+        auth::claude::active_account_label().as_deref(),
+        Some(imported.label.as_str())
+    );
+
+    // Importing the same login again updates that account instead of adding one.
+    assert!(reuse_claude_code_native(&file).unwrap());
+    assert_eq!(auth::claude::list_accounts().unwrap().len(), 2);
+
+    auth::claude::set_active_account_override(None);
+    set_or_clear_env("CLAUDE_CODE_OAUTH_TOKEN", old_native);
+    set_or_clear_env("CLAUDE_CONFIG_DIR", old_config);
+    set_or_clear_env("JCODE_HOME", old_home);
+}
+
+#[test]
+fn shadowed_claude_code_file_login_does_not_keep_new_trust() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let old_home = std::env::var_os("JCODE_HOME");
+    let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    let old_native = std::env::var_os("CLAUDE_CODE_OAUTH_TOKEN");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+    let config_dir = temp.path().join("claude-config");
+    crate::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let file = config_dir.join(".credentials.json");
+    // Expired access token with a refresh token: usable, but a valid saved
+    // Jcode credential takes precedence when Jcode selects credentials.
+    std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"file-token","refreshToken":"file-refresh","expiresAt":1}}"#).unwrap();
+    auth::claude::set_active_account_override(None);
+    auth::claude::upsert_account(auth::claude::AnthropicAccount {
+        label: "saved".to_string(),
+        access: "saved-token".to_string(),
+        refresh: "saved-refresh".to_string(),
+        expires: 4_102_444_800_000,
+        email: None,
+        subscription_type: None,
+        scopes: Vec::new(),
+    })
+    .unwrap();
+
+    CLAUDE_CODE_REUSE_TEST_APPROVAL.with(|approval| approval.set(Some(true)));
+    let result = reuse_claude_code_file(auth::claude::ExternalClaudeAuthSource::ClaudeCode, &file);
+    CLAUDE_CODE_REUSE_TEST_APPROVAL.with(|approval| approval.set(None));
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("taking precedence"));
+    assert!(
+        !crate::config::Config::external_auth_source_allowed_for_path(
+            auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
+            &file,
+        ),
+        "a failed login must not leave the Claude Code file trusted"
+    );
+
+    auth::claude::set_active_account_override(None);
+    set_or_clear_env("CLAUDE_CODE_OAUTH_TOKEN", old_native);
+    set_or_clear_env("CLAUDE_CONFIG_DIR", old_config);
+    set_or_clear_env("JCODE_HOME", old_home);
+}
+
+#[test]
 fn unusable_claude_code_file_falls_back_to_native_snapshot() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();

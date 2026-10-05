@@ -911,7 +911,29 @@ pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> 
         );
     }
 
-    let label = login_target_label(None)?;
+    // Never overwrite a different saved account: reuse the account that
+    // already holds these tokens, otherwise store the login under a new label.
+    let accounts = list_accounts()?;
+    let label = accounts
+        .iter()
+        .find(|account| {
+            account.refresh == creds.refresh_token
+                || (!creds.access_token.is_empty() && account.access == creds.access_token)
+        })
+        .map(|account| account.label.clone())
+        .unwrap_or_else(|| {
+            (accounts.len() + 1..)
+                .map(|index| {
+                    crate::auth::account_store::canonical_account_label(ACCOUNT_LABEL_PREFIX, index)
+                })
+                .find(|label| !accounts.iter().any(|account| &account.label == label))
+                .unwrap_or_else(|| {
+                    crate::auth::account_store::next_account_label(
+                        ACCOUNT_LABEL_PREFIX,
+                        accounts.len(),
+                    )
+                })
+        });
     upsert_account(AnthropicAccount {
         label: label.clone(),
         access: creds.access_token,
