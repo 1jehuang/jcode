@@ -1527,9 +1527,7 @@ fn turn_token_usage_after(
 
         saw_usage = true;
         if let Some(value) = message_usage.prompt_tokens {
-            usage.prompt_tokens = Some(
-                usage.prompt_tokens.unwrap_or(0).saturating_add(value),
-            );
+            usage.prompt_tokens = Some(usage.prompt_tokens.unwrap_or(0).saturating_add(value));
         }
         usage.input_tokens = usage
             .input_tokens
