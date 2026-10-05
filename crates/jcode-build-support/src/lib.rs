@@ -1,5 +1,6 @@
 mod paths;
 mod platform_support;
+mod prune;
 mod source_state;
 mod storage_helpers;
 
@@ -11,6 +12,10 @@ pub use paths::{
     selfdev_binary_path, selfdev_build_command, selfdev_build_command_for_target,
     shared_server_update_candidate, update_launcher_symlink_to_current,
     update_launcher_symlink_to_stable, version_matches_installed_channel,
+};
+pub use prune::{
+    DEFAULT_KEEP_VERSIONS, KEEP_VERSIONS_ENV, PruneReport, keep_versions_setting,
+    prune_old_versions, prune_old_versions_after_install, run_prune_builds_command,
 };
 pub use source_state::{
     current_build_info, current_git_diff, current_git_hash, current_git_hash_full,
@@ -704,6 +709,7 @@ pub fn publish_local_current_build_for_source(
     validate_binary_version_matches_source_report(&installed_report, &versioned_path, source)?;
     let current_link = update_current_symlink(&source.version_label)?;
     let launcher_link = update_launcher_symlink_to_current()?;
+    prune::prune_after_install_keeping(previous_current_version.as_deref());
 
     Ok(PublishedBuild {
         version: source.version_label.clone(),
@@ -919,6 +925,7 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
     update_current_symlink(&version)?;
     update_shared_server_symlink(&version)?;
     update_launcher_symlink_to_current()?;
+    prune_old_versions_after_install();
 
     Ok(versioned)
 }

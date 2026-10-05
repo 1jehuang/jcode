@@ -1044,3 +1044,23 @@ fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
         );
     }
 }
+
+#[test]
+fn prune_builds_parses_keep_and_dry_run() {
+    let args = Args::try_parse_from(["jcode", "prune-builds", "--keep", "5", "--dry-run"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::PruneBuilds {
+            keep: Some(5),
+            dry_run: true
+        })
+    ));
+    let args = Args::try_parse_from(["jcode", "prune-builds"]).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::PruneBuilds {
+            keep: None,
+            dry_run: false
+        })
+    ));
+}

@@ -141,6 +141,23 @@ if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
   fi
 fi
 
+# Delete old builds from ~/.jcode/builds/versions. The newest few (set with
+# JCODE_KEEP_BUILDS, 0 disables) and every build a channel, the launcher or a
+# running process still uses are kept. Runs after the reload so the old server
+# binary is already released.
+if [ "${JCODE_KEEP_BUILDS:-}" != "0" ]; then
+  "$install_dir/jcode" prune-builds </dev/null 2>/dev/null | head -1 || true
+fi
+
+# Trim stale Cargo artifacts left by earlier builds in this checkout: old
+# dependency generations and idle incremental caches, keeping the newest per
+# crate so the next build stays warm. JCODE_TARGET_SWEEP_DAYS sets the idle age
+# (default 2); JCODE_SKIP_TARGET_SWEEP=1 turns it off.
+if [ "${JCODE_SKIP_TARGET_SWEEP:-}" != "1" ]; then
+  "$repo_root/scripts/clean_target.sh" --apply --sweep-only \
+    --sweep "${JCODE_TARGET_SWEEP_DAYS:-2}" 2>&1 | tail -1 || true
+fi
+
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$install_dir"; then
   echo ""
   echo "Tip: add $install_dir to PATH if needed."

@@ -13,9 +13,14 @@
 #   scripts/clean_target.sh --apply         # actually delete safe items
 #   scripts/clean_target.sh --sweep 7       # also sweep stale artifact generations
 #                                           # older than 7 days (keeps the newest
-#                                           # generation per crate, so the warm
-#                                           # cache survives; dry-run w/o --apply)
+#                                           # generation and incremental cache per
+#                                           # crate, so the warm cache survives;
+#                                           # dry-run w/o --apply)
 #   scripts/clean_target.sh --apply --aggressive  # cargo clean stale profiles
+#   scripts/clean_target.sh --apply --sweep 2 --sweep-only  # only the sweep,
+#                                           # keep cross-compile caches
+#
+# Works with GNU (Linux) and BSD (macOS) userlands.
 #
 # Env:
 #   JCODE_CLEAN_ACTIVE_WINDOW_MIN  activity window in minutes (default 20)
@@ -28,6 +33,7 @@ cd "$repo_root"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 apply="false"
 aggressive="false"
+sweep_only="false"
 sweep_days=""
 activity_window_min="${JCODE_CLEAN_ACTIVE_WINDOW_MIN:-20}"
 
@@ -41,10 +47,11 @@ for arg in "$@"; do
   case "$arg" in
     --apply) apply="true" ;;
     --aggressive) aggressive="true" ;;
+    --sweep-only) sweep_only="true" ;;
     --sweep) expect_sweep_days="true" ;;
     --sweep=*) sweep_days="${arg#--sweep=}" ;;
     -h|--help)
-      sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -64,25 +71,38 @@ fi
 
 log() { printf 'clean_target: %s\n' "$*" >&2; }
 
+# `stat` output of "<mtime-epoch> <bytes> <path>", GNU or BSD flavour.
+if stat -c '%Y' / >/dev/null 2>&1; then
+  stat_fmt=(-c '%Y %s %n')
+else
+  stat_fmt=(-f '%m %z %N')
+fi
+
+# Epoch seconds `days` days ago (no GNU `date -d`).
+cutoff_epoch() {
+  echo $(( $(date +%s) - $1 * 86400 ))
+}
+
 human() {
   # Bytes -> human readable
   numfmt --to=iec --suffix=B "${1:-0}" 2>/dev/null || printf '%sB' "${1:-0}"
 }
 
 dir_bytes() {
-  du -sb "$1" 2>/dev/null | awk '{print $1}'
+  local kib
+  kib=$(du -sk "$1" 2>/dev/null | awk '{print $1}')
+  echo $(( ${kib:-0} * 1024 ))
 }
 
 # Is any rustc/cargo process currently operating inside this path?
 path_has_active_process() {
-  local path="$1"
-  local p
-  for p in $(pgrep -x rustc 2>/dev/null) $(pgrep -x cargo 2>/dev/null); do
-    if tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -qF "$path"; then
-      return 0
-    fi
-  done
-  return 1
+  local path="$1" procs
+  procs=$(ps -A -o command= 2>/dev/null) || return 1
+  # One awk pass: an early-exiting `grep -q` in a pipeline would SIGPIPE its
+  # writer, and with pipefail that reads as "no match".
+  awk -v path="$path" '
+    $0 ~ /(^|\/)(rustc|cargo|clippy-driver)( |$)/ && index($0, path) { found = 1 }
+    END { exit !found }' <<<"$procs"
 }
 
 # Was this path written to within the activity window?
@@ -90,7 +110,7 @@ path_recently_active() {
   local path="$1"
   [[ -d "$path" ]] || return 1
   local recent
-  recent=$(find "$path" -maxdepth 3 -type f -newermt "-${activity_window_min} min" 2>/dev/null | head -1)
+  recent=$(find "$path" -maxdepth 3 -type f -mmin "-${activity_window_min}" 2>/dev/null | head -1)
   [[ -n "$recent" ]]
 }
 
@@ -137,7 +157,7 @@ log "target dir: $target_dir (activity window: ${activity_window_min}min, apply=
 # 1) Cross-compile / compat caches: not part of the local dev inner loop. They
 #    are regenerated on demand by release/compat scripts.
 for d in "$target_dir"/*-apple-darwin "$target_dir"/*-pc-windows-* "$target_dir"/linux-compat; do
-  [[ -d "$d" ]] || continue
+  [[ -d "$d" && "$sweep_only" != "true" ]] || continue
   remove_path "$d" "cross-compile/compat cache"
 done
 
@@ -149,9 +169,9 @@ done
 #    Cargo transparently rebuilds anything it still needs, so this is safe.
 list_stale_dep_generations() {
   local deps="$1" days="$2"
-  find "$deps" -maxdepth 1 -type f -printf '%T@ %s %p\n' 2>/dev/null \
+  find "$deps" -maxdepth 1 -type f -exec stat "${stat_fmt[@]}" {} + 2>/dev/null \
     | sort -rn \
-    | awk -v cutoff="$(date -d "-${days} days" +%s)" '
+    | awk -v cutoff="$(cutoff_epoch "$days")" '
         {
           path=$3; file=path; sub(/^.*\//, "", file)
           base=file; ext=""
@@ -163,6 +183,21 @@ list_stale_dep_generations() {
           # Newest generation per key (input is mtime-descending): keep it.
           if (!(key in seen)) { seen[key]=1; next }
           if ($1 < cutoff) { print $2 "\t" $3 }
+        }'
+}
+
+# Incremental session dirs are named `<crate>-<hash>`; a crate collects one per
+# flag/feature combination it was ever built with. Keep the newest per crate
+# and list the rest that have been idle past the threshold.
+list_stale_incremental_dirs() {
+  local dir="$1" days="$2"
+  find "$dir" -mindepth 1 -maxdepth 1 -type d -exec stat "${stat_fmt[@]}" {} + 2>/dev/null \
+    | sort -rn \
+    | awk -v cutoff="$(cutoff_epoch "$days")" '
+        {
+          path=$3; key=path; sub(/^.*\//, "", key); sub(/-[^-]+$/, "", key)
+          if (!(key in seen)) { seen[key]=1; next }
+          if ($1 < cutoff) { print path }
         }'
 }
 
@@ -194,7 +229,7 @@ if [[ -n "$sweep_days" ]]; then
     if [[ -d "$profile_dir/incremental" ]]; then
       while IFS= read -r d; do
         remove_path "$d" "stale incremental session (>${sweep_days}d)"
-      done < <(find "$profile_dir/incremental" -mindepth 1 -maxdepth 1 -type d -mtime "+$sweep_days" 2>/dev/null)
+      done < <(list_stale_incremental_dirs "$profile_dir/incremental" "$sweep_days")
     fi
   done
 fi

@@ -280,6 +280,16 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Delete old installed builds, keeping recent, referenced and running ones
+    PruneBuilds {
+        /// Unreferenced builds to keep, newest first (default: JCODE_KEEP_BUILDS or 3)
+        #[arg(long)]
+        keep: Option<usize>,
+        /// Show what would be removed without deleting anything
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Show usage limits for connected providers
     Usage {
         /// Emit JSON instead of plain text

@@ -370,6 +370,13 @@ if [ "${JCODE_SKIP_SERVER_RELOAD:-}" != "1" ]; then
   fi
 fi
 
+# Delete old builds from the version store, keeping the newest few
+# (JCODE_KEEP_BUILDS, 0 disables) and anything still in use. Best-effort.
+INSTALL_STAGE="prune_builds"
+if [ "${JCODE_KEEP_BUILDS:-}" != "0" ] && [ -x "$launcher_path" ]; then
+  "$launcher_path" prune-builds </dev/null >/dev/null 2>&1 || true
+fi
+
 if [ "$IS_WINDOWS" = true ]; then
   INSTALL_STAGE="path_configuration"
   win_install_dir=$(cygpath -w "$INSTALL_DIR" 2>/dev/null || echo "$INSTALL_DIR")
