@@ -590,9 +590,76 @@ impl App {
     }
 
     fn start_claude_login(&mut self) {
+        self.push_display_message(DisplayMessage::system(
+            "Claude login method\n\n1. Jcode OAuth (default): sign in directly in a browser.\n2. Claude Code CLI: sign in with `claude auth login` in a new terminal, then approve Jcode's access to that login.\n\nReply 1 or 2, or /cancel."
+                .to_string(),
+        ));
+        self.set_status_notice("Claude login: choose 1 or 2");
+        self.begin_pending_login(PendingLogin::ClaudeMethodChoice);
+    }
+
+    fn start_jcode_claude_login(&mut self) {
         let label = crate::auth::claude::login_target_label(None)
             .unwrap_or_else(|_| crate::auth::claude::primary_account_label());
         self.start_claude_login_for_account(&label);
+    }
+
+    fn start_claude_code_cli_login(&mut self) {
+        if crate::tui::is_ssh_remote() {
+            self.push_display_message(DisplayMessage::error(
+                "Claude Code CLI login must run on the remote host. SSH into that host and run `jcode login --provider claude --claude-code` there."
+                    .to_string(),
+            ));
+            return;
+        }
+        let command = "jcode login --provider claude --claude-code";
+        // macOS terminal launchers start a fresh login shell rather than
+        // inheriting this process's environment. Do not silently sign into a
+        // different Claude profile or Jcode home.
+        if ["CLAUDE_CONFIG_DIR", "JCODE_HOME"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+        {
+            self.push_display_message(DisplayMessage::system(format!(
+                "This Jcode session uses CLAUDE_CONFIG_DIR or JCODE_HOME. Open a terminal with the same environment settings, then run:\n\n  {command}\n\nA new terminal here may lose those settings and sign into the wrong profile."
+            )));
+            self.set_status_notice(
+                "Claude Code CLI login: run on Jcode host with same environment",
+            );
+            return;
+        }
+        let opened = if cfg!(test) {
+            Ok(false)
+        } else {
+            std::env::current_exe().and_then(|exe| {
+                let cwd = std::env::current_dir()?;
+                let invocation = crate::terminal_launch::TerminalCommand::new(
+                    exe,
+                    vec![
+                        "login".into(),
+                        "--provider".into(),
+                        "claude".into(),
+                        "--claude-code".into(),
+                    ],
+                )
+                .title("jcode · Claude Code login".to_string());
+                crate::terminal_launch::spawn_command_in_new_terminal(&invocation, &cwd)
+                    .map_err(std::io::Error::other)
+            })
+        };
+        match opened {
+            Ok(true) => self.push_display_message(DisplayMessage::system(
+                "Opened Claude Code login in a new terminal. Complete sign-in and approve credential reuse there; Jcode will refresh its provider status when that command finishes."
+                    .to_string(),
+            )),
+            Ok(false) => self.push_display_message(DisplayMessage::system(format!(
+                "No new terminal was available. Run this on the Jcode host to sign in:\n\n  {command}"
+            ))),
+            Err(error) => self.push_display_message(DisplayMessage::error(format!(
+                "Could not open a terminal ({error}). Run this on the Jcode host:\n\n  {command}"
+            ))),
+        }
+        self.set_status_notice("Claude Code CLI login: complete in terminal");
     }
 
     fn start_jcode_login(&mut self) {
@@ -2021,6 +2088,9 @@ impl App {
                 PendingLogin::AutoImportSelection { .. } => {
                     "Auto import is waiting for your selection. Reply with a to approve all, 1,3 to approve specific sources, or /cancel to abort.".to_string()
                 }
+                PendingLogin::ClaudeMethodChoice => {
+                    "Choose 1 for Jcode OAuth or 2 for Claude Code CLI, or /cancel.".to_string()
+                }
                 _ => "Login still in progress. Complete it in your browser, or paste the callback URL / authorization code here. Type /cancel to abort.".to_string(),
             };
             self.push_display_message(DisplayMessage::system(help));
@@ -2051,6 +2121,17 @@ impl App {
                 // SSH input must never fall through to laptop credential handlers.
                 self.append_ssh_login_input(&input);
             }
+            PendingLogin::ClaudeMethodChoice => match trimmed.to_ascii_lowercase().as_str() {
+                "1" | "jcode" | "oauth" => self.start_jcode_claude_login(),
+                "2" | "cli" | "claude-code" => self.start_claude_code_cli_login(),
+                _ => {
+                    self.push_display_message(DisplayMessage::system(
+                        "Choose 1 for Jcode OAuth or 2 for Claude Code CLI, or /cancel."
+                            .to_string(),
+                    ));
+                    self.pending_login = Some(PendingLogin::ClaudeMethodChoice);
+                }
+            },
             PendingLogin::ClaudeAccount {
                 verifier,
                 label,

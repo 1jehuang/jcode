@@ -75,7 +75,7 @@
     "crates/jcode-tui-mermaid/src/mermaid_viewport.rs": 1971,
     "crates/jcode-tui-render/src/swarm_gallery.rs": 3099,
     "crates/jcode-tui/src/tui/app.rs": 2701,
-    "crates/jcode-tui/src/tui/app/auth.rs": 3520,
+    "crates/jcode-tui/src/tui/app/auth.rs": 3601,
     "crates/jcode-tui/src/tui/app/auth_account_commands.rs": 1217,
     "crates/jcode-tui/src/tui/app/auth_account_picker.rs": 1275,
     "crates/jcode-tui/src/tui/app/commands.rs": 3788,
@@ -114,11 +114,11 @@
     "src/bin/memory_recall_bench.rs": 2667,
     "src/bin/tui_bench.rs": 1765,
     "src/cli/acp.rs": 2201,
-    "src/cli/args.rs": 1251,
+    "src/cli/args.rs": 1256,
     "src/cli/cloud_move.rs": 1705,
     "src/cli/commands.rs": 3556,
-    "src/cli/dispatch.rs": 1523,
-    "src/cli/login.rs": 1454,
+    "src/cli/dispatch.rs": 1525,
+    "src/cli/login.rs": 1687,
     "src/cli/provider_init.rs": 1902
   },
   "version": 1

@@ -3,6 +3,73 @@ use super::{
     save_tui_openai_compatible_key,
 };
 
+#[test]
+fn claude_method_choice_can_cancel_or_retry_without_running_cli() {
+    use super::PendingLogin;
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.start_claude_login();
+    assert!(matches!(
+        app.pending_login,
+        Some(PendingLogin::ClaudeMethodChoice)
+    ));
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Claude Code CLI")
+    );
+
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, "invalid".into());
+    assert!(matches!(
+        app.pending_login,
+        Some(PendingLogin::ClaudeMethodChoice)
+    ));
+    app.pending_login = None;
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, "/cancel".into());
+    assert!(app.pending_login.is_none());
+    assert!(
+        app.display_messages()
+            .last()
+            .unwrap()
+            .content
+            .contains("Login cancelled")
+    );
+}
+
+#[test]
+fn claude_code_choice_offers_host_command_when_terminal_cannot_open() {
+    use super::PendingLogin;
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, "2".into());
+    assert!(app.pending_login.is_none());
+    let message = &app.display_messages().last().unwrap().content;
+    assert!(message.contains("jcode login --provider claude --claude-code"));
+    assert!(
+        message.contains("No new terminal was available")
+            || message.contains("remote host")
+            || message.contains("same environment settings")
+    );
+}
+
+#[test]
+fn claude_code_choice_does_not_launch_terminal_with_custom_profile() {
+    use super::PendingLogin;
+    let _lock = crate::storage::lock_test_env();
+    let old_config = std::env::var_os("CLAUDE_CONFIG_DIR");
+    crate::env::set_var("CLAUDE_CONFIG_DIR", "/synthetic/claude-profile");
+    let mut app = crate::tui::app::tests::create_test_app();
+    app.handle_login_input(PendingLogin::ClaudeMethodChoice, "2".into());
+    let message = &app.display_messages().last().unwrap().content;
+    assert!(message.contains("same environment settings"));
+    assert!(message.contains("jcode login --provider claude --claude-code"));
+    if let Some(value) = old_config {
+        crate::env::set_var("CLAUDE_CONFIG_DIR", value);
+    } else {
+        crate::env::remove_var("CLAUDE_CONFIG_DIR");
+    }
+}
+
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _env_guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
