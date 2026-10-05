@@ -81,6 +81,76 @@ fn test_agents_review_picker_saves_session_override_without_global_write() {
     });
 }
 
+/// Ctrl+G in an `/agents` view switches scope in place, and Enter then
+/// writes only that scope: global changes config, session changes the
+/// session override.
+#[test]
+fn test_agents_ctrl_g_toggles_scope_and_saves_to_the_chosen_scope() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+        app.input = "/agents review".into();
+        app.submit_input();
+        assert!(!app.agent_models_global_scope);
+
+        // Toggle to the global default and pick "inherit coordinator". The
+        // reopen reads the remote catalog configured above.
+        app.handle_inline_interactive_key(KeyCode::Char('g'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(app.agent_models_global_scope);
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().expect("still open");
+        assert!(
+            picker.entries.iter().any(|entry| entry
+                .options
+                .iter()
+                .any(|option| option.detail.starts_with("[global]"))),
+            "reopened in global scope"
+        );
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            crate::config::Config::load().autoreview.model.as_deref(),
+            Some("inherit")
+        );
+        assert!(app.session.agent_model_overrides.is_empty());
+
+        // The role list toggles too, and the next save stays in session scope.
+        app.input = "/agents default".into();
+        app.submit_input();
+        assert!(app.agent_models_global_scope);
+        app.handle_inline_interactive_key(KeyCode::Char('g'), KeyModifiers::CONTROL)
+            .unwrap();
+        assert!(!app.agent_models_global_scope);
+        let roles = app.inline_interactive_state.as_ref().expect("role list");
+        assert!(roles.is_agent_target_picker());
+        assert!(roles.entries.iter().all(|entry| entry.name.ends_with("[session]")));
+        configure_test_remote_models(&mut app);
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Review);
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.session
+                .agent_model_overrides
+                .get("review")
+                .map(String::as_str),
+            Some("inherit")
+        );
+    });
+}
+
 #[test]
 fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
     with_temp_jcode_home(|| {

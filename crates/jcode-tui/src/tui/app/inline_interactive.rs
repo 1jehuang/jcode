@@ -318,6 +318,32 @@ fn picker_is_runtime_model_picker(picker: &InlineInteractiveState) -> bool {
             .any(|entry| matches!(entry.action, PickerAction::Model))
 }
 
+/// Which `/agents` view is open, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentModelsPickerView {
+    /// The role list (swarm, review, judge, memory, ambient).
+    Targets,
+    /// The model list for one role.
+    Models(crate::tui::AgentModelTarget),
+}
+
+pub(crate) fn agent_models_picker_view(
+    picker: &InlineInteractiveState,
+) -> Option<AgentModelsPickerView> {
+    if picker.kind != PickerKind::Model {
+        return None;
+    }
+    if picker.is_agent_target_picker() {
+        return Some(AgentModelsPickerView::Targets);
+    }
+    picker.entries.iter().find_map(|entry| match entry.action {
+        PickerAction::AgentModelChoice { target, .. } => {
+            Some(AgentModelsPickerView::Models(target))
+        }
+        _ => None,
+    })
+}
+
 fn key_char_eq_ignore_ascii_case(code: KeyCode, expected: char) -> bool {
     matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&expected))
 }
@@ -3296,6 +3322,27 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        // `/agents` pickers: Ctrl+G switches between editing this session and
+        // the global default, then reopens the same view in the other scope.
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && key_char_eq_ignore_ascii_case(code, 'g')
+            && let Some(view) = self
+                .inline_interactive_state
+                .as_ref()
+                .and_then(agent_models_picker_view)
+        {
+            self.agent_models_global_scope = !self.agent_models_global_scope;
+            match view {
+                AgentModelsPickerView::Targets => self.open_agents_picker(),
+                AgentModelsPickerView::Models(target) => self.open_agent_model_picker(target),
+            }
+            self.set_status_notice(if self.agent_models_global_scope {
+                "/agents: editing the global default (all sessions)"
+            } else {
+                "/agents: editing this session only"
+            });
+            return Ok(());
+        }
         match code {
             KeyCode::Esc => {
                 if let Some(ref mut picker) = self.inline_interactive_state

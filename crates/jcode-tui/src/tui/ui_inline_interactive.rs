@@ -186,10 +186,21 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
                 }
             )
         });
-    if is_swarm_agent_model_picker {
-        return Some(
-            " swarm routing is configured by a prompt · /swarm-prompt to edit the active file",
-        );
+    if let Some(global) = agent_models_scope(picker) {
+        return Some(match (global, is_swarm_agent_model_picker) {
+            (true, false) => {
+                " GLOBAL DEFAULT: changes every session without its own choice · Ctrl+G this session instead"
+            }
+            (false, false) => {
+                " THIS SESSION ONLY: other sessions keep the global default · Ctrl+G global default"
+            }
+            (true, true) => {
+                " GLOBAL DEFAULT (all sessions) · Ctrl+G this session · swarm routing: /swarm-prompt"
+            }
+            (false, true) => {
+                " THIS SESSION ONLY · Ctrl+G global default · swarm routing: /swarm-prompt"
+            }
+        });
     }
 
     // The favorite/default hotkeys now work in both the focused picker and the
@@ -207,6 +218,33 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
     } else {
         None
     }
+}
+
+/// Scope of an open `/agents` view: `Some(true)` edits the global default,
+/// `Some(false)` this session, `None` when it is not an `/agents` view. Both
+/// views tag every row with its scope (`Swarm [session]` role rows,
+/// `[global] ...` model route details), so the scope is read from there.
+fn agent_models_scope(picker: &crate::tui::InlineInteractiveState) -> Option<bool> {
+    if picker.kind != crate::tui::PickerKind::Model {
+        return None;
+    }
+    let is_agents_view = picker.is_agent_target_picker()
+        || picker.entries.iter().any(|entry| {
+            matches!(
+                entry.action,
+                crate::tui::PickerAction::AgentModelChoice { .. }
+            )
+        });
+    if !is_agents_view {
+        return None;
+    }
+    Some(picker.entries.iter().any(|entry| {
+        entry.name.ends_with("[global]")
+            || entry
+                .options
+                .iter()
+                .any(|option| option.detail.starts_with("[global]"))
+    }))
 }
 
 fn account_picker_shows_provider_badge(picker: &crate::tui::InlineInteractiveState) -> bool {
@@ -1387,7 +1425,49 @@ mod tests {
 
         let hint = model_picker_top_hint(&picker).expect("swarm picker should show prompt hint");
         assert!(hint.contains("/swarm-prompt"));
-        assert!(hint.contains("configured by a prompt"));
+        assert!(hint.contains("swarm routing"));
+    }
+
+    /// `/agents` must say which settings a choice changes and how to switch:
+    /// the hint follows the `[session]` / `[global]` tags on the rows.
+    #[test]
+    fn agents_pickers_name_their_scope_and_the_toggle() {
+        let mut picker = sample_picker();
+        for entry in &mut picker.entries {
+            entry.action = crate::tui::PickerAction::AgentModelChoice {
+                target: crate::tui::AgentModelTarget::Review,
+                clear_override: false,
+            };
+            for option in &mut entry.options {
+                option.detail = format!("[session] {}", option.detail);
+            }
+        }
+        let hint = model_picker_top_hint(&picker).expect("session hint");
+        assert!(hint.contains("THIS SESSION ONLY"), "{hint}");
+        assert!(hint.contains("Ctrl+G global default"), "{hint}");
+
+        for entry in &mut picker.entries {
+            for option in &mut entry.options {
+                option.detail = option.detail.replacen("[session]", "[global]", 1);
+            }
+        }
+        let hint = model_picker_top_hint(&picker).expect("global hint");
+        assert!(hint.contains("GLOBAL DEFAULT"), "{hint}");
+        assert!(hint.contains("Ctrl+G this session"), "{hint}");
+
+        // The role list carries the scope in its row names.
+        let mut roles = sample_picker();
+        for entry in &mut roles.entries {
+            entry.name = "Swarm [global]".to_string();
+            entry.action =
+                crate::tui::PickerAction::AgentTarget(crate::tui::AgentModelTarget::Swarm);
+        }
+        let hint = model_picker_top_hint(&roles).expect("role list hint");
+        assert!(hint.contains("GLOBAL DEFAULT"), "{hint}");
+
+        // The plain /model picker keeps its own key hint.
+        let hint = model_picker_top_hint(&sample_picker()).expect("model hint");
+        assert!(hint.contains("Ctrl+O set default"), "{hint}");
     }
 
     #[test]
