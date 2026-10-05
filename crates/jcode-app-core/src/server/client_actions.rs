@@ -1186,41 +1186,6 @@ pub(super) async fn handle_resume_all_sessions(
     });
 }
 
-/// Whether a session's working directory counts as being in the caller's project.
-///
-/// Both sides are canonicalized before comparing, so a symlinked checkout, a
-/// `..` segment, or a Windows short/long path pair does not read as a different
-/// project and silently skip sessions the user asked to continue.
-///
-/// The `None` cases follow the project-isolation invariants: `working_dir: None`
-/// must never mean "the daemon's cwd", because the daemon's cwd is whichever
-/// project happened to start it. This function compares the two directories
-/// only when both are present; it never falls back to a process-global default.
-///
-/// When either side is absent the session is treated as in scope, and that is a
-/// deliberate choice rather than an oversight:
-///
-/// - A session with no directory is not attributable to any project, so
-///   scoping it away would silently drop it from a sweep the user asked for.
-/// - A caller with no directory means the daemon could not attribute the
-///   request to a project at all. Scoping nothing would make `/continue`
-///   report "no interrupted sessions" while real sessions sat interrupted,
-///   which is worse than the behavior this item removes. Note this is not a
-///   common path: `Session::create` populates `working_dir` from the process
-///   cwd, so a real caller almost always has one.
-///
-/// In every ordinary case both sides carry a directory, and the comparison is
-/// strict: project B never matches a caller in project A.
-fn working_dir_in_scope(session_dir: Option<&str>, caller_dir: Option<&str>) -> bool {
-    match (session_dir, caller_dir) {
-        (Some(session), Some(caller)) => {
-            super::util::canonicalize_or(session.into()) == super::util::canonicalize_or(caller.into())
-        }
-        _ => true,
-    }
-}
-
-
 pub(super) fn handle_compact(
     id: u64,
     agent: &Arc<Mutex<Agent>>,

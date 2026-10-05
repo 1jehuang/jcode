@@ -11,7 +11,6 @@
 // (`apply_or_defer_subscribe_working_dir`). Fixing only one would leave the
 // other able to undo it.
 
-use super::*;
 use crate::session::Session;
 
 /// Build a live target agent whose session is already bound to `working_dir`.

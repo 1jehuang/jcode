@@ -3,7 +3,7 @@ use super::{
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
     mark_remote_reload_started, prewarm_idle_agent, remove_detached_source_if_unclaimed,
     rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
-    session_working_dir_for_client, session_was_interrupted_by_reload, subscribe_should_mark_ready,
+    session_was_interrupted_by_reload, session_working_dir_for_client, subscribe_should_mark_ready,
     subscribe_working_dir_replacement,
 };
 use crate::agent::Agent;
@@ -404,11 +404,19 @@ fn resume_preserves_target_working_dir_on_cross_project_attach() {
         Some(target.to_string())
     );
     assert_eq!(
-        session_working_dir_for_client(Some("/home/tester/work/project-b"), Some("/home/tester/work/./project-b"), false),
+        session_working_dir_for_client(
+            Some("/home/tester/work/project-b"),
+            Some("/home/tester/work/./project-b"),
+            false
+        ),
         Some("/home/tester/work/project-b".to_string())
     );
     assert_eq!(
-        session_working_dir_for_client(Some("/home/tester/work/project-b"), Some("/home/tester/work/project-b/"), false),
+        session_working_dir_for_client(
+            Some("/home/tester/work/project-b"),
+            Some("/home/tester/work/project-b/"),
+            false
+        ),
         Some("/home/tester/work/project-b".to_string())
     );
 
