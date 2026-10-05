@@ -1,8 +1,8 @@
 {
-  "total": 3728,
+  "total": 3730,
   "totals_by_pattern": {
-    "dot_ok": 1426,
-    "let_underscore": 1382,
+    "dot_ok": 1427,
+    "let_underscore": 1383,
     "unwrap_or_default": 920
   },
   "tracked_files": {
@@ -1207,8 +1207,8 @@
       "unwrap_or_default": 5
     },
     "crates/jcode-base/src/usage/accessors.rs": {
-      "dot_ok": 4,
-      "let_underscore": 2,
+      "dot_ok": 5,
+      "let_underscore": 3,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/usage/anthropic_reset.rs": {
