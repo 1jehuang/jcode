@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
@@ -332,7 +332,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             flow_id,
             cancel,
             no_validate,
-            google_access_tier,
+            google,
             api_base,
             api_key,
             api_key_env,
@@ -363,35 +363,25 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 _ => None,
             };
             let before = default_family.map(login_account_labels);
-            login::run_login(
-                &login_choice,
-                account.as_deref(),
-                login::LoginOptions {
-                    no_browser,
-                    claude_code,
-                    print_auth_url,
-                    callback_url,
-                    auth_code,
-                    json,
-                    complete,
-                    flow_id,
-                    cancel,
-                    no_validate,
-                    google_access_tier: google_access_tier.map(|tier| match tier {
-                        super::args::GoogleAccessTierArg::Full => {
-                            auth::google::GmailAccessTier::Full
-                        }
-                        super::args::GoogleAccessTierArg::Readonly => {
-                            auth::google::GmailAccessTier::ReadOnly
-                        }
-                    }),
-                    openai_compatible_api_base: api_base,
-                    openai_compatible_api_key: api_key,
-                    openai_compatible_api_key_env: api_key_env,
-                    openai_compatible_default_model: args.model.clone(),
-                },
-            )
-            .await?;
+            let mut options = login::LoginOptions {
+                no_browser,
+                claude_code,
+                print_auth_url,
+                callback_url,
+                auth_code,
+                json,
+                complete,
+                flow_id,
+                cancel,
+                no_validate,
+                openai_compatible_api_base: api_base,
+                openai_compatible_api_key: api_key,
+                openai_compatible_api_key_env: api_key_env,
+                openai_compatible_default_model: args.model.clone(),
+                ..Default::default()
+            };
+            google.apply(&mut options)?;
+            login::run_login(&login_choice, account.as_deref(), options).await?;
             if make_default {
                 make_login_default(default_family, before, account.as_deref())?;
             }
@@ -1313,6 +1303,18 @@ fn try_acquire_spawn_lock(path: &std::path::Path) -> Result<Option<SpawnLockGuar
     use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
 
+    // The client acquires this lock before the daemon creates its socket directory.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create JCode runtime directory {}",
+                parent.display()
+            )
+        })?;
+    }
     let file = OpenOptions::new()
         .create(true)
         .write(true)

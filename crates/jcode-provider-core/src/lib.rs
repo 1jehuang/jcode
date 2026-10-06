@@ -14,6 +14,7 @@ pub mod pricing;
 pub mod reasoning;
 pub mod retry_after;
 pub mod selection;
+pub mod service_tier;
 pub mod transport;
 pub mod usage_limit;
 

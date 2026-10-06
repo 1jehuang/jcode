@@ -408,29 +408,19 @@ fn generated_image_payload(path: &str, output_format: &str) -> Option<(String, S
             return None;
         }
     };
-    let media_type = generated_image_media_type(path_ref, output_format).to_string();
-    let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
-    Some((media_type, data_b64))
-}
-
-fn generated_image_media_type(path: &Path, output_format: &str) -> &'static str {
-    logging::debug(&format!(
-        "resolving generated image media type path={} format={output_format}",
-        path.display()
-    ));
-    let ext = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or(output_format)
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "ico" => "image/x-icon",
-        _ => "image/png",
-    }
+    // The media type comes from the bytes, not the extension or the requested
+    // output format, and non-provider formats are converted (#1712).
+    let image = match crate::image_normalize::normalize_image_bytes(data) {
+        Ok(image) => image,
+        Err(reason) => {
+            logging::warn(&format!(
+                "skipping generated image payload path={path} format={output_format}: {reason}"
+            ));
+            return None;
+        }
+    };
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&image.data);
+    Some((image.media_type.to_string(), data_b64))
 }
 
 #[cfg(test)]

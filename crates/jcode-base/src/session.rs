@@ -50,7 +50,6 @@ pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
-pub use jcode_session_types::prompt_title;
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
@@ -74,6 +73,7 @@ pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
+pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
@@ -403,6 +403,7 @@ impl Session {
         session.replay_events.clear();
         session.rebuild_memory_profile_cache();
         session.reset_persist_state(true);
+        session.persist_state.transcript_stripped = true;
         session
     }
 
@@ -595,6 +596,7 @@ impl Session {
             memory_injections_mode: PersistVectorMode::Clean,
             replay_events_mode: PersistVectorMode::Clean,
             last_meta: Some(self.journal_meta()),
+            transcript_stripped: self.persist_state.transcript_stripped,
         };
     }
 
@@ -1685,6 +1687,7 @@ request in this new forked session, using the inherited conversation only as con
         self.rebuild_memory_profile_cache();
         self.reset_provider_messages_cache();
         self.reset_persist_state(true);
+        self.persist_state.transcript_stripped = true;
     }
 
     /// Remove all ToolUse content blocks from a specific message.

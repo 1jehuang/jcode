@@ -44,6 +44,11 @@ model_switch_prev = "ctrl+shift+tab"
 effort_increase = "@EFFORT_INCREASE@"
 effort_decrease = "@EFFORT_DECREASE@"
 
+# Speed tier switching: Standard -> Fast -> Ultrafast (OpenAI), Fast on/off elsewhere.
+# Ctrl/Cmd+Up/Down still recall prompt history.
+speed_increase = "alt+up"
+speed_decrease = "alt+down"
+
 # Centered mode toggle key
 centered_toggle = "alt+c"
 

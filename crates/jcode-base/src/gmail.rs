@@ -171,7 +171,7 @@ impl GmailClient {
     /// Whether this backend has credentials available to talk to Gmail.
     pub fn is_configured(&self) -> bool {
         match &self.backend {
-            GmailBackend::Direct => google::has_tokens(),
+            GmailBackend::Direct => google::has_service(google::GoogleService::Gmail),
             GmailBackend::Composio(cfg) => !cfg.api_key.is_empty(),
         }
     }
@@ -203,7 +203,9 @@ impl GmailClient {
     pub fn not_configured_message(&self) -> &'static str {
         match &self.backend {
             GmailBackend::Direct => {
-                "Gmail is not configured. Run `jcode login google` to set up Gmail access."
+                "Gmail is not configured. Offer to set it up: follow jcode_docs \
+                 docs/GOOGLE_GUIDED_SETUP.md (you can drive the Google Cloud Console in the \
+                 user's browser), or have the user run `jcode login google`."
             }
             GmailBackend::Composio(_) => {
                 "Gmail (Composio backend) is not configured. Set COMPOSIO_API_KEY and connect your \
@@ -579,6 +581,60 @@ impl GmailClient {
             .request(reqwest::Method::POST, &url, Some(payload))
             .await?;
         Ok(serde_json::from_value(value)?)
+    }
+
+    /// List drafts, newest first, returning lightweight refs.
+    pub async fn list_drafts(&self, max_results: u32) -> Result<Vec<Draft>> {
+        let url = format!("{}/drafts?maxResults={}", GMAIL_API_BASE, max_results);
+        #[derive(Deserialize)]
+        struct DraftList {
+            drafts: Option<Vec<Draft>>,
+        }
+        let value = self.request(reqwest::Method::GET, &url, None).await?;
+        let list: DraftList = serde_json::from_value(value)?;
+        Ok(list.drafts.unwrap_or_default())
+    }
+
+    /// Fetch a single draft including its full message (headers + body).
+    pub async fn get_draft(&self, draft_id: &str) -> Result<DraftFull> {
+        let url = format!("{}/drafts/{}?format=full", GMAIL_API_BASE, draft_id);
+        let value = self.request(reqwest::Method::GET, &url, None).await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Replace a draft's content in place. Gmail drafts are immutable
+    /// messages under a stable draft ID, so updating means PUTting a full new
+    /// message; the draft ID stays the same.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_draft(
+        &self,
+        draft_id: &str,
+        to: &str,
+        subject: &str,
+        body: &str,
+        in_reply_to: Option<&str>,
+        thread_id: Option<&str>,
+        attachments: &[std::path::PathBuf],
+    ) -> Result<Draft> {
+        let url = format!("{}/drafts/{}", GMAIL_API_BASE, draft_id);
+        let raw = build_raw_mime(to, subject, body, in_reply_to, attachments)?;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes());
+        let mut message = json!({ "raw": encoded });
+        if let Some(tid) = thread_id {
+            message["threadId"] = Value::String(tid.to_string());
+        }
+        let payload = json!({ "id": draft_id, "message": message });
+        let value = self
+            .request(reqwest::Method::PUT, &url, Some(payload))
+            .await?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Permanently delete a draft (drafts do not go to Trash).
+    pub async fn delete_draft(&self, draft_id: &str) -> Result<()> {
+        let url = format!("{}/drafts/{}", GMAIL_API_BASE, draft_id);
+        self.request(reqwest::Method::DELETE, &url, None).await?;
+        Ok(())
     }
 
     pub async fn send_message(
@@ -1032,6 +1088,13 @@ pub struct Label {
 pub struct Draft {
     pub id: String,
     pub message: Option<MessageRef>,
+}
+
+/// A draft fetched with its full message, used to merge partial updates.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DraftFull {
+    pub id: String,
+    pub message: Option<Message>,
 }
 
 pub fn format_message_summary(msg: &Message) -> String {

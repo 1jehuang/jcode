@@ -35,9 +35,9 @@ pub use jcode_compaction_core::{
     TOKEN_HISTORY_WINDOW, build_compaction_prompt, build_emergency_summary_text,
     compacted_summary_text_block, content_char_count, effective_context_tokens_from_usage,
     emergency_strip_large_images, emergency_truncate_large_payloads, estimate_compaction_tokens,
-    is_request_payload_too_large_error, mean_embedding, message_char_count, safe_compaction_cutoff,
-    semantic_cache_key, semantic_goal_text, semantic_message_text, strip_large_images_in_contents,
-    summary_payload_char_count,
+    is_image_rejection_error, is_request_payload_too_large_error, mean_embedding,
+    message_char_count, safe_compaction_cutoff, semantic_cache_key, semantic_goal_text,
+    semantic_message_text, strip_large_images_in_contents, summary_payload_char_count,
 };
 
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;

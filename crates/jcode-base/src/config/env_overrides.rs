@@ -39,6 +39,12 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_EFFORT_DECREASE_KEY") {
             self.keybindings.effort_decrease = v;
         }
+        if let Ok(v) = std::env::var("JCODE_SPEED_INCREASE_KEY") {
+            self.keybindings.speed_increase = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_SPEED_DECREASE_KEY") {
+            self.keybindings.speed_decrease = v;
+        }
         if let Ok(v) = std::env::var("JCODE_CENTERED_TOGGLE_KEY") {
             self.keybindings.centered_toggle = v;
         }

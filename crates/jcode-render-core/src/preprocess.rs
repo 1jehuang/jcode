@@ -559,6 +559,7 @@ fn normalize_latex_delimiters_and_environments(text: &str) -> String {
             && rest.starts_with("\\(")
             && !is_escaped_at(text, index)
             && has_unescaped_delimiter(&rest[2..], "\\)")
+            && !delimited_content_looks_like_prose(rest, "\\)")
         {
             out.push('$');
             math_delimiter = Some(MathDelimiter::LatexInline);
@@ -579,6 +580,7 @@ fn normalize_latex_delimiters_and_environments(text: &str) -> String {
             && !is_escaped_at(text, index)
             && has_unescaped_delimiter(&rest[2..], "\\]")
             && !looks_like_escaped_markdown_link(rest)
+            && !delimited_content_looks_like_prose(rest, "\\]")
         {
             out.push_str("$$");
             math_delimiter = Some(MathDelimiter::LatexDisplay);
@@ -711,6 +713,29 @@ fn looks_like_escaped_markdown_link(rest: &str) -> bool {
         return false;
     };
     rest[2 + close + 2..].starts_with('(')
+}
+
+/// Models often escape literal brackets in prose, e.g.
+/// `\[Attached image associated with ...\]`. That is Markdown punctuation, not
+/// LaTeX. Treat the delimited body as prose when it has no math signal at all
+/// and reads like a sequence of words.
+fn delimited_content_looks_like_prose(rest: &str, close_delimiter: &str) -> bool {
+    let Some(close) = find_unescaped_delimiter(&rest[2..], close_delimiter) else {
+        return false;
+    };
+    let body = &rest[2..2 + close];
+    if body.chars().any(|ch| {
+        matches!(
+            ch,
+            '\\' | '^' | '_' | '=' | '{' | '}' | '+' | '<' | '>' | '|' | '&'
+        )
+    }) {
+        return false;
+    }
+    body.split_whitespace()
+        .filter(|word| word.chars().filter(|ch| ch.is_alphabetic()).count() >= 2)
+        .count()
+        >= 3
 }
 
 /// Escape dollar signs that look like currency amounts (`$` immediately
@@ -965,5 +990,19 @@ mod tests {
             normalize_latex_math(r"Costs $35. Then \[x^2\]."),
             r"Costs $35. Then $$x^2$$."
         );
+    }
+
+    #[test]
+    fn escaped_bracketed_prose_is_not_math() {
+        let bracketed = r#"fold in the adjacent "\[Attached image associated...\]" label text"#;
+        assert_eq!(normalize_latex_math(bracketed), bracketed);
+        let parenthesized = r"see \(the optional part\) here";
+        assert_eq!(normalize_latex_math(parenthesized), parenthesized);
+        assert_eq!(normalize_latex_math(r"\[a b\]"), r"$$a b$$");
+        assert_eq!(
+            normalize_latex_math(r"\[\text{area} = \pi r^2\]"),
+            r"$$\text{area} = \pi r^2$$"
+        );
+        assert_eq!(normalize_latex_math(r"\(x\)"), r"$x$");
     }
 }

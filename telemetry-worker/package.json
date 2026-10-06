@@ -27,6 +27,7 @@
     "concurrency": "node scripts/run-dashboard.mjs concurrency.sql",
     "migrate:concurrency": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0026_concurrency_tracking.sql",
     "migrate:model-usage": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0027_daily_model_usage.sql",
+    "migrate:drop-unused-indexes": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0028_drop_unused_event_indexes.sql",
     "opt-outs": "node scripts/run-dashboard.mjs opt-outs.sql",
     "repair:daily-active": "npx wrangler d1 execute jcode-telemetry --remote --file=repair-daily-active.sql",
     "token-value": "node scripts/run-dashboard.mjs token-value.sql",

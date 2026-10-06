@@ -11,6 +11,21 @@ const TEMP_IDLE_SECS_ENV: &str = "JCODE_TEMP_SERVER_IDLE_SECS";
 const DEFAULT_TEMP_IDLE_SECS: u64 = 30 * 60;
 const TEMP_SERVER_EXIT_CODE: i32 = super::EXIT_IDLE_TIMEOUT;
 
+/// Wait (bounded) for an in-flight session save before the process exits.
+/// Exiting between a checkpoint's snapshot write and journal delete used to
+/// duplicate history on the next load (#1632).
+pub(crate) async fn drain_session_saves_before_exit() {
+    crate::logging::info("Server received SIGTERM, shutting down gracefully");
+    let drained = tokio::task::spawn_blocking(|| {
+        crate::session::drain_saves_for_shutdown(Duration::from_secs(5))
+    })
+    .await
+    .unwrap_or(false);
+    if !drained {
+        crate::logging::warn("Shutdown: a session save was still running after 5s; exiting anyway");
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TemporaryServerPolicy {
     pub(crate) owner_pid: Option<u32>,

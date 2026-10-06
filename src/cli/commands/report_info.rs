@@ -483,6 +483,15 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
         return Ok(());
     }
 
+    // One width for every provider section so bars align across them.
+    let name_width = report
+        .providers
+        .iter()
+        .flat_map(|provider| provider.limits.iter())
+        .map(|limit| limit.name.chars().count())
+        .max()
+        .unwrap_or(0);
+
     for (idx, provider) in report.providers.iter().enumerate() {
         if idx > 0 {
             println!();
@@ -504,15 +513,17 @@ pub(super) async fn run_usage_command(emit_json: bool) -> Result<()> {
         for limit in &provider.limits {
             match limit.reset_in.as_deref() {
                 Some(reset_in) => println!(
-                    "{}: {} (resets in {})",
+                    "{:<width$}: {} (resets in {})",
                     limit.name,
                     crate::usage::format_usage_bar(limit.usage_percent, 15),
-                    reset_in
+                    reset_in,
+                    width = name_width
                 ),
                 None => println!(
-                    "{}: {}",
+                    "{:<width$}: {}",
                     limit.name,
-                    crate::usage::format_usage_bar(limit.usage_percent, 15)
+                    crate::usage::format_usage_bar(limit.usage_percent, 15),
+                    width = name_width
                 ),
             }
         }

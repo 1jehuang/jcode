@@ -517,6 +517,33 @@ mod tests {
         assert!(hint.contains("/v1/models"));
     }
 
+    /// #1596: an OpenAI-compatible provider answering 529 "heavy usage" (or
+    /// any other 5xx) must be retried, not fail the turn on the first try.
+    #[test]
+    fn every_5xx_status_including_529_is_retryable() {
+        let body = r#"data: {"error":{"message":"We're experiencing heavy usage right now, please try again in a moment.","type":"server_error"}}"#;
+        for status in [
+            "500 internal server error",
+            "502 bad gateway",
+            "503 service unavailable",
+            "520 <unknown status code>",
+            "529 <unknown status code>",
+        ] {
+            let err = format!(
+                "openai-compatible chat request failed\n  endpoint: https://compat.example.test/v1/chat/completions\n  model: glm-5.3\n  auth: compat_api_key\n  status: {status}\n  response: {body}"
+            )
+            .to_lowercase();
+            assert!(is_retryable_error(&err), "{status} must be retried");
+        }
+    }
+
+    #[test]
+    fn server_error_hint_points_at_provider_not_network() {
+        let hint = http_status_hint(529, "https://compat.example.test/v1", "glm-5.3");
+        assert!(hint.contains("overloaded"), "{hint}");
+        assert!(!hint.contains("check network"), "{hint}");
+    }
+
     #[test]
     fn parsed_http_status_extracts_code() {
         assert_eq!(

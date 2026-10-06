@@ -888,6 +888,36 @@ pub struct CopilotModelInfo {
 pub struct CopilotModelCapabilities {
     #[serde(default)]
     pub limits: Option<CopilotModelLimits>,
+    #[serde(default)]
+    pub supports: Option<CopilotModelSupports>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CopilotModelSupports {
+    /// Advertised reasoning effort levels, e.g. `["low","medium","high"]`.
+    #[serde(default)]
+    pub reasoning_effort: Option<Value>,
+}
+
+impl CopilotModelInfo {
+    /// Reasoning effort levels advertised in the catalog, lowercased.
+    /// Empty when the model does not advertise any.
+    pub fn reasoning_efforts(&self) -> Vec<String> {
+        let Some(Value::Array(levels)) = self
+            .capabilities
+            .as_ref()
+            .and_then(|c| c.supports.as_ref())
+            .and_then(|s| s.reasoning_effort.as_ref())
+        else {
+            return Vec::new();
+        };
+        levels
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

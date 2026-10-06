@@ -372,7 +372,7 @@ impl App {
             // Per-window accounts and the failover toggle live on the
             // session, but only the provider acts on them.
             self.restore_local_window_accounts();
-            self.update_context_limit_for_model(&active_model);
+            self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
             self.session.mark_active();
             self.set_side_panel_snapshot(

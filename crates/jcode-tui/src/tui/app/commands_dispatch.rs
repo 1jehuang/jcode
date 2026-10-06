@@ -110,6 +110,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/split"
             | "/btw"
             | "/transfer"
+            | "/desktop"
             | "/workspace"
     )
 }
@@ -225,6 +226,7 @@ fn dispatch_single_local_command(app: &mut App, trimmed: &str) -> bool {
         // `/test`, `/mission`, `/goal`, and `/goals` are dispatched inside
         // `handle_session_command`, so they need no separate entries here.
         || super::commands::handle_session_command(app, trimmed)
+        || super::commands_desktop::handle_desktop_command(app, trimmed)
         || super::commands::handle_dictation_command(app, trimmed)
         || super::commands::handle_config_command(app, trimmed)
         || super::commands_colors::handle_colors_command(app, trimmed)
@@ -356,6 +358,7 @@ mod tests {
             "/split",
             "/btw question",
             "/transfer",
+            "/desktop",
             "/workspace",
             "/workspace split",
             "/todos",
