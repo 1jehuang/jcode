@@ -1764,6 +1764,16 @@ impl App {
                 self.queued_messages.push(summary);
                 self.pending_queued_dispatch = true;
                 return true;
+            } else if confidence_needs_followup && gate_budget_left {
+                // Suppressed: fingerprint unchanged since last fire.
+                let fp_preview = completion_confidence_fingerprint
+                    .as_ref()
+                    .map(|s| &s[..s.len().min(32)]);
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=idle reason=unchanged_completion_confidence fingerprint={:?} completed_count={}",
+                    fp_preview,
+                    todos.iter().filter(|t| t.status == "completed").count()
+                ));
             }
             if (ownership_needs_followup
                 || confidence_summary.completion_confidence_needs_validation
