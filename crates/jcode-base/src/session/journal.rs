@@ -74,6 +74,10 @@ pub(super) struct SessionPersistState {
     pub(super) memory_injections_mode: PersistVectorMode,
     pub(super) replay_events_mode: PersistVectorMode,
     pub(super) last_meta: Option<SessionJournalMeta>,
+    /// Set on remote-client stubs whose transcript was never loaded or was
+    /// stripped. The server owns that transcript, so a snapshot written from
+    /// the stub would replace it with nothing. Survives `reset_persist_state`.
+    pub(super) transcript_stripped: bool,
 }
 
 pub(super) fn metadata_requires_snapshot(

@@ -380,6 +380,7 @@ impl Session {
         session.replay_events.clear();
         session.rebuild_memory_profile_cache();
         session.reset_persist_state(true);
+        session.persist_state.transcript_stripped = true;
         session
     }
 
@@ -566,6 +567,7 @@ impl Session {
             memory_injections_mode: PersistVectorMode::Clean,
             replay_events_mode: PersistVectorMode::Clean,
             last_meta: Some(self.journal_meta()),
+            transcript_stripped: self.persist_state.transcript_stripped,
         };
     }
 
@@ -1647,6 +1649,7 @@ request in this new forked session, using the inherited conversation only as con
         self.rebuild_memory_profile_cache();
         self.reset_provider_messages_cache();
         self.reset_persist_state(true);
+        self.persist_state.transcript_stripped = true;
     }
 
     /// Remove all ToolUse content blocks from a specific message.

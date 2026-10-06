@@ -305,6 +305,14 @@ impl Session {
     }
 
     fn checkpoint_snapshot(&mut self, snapshot_path: &Path, journal_path: &Path) -> Result<()> {
+        // Remote `/restart` and `/reload` save the client's stub; writing it as a
+        // snapshot wiped the server-owned transcript and deleted its journal.
+        if self.persist_state.transcript_stripped && snapshot_path.exists() {
+            bail!(
+                "refusing to checkpoint transcript-less stub of session {} over the persisted transcript",
+                self.id
+            );
+        }
         let destructive_empty_checkpoint = self.messages.is_empty()
             && self.persist_state.messages_len > 0
             && snapshot_path.exists();
@@ -822,6 +830,30 @@ mod tests {
             path.to_string_lossy().contains(".jsonl.pre-wipe-")
                 && std::fs::read(path).unwrap() == original_journal
         }));
+    }
+
+    #[test]
+    fn stripped_remote_stub_cannot_checkpoint_over_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("session_stub.json");
+        let journal_path = dir.path().join("session_stub.jsonl");
+        let original_snapshot = vec![b'x'; 5 * 1024];
+        std::fs::write(&snapshot_path, &original_snapshot).unwrap();
+        std::fs::write(&journal_path, b"journal tail\n").unwrap();
+
+        let mut session = Session::create_with_id("session_stub".into(), None, None);
+        session.persist_state.snapshot_exists = true;
+        session.persist_state.messages_len = 3;
+        session.strip_transcript_for_remote_client();
+        // `/restart` changes status, which forces a full snapshot.
+        session.set_status(crate::session::SessionStatus::Reloaded);
+
+        let error = session
+            .checkpoint_snapshot(&snapshot_path, &journal_path)
+            .unwrap_err();
+        assert!(error.to_string().contains("transcript-less stub"));
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), original_snapshot);
+        assert!(journal_path.exists());
     }
 
     #[test]
