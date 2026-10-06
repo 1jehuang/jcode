@@ -43,7 +43,7 @@
     "crates/jcode-base/src/skill.rs": 1582,
     "crates/jcode-base/src/subscription_api.rs": 1206,
     "crates/jcode-base/src/todo.rs": 2320,
-    "crates/jcode-config-types/src/lib.rs": 1726,
+    "crates/jcode-config-types/src/lib.rs": 1611,
     "crates/jcode-harness-api-server/src/translate.rs": 3500,
     "crates/jcode-import-core/src/lib.rs": 1645,
     "crates/jcode-plan/src/lib.rs": 1201,

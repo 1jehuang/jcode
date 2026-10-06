@@ -308,8 +308,8 @@ update_channel = "stable"
 # key. Providers without native search use the local engines below.
 # Anthropic API keys are billed about $10 per 1,000 searches.
 prefer_native = true
-# Local websearch engine: "duckduckgo", "bing", "searxng", or "native"
-# ("native" forces prefer_native on and otherwise runs fallback_engines).
+# Local websearch engine: "duckduckgo", "bing", "searxng", "tavily", "exa",
+# or "native" ("native" forces prefer_native on and otherwise runs fallback_engines).
 engine = "duckduckgo"
 # Keyless HTML engines to try if the preferred engine fails. Default falls back to Bing HTML.
 fallback_engines = ["bing"]
@@ -317,6 +317,13 @@ fallback_engines = ["bing"]
 # Fallback Bing searches intentionally use keyless HTML search.
 # bing_api_key_env = "JCODE_BING_API_KEY"
 # bing_api_key = ""
+# Tavily and Exa are key-based JSON search APIs designed for LLM agents; both
+# have free tiers. Configure a key here or via the env var, then set
+# engine = "tavily" / "exa" or add it to fallback_engines.
+# tavily_api_key_env = "JCODE_TAVILY_API_KEY"
+# tavily_api_key = ""
+# exa_api_key_env = "JCODE_EXA_API_KEY"
+# exa_api_key = ""
 # Bing market/region, for example "en-US" or "zh-CN".
 bing_market = "en-US"
 # SearXNG instance for the "searxng" engine. On some hosts (commonly Linux),
@@ -336,6 +343,12 @@ bing_market = "en-US"
 # Anthropic tool version. "web_search_20260209" and newer are sent with
 # allowed_callers = ["direct"].
 # native_anthropic_tool_version = "web_search_20250305"
+# Extra HTTP headers for authenticated SearXNG instances (e.g. behind a reverse
+# proxy requiring a bearer token). Headers are only sent over HTTPS, or over
+# plaintext HTTP to loopback hosts. NOTE: this must stay at the end of the
+# [websearch] section — a TOML sub-table absorbs every key that follows it.
+# [websearch.searxng_headers]
+# Authorization = "Bearer ..."
 
 [tools]
 # Controls which built-in tools are sent to the model.
