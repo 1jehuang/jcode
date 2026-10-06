@@ -480,6 +480,7 @@ fn login_no_browser_flag_parses() {
             no_validate,
             flow_id,
             cancel,
+            ..
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
@@ -790,6 +791,7 @@ fn run_json_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(json);
             assert!(!ndjson);
@@ -807,6 +809,7 @@ fn run_ndjson_subcommand_parses() {
             json,
             ndjson,
             message,
+            ..
         }) => {
             assert!(!json);
             assert!(ndjson);
@@ -1068,4 +1071,156 @@ fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
             "stdio must not silently ignore an API socket override"
         );
     }
+}
+
+#[test]
+fn account_flag_is_repeatable_for_tui_and_run() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "--account",
+        "claude-fox",
+        "--account",
+        "openai-otter",
+    ])
+    .unwrap();
+    assert_eq!(args.account, vec!["claude-fox", "openai-otter"]);
+
+    let args = Args::try_parse_from(["jcode", "run", "--account", "claude-fox", "hi"]).unwrap();
+    let Some(Command::Run { account, .. }) = args.command else {
+        panic!("expected run");
+    };
+    assert_eq!(account, vec!["claude-fox"]);
+
+    // `jcode login --account` keeps naming the login target, and `--default`
+    // makes the new login the default.
+    let args = Args::try_parse_from([
+        "jcode",
+        "login",
+        "claude",
+        "--account",
+        "claude-fox",
+        "--default",
+    ])
+    .unwrap();
+    let Some(Command::Login {
+        account,
+        make_default,
+        ..
+    }) = args.command
+    else {
+        panic!("expected login");
+    };
+    assert_eq!(account.as_deref(), Some("claude-fox"));
+    assert!(make_default);
+}
+
+/// Store one Claude and one OpenAI account; returns their labels.
+fn store_cli_accounts() -> (String, String) {
+    let expires = chrono::Utc::now().timestamp_millis() + 3_600_000;
+    let claude = crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+        label: String::new(),
+        access: "access-c".to_string(),
+        refresh: "refresh-c".to_string(),
+        expires,
+        email: Some("fox@example.com".to_string()),
+        subscription_type: None,
+        scopes: Vec::new(),
+    })
+    .unwrap();
+    let openai = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        label: String::new(),
+        access_token: "acc".to_string(),
+        refresh_token: "ref".to_string(),
+        id_token: None,
+        account_id: Some("acct-1".to_string()),
+        expires_at: Some(expires),
+        email: Some("otter@example.com".to_string()),
+    })
+    .unwrap();
+    (claude, openai)
+}
+
+#[test]
+fn account_pins_resolve_stored_labels_and_emails() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (claude, openai) = store_cli_accounts();
+    let pins = crate::cli::account_pins::resolve_account_pins(&[
+        claude.clone(),
+        "otter@example.com".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(
+        pins,
+        vec![
+            ("claude".to_string(), claude.clone()),
+            ("openai".to_string(), openai.clone()),
+        ]
+    );
+    let err = crate::cli::account_pins::resolve_account_pins(&[claude.clone(), claude.clone()])
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("one --account per provider"),
+        "{err}"
+    );
+    assert!(crate::cli::account_pins::resolve_account_pins(&["nobody".to_string()]).is_err());
+}
+
+/// Greptile "Missing account passes validation": a label with a known prefix
+/// that names no stored account must fail and list the saved labels.
+#[test]
+fn account_pins_reject_missing_label_with_known_prefix() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (claude, openai) = store_cli_accounts();
+    let missing = if claude == "claude-zebra" {
+        "claude-yak"
+    } else {
+        "claude-zebra"
+    };
+    let err = crate::cli::account_pins::resolve_account_pins(&[missing.to_string()])
+        .expect_err("a missing account must not pass validation");
+    let text = err.to_string();
+    assert!(text.contains(missing), "{text}");
+    assert!(
+        text.contains(&claude) && text.contains(&openai),
+        "the error lists the saved labels: {text}"
+    );
+}
+
+/// Greptile "Top-level account misses run": `jcode --account X run` uses X;
+/// a `run --account` value wins for the same provider.
+#[test]
+fn global_account_flag_applies_to_run() {
+    let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+    let (claude, openai) = store_cli_accounts();
+    let args = Args::try_parse_from(["jcode", "--account", &claude, "run", "hi"]).unwrap();
+    let Some(Command::Run { account, .. }) = &args.command else {
+        panic!("expected run");
+    };
+    let pins = crate::cli::account_pins::merge_account_values(&args.account, account).unwrap();
+    assert_eq!(pins, vec![("claude".to_string(), claude.clone())]);
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "--account",
+        &claude,
+        "--account",
+        &openai,
+        "run",
+        "--account",
+        "fox@example.com",
+        "hi",
+    ])
+    .unwrap();
+    let Some(Command::Run { account, .. }) = &args.command else {
+        panic!("expected run");
+    };
+    let pins = crate::cli::account_pins::merge_account_values(&args.account, account).unwrap();
+    assert_eq!(
+        pins,
+        vec![
+            ("claude".to_string(), claude.clone()),
+            ("openai".to_string(), openai.clone()),
+        ],
+        "one pin per provider, run's value first"
+    );
 }

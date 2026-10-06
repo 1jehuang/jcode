@@ -962,8 +962,10 @@ pub fn clear_model_unavailable_for_account(model: &str) {
 }
 
 fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
-    let key = current_provider_runtime_scope_key(provider);
+    runtime_provider_unavailability_for_key(current_provider_runtime_scope_key(provider))
+}
 
+fn runtime_provider_unavailability_for_key(key: String) -> Option<RuntimeProviderUnavailability> {
     let mut unavailable = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write().ok()?;
     if let Some(entry) = unavailable.get(&key) {
         if entry.recorded_at.elapsed() <= PROVIDER_RUNTIME_UNAVAILABLE_TTL {
@@ -975,7 +977,41 @@ fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnav
 }
 
 pub fn record_provider_unavailable_for_account(provider: &str, reason: &str) {
-    let key = current_provider_runtime_scope_key(provider);
+    record_provider_unavailable_for_key(current_provider_runtime_scope_key(provider), reason);
+}
+
+/// Mark `provider` unavailable for one account label only. Sessions pinned
+/// to other accounts of the same provider are unaffected (unlike
+/// [`record_provider_unavailable_for_account`], which uses the process-wide
+/// default account's scope).
+pub fn record_provider_unavailable_for_label(provider: &str, account_label: &str, reason: &str) {
+    record_provider_unavailable_for_key(
+        provider_runtime_scope_key(provider, Some(account_label)),
+        reason,
+    );
+}
+
+/// Clear the unavailability of `provider` for one account label.
+pub fn clear_provider_unavailable_for_label(provider: &str, account_label: &str) {
+    let key = provider_runtime_scope_key(provider, Some(account_label));
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
+/// Unavailability detail of `provider` for one account label.
+pub fn provider_unavailability_detail_for_label(
+    provider: &str,
+    account_label: &str,
+) -> Option<String> {
+    let entry = runtime_provider_unavailability_for_key(provider_runtime_scope_key(
+        provider,
+        Some(account_label),
+    ))?;
+    Some(format_unavailability_detail(entry))
+}
+
+fn record_provider_unavailable_for_key(key: String, reason: &str) {
     if key.trim().is_empty() {
         return;
     }
@@ -1011,6 +1047,64 @@ pub fn clear_openai_provider_unavailability_for_account_label(account_label: Opt
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
         unavailable.remove(&key);
     }
+    if let Some(label) = account_label {
+        super::account_failover::clear_account_exhausted(
+            jcode_provider_core::AccountProviderKind::OpenAi,
+            label,
+        );
+    }
+}
+
+/// Fresh usage shows the OpenAI account `account_label` is open again. Drop
+/// its usage-limit mark, and its provider cooldown only when that cooldown
+/// was recorded for a usage or rate limit. An auth (401/403) or other
+/// cooldown says nothing about quota and stays until it expires.
+pub fn clear_openai_usage_limit_for_account_label(account_label: &str) {
+    let key = provider_runtime_scope_key("openai", Some(account_label));
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable
+            .get(&key)
+            .is_some_and(|entry| is_usage_limit_cooldown_reason(&entry.reason))
+    {
+        unavailable.remove(&key);
+    }
+    super::account_failover::clear_account_exhausted(
+        jcode_provider_core::AccountProviderKind::OpenAi,
+        account_label,
+    );
+}
+
+/// True when a cooldown reason describes a usage, quota or rate limit and not
+/// an authentication or access failure.
+fn is_usage_limit_cooldown_reason(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    let auth = [
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "access denied",
+        "authentication",
+        "credentials",
+        "token exchange",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if auth {
+        return false;
+    }
+    [
+        "usage",
+        "quota",
+        "rate limit",
+        "rate-limit",
+        "rate_limit",
+        "too many requests",
+        "429",
+        "limit reached",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// Clear the quota cooldown for the exact Claude login whose limits were reset.
@@ -1020,6 +1114,12 @@ pub fn clear_claude_provider_unavailability_for_account_label(account_label: Opt
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
         unavailable.remove(&key);
     }
+    if let Some(label) = account_label {
+        super::account_failover::clear_account_exhausted(
+            jcode_provider_core::AccountProviderKind::Claude,
+            label,
+        );
+    }
 }
 
 /// Clear all runtime model unavailability markers.
@@ -1028,16 +1128,26 @@ pub fn clear_all_model_unavailability_for_account() {
     OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable_scope(&scope);
 }
 
-/// Clear all runtime provider unavailability markers.
+/// Clear the runtime provider unavailability markers of the active accounts.
+///
+/// Called on account switches and relogins. Claude markers are keyed by label,
+/// and a relogin often reuses the label for a different account, so the
+/// active Claude login's marker (for example an old usage-limit 429) must be
+/// dropped here too, or the precheck keeps skipping Claude for the new login.
 pub fn clear_all_provider_unavailability_for_account() {
-    let scope = current_openai_account_scope();
+    let openai_prefix = format!("openai::{}", current_openai_account_scope());
+    let claude_key = provider_runtime_scope_key("claude", None);
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
-        unavailable.retain(|key, _| !key.starts_with(&format!("openai::{}", scope)));
+        unavailable.retain(|key, _| !key.starts_with(&openai_prefix) && *key != claude_key);
     }
 }
 
 pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<String> {
     let entry = runtime_provider_unavailability(provider)?;
+    Some(format_unavailability_detail(entry))
+}
+
+fn format_unavailability_detail(entry: RuntimeProviderUnavailability) -> String {
     let mut detail = entry.reason;
     if let Ok(elapsed) = SystemTime::now().duration_since(entry.observed_at) {
         detail.push_str(&format!(
@@ -1045,8 +1155,7 @@ pub fn provider_unavailability_detail_for_account(provider: &str) -> Option<Stri
             format_elapsed_duration_short(elapsed)
         ));
     }
-
-    Some(detail)
+    detail
 }
 
 pub fn model_unavailability_detail_for_account(model: &str) -> Option<String> {

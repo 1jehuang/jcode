@@ -108,6 +108,12 @@ pub(crate) struct Args {
     #[arg(short, long, global = true)]
     pub(crate) model: Option<String>,
 
+    /// Use this saved account for this window/run only (repeatable, one per
+    /// provider; `claude-fox`, `openai-otter`, or an account email). Other
+    /// windows and the default account are unchanged.
+    #[arg(long = "account", value_name = "LABEL")]
+    pub(crate) account: Vec<String>,
+
     /// Named provider profile from [providers.<name>] in config.toml.
     /// Implies --provider openai-compatible for OpenAI-compatible profiles.
     #[arg(long, global = true)]
@@ -179,6 +185,10 @@ pub(crate) enum Command {
 
     /// Run a single message and exit
     Run {
+        /// Use this saved account for this run (repeatable, one per provider).
+        #[arg(long = "account", value_name = "LABEL")]
+        account: Vec<String>,
+
         /// Emit a machine-readable JSON result instead of streaming text
         #[arg(long, conflicts_with = "ndjson")]
         json: bool,
@@ -204,6 +214,10 @@ pub(crate) enum Command {
         /// Account label for multi-account support (stored labels are auto-numbered)
         #[arg(long, short = 'a')]
         account: Option<String>,
+
+        /// Make this login the default account for new windows.
+        #[arg(long = "default", id = "make_default")]
+        make_default: bool,
 
         /// Do not open a local browser. Show a login QR for another device (useful over SSH).
         #[arg(long, alias = "headless")]

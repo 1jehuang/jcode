@@ -49,6 +49,7 @@ pub(super) async fn create_headless_session(
     provider_key_override: Option<String>,
     route_api_method_override: Option<String>,
     effort_override: Option<String>,
+    accounts: crate::session_accounts::AccountInheritance,
     mcp_pool: Option<Arc<crate::mcp::SharedMcpPool>>,
     report_back_to_session_id: Option<String>,
     memory_scope: HeadlessMemoryScope,
@@ -158,6 +159,9 @@ pub(super) async fn create_headless_session(
         ));
     }
 
+    // Workers bill the same subscription as their coordinator.
+    new_agent.apply_account_inheritance(&accounts);
+
     new_agent.set_debug(true);
 
     if selfdev_requested {
@@ -171,7 +175,9 @@ pub(super) async fn create_headless_session(
         }
     }
 
+    let agent_provider = new_agent.provider_handle();
     let agent = Arc::new(Mutex::new(new_agent));
+    super::client_state::register_agent_provider(&agent, agent_provider);
     {
         let mut sessions_guard = sessions.write().await;
         sessions_guard.insert(client_session_id.clone(), Arc::clone(&agent));

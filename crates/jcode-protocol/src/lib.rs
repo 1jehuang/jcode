@@ -184,7 +184,7 @@ pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
 pub use wire::{Request, ServerEvent};
-pub use wire::{SessionToolConfig, SessionToolDefinition, TaskGraphNodeSpec};
+pub use wire::{SessionAccountInfo, SessionToolConfig, SessionToolDefinition, TaskGraphNodeSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -641,6 +641,9 @@ impl Request {
             Request::NotifyAuthChanged { id, .. } => *id,
             Request::SwitchAnthropicAccount { id, .. } => *id,
             Request::SwitchOpenAiAccount { id, .. } => *id,
+            Request::SetSessionAccount { id, .. } => *id,
+            Request::SetDefaultAccount { id, .. } => *id,
+            Request::SetAccountFailover { id, .. } => *id,
             Request::InvalidateOpenAiUsage { id, .. } => *id,
             Request::InvalidateAnthropicUsage { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
@@ -690,6 +693,11 @@ impl Request {
                 // one-shot client can send it without subscribing to a session.
                 | Request::InvalidateOpenAiUsage { .. }
                 | Request::InvalidateAnthropicUsage { .. }
+                // `jcode login` and the SDK login flow send a lone auth-change
+                // notice on a fresh socket. The process-wide refresh needs no
+                // session; on a subscribed connection it keeps its full
+                // session-aware handling.
+                | Request::NotifyAuthChanged { .. }
                 | Request::NotifySession { .. }
                 | Request::AppletAction { .. }
                 | Request::CloseApplet { .. }

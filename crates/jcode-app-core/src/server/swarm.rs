@@ -1610,7 +1610,16 @@ pub(super) async fn run_swarm_task(
     prompt: &str,
 ) -> Result<String> {
     let started = Instant::now();
-    let (provider, registry, session_id, working_dir, coordinator_model, provider_key, route) = {
+    let (
+        provider,
+        registry,
+        session_id,
+        working_dir,
+        coordinator_model,
+        provider_key,
+        route,
+        accounts,
+    ) = {
         let agent = agent.lock().await;
         (
             agent.provider_fork(),
@@ -1620,6 +1629,7 @@ pub(super) async fn run_swarm_task(
             agent.provider_model(),
             agent.session_provider_key(),
             agent.session_route_api_method(),
+            agent.account_inheritance(),
         )
     };
     let parent_session_id = session_id.clone();
@@ -1634,6 +1644,8 @@ pub(super) async fn run_swarm_task(
     // instead of silently falling back to the config default on persistence.
     session.provider_key = provider_key;
     session.route_api_method = route;
+    // Workers bill the same subscription as their coordinator.
+    accounts.apply_to_session(&mut session);
     if let Some(dir) = working_dir {
         session.working_dir = Some(dir.display().to_string());
     }

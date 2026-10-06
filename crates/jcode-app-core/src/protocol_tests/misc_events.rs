@@ -210,6 +210,8 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         crash_on_disconnect: true,
         continue_on_disconnect: true,
         terminal_env: vec![("ZELLIJ_SESSION_NAME".to_string(), "sessionB".to_string())],
+        account_pins: Vec::new(),
+        supports_session_accounts: false,
     };
     let json = serde_json::to_string(&req)?;
     assert!(json.contains("\"type\":\"subscribe\""));
@@ -227,6 +229,8 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         crash_on_disconnect,
         continue_on_disconnect,
         terminal_env,
+        account_pins: _,
+        supports_session_accounts: _,
     } = decoded
     else {
         return Err(anyhow!("expected Subscribe"));
@@ -264,6 +268,8 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         crash_on_disconnect,
         continue_on_disconnect,
         terminal_env,
+        account_pins: _,
+        supports_session_accounts: _,
     } = decoded
     else {
         return Err(anyhow!("expected Subscribe"));

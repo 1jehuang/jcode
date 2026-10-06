@@ -15,6 +15,17 @@ impl MultiProvider {
             .clone()
     }
 
+    /// Runtime that owns stored accounts of `kind`.
+    pub(super) fn account_runtime(
+        &self,
+        kind: jcode_provider_core::AccountProviderKind,
+    ) -> Option<Arc<dyn Provider>> {
+        match kind {
+            jcode_provider_core::AccountProviderKind::Claude => self.anthropic_provider(),
+            jcode_provider_core::AccountProviderKind::OpenAi => self.openai_provider(),
+        }
+    }
+
     pub(super) fn antigravity_provider(&self) -> Option<Arc<dyn Provider>> {
         self.antigravity
             .read()
