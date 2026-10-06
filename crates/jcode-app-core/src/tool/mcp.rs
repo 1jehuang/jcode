@@ -31,6 +31,55 @@ struct McpSearchResult {
 /// tool references, so an empty or broad query cannot pull in a whole catalog.
 const MAX_SEARCH_TOOL_REFERENCES: usize = 32;
 
+/// Matches returned with full descriptions and input schemas. Further matches
+/// are listed by name only, so a broad query cannot flood the context.
+const MAX_DETAILED_SEARCH_RESULTS: usize = 12;
+
+/// Descriptions are clipped in search results; long vendor descriptions
+/// (scopes, field glossaries, examples) dominate token cost otherwise.
+const MAX_SEARCH_DESCRIPTION_CHARS: usize = 400;
+
+/// Clip `text` to `max` chars on a char boundary, marking the cut.
+fn clip_description(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push_str("…");
+    out
+}
+
+/// How well a tool matches a search query. Name matches outrank description
+/// matches, so a query like "calendar" does not return every tool whose
+/// documentation merely mentions a calendar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchRank {
+    Description,
+    Name,
+}
+
+fn match_rank(
+    query_terms: &[String],
+    name: &str,
+    server: &str,
+    tool: &str,
+    description: &str,
+) -> Option<MatchRank> {
+    if query_terms.is_empty() {
+        return Some(MatchRank::Name);
+    }
+    let names = format!("{name} {server} {tool}").to_ascii_lowercase();
+    if query_terms.iter().all(|term| names.contains(term.as_str())) {
+        return Some(MatchRank::Name);
+    }
+    let all = format!("{names} {}", description.to_ascii_lowercase());
+    query_terms
+        .iter()
+        .all(|term| all.contains(term.as_str()))
+        .then_some(MatchRank::Description)
+}
+
 /// Fixed MCP discovery surface used when individual server definitions are deferred.
 pub struct McpSearchTool {
     manager: Arc<RwLock<McpManager>>,
@@ -90,12 +139,16 @@ impl Tool for McpSearchTool {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_ascii_lowercase);
+        let query_terms: Vec<String> = query
+            .as_deref()
+            .map(|q| q.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default();
         let manager = self.manager.read().await;
         let catalog = manager.searchable_tools().await;
         drop(manager);
 
         let names = crate::mcp::dispatch_names(&catalog);
-        let matches: Vec<McpSearchResult> = catalog
+        let ranked: Vec<(MatchRank, McpSearchResult)> = catalog
             .into_iter()
             .zip(names)
             .filter_map(|((server, tool), name)| {
@@ -129,25 +182,38 @@ impl Tool for McpSearchTool {
                 if !allowed {
                     return None;
                 }
-                if let Some(query) = &query {
-                    let description = tool.description.as_deref().unwrap_or_default();
-                    if !name.to_ascii_lowercase().contains(query)
-                        && !server.to_ascii_lowercase().contains(query)
-                        && !tool.name.to_ascii_lowercase().contains(query)
-                        && !description.to_ascii_lowercase().contains(query)
-                    {
-                        return None;
-                    }
-                }
-                Some(McpSearchResult {
-                    name,
-                    server,
-                    tool: tool.name,
-                    description: tool.description.unwrap_or_else(|| "MCP tool".to_string()),
-                    input_schema: tool.input_schema,
-                })
+                let description = tool.description.as_deref().unwrap_or_default();
+                let rank = match_rank(&query_terms, &name, &server, &tool.name, description)?;
+                Some((
+                    rank,
+                    McpSearchResult {
+                        name,
+                        server,
+                        tool: tool.name,
+                        description: clip_description(
+                            tool.description.as_deref().unwrap_or("MCP tool"),
+                            MAX_SEARCH_DESCRIPTION_CHARS,
+                        ),
+                        input_schema: tool.input_schema,
+                    },
+                ))
             })
             .collect();
+
+        // Name matches win. Description-only matches are noise once any tool
+        // matches by name, so they are dropped rather than ranked below.
+        let best = ranked.iter().map(|(rank, _)| *rank).max();
+        let mut matches: Vec<McpSearchResult> = ranked
+            .into_iter()
+            .filter(|(rank, _)| Some(*rank) == best)
+            .map(|(_, result)| result)
+            .collect();
+        let total = matches.len();
+        let overflow: Vec<McpSearchResult> = if matches.len() > MAX_DETAILED_SEARCH_RESULTS {
+            matches.split_off(MAX_DETAILED_SEARCH_RESULTS)
+        } else {
+            Vec::new()
+        };
 
         // Ask the agent to load the matched definitions natively. With
         // provider-native deferred loading these become directly callable
@@ -158,8 +224,17 @@ impl Tool for McpSearchTool {
             .take(MAX_SEARCH_TOOL_REFERENCES)
             .map(|m| m.name.as_str())
             .collect();
-        Ok(ToolOutput::new(serde_json::to_string_pretty(&matches)?)
-            .with_title(format!("MCP tools ({})", matches.len()))
+        let mut output = serde_json::to_string(&matches)?;
+        if !overflow.is_empty() {
+            let rest: Vec<&str> = overflow.iter().map(|m| m.name.as_str()).collect();
+            output.push_str(&format!(
+                "\n\n{} more matches (names only; search for one by name for its schema): {}",
+                rest.len(),
+                rest.join(", ")
+            ));
+        }
+        Ok(ToolOutput::new(output)
+            .with_title(format!("MCP tools ({})", total))
             .with_metadata(json!({ "tool_references": references })))
     }
 }
@@ -493,36 +568,52 @@ impl McpManagementTool {
             ).with_title("MCP: No servers"));
         }
 
+        // Names only: full descriptions for every tool of every server cost
+        // tens of thousands of tokens. `mcp_search` returns descriptions and
+        // schemas for the tools the agent actually needs.
         let mut output = String::new();
-        output.push_str(&format!("Connected MCP servers: {}\n\n", servers.len()));
+        output.push_str(&format!(
+            "Connected MCP servers: {} ({} tools)\n\n",
+            servers.len(),
+            all_tools
+                .iter()
+                .filter(|(owner, _)| servers.contains(owner))
+                .count()
+        ));
 
         let names = crate::mcp::dispatch_names(&all_tools);
+        let registry = self.registry.as_ref().and_then(|r| r.upgrade());
         for server in &servers {
-            output.push_str(&format!("## {}\n", server));
-            let server_tools: Vec<_> = all_tools
+            // Callable aliases, which differ from raw names when servers collide.
+            let server_tools: Vec<String> = all_tools
                 .iter()
                 .zip(&names)
                 .filter(|((owner, _), _)| owner == server)
-                .collect();
-
-            if server_tools.is_empty() {
-                output.push_str("  (no tools)\n");
-            } else {
-                for ((_, tool), fallback) in server_tools {
-                    let name = self
-                        .registry
+                .map(|((_, tool), fallback)| {
+                    registry
                         .as_ref()
-                        .and_then(|r| r.upgrade())
                         .and_then(|r| r.mcp_alias(server, &tool.name))
-                        .unwrap_or_else(|| fallback.clone());
-                    output.push_str(&format!(
-                        "  - {}: {}\n",
-                        name,
-                        tool.description.as_deref().unwrap_or("(no description)")
-                    ));
-                }
+                        .unwrap_or_else(|| fallback.clone())
+                })
+                .collect();
+            output.push_str(&format!(
+                "## {} ({} tool{})\n",
+                server,
+                server_tools.len(),
+                if server_tools.len() == 1 { "" } else { "s" }
+            ));
+            if server_tools.is_empty() {
+                output.push_str("(no tools)\n");
+            } else {
+                output.push_str(&server_tools.join(", "));
+                output.push('\n');
             }
             output.push('\n');
+        }
+        if !servers.is_empty() {
+            output.push_str(
+                "Use mcp_search with a server or query for descriptions and input schemas.\n\n",
+            );
         }
 
         if !configured.is_empty() {
@@ -979,6 +1070,53 @@ mod tests {
             compatible["properties"]["arguments"]["additionalProperties"],
             true
         );
+    }
+
+    #[test]
+    fn search_name_matches_beat_description_matches() {
+        let terms = vec!["calendar".to_string()];
+        assert_eq!(
+            match_rank(
+                &terms,
+                "mcp__g__calendar_events",
+                "g",
+                "calendar_events",
+                ""
+            ),
+            Some(MatchRank::Name)
+        );
+        assert_eq!(
+            match_rank(
+                &terms,
+                "mcp__rho__get_card",
+                "rho",
+                "get_card",
+                "resets on calendar boundaries"
+            ),
+            Some(MatchRank::Description)
+        );
+        assert_eq!(match_rank(&terms, "mcp__x__y", "x", "y", "nothing"), None);
+        // Every term must match, in any field.
+        let terms = vec!["gmail".to_string(), "send".to_string()];
+        assert_eq!(
+            match_rank(&terms, "mcp__g__gmail_send", "g", "gmail_send", ""),
+            Some(MatchRank::Name)
+        );
+        assert_eq!(
+            match_rank(&terms, "mcp__g__gmail_read", "g", "gmail_read", ""),
+            None
+        );
+        // An empty query lists everything.
+        assert_eq!(match_rank(&[], "a", "b", "c", ""), Some(MatchRank::Name));
+    }
+
+    #[test]
+    fn search_descriptions_are_clipped() {
+        assert_eq!(clip_description("  short  ", 10), "short");
+        let long = "é".repeat(500);
+        let clipped = clip_description(&long, MAX_SEARCH_DESCRIPTION_CHARS);
+        assert_eq!(clipped.chars().count(), MAX_SEARCH_DESCRIPTION_CHARS + 1);
+        assert!(clipped.ends_with('…'));
     }
 
     #[tokio::test]
