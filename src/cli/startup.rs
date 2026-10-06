@@ -507,7 +507,7 @@ fn report_main_error(error: &anyhow::Error) {
     let error_str = format!("{:?}", error);
     logging::error(&error_str);
 
-    if let Some(session_id) = terminal::get_current_session() {
+    if !output::quiet_enabled() && let Some(session_id) = terminal::get_current_session() {
         // The terminal can already be gone by the time a fatal error is
         // reported (SIGHUP-killed window, detached remote client). A failing
         // `eprintln!` here would panic inside the panic path and abort the

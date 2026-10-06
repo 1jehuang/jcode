@@ -270,7 +270,7 @@ pub(super) async fn start_scriptable_login(
             auth::browser_suppressed(options.no_browser),
         )
     {
-        eprintln!("{qr}");
+        crate::console::eprintln_best_effort(&qr);
     }
     Ok(LoginFlowOutcome::Deferred)
 }
@@ -700,7 +700,10 @@ pub(super) fn cancel_scriptable_login(
             })
         );
     } else {
-        eprintln!("Cancelled pending {} login flow {}.", provider.id, flow_id);
+        crate::console::eprintln_best_effort(&format!(
+            "Cancelled pending {} login flow {}.",
+            provider.id, flow_id
+        ));
     }
     Ok(())
 }

@@ -12,10 +12,14 @@ pub fn eprintln_best_effort(msg: &str) {
     let _ = writeln!(stderr, "{msg}");
 }
 
-/// Best-effort `print!` + flush that never panics on a dead terminal.
+/// Best-effort `eprint!` + flush that never panics on a dead terminal.
+///
+/// Writes to stderr: every call site replaced an `eprint!` prompt, and prompts
+/// must stay on the interactive stream even when stdout is redirected to a
+/// file, or the login would wait for input whose question the user never sees.
 pub fn eprompt_best_effort(msg: &str) {
     use std::io::Write;
-    let mut stdout = std::io::stdout().lock();
-    let _ = write!(stdout, "{msg}");
-    let _ = stdout.flush();
+    let mut stderr = std::io::stderr().lock();
+    let _ = write!(stderr, "{msg}");
+    let _ = stderr.flush();
 }

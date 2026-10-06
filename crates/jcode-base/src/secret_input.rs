@@ -67,7 +67,7 @@ pub fn read_secret_line() -> Result<String> {
             }
             match key_event.code {
                 KeyCode::Enter => {
-                    eprintln!();
+                    crate::console::eprintln_best_effort("");
                     break;
                 }
                 KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {

@@ -352,7 +352,8 @@ fn init_tui_terminal(inherited_terminal: bool) -> Result<ratatui::DefaultTermina
         init_tui_terminal_resume()
     } else {
         stash_panic_hook_for_ratatui_init();
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init)).map_err(|payload| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init))
+        .map_err(|payload| {
             anyhow::anyhow!(
                 "failed to initialize terminal: {}",
                 panic_payload_to_string(payload.as_ref())
@@ -367,6 +368,14 @@ fn init_tui_terminal(inherited_terminal: bool) -> Result<ratatui::DefaultTermina
             // Discard that wrapper and restore our chain fronted by the quiet
             // restore.
             rechain_panic_hook_after_ratatui_init();
+        })
+        // If `ratatui::init` panicked, its wrapper hook is still installed and
+        // the saved chain still sits in the stash; any later panic would run
+        // ratatui's loud wrapper and skip jcode's recovery hook. Restore the
+        // stashed chain on the failure path too.
+        .map_err(|err| {
+            rechain_panic_hook_after_ratatui_init();
+            err
         })
     }
 }
