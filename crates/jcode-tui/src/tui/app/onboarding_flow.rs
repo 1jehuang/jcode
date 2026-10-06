@@ -582,6 +582,7 @@ pub(crate) fn detect_external_cli_oauths() -> Vec<ExternalCli> {
         found.push(ExternalCli::Pi);
     }
     if external_oauth_present(&external_home_path(".local/share/opencode/auth.json"))
+        || crate::opencode_db::existing_db_path().is_some()
         || external_transcripts_present(
             &external_home_path(".local/share/opencode/storage/session"),
             "json",

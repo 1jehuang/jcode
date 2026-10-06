@@ -1015,7 +1015,7 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         options,
         load_pi_external_session,
     );
-    collect_opencode_external_sessions(&mut records, &mut report, options);
+    collect_opencode_external_sessions(&mut records, &mut report, query, options);
     collect_external_jsonl_source(
         &mut records,
         &mut report,
@@ -1026,11 +1026,9 @@ fn search_external_sessions(query: &QueryProfile, options: &SearchOptions) -> Se
         load_cursor_external_session,
     );
 
-    if records.len() > options.max_scan_sessions.saturating_mul(5) {
-        records.truncate(options.max_scan_sessions.saturating_mul(5));
-        report.truncated = true;
-    }
-
+    // Every source already caps its own scan at `max_scan_sessions`, and the
+    // records are loaded by now, so a global cap here would only hide the
+    // sources collected last (e.g. Cursor) without saving any IO.
     report.scanned_external_sessions = records.len();
     for record in records {
         append_external_session_results(&mut report.results, &record, query, options);
@@ -1332,42 +1330,259 @@ fn external_text_matches_query(text: &str, query: &QueryProfile) -> bool {
     jcode_session_types::normalized_session_search_text_matches(&text.to_lowercase(), query)
 }
 
+/// Where an OpenCode scan candidate lives.
+enum OpenCodeCandidate {
+    Db(crate::opencode_db::OpenCodeDbSession),
+    Legacy(PathBuf),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Number of OpenCode database histories loaded by session search.
+    static OPENCODE_DB_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn collect_opencode_external_sessions(
     records: &mut Vec<ExternalSessionRecord>,
     report: &mut SearchReport,
+    query: &QueryProfile,
     options: &SearchOptions,
 ) {
     if !source_matches_filter("opencode", options) {
         return;
     }
-    let Ok(root) = crate::storage::user_home_path(".local/share/opencode/storage/session") else {
-        return;
-    };
-    if !root.exists() {
-        return;
-    }
-    report.external_sources.push("opencode");
-    let Ok(messages_base) = crate::storage::user_home_path(".local/share/opencode/storage/message")
-    else {
-        return;
-    };
-    let Ok(parts_base) = crate::storage::user_home_path(".local/share/opencode/storage/part")
-    else {
-        return;
-    };
-    for path in collect_recent_files_recursive(&root, "json", options.max_scan_sessions) {
-        match load_opencode_external_session(
-            &path,
-            &messages_base,
-            &parts_base,
-            options.include_tools,
-            options.max_scan_sessions,
-        ) {
-            Ok(Some(record)) => records.push(record),
-            Ok(None) => {}
+    // OpenCode 1.17+ keeps sessions in SQLite; older installs use JSON files.
+    // Both stores share ONE scan allowance: the most recent sessions across
+    // them, deduped by id with database rows winning.
+    let mut candidates: Vec<(DateTime<Utc>, String, OpenCodeCandidate)> = Vec::new();
+    let db = crate::opencode_db::existing_db_path();
+    let mut found_store = false;
+    if let Some(db) = db.as_deref() {
+        found_store = true;
+        match crate::opencode_db::list_sessions(db, options.max_scan_sessions) {
+            Ok(rows) => candidates.extend(
+                rows.into_iter()
+                    .map(|row| (row.updated_at, row.id.clone(), OpenCodeCandidate::Db(row))),
+            ),
             Err(_) => report.parse_errors += 1,
         }
     }
+    let legacy_root = crate::storage::user_home_path(".local/share/opencode/storage/session")
+        .ok()
+        .filter(|root| root.exists());
+    if let Some(root) = legacy_root.as_deref() {
+        found_store = true;
+        let db_ids: std::collections::HashSet<String> =
+            candidates.iter().map(|(_, id, _)| id.clone()).collect();
+        let (legacy, parse_errors) =
+            select_legacy_opencode_candidates(root, &db_ids, options.max_scan_sessions);
+        report.parse_errors += parse_errors;
+        candidates.extend(
+            legacy
+                .into_iter()
+                .map(|(updated, id, path)| (updated, id, OpenCodeCandidate::Legacy(path))),
+        );
+    }
+    if found_store {
+        report.external_sources.push("opencode");
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    if candidates.len() > options.max_scan_sessions {
+        candidates.truncate(options.max_scan_sessions);
+        report.truncated = true;
+    }
+
+    // Only load database histories whose parts can match the query.
+    let db_ids: Vec<String> = candidates
+        .iter()
+        .filter(|(_, _, c)| matches!(c, OpenCodeCandidate::Db(_)))
+        .map(|(_, id, _)| id.clone())
+        .collect();
+    let db_matches = match db.as_deref() {
+        Some(db) if !db_ids.is_empty() => {
+            let mut matched = std::collections::HashSet::new();
+            let mut failed = false;
+            for chunk in db_ids.chunks(500) {
+                match crate::opencode_db::sessions_matching_terms(
+                    db,
+                    chunk,
+                    &query.terms,
+                    query.min_term_matches,
+                    options.include_tools,
+                ) {
+                    Ok(ids) => matched.extend(ids),
+                    Err(_) => failed = true,
+                }
+            }
+            if failed {
+                report.parse_errors += 1;
+            }
+            matched
+        }
+        _ => std::collections::HashSet::new(),
+    };
+
+    let messages_base = crate::storage::user_home_path(".local/share/opencode/storage/message");
+    let parts_base = crate::storage::user_home_path(".local/share/opencode/storage/part");
+    for (_, id, candidate) in candidates {
+        match candidate {
+            OpenCodeCandidate::Db(row) => {
+                let Some(db) = db.as_deref() else { continue };
+                // Title/metadata matches still need a record, but no history.
+                let load_history = db_matches.contains(&id);
+                match load_opencode_db_external_session(
+                    db,
+                    row,
+                    load_history,
+                    options.include_tools,
+                ) {
+                    Ok(record) => records.push(record),
+                    Err(_) => report.parse_errors += 1,
+                }
+            }
+            OpenCodeCandidate::Legacy(path) => {
+                let (Ok(messages_base), Ok(parts_base)) = (&messages_base, &parts_base) else {
+                    continue;
+                };
+                match load_opencode_external_session(
+                    &path,
+                    messages_base,
+                    parts_base,
+                    options.include_tools,
+                    options.max_scan_sessions,
+                ) {
+                    Ok(Some(record)) => records.push(record),
+                    Ok(None) => {}
+                    Err(_) => report.parse_errors += 1,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Number of legacy OpenCode session metadata files read by session search.
+    static OPENCODE_LEGACY_META_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Small subset of a legacy OpenCode session file used to rank candidates.
+#[derive(Deserialize)]
+struct LegacyOpenCodeSessionMeta {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    time: Option<LegacyOpenCodeSessionTime>,
+}
+
+#[derive(Deserialize)]
+struct LegacyOpenCodeSessionTime {
+    #[serde(default)]
+    updated: Option<i64>,
+}
+
+/// How many legacy session files to read metadata from, given the scan limit.
+///
+/// Files are preselected by filesystem mtime so a large store does not cost
+/// one open and parse per session. The headroom lets stored update times
+/// reorder sessions whose mtime drifted (for example after a copy) without
+/// making the work proportional to the whole store.
+fn legacy_opencode_metadata_window(max_scan_sessions: usize) -> usize {
+    max_scan_sessions
+        .saturating_mul(2)
+        .max(max_scan_sessions.saturating_add(16))
+}
+
+/// Pick legacy OpenCode JSON sessions to scan, one entry per session id.
+///
+/// Sessions already present in the database are skipped. When several files
+/// carry the same id (copied stores), only the most recently updated copy is
+/// kept so duplicates cannot take scan slots from distinct sessions. Returns
+/// the candidates and the number of unreadable files.
+fn select_legacy_opencode_candidates(
+    root: &Path,
+    db_ids: &std::collections::HashSet<String>,
+    max_scan_sessions: usize,
+) -> (Vec<(DateTime<Utc>, String, PathBuf)>, usize) {
+    let mut parse_errors = 0;
+    let mut by_id: HashMap<String, (DateTime<Utc>, PathBuf)> = HashMap::new();
+    let window = legacy_opencode_metadata_window(max_scan_sessions);
+    for path in collect_recent_files_recursive(root, "json", window) {
+        #[cfg(test)]
+        OPENCODE_LEGACY_META_READS.with(|reads| reads.set(reads.get() + 1));
+        let meta = match std::fs::File::open(&path).map(std::io::BufReader::new) {
+            Ok(reader) => serde_json::from_reader::<_, LegacyOpenCodeSessionMeta>(reader),
+            Err(_) => {
+                parse_errors += 1;
+                continue;
+            }
+        };
+        let Ok(meta) = meta else {
+            parse_errors += 1;
+            continue;
+        };
+        if meta.id.is_empty() || db_ids.contains(&meta.id) {
+            continue;
+        }
+        let updated = meta
+            .time
+            .and_then(|time| time.updated)
+            .and_then(DateTime::<Utc>::from_timestamp_millis)
+            .or_else(|| jcode_import_core::file_modified_datetime(&path))
+            .unwrap_or_default();
+        match by_id.get(&meta.id) {
+            Some((existing, existing_path)) if (*existing, existing_path) >= (updated, &path) => {}
+            _ => {
+                by_id.insert(meta.id, (updated, path));
+            }
+        }
+    }
+    let candidates = by_id
+        .into_iter()
+        .map(|(id, (updated, path))| (updated, id, path))
+        .collect();
+    (candidates, parse_errors)
+}
+
+fn load_opencode_db_external_session(
+    db: &Path,
+    row: crate::opencode_db::OpenCodeDbSession,
+    load_history: bool,
+    include_tools: bool,
+) -> Result<ExternalSessionRecord> {
+    let messages = if load_history {
+        #[cfg(test)]
+        OPENCODE_DB_LOADS.with(|loads| loads.set(loads.get() + 1));
+        crate::opencode_db::load_search_messages(db, &row.id, include_tools)?
+            .into_iter()
+            .filter(|msg| !msg.text.trim().is_empty())
+            .map(|msg| jcode_import_core::ExternalMessageRecord {
+                role: msg.role,
+                text: msg.text,
+                timestamp: msg.created_at,
+                id: Some(msg.id),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let short = jcode_core::util::truncate_str(&row.id, 8).to_string();
+    Ok(ExternalSessionRecord {
+        source: "opencode",
+        short_name: Some(format!("opencode {short}")),
+        title: Some(
+            row.title
+                .unwrap_or_else(|| format!("OpenCode session {short}")),
+        ),
+        working_dir: row.directory,
+        provider_key: Some(row.provider_id.unwrap_or_else(|| "opencode".to_string())),
+        model: row.model_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        path: db.to_path_buf(),
+        messages,
+        session_id: row.id,
+    })
 }
 
 fn append_external_session_results(
