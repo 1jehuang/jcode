@@ -317,29 +317,51 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
         )
         .expect("save passing ownership assessment");
 
-        // Each scheduled nudge consumes budget. Simulate the dispatch loop by
-        // clearing the queued state between iterations (as if the turn ran and
-        // the model made no todo progress).
-        for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
+        // The fingerprint dedup stops re-firing the gate when todos are unchanged.
+        // Attempt 0 fires (None → Some fingerprint). Attempt 1 falls through the
+        // dedup to the clean completion handoff (final-response continuation),
+        // which is the designed "agent kept its honest scores" path. Attempts 2+
+        // return false via the unchanged final-response fingerprint guard.
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "attempt 0: first gate should fire (no prior fingerprint)"
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "attempt 1: dedup fall-through should reach the final-response handoff"
+        );
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(
+            app.queued_messages[0]
+                .starts_with(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE),
+            "attempt 1 must queue the final-response handoff, not another confidence poke"
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        // Attempts 2+: unchanged final-response fingerprint → fully idle
+        for attempt in 2..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS + 2 {
             assert!(
-                app.schedule_auto_poke_followup_if_needed(),
-                "attempt {attempt} should still schedule a gate nudge"
+                !app.schedule_auto_poke_followup_if_needed(),
+                "attempt {attempt}: deduped handoff must not re-fire anything"
             );
-            app.queued_messages.clear();
-            app.pending_queued_dispatch = false;
         }
 
-        // Budget exhausted: the gate must stop scheduling and disarm auto-poke
-        // instead of looping forever (observed live as one API call per ~5s).
-        assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
-            "exhausted gate must not schedule another nudge"
-        );
-        assert!(!app.auto_poke_incomplete_todos);
+        // auto_poke stays armed (circuit breaker never tripped since dedup stopped at 1)
+        assert!(app.auto_poke_incomplete_todos);
         assert!(!app.pending_queued_dispatch);
         assert!(app.queued_messages.is_empty());
         assert!(app.hidden_queued_system_messages.is_empty());
+        // Gate fired once (attempt 0); the attempt-1 clean handoff then reset the
+        // budget to 0 as designed, kept the fingerprint latched, and armed the
+        // final-response continuation.
         assert_eq!(app.todo_completion_gate_attempts, 0);
+        assert!(
+            app.last_todo_completion_confidence_fingerprint.is_some(),
+            "fingerprint should be set after first gate fire"
+        );
+        assert!(app.todo_final_response_requested);
     });
 }
 

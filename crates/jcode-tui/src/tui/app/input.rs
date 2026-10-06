@@ -1740,18 +1740,11 @@ impl App {
                 confidence_summary.completion_confidence_needs_validation || needs_spike_challenge;
             if confidence_needs_followup
                 && self.last_todo_completion_confidence_fingerprint.as_ref()
-                    == completion_confidence_fingerprint.as_ref()
+                    != completion_confidence_fingerprint.as_ref()
+                && gate_budget_left
             {
-                // The agent already had a chance to re-verify its honest scores.
-                // Repeating the same check cannot move confidence higher.
-                crate::logging::info(
-                    "AUTO_POKE_DECISION action=idle reason=unchanged_completion_confidence",
-                );
-            } else if confidence_needs_followup && gate_budget_left {
-                if completion_confidence_fingerprint.is_some() {
-                    self.last_todo_completion_confidence_fingerprint
-                        = completion_confidence_fingerprint;
-                }
+                self.last_todo_completion_confidence_fingerprint =
+                    completion_confidence_fingerprint.clone();
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
                 let notice = if confidence_summary.completion_confidence_needs_validation {
