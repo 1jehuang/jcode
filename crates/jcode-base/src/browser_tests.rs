@@ -560,3 +560,51 @@ async fn bridge_cli_is_pointed_at_the_target_browsers_host() {
         None => crate::env::remove_var("FAB_BROWSER"),
     }
 }
+
+#[test]
+fn bridge_updates_only_to_strictly_newer_releases() {
+    use super::browser_update::is_newer_release;
+    assert!(is_newer_release(Some("v0.10.0"), "v0.10.1"));
+    assert!(is_newer_release(Some("v0.9.9"), "v0.10.0"));
+    assert!(!is_newer_release(Some("v0.10.1"), "v0.10.1"));
+    assert!(!is_newer_release(Some("v0.10.1"), "v0.10.0"));
+    // Installs from before jcode recorded a version update once.
+    assert!(is_newer_release(None, "v0.10.1"));
+    assert!(is_newer_release(Some("garbage"), "v0.10.1"));
+    // A malformed latest tag never triggers a download.
+    assert!(!is_newer_release(None, "nightly"));
+}
+
+#[test]
+fn bridge_update_check_is_throttled() {
+    use super::browser_update::check_due;
+    let now = std::time::SystemTime::now();
+    let hour = std::time::Duration::from_secs(60 * 60);
+    assert!(check_due(None, now));
+    assert!(!check_due(Some(now - hour), now));
+    assert!(check_due(Some(now - 7 * hour), now));
+    // A clock that moved backwards must not block checks forever.
+    assert!(check_due(Some(now + hour), now));
+}
+
+#[test]
+fn bridge_update_is_skipped_until_the_bridge_is_installed() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // No network call happens: first-time installs stay an explicit setup.
+    let update = rt
+        .block_on(update_bridge_if_newer(BrowserKind::Firefox, true))
+        .unwrap();
+    assert_eq!(update, BridgeUpdate::Skipped);
+    assert_eq!(installed_bridge_version(), None);
+    match prev_home {
+        Some(v) => crate::env::set_var("JCODE_HOME", v),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}

@@ -173,6 +173,11 @@ pub fn resolve_target_browser(requested: Option<&str>) -> Result<BrowserDetectio
 #[path = "browser_session.rs"]
 mod browser_session;
 pub use browser_session::{ensure_browser_session, ensure_browser_session_for};
+#[path = "browser_update.rs"]
+mod browser_update;
+pub use browser_update::{
+    BridgeUpdate, auto_update_before_action, installed_bridge_version, update_bridge_if_newer,
+};
 
 /// Point a bridge CLI invocation at the native host of `browser`.
 ///
@@ -269,6 +274,17 @@ pub async fn ensure_browser_setup_for(target: BrowserDetection) -> Result<String
         log.push_str(
             "Override with `jcode browser setup <firefox|chrome|edge|brave|chromium|safari>` or JCODE_BROWSER.\n",
         );
+    }
+
+    match update_bridge_if_newer(kind, true).await {
+        Ok(update) => {
+            if let Some(note) = update.describe() {
+                log.push_str(&format!("{note}\n"));
+                // Let the extension reconnect to the restarted host.
+                wait_for_bridge(kind, 10).await;
+            }
+        }
+        Err(e) => log.push_str(&format!("Bridge update check failed: {e}\n")),
     }
 
     let initial_status = inspect_browser_status_for(&target).await?;
@@ -506,23 +522,18 @@ fn connected_matches(status: &BrowserStatus, kind: BrowserKind) -> bool {
 }
 
 async fn download_browser_binary_for(kind: BrowserKind) -> Result<()> {
+    let release = browser_update::fetch_latest_release().await?;
+    download_bridge_release(&release, kind).await
+}
+
+/// Download every bridge asset `kind` needs from `release_info` (a GitHub
+/// release JSON) and record its tag as the installed version.
+async fn download_bridge_release(
+    release_info: &serde_json::Value,
+    kind: BrowserKind,
+) -> Result<()> {
     let asset_name = get_platform_asset_name();
     let client = jcode_provider_core::shared_http_client();
-
-    let mut request = client
-        .get(GITHUB_API_LATEST)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json");
-    // Avoid the shared unauthenticated 60 req/h per-IP GitHub bucket when a
-    // token is available (see crate::github).
-    if let Some(token) = crate::github::github_public_api_token() {
-        request = request.bearer_auth(token);
-    }
-    let release_info: serde_json::Value = request
-        .send()
-        .await?
-        .json()
-        .await
-        .context("Failed to fetch latest release info")?;
 
     let assets = release_info["assets"]
         .as_array()
@@ -655,6 +666,9 @@ async fn download_browser_binary_for(kind: BrowserKind) -> Result<()> {
     let host_path = host_binary_path();
     write_file_atomically(&host_path, &host_bytes, true)?;
 
+    if let Some(tag) = release_info["tag_name"].as_str() {
+        browser_update::record_installed_version(tag);
+    }
     Ok(())
 }
 
@@ -1155,6 +1169,11 @@ pub async fn ensure_browser_ready_noninteractive_for(
         status.setup_complete = is_setup_complete();
     }
     Ok(status)
+}
+
+/// Wait up to `timeout_secs` for `kind`'s bridge to answer a ping.
+pub async fn wait_for_bridge(kind: BrowserKind, timeout_secs: u64) -> bool {
+    matches!(wait_for_ping(kind, timeout_secs).await, Ok(true))
 }
 
 async fn wait_for_ping(kind: BrowserKind, timeout_secs: u64) -> Result<bool> {

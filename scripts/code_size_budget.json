@@ -17,7 +17,7 @@
     "crates/jcode-app-core/src/server/provider_control.rs": 1626,
     "crates/jcode-app-core/src/server/swarm.rs": 3248,
     "crates/jcode-app-core/src/tool/bash.rs": 1578,
-    "crates/jcode-app-core/src/tool/browser.rs": 1268,
+    "crates/jcode-app-core/src/tool/browser.rs": 1272,
     "crates/jcode-app-core/src/tool/communicate.rs": 3490,
     "crates/jcode-app-core/src/tool/discover.rs": 2982,
     "crates/jcode-app-core/src/tool/mod.rs": 1699,

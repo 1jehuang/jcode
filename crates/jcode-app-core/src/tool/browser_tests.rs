@@ -259,8 +259,10 @@ async fn readiness_does_not_trust_a_stale_setup_marker() {
     let prev_autolaunch = std::env::var_os("JCODE_BROWSER_AUTOLAUNCH");
     let temp = tempfile::TempDir::new().expect("create temp dir");
     jcode_base::env::set_var("JCODE_HOME", temp.path());
-    // Keep the test hermetic: never launch a real Firefox from here.
+    let prev_auto_update = std::env::var_os("JCODE_BROWSER_AUTO_UPDATE");
+    // Keep the test hermetic: never launch a real Firefox or query GitHub.
     jcode_base::env::set_var("JCODE_BROWSER_AUTOLAUNCH", "0");
+    jcode_base::env::set_var("JCODE_BROWSER_AUTO_UPDATE", "0");
 
     let browser_dir = temp.path().join("browser");
     std::fs::create_dir_all(&browser_dir).expect("create browser dir");
@@ -296,6 +298,10 @@ async fn readiness_does_not_trust_a_stale_setup_marker() {
         jcode_base::env::set_var("JCODE_BROWSER_AUTOLAUNCH", prev_autolaunch);
     } else {
         jcode_base::env::remove_var("JCODE_BROWSER_AUTOLAUNCH");
+    }
+    match prev_auto_update {
+        Some(v) => jcode_base::env::set_var("JCODE_BROWSER_AUTO_UPDATE", v),
+        None => jcode_base::env::remove_var("JCODE_BROWSER_AUTO_UPDATE"),
     }
 }
 

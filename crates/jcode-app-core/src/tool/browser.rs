@@ -600,9 +600,12 @@ async fn ensure_firefox_ready(
     // verify the live bridge before launching an action because the browser or
     // the extension may have stopped or become incompatible since then.
     let name = target.kind.display_name();
+    // Throttled (every few hours) check for a newer bridge release.
+    let update_note = crate::browser::auto_update_before_action(target.kind).await;
     let mut status = crate::browser::ensure_browser_ready_noninteractive_for(target).await?;
     if status.ready {
-        return ready_in_requested_browser(&status, target.kind, explicit);
+        return ready_in_requested_browser(&status, target.kind, explicit)
+            .map(|note| note.or(update_note));
     }
 
     // The most common "not responding" cause after a completed setup is that
