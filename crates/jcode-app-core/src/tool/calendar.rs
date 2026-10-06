@@ -601,4 +601,56 @@ mod tests {
         );
         assert_eq!(body["reminders"]["overrides"][0]["minutes"], json!(0));
     }
+
+    /// Read-only check against the real Google Calendar API using the saved
+    /// login. Run with:
+    /// `cargo test -p jcode-app-core --lib tool::calendar::tests::live_read_only -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "hits the live Google Calendar API with the saved login"]
+    async fn live_read_only() {
+        let ctx = || ToolContext {
+            session_id: "calendar-live".to_string(),
+            message_id: "message".to_string(),
+            tool_call_id: "call".to_string(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: super::super::ToolExecutionMode::Direct,
+        };
+        let tool = CalendarTool::new();
+        assert!(tool.client.is_configured(), "Calendar not granted");
+
+        let calendars = tool
+            .execute(json!({"action": "calendars"}), ctx())
+            .await
+            .unwrap()
+            .output;
+        println!("{calendars}");
+        assert!(calendars.contains("(primary)"), "{calendars}");
+
+        let events = tool
+            .execute(
+                json!({"action": "list", "time_min": "2026-10-05", "time_max": "2026-10-06"}),
+                ctx(),
+            )
+            .await
+            .unwrap()
+            .output;
+        println!("{events}");
+        assert!(events.starts_with("Events on primary") || events.starts_with("No events"));
+
+        // Local naive time resolves through the calendar's own zone lookup.
+        let preview = tool
+            .execute(
+                json!({"action": "create", "summary": "dry run", "start": "2026-10-05T19:00",
+                       "attendees": ["nobody@example.com"], "send_updates": "all"}),
+                ctx(),
+            )
+            .await
+            .unwrap()
+            .output;
+        println!("{preview}");
+        assert!(preview.starts_with("Confirmation required"), "{preview}");
+        assert!(preview.contains("\"timeZone\""), "{preview}");
+    }
 }
