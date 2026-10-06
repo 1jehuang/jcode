@@ -106,6 +106,7 @@ impl App {
         self.keybindings_config_generation = generation;
         self.model_switch_keys = keybind::load_model_switch_keys();
         self.effort_switch_keys = keybind::load_effort_switch_keys();
+        self.speed_switch_keys = keybind::load_speed_switch_keys();
         self.centered_toggle_keys = keybind::load_centered_toggle_key();
         self.toggle_keys = keybind::load_toggle_keys();
         self.workspace_navigation_keys = keybind::load_workspace_navigation_keys();
@@ -671,6 +672,7 @@ impl App {
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
+            speed_switch_keys: keybind::load_speed_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
             toggle_keys: keybind::load_toggle_keys(),
             workspace_navigation_keys: keybind::load_workspace_navigation_keys(),
@@ -1132,6 +1134,7 @@ impl App {
             pending_account_picker_action: None,
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
+            speed_switch_keys: keybind::load_speed_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
             toggle_keys: keybind::load_toggle_keys(),
             workspace_navigation_keys: keybind::load_workspace_navigation_keys(),

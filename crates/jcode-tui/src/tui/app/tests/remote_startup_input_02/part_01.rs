@@ -1704,12 +1704,14 @@ fn test_retrieve_pending_message_edits_queued_message() {
 fn test_retrieve_pending_message_with_alt_and_super_up() {
     // Ctrl+Up, Alt(Option)+Up and Cmd(Super)+Up must all recall a queued message
     // so the gesture works regardless of which modifier the terminal forwards.
+    // Alt+Up only recalls when the speed-tier keys are unbound.
     for modifier in [
         KeyModifiers::CONTROL,
         KeyModifiers::ALT,
         KeyModifiers::SUPER,
     ] {
         let mut app = create_test_app();
+        app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys::default();
         app.queue_mode = true;
         app.is_processing = true;
 
@@ -1728,6 +1730,166 @@ fn test_retrieve_pending_message_with_alt_and_super_up() {
         assert_eq!(app.queued_count(), 0, "modifier {modifier:?}");
         assert_eq!(app.input(), "hello", "modifier {modifier:?}");
         assert_eq!(app.cursor_pos(), 5, "modifier {modifier:?}");
+    }
+}
+
+#[test]
+fn test_alt_up_down_cycle_speed_tier_by_default() {
+    use crate::tui::TuiState as _;
+    let mut app = create_test_app();
+    app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys {
+        increase: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::ALT,
+        }),
+        decrease: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::ALT,
+        }),
+    };
+    app.set_input_for_test("draft");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::ALT).unwrap();
+
+    // The speed key is consumed: no history recall, draft untouched, and a
+    // speed notice (or an availability notice for the mock provider) shows.
+    assert_eq!(app.input(), "draft");
+    let notice = app.status_notice().unwrap_or_default();
+    assert!(notice.starts_with("Speed"), "unexpected notice: {notice}");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::ALT).unwrap();
+    assert_eq!(app.input(), "draft");
+    let notice = app.status_notice().unwrap_or_default();
+    assert!(notice.starts_with("Speed"), "unexpected notice: {notice}");
+}
+
+#[test]
+fn test_local_speed_cycle_walks_standard_fast_ultrafast_and_clamps() {
+    use crate::tui::TuiState as _;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    #[derive(Clone)]
+    struct UltraMock(StdArc<StdMutex<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl Provider for UltraMock {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            unimplemented!("UltraMock")
+        }
+        fn name(&self) -> &str {
+            "openai"
+        }
+        fn model(&self) -> String {
+            "gpt-6-astra".to_string()
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+        fn service_tier(&self) -> Option<String> {
+            self.0.lock().unwrap().clone()
+        }
+        fn set_service_tier(&self, tier: &str) -> anyhow::Result<()> {
+            *self.0.lock().unwrap() = match tier {
+                "off" => None,
+                other => Some(other.to_string()),
+            };
+            Ok(())
+        }
+    }
+
+    let tier = StdArc::new(StdMutex::new(None));
+    let provider: Arc<dyn Provider> = Arc::new(UltraMock(tier.clone()));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys {
+        increase: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::ALT,
+        }),
+        decrease: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::ALT,
+        }),
+    };
+
+    let mut press = |app: &mut App, code| {
+        app.handle_key(code, KeyModifiers::ALT).unwrap();
+        (tier.lock().unwrap().clone(), app.status_notice().unwrap_or_default())
+    };
+
+    assert_eq!(
+        press(&mut app, KeyCode::Up),
+        (Some("priority".into()), "Speed: Fast ○●○".into())
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Up),
+        (Some("ultrafast".into()), "Speed: Ultrafast ○○●".into())
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Up),
+        (
+            Some("ultrafast".into()),
+            "Speed: Ultrafast ○○● (already at max)".into()
+        )
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Down),
+        (Some("priority".into()), "Speed: Fast ○●○".into())
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Down),
+        (None, "Speed: Standard ●○○".into())
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Down),
+        (None, "Speed: Standard ●○○ (already at min)".into())
+    );
+}
+
+#[test]
+fn test_remote_alt_up_sends_next_speed_tier_over_the_wire() {
+    use tokio::io::AsyncBufReadExt;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for (current, expected) in [(None, "priority"), (Some("priority"), "ultrafast")] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openai".to_string());
+        app.remote_provider_model = Some("gpt-6-astra".to_string());
+        app.remote_service_tier = current.map(str::to_string);
+        app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys {
+            increase: Some(crate::tui::keybind::KeyBinding {
+                code: KeyCode::Up,
+                modifiers: KeyModifiers::ALT,
+            }),
+            decrease: None,
+        };
+        rt.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            let peer = remote.take_dummy_peer().unwrap();
+            let mut reader = tokio::io::BufReader::new(peer);
+            app.handle_remote_key(KeyCode::Up, KeyModifiers::ALT, &mut remote)
+                .await
+                .unwrap();
+            let mut line = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                reader.read_line(&mut line),
+            )
+            .await
+            .expect("speed key must send a wire request")
+            .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["type"], "set_service_tier", "request: {line}");
+            assert_eq!(request["service_tier"], expected, "request: {line}");
+        });
     }
 }
 

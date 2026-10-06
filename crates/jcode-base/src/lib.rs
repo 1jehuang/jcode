@@ -46,6 +46,7 @@ pub mod generated_image;
 pub mod github;
 pub mod gmail;
 pub mod goal;
+pub mod google_calendar;
 pub mod hooks;
 pub mod id;
 pub mod image_normalize;
