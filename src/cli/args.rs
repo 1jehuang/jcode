@@ -248,6 +248,11 @@ pub(crate) enum Command {
         #[arg(long, value_enum)]
         google_access_tier: Option<GoogleAccessTierArg>,
 
+        /// Google services to authorize, comma-separated: gmail, calendar, or all.
+        /// Defaults to the services already granted, or an interactive prompt.
+        #[arg(long, value_name = "SERVICES")]
+        google_services: Option<String>,
+
         /// OpenAI-compatible API base URL. Used with --provider openai-compatible/custom profiles.
         #[arg(long)]
         api_base: Option<String>,

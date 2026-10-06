@@ -171,7 +171,7 @@ impl GmailClient {
     /// Whether this backend has credentials available to talk to Gmail.
     pub fn is_configured(&self) -> bool {
         match &self.backend {
-            GmailBackend::Direct => google::has_tokens(),
+            GmailBackend::Direct => google::has_service(google::GoogleService::Gmail),
             GmailBackend::Composio(cfg) => !cfg.api_key.is_empty(),
         }
     }

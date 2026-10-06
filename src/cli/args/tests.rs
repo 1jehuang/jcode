@@ -480,6 +480,7 @@ fn login_no_browser_flag_parses() {
             no_validate,
             flow_id,
             cancel,
+            google_services,
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
@@ -490,6 +491,7 @@ fn login_no_browser_flag_parses() {
             assert!(!json);
             assert!(!complete);
             assert!(google_access_tier.is_none());
+            assert!(google_services.is_none());
             assert!(api_base.is_none());
             assert!(api_key.is_none());
             assert!(api_key_env.is_none());
@@ -700,6 +702,24 @@ fn login_scriptable_flags_parse() {
         }) => {
             assert!(complete);
             assert_eq!(google_access_tier, Some(GoogleAccessTierArg::Readonly));
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let args = Args::try_parse_from([
+        "jcode",
+        "login",
+        "--provider",
+        "google",
+        "--google-services",
+        "gmail,calendar",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Login {
+            google_services, ..
+        }) => {
+            assert_eq!(google_services.as_deref(), Some("gmail,calendar"));
         }
         other => panic!("unexpected command: {:?}", other),
     }

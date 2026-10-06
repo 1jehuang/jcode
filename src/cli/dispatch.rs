@@ -308,6 +308,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             cancel,
             no_validate,
             google_access_tier,
+            google_services,
             api_base,
             api_key,
             api_key_env,
@@ -333,6 +334,10 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                             auth::google::GmailAccessTier::ReadOnly
                         }
                     }),
+                    google_services: google_services
+                        .as_deref()
+                        .map(auth::google::GoogleService::parse_list)
+                        .transpose()?,
                     openai_compatible_api_base: api_base,
                     openai_compatible_api_key: api_key,
                     openai_compatible_api_key_env: api_key_env,

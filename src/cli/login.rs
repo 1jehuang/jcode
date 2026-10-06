@@ -30,6 +30,7 @@ pub struct LoginOptions {
     pub cancel: bool,
     pub no_validate: bool,
     pub google_access_tier: Option<auth::google::GmailAccessTier>,
+    pub google_services: Option<Vec<auth::google::GoogleService>>,
     pub openai_compatible_api_base: Option<String>,
     pub openai_compatible_api_key: Option<String>,
     pub openai_compatible_api_key_env: Option<String>,
@@ -133,6 +134,10 @@ enum PendingScriptableLogin {
         state: String,
         redirect_uri: String,
         tier: auth::google::GmailAccessTier,
+        /// Missing in pending files written by older builds, which only
+        /// requested Gmail.
+        #[serde(default = "default_pending_google_services")]
+        services: Vec<auth::google::GoogleService>,
     },
     Copilot {
         device_code: String,
@@ -354,11 +359,13 @@ pub async fn run_login_provider(
             LoginProviderTarget::Antigravity => login_antigravity_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
-            LoginProviderTarget::Google => {
-                login_google_flow(options.no_browser, options.google_access_tier)
-                    .await
-                    .map(|_| LoginFlowOutcome::Completed)
-            }
+            LoginProviderTarget::Google => login_google_flow(
+                options.no_browser,
+                options.google_access_tier,
+                options.google_services.clone(),
+            )
+            .await
+            .map(|_| LoginFlowOutcome::Completed),
         }
     };
     let outcome = match login_result {
@@ -1198,11 +1205,12 @@ fn login_gemini_api_key_flow() -> Result<()> {
 async fn login_google_flow(
     no_browser: bool,
     access_tier: Option<auth::google::GmailAccessTier>,
+    requested_services: Option<Vec<auth::google::GoogleService>>,
 ) -> Result<()> {
-    use auth::google::{GmailAccessTier, GoogleCredentials};
+    use auth::google::{GmailAccessTier, GoogleCredentials, GoogleService};
 
     eprintln!("╔══════════════════════════════════════════╗");
-    eprintln!("║       Gmail Integration Setup            ║");
+    eprintln!("║       Google Integration Setup           ║");
     eprintln!("╚══════════════════════════════════════════╝\n");
 
     let _creds = match auth::google::load_credentials() {
@@ -1312,13 +1320,12 @@ async fn login_google_flow(
                     let mut wait = String::new();
                     io::stdin().read_line(&mut wait)?;
 
-                    eprintln!("\n2. Enable the Gmail API:");
-                    eprintln!("   Opening: Gmail API library page\n");
-                    maybe_open_browser(
-                        "https://console.cloud.google.com/apis/library/gmail.googleapis.com",
-                        no_browser,
-                    );
-                    eprintln!("   Click the blue 'Enable' button.");
+                    eprintln!("\n2. Enable the Google APIs jcode can use:");
+                    for service in GoogleService::ALL {
+                        eprintln!("   Opening: {} API library page", service.label());
+                        maybe_open_browser(service.api_library_url(), no_browser);
+                    }
+                    eprintln!("\n   Click the blue 'Enable' button on each page you plan to use.");
                     eprint!("   Press Enter when done...");
                     io::stdout().flush()?;
                     io::stdin().read_line(&mut wait)?;
@@ -1388,7 +1395,19 @@ async fn login_google_flow(
         }
     };
 
-    let tier = if let Some(tier) = access_tier {
+    let existing = auth::google::load_tokens().ok();
+    let services = match requested_services {
+        Some(services) => auth::google::normalize_services(services),
+        None => prompt_google_services(existing.as_ref().map(|t| t.services.as_slice()))?,
+    };
+
+    let tier = if !services.contains(&GoogleService::Gmail) {
+        // Not requesting Gmail scopes, so the tier is unused. Keep any
+        // previous choice so re-adding Gmail later starts from it.
+        access_tier
+            .or(existing.as_ref().map(|t| t.tier))
+            .unwrap_or(GmailAccessTier::Full)
+    } else if let Some(tier) = access_tier {
         tier
     } else {
         eprintln!("── Gmail Access Level ──\n");
@@ -1413,19 +1432,44 @@ async fn login_google_flow(
         }
     };
 
-    eprintln!("\nAccess level: {}", tier.label());
+    eprintln!(
+        "\nAuthorizing: {}",
+        auth::google::describe_services(&services, tier)
+    );
+    eprintln!(
+        "Make sure each API is enabled in your Google Cloud project: {}",
+        services
+            .iter()
+            .map(|s| s.api_library_url())
+            .collect::<Vec<_>>()
+            .join(" , ")
+    );
 
     eprintln!("\n── Logging in ──\n");
 
-    let tokens = auth::google::login(tier, no_browser).await?;
+    let tokens = auth::google::login(&services, tier, no_browser).await?;
 
     eprintln!("\n╔══════════════════════════════════════════╗");
-    eprintln!("║  ✓ Gmail setup complete!                 ║");
+    eprintln!("║  ✓ Google setup complete!                ║");
     eprintln!("╚══════════════════════════════════════════╝\n");
     if let Some(email) = &tokens.email {
         eprintln!("  Account:      {}", email);
     }
-    eprintln!("  Access tier:  {}", tokens.tier.label());
+    eprintln!(
+        "  Services:     {}",
+        auth::google::describe_services(&tokens.services, tokens.tier)
+    );
+    let missing: Vec<_> = services
+        .iter()
+        .filter(|s| !tokens.services.contains(s))
+        .map(|s| s.label())
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "  Not granted:  {} (permission unticked on the consent screen)",
+            missing.join(", ")
+        );
+    }
     eprintln!(
         "  Credentials:  {}",
         auth::google::credentials_path()?.display()
@@ -1434,12 +1478,69 @@ async fn login_google_flow(
         "  Tokens:       {}\n",
         auth::google::tokens_path()?.display()
     );
-    eprintln!("The 'gmail' tool is enabled by default in the full tool profile.");
-    eprintln!("To hide it, add `disabled = [\"gmail\"]` to [tools] in config.toml.");
-    eprintln!("Then try asking: \"check my recent emails\" or \"search emails from ...\"");
+    eprintln!("The matching tools ('gmail', 'calendar') are enabled in the full tool profile.");
+    eprintln!("To hide one, add it to `disabled = [...]` under [tools] in config.toml.");
+    if tokens.has_service(GoogleService::Gmail) {
+        eprintln!("Try asking: \"check my recent emails\" or \"search emails from ...\"");
+    }
+    if tokens.has_service(GoogleService::Calendar) {
+        eprintln!("Try asking: \"what's on my calendar tomorrow?\" or \"remind me at 7pm to ...\"");
+    }
 
     crate::telemetry::record_auth_success("google", "oauth");
     Ok(())
+}
+
+fn default_pending_google_services() -> Vec<auth::google::GoogleService> {
+    vec![auth::google::GoogleService::Gmail]
+}
+
+/// Services to authorize when the caller did not pass `--google-services`:
+/// keep what is already granted, defaulting to Gmail for first-time setup.
+pub(super) fn default_google_services(options: &LoginOptions) -> Vec<auth::google::GoogleService> {
+    options
+        .google_services
+        .clone()
+        .or_else(|| auth::google::load_tokens().ok().map(|t| t.services))
+        .map(auth::google::normalize_services)
+        .filter(|services| !services.is_empty())
+        .unwrap_or_else(default_pending_google_services)
+}
+
+fn prompt_google_services(
+    existing: Option<&[auth::google::GoogleService]>,
+) -> Result<Vec<auth::google::GoogleService>> {
+    use auth::google::GoogleService;
+
+    let default = existing
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_vec())
+        .unwrap_or_else(|| vec![GoogleService::Gmail]);
+    let default_ids = default
+        .iter()
+        .map(GoogleService::id)
+        .collect::<Vec<_>>()
+        .join(",");
+
+    eprintln!("── Google Services ──\n");
+    eprintln!("  gmail     Search, read, draft, and send email");
+    eprintln!("  calendar  View and manage Google Calendar events\n");
+    eprintln!("Enter a comma-separated list, or 'all'.");
+    eprint!("Services (default: {}): ", default_ids);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().is_empty() {
+        return Ok(default);
+    }
+    match GoogleService::parse_list(input.trim()) {
+        Ok(services) => Ok(services),
+        Err(err) => {
+            eprintln!("{err} Using {default_ids}.");
+            Ok(default)
+        }
+    }
 }
 
 fn maybe_open_browser(target: &str, no_browser: bool) -> bool {
