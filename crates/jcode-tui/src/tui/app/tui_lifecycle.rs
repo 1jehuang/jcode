@@ -38,6 +38,8 @@ impl App {
         self.set_todos_view_enabled(restored.todos_view_enabled, restored.todos_view_enabled);
         self.todo_confidence_spike_challenged = restored.todo_confidence_spike_challenged;
         self.last_todo_ownership_fingerprint = restored.last_todo_ownership_fingerprint;
+        self.last_todo_completion_confidence_fingerprint =
+            restored.last_todo_completion_confidence_fingerprint;
         self.final_response_todo_fingerprint = restored.final_response_todo_fingerprint;
         self.todo_final_response_requested = self.final_response_todo_fingerprint.is_some();
 
@@ -467,6 +469,7 @@ impl App {
             todo_gate_digest_delivered: false,
             todo_completion_gate_attempts: 0,
             last_todo_ownership_fingerprint: None,
+            last_todo_completion_confidence_fingerprint: None,
             todo_final_response_requested: false,
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
@@ -929,6 +932,7 @@ impl App {
             todo_gate_digest_delivered: false,
             todo_completion_gate_attempts: 0,
             last_todo_ownership_fingerprint: None,
+            last_todo_completion_confidence_fingerprint: None,
             todo_final_response_requested: false,
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,

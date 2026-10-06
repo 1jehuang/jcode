@@ -24,6 +24,7 @@ pub(super) struct RestoredReloadInput {
     pub todos_view_enabled: bool,
     pub todo_confidence_spike_challenged: bool,
     pub last_todo_ownership_fingerprint: Option<String>,
+    pub last_todo_completion_confidence_fingerprint: Option<String>,
     pub final_response_todo_fingerprint: Option<String>,
 }
 
@@ -351,6 +352,7 @@ impl App {
                 "todos_view_enabled": self.todos_view_enabled,
                 "todo_confidence_spike_challenged": self.todo_confidence_spike_challenged,
                 "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
+                "last_todo_completion_confidence_fingerprint": self.last_todo_completion_confidence_fingerprint,
                 "final_response_todo_fingerprint": self.final_response_todo_fingerprint,
             });
             let _ = std::fs::write(&path, data.to_string());
@@ -601,6 +603,10 @@ impl App {
                     .get("last_todo_ownership_fingerprint")
                     .and_then(|v| v.as_str())
                     .map(str::to_owned),
+                last_todo_completion_confidence_fingerprint: value
+                    .get("last_todo_completion_confidence_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
             });
         }
 
@@ -628,6 +634,7 @@ impl App {
             todos_view_enabled: false,
             todo_confidence_spike_challenged: false,
             last_todo_ownership_fingerprint: None,
+            last_todo_completion_confidence_fingerprint: None,
             final_response_todo_fingerprint: None,
         })
     }

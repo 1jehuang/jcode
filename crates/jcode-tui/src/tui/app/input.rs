@@ -1728,9 +1728,30 @@ impl App {
                 super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
-            if (confidence_summary.completion_confidence_needs_validation || needs_spike_challenge)
-                && gate_budget_left
+            let completion_confidence_fingerprint = serde_json::to_string(
+                &todos
+                    .iter()
+                    .filter(|t| t.status == "completed")
+                    .map(|t| (&t.id, &t.completion_confidence, &t.confidence_history))
+                    .collect::<Vec<_>>(),
+            )
+            .ok();
+            let confidence_needs_followup =
+                confidence_summary.completion_confidence_needs_validation || needs_spike_challenge;
+            if confidence_needs_followup
+                && self.last_todo_completion_confidence_fingerprint.as_ref()
+                    == completion_confidence_fingerprint.as_ref()
             {
+                // The agent already had a chance to re-verify its honest scores.
+                // Repeating the same check cannot move confidence higher.
+                crate::logging::info(
+                    "AUTO_POKE_DECISION action=idle reason=unchanged_completion_confidence",
+                );
+            } else if confidence_needs_followup && gate_budget_left {
+                if completion_confidence_fingerprint.is_some() {
+                    self.last_todo_completion_confidence_fingerprint
+                        = completion_confidence_fingerprint;
+                }
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
                 let notice = if confidence_summary.completion_confidence_needs_validation {
@@ -1772,6 +1793,7 @@ impl App {
                 self.todo_confidence_spike_challenged = false;
                 self.todo_completion_gate_attempts = 0;
                 self.todo_gate_digest_delivered = false;
+                self.last_todo_completion_confidence_fingerprint = None;
                 self.pending_queued_dispatch = false;
                 return false;
             }
@@ -1806,6 +1828,7 @@ impl App {
         // retrigger the same evidence gate against unchanged completed todos.
         self.todo_confidence_spike_challenged = false;
         self.last_todo_ownership_fingerprint = None;
+        self.last_todo_completion_confidence_fingerprint = None;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
