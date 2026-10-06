@@ -398,6 +398,32 @@ fn choose_default_model_auto_promotes_unlisted_newer_opus() {
 }
 
 #[test]
+fn choose_default_model_realistic_catalog_no_longer_pins_opus_4_6() {
+    // Shape of a real paid-tier /models response: the shipped fallback list,
+    // newer flagships, and non-picker entries such as embeddings.
+    let mut models = copilot_models(jcode_provider_copilot::FALLBACK_MODELS);
+    models.extend(copilot_models(&[
+        "claude-opus-4.8",
+        "claude-opus-5.5",
+        "gpt-5.6",
+    ]));
+    models.push(CopilotModelInfo {
+        id: "claude-opus-9".to_string(),
+        name: String::new(),
+        vendor: String::new(),
+        version: String::new(),
+        model_picker_enabled: false,
+        capabilities: Default::default(),
+    });
+    let chosen = choose_default_model(&models);
+    assert_ne!(
+        chosen, "claude-opus-4.6",
+        "regression: stale Opus 4.6 default"
+    );
+    assert_eq!(chosen, "claude-opus-5.5");
+}
+
+#[test]
 fn choose_default_model_ignores_fast_and_cheap_variants() {
     let models = copilot_models(&[
         "claude-haiku-4.5",
