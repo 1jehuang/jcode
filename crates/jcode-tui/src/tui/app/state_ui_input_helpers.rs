@@ -206,6 +206,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/rename", "Rename current session"),
     RegisteredCommand::public("/fork", "Fork session into a new window (optional prompt)"),
     RegisteredCommand::hidden("/split", "Alias for /fork"),
+    RegisteredCommand::public("/desktop", "Open this session in Jcode Desktop"),
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
     RegisteredCommand::public(
         "/cloud",

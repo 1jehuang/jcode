@@ -57,6 +57,7 @@ mod catchup;
 mod commands;
 mod commands_cloud;
 mod commands_colors;
+mod commands_desktop;
 mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
