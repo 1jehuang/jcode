@@ -176,6 +176,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_MAX_RETRIES",
     "JCODE_MCP_TOOLS",
     "JCODE_MCP_TOOLS_TOKEN_THRESHOLD",
+    "JCODE_CODEMODE",
     "JCODE_RETRY_BACKOFF_CAP_SECS",
     "JCODE_SWARM_ENABLED",
     "JCODE_SWARM_EFFORT",
@@ -681,6 +682,10 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
+    /// Opt-in Codemode: expose a `codemode` tool that runs model-written
+    /// JavaScript in an embedded QuickJS sandbox able to call every other
+    /// tool (including MCP tools). Off by default.
+    pub codemode: bool,
 }
 
 impl Default for ToolConfig {
@@ -692,6 +697,7 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
+            codemode: false,
         }
     }
 }

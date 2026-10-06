@@ -368,6 +368,12 @@ disable_base_tools = false
 # kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
+# Experimental, opt-in Codemode. Adds a `codemode` tool that runs
+# model-written JavaScript in an embedded QuickJS sandbox. Scripts call any
+# other tool (including MCP tools) via `await tools.<name>(args)`, chain and
+# parallelize calls, and keep intermediate results out of the conversation.
+# Env override: JCODE_CODEMODE=1.
+codemode = false
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.

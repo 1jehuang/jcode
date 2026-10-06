@@ -84,6 +84,7 @@ impl Config {
 - Disable base tools: {}
 - MCP tools: {}
 - MCP auto threshold: {} tokens
+- Codemode: {}
 
 **Provider:**
 - Default model: {}
@@ -252,6 +253,7 @@ impl Config {
             self.tools.disable_base_tools,
             self.tools.mcp_tools.as_str(),
             self.tools.mcp_tools_token_threshold,
+            self.tools.codemode,
             self.provider
                 .default_model
                 .as_deref()

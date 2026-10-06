@@ -152,6 +152,11 @@ impl Config {
         {
             self.tools.mcp_tools_token_threshold = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_CODEMODE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.tools.codemode = parsed;
+        }
 
         // ACP adapter
         if let Ok(v) = std::env::var("JCODE_ACP_PROFILE") {

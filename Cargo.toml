@@ -73,6 +73,7 @@ members = [
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
     "crates/jcode-transport",
+    "crates/jcode-codemode",
     "crates/jcode-tool-core",
     "crates/jcode-tool-types",
     "crates/jcode-tui-account-picker",
