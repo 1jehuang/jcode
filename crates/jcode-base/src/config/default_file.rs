@@ -368,6 +368,12 @@ disable_base_tools = false
 # kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
+# Opt in to parallel adjacent tool calls from one model response. Only read,
+# ls, jcode_docs, and webfetch are eligible. All bash, agentgrep, websearch,
+# and custom tools remain sequential. Results keep the model's order.
+# Disabled by default. Env override: JCODE_PARALLEL_TOOLS=1 enables this;
+# JCODE_PARALLEL_TOOLS=0 disables it, overriding the config file.
+parallel = false
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.

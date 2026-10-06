@@ -82,6 +82,32 @@ fn model_supports_image_generation(model_id: &str) -> bool {
     !model_id.to_ascii_lowercase().contains("codex")
 }
 
+/// Request batching is permission to emit multiple calls, not permission to
+/// execute arbitrary tools concurrently. The agent scheduler still decides
+/// which calls are safe to overlap. Use the existing base config (including
+/// JCODE_PARALLEL_TOOLS overrides) rather than a second provider-only switch.
+///
+/// OpenAI documents mixed built-in/function parallelism starting with GPT-5
+/// and recommends disabling it for the dated GPT-4.1 nano snapshot:
+/// https://developers.openai.com/api/docs/guides/function-calling#parallel-function-calling
+fn parallel_tool_calls_enabled(model_id: &str, tools: &[Value], configured: bool) -> bool {
+    if !configured || model_id.eq_ignore_ascii_case("gpt-4.1-nano-2025-04-14") {
+        return false;
+    }
+    let has_builtin_tools = tools.iter().any(|tool| {
+        !matches!(
+            tool.get("type").and_then(Value::as_str),
+            Some("function" | "custom")
+        )
+    });
+    let mixed_parallel_supported = model_id
+        .to_ascii_lowercase()
+        .strip_prefix("gpt-")
+        .and_then(|rest| rest.split(['.', '-']).next())
+        .is_some_and(|major| matches!(major.parse::<u32>(), Ok(5..)));
+    !has_builtin_tools || mixed_parallel_supported
+}
+
 /// Maximum number of retries for transient errors
 const MAX_RETRIES: u32 = 3;
 
@@ -1328,7 +1354,9 @@ impl OpenAIProvider {
             "input": input,
             "tools": tools,
             "tool_choice": "auto",
-            "parallel_tool_calls": false,
+            "parallel_tool_calls": parallel_tool_calls_enabled(
+                model_id, &tools, jcode_base::config::config().tools.parallel
+            ),
             "stream": true,
             "store": false,
             "include": ["reasoning.encrypted_content"],

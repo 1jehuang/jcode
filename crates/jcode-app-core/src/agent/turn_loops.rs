@@ -1048,7 +1048,11 @@ impl Agent {
             let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
             let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
-            for tc in tool_calls {
+            // See turn_streaming_mpsc: safe runs start together, results are
+            // still recorded in order, and leftovers abort on drop.
+            let mut prefetch = self.tool_prefetch().await;
+            for tool_index in 0..tool_calls.len() {
+                let tc = tool_calls[tool_index].clone();
                 let message_id = assistant_message_id
                     .clone()
                     .unwrap_or_else(|| self.session.id.clone());
@@ -1152,15 +1156,15 @@ impl Agent {
                     io::stdout().flush()?;
                 }
 
-                let ctx = ToolContext {
-                    session_id: self.session.id.clone(),
-                    message_id: message_id.clone(),
-                    tool_call_id: tc.id.clone(),
-                    working_dir: self.working_dir().map(PathBuf::from),
-                    stdin_request_tx: self.stdin_request_tx.clone(),
-                    graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
-                    execution_mode: ToolExecutionMode::AgentTurn,
-                };
+                self.maybe_prefetch_safe_run(
+                    &mut prefetch,
+                    &tool_calls,
+                    tool_index,
+                    &message_id,
+                    &sdk_tool_results,
+                    super::parallel_tools::PrefetchRegistry::Shared,
+                )
+                .await;
 
                 if trace {
                     eprintln!("[trace] tool_exec_start name={} id={}", tc.name, tc.id);
@@ -1177,6 +1181,7 @@ impl Agent {
 
                 logging::info(&format!("Tool starting: {}", tc.name));
                 let tool_start = Instant::now();
+                let mut execution_elapsed = None;
 
                 // Publish status for TUI to show during Task execution
                 Bus::global().publish(BusEvent::SubagentStatus(SubagentStatus {
@@ -1185,10 +1190,31 @@ impl Agent {
                     model: Some(self.provider.model()),
                 }));
 
-                let result = self.registry.execute(&tc.name, tc.input.clone(), ctx).await;
+                let result = if let Some(mut prefetched) = prefetch.take(tool_index) {
+                    let joined = (&mut prefetched).await;
+                    execution_elapsed = Some(prefetched.elapsed());
+                    match joined {
+                        Ok(Ok(output)) => {
+                            Ok(self.admit_prefetched_output(&prefetch, &tc, output).await)
+                        }
+                        Ok(Err(error)) => Err(error),
+                        Err(e) => Err(anyhow::anyhow!("Tool task panicked: {}", e)),
+                    }
+                } else {
+                    let ctx = ToolContext {
+                        session_id: self.session.id.clone(),
+                        message_id: message_id.clone(),
+                        tool_call_id: tc.id.clone(),
+                        working_dir: self.working_dir().map(PathBuf::from),
+                        stdin_request_tx: self.stdin_request_tx.clone(),
+                        graceful_shutdown_signal: Some(self.graceful_shutdown.clone()),
+                        execution_mode: ToolExecutionMode::AgentTurn,
+                    };
+                    self.registry.execute(&tc.name, tc.input.clone(), ctx).await
+                };
                 crate::telemetry::record_tool_call();
                 self.unlock_tools_if_needed(&tc.name);
-                let tool_elapsed = tool_start.elapsed();
+                let tool_elapsed = execution_elapsed.unwrap_or_else(|| tool_start.elapsed());
                 logging::info(&format!(
                     "Tool finished: {} in {:.2}s",
                     tc.name,
@@ -1224,11 +1250,11 @@ impl Agent {
                         }
 
                         let blocks = tool_output_to_content_blocks(tc.id, output);
-                        self.add_message_with_duration(
-                            Role::User,
+                        self.add_tool_result_with_duration(
                             blocks,
                             Some(tool_elapsed.as_millis() as u64),
-                        );
+                        )
+                        .await;
                         tool_results_dirty = true;
                     }
                     Err(e) => {
@@ -1253,15 +1279,15 @@ impl Agent {
                         if print_output {
                             println!("{}", error_msg);
                         }
-                        self.add_message_with_duration(
-                            Role::User,
+                        self.add_tool_result_with_duration(
                             vec![ContentBlock::ToolResult {
                                 tool_use_id: tc.id,
                                 content: error_msg,
                                 is_error: Some(true),
                             }],
                             Some(tool_elapsed.as_millis() as u64),
-                        );
+                        )
+                        .await;
                         tool_results_dirty = true;
                     }
                 }

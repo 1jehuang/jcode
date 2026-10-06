@@ -362,4 +362,5 @@ fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
 
 include!("openai_tests/persistent_terminal.rs");
 
+include!("openai_tests/parallel_calls.rs");
 include!("openai_tests/persistent_prefix.rs");
