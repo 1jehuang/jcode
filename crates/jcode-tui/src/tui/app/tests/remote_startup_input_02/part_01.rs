@@ -1704,12 +1704,14 @@ fn test_retrieve_pending_message_edits_queued_message() {
 fn test_retrieve_pending_message_with_alt_and_super_up() {
     // Ctrl+Up, Alt(Option)+Up and Cmd(Super)+Up must all recall a queued message
     // so the gesture works regardless of which modifier the terminal forwards.
+    // Alt+Up only recalls when the speed-tier keys are unbound.
     for modifier in [
         KeyModifiers::CONTROL,
         KeyModifiers::ALT,
         KeyModifiers::SUPER,
     ] {
         let mut app = create_test_app();
+        app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys::default();
         app.queue_mode = true;
         app.is_processing = true;
 
@@ -1729,6 +1731,36 @@ fn test_retrieve_pending_message_with_alt_and_super_up() {
         assert_eq!(app.input(), "hello", "modifier {modifier:?}");
         assert_eq!(app.cursor_pos(), 5, "modifier {modifier:?}");
     }
+}
+
+#[test]
+fn test_alt_up_down_cycle_speed_tier_by_default() {
+    use crate::tui::TuiState as _;
+    let mut app = create_test_app();
+    app.speed_switch_keys = crate::tui::keybind::SpeedSwitchKeys {
+        increase: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::ALT,
+        }),
+        decrease: Some(crate::tui::keybind::KeyBinding {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::ALT,
+        }),
+    };
+    app.set_input_for_test("draft");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::ALT).unwrap();
+
+    // The speed key is consumed: no history recall, draft untouched, and a
+    // speed notice (or an availability notice for the mock provider) shows.
+    assert_eq!(app.input(), "draft");
+    let notice = app.status_notice().unwrap_or_default();
+    assert!(notice.starts_with("Speed"), "unexpected notice: {notice}");
+
+    app.handle_key(KeyCode::Down, KeyModifiers::ALT).unwrap();
+    assert_eq!(app.input(), "draft");
+    let notice = app.status_notice().unwrap_or_default();
+    assert!(notice.starts_with("Speed"), "unexpected notice: {notice}");
 }
 
 #[test]

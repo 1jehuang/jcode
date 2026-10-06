@@ -122,6 +122,16 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
             cfg.effort_decrease.as_str(),
         ),
         (
+            "speed_increase",
+            "Increase speed tier",
+            cfg.speed_increase.as_str(),
+        ),
+        (
+            "speed_decrease",
+            "Decrease speed tier",
+            cfg.speed_decrease.as_str(),
+        ),
+        (
             "centered_toggle",
             "Toggle centered layout",
             cfg.centered_toggle.as_str(),

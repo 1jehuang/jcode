@@ -627,6 +627,48 @@ impl App {
         }
     }
 
+    /// Step the speed tier (Standard -> Fast -> Ultrafast) for a local session.
+    pub(super) fn cycle_speed_tier(&mut self, direction: i8) {
+        let provider_name = self.provider.name().to_string();
+        let model = self.provider.model();
+        let ladder = jcode_provider_core::service_tier::speed_tier_ladder(
+            Some(&provider_name),
+            Some(&model),
+        );
+        let current = self.provider.service_tier();
+        let Some((index, next, at_end)) = jcode_provider_core::service_tier::step_speed_tier(
+            &ladder,
+            current.as_deref(),
+            direction,
+        ) else {
+            self.set_status_notice("Speed tiers not available for this model");
+            return;
+        };
+        if at_end {
+            self.set_status_notice(speed_tier_notice(
+                next,
+                index,
+                ladder.len(),
+                Some(direction),
+            ));
+            return;
+        }
+        match self.provider.set_service_tier(next) {
+            Ok(()) => {
+                let applied = self.provider.service_tier();
+                let applied =
+                    jcode_provider_core::service_tier::canonical_speed_tier(applied.as_deref());
+                let index = ladder.iter().position(|t| *t == applied).unwrap_or(index);
+                let mut notice = speed_tier_notice(applied, index, ladder.len(), None);
+                if self.is_processing {
+                    notice.push_str(" (next request)");
+                }
+                self.set_status_notice(notice);
+            }
+            Err(e) => self.set_status_notice(format!("Speed switch failed: {}", e)),
+        }
+    }
+
     pub(super) fn update_context_limit_for_model(
         &mut self,
         model: &str,
@@ -1654,7 +1696,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
 
     if matches!(trimmed, "/fast" | "/fast status") {
         let current = app.provider.service_tier();
-        let status = if current.as_deref() == Some("priority") {
+        let status = if service_tier_is_fast(current.as_deref()) {
             "on"
         } else {
             "off"
@@ -1682,10 +1724,11 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         let mode = mode.trim().to_ascii_lowercase();
         let target = match mode.as_str() {
             "on" => "priority",
+            "ultra" | "ultrafast" => "ultrafast",
             "off" => "off",
             "status" => {
                 let current = app.provider.service_tier();
-                let enabled = current.as_deref() == Some("priority");
+                let enabled = service_tier_is_fast(current.as_deref());
                 let current_label = current
                     .as_deref()
                     .map(service_tier_display_label)
@@ -1706,7 +1749,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
             }
             _ => {
                 app.push_display_message(DisplayMessage::error(
-                    "Usage: /fast [on|off|status|default ...]".to_string(),
+                    "Usage: /fast [on|ultra|off|status|default ...]".to_string(),
                 ));
                 return true;
             }
@@ -1715,7 +1758,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         match app.provider.set_service_tier(target) {
             Ok(()) => {
                 let current = app.provider.service_tier();
-                let enabled = current.as_deref() == Some("priority");
+                let enabled = service_tier_is_fast(current.as_deref());
                 let label = current
                     .as_deref()
                     .map(service_tier_display_label)
@@ -1726,7 +1769,10 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                     label,
                     applies_next_request,
                 )));
-                app.set_status_notice(fast_mode_status_notice(enabled, applies_next_request));
+                app.set_status_notice(fast_mode_status_notice(
+                    current.as_deref(),
+                    applies_next_request,
+                ));
             }
             Err(e) => {
                 app.push_display_message(DisplayMessage::error(format!(

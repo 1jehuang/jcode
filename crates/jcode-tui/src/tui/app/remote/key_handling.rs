@@ -62,6 +62,35 @@ pub(in crate::tui::app) async fn reload_stale_remote_server_before_update(
     Ok(true)
 }
 
+/// Step the remote session's speed tier (Standard -> Fast -> Ultrafast).
+async fn apply_remote_speed_direction(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    direction: i8,
+) -> Result<()> {
+    use jcode_provider_core::service_tier::{speed_tier_ladder, step_speed_tier};
+    let (provider_name, provider_model) = app.remote_effort_identity();
+    let ladder = speed_tier_ladder(provider_name.as_deref(), provider_model.as_deref());
+    let Some((index, next, at_end)) =
+        step_speed_tier(&ladder, app.remote_service_tier.as_deref(), direction)
+    else {
+        app.set_status_notice("Speed tiers not available for this model");
+        return Ok(());
+    };
+    if at_end {
+        app.set_status_notice(app_mod::speed_tier_notice(
+            next,
+            index,
+            ladder.len(),
+            Some(direction),
+        ));
+        return Ok(());
+    }
+    app.set_status_notice(app_mod::speed_tier_notice(next, index, ladder.len(), None));
+    remote.set_service_tier(next).await?;
+    Ok(())
+}
+
 async fn apply_remote_effort_direction(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -547,6 +576,10 @@ async fn handle_remote_key_internal(
     if let Some(direction) = app.effort_switch_keys.direction_for(code, modifiers) {
         app.record_keybinding_fast(crate::tui::app::shortcut_hints::LearnableAction::EffortCycle);
         apply_remote_effort_direction(app, remote, direction).await?;
+        return Ok(());
+    }
+    if let Some(direction) = app.speed_switch_keys.direction_for(code, modifiers) {
+        apply_remote_speed_direction(app, remote, direction).await?;
         return Ok(());
     }
     if cfg!(target_os = "macos")
@@ -1353,7 +1386,7 @@ async fn handle_remote_key_internal(
 
                 if matches!(trimmed, "/fast" | "/fast status") {
                     let current = app.remote_service_tier.as_deref();
-                    let enabled = current == Some("priority");
+                    let enabled = app_mod::service_tier_is_fast(current);
                     let current_label = current
                         .map(app_mod::service_tier_display_label)
                         .unwrap_or("Standard");
@@ -1378,10 +1411,11 @@ async fn handle_remote_key_internal(
                     let mode = mode.trim().to_ascii_lowercase();
                     let service_tier = match mode.as_str() {
                         "on" => "priority",
+                        "ultra" | "ultrafast" => "ultrafast",
                         "off" => "off",
                         "status" => {
                             let current = app.remote_service_tier.as_deref();
-                            let enabled = current == Some("priority");
+                            let enabled = app_mod::service_tier_is_fast(current);
                             let current_label = current
                                 .map(app_mod::service_tier_display_label)
                                 .unwrap_or("Standard");
@@ -1404,7 +1438,7 @@ async fn handle_remote_key_internal(
                         }
                         _ => {
                             app.push_display_message(DisplayMessage::error(
-                                "Usage: /fast [on|off|status|default ...]",
+                                "Usage: /fast [on|ultra|off|status|default ...]",
                             ));
                             return Ok(());
                         }

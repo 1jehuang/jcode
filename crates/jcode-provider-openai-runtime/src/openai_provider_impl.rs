@@ -1048,7 +1048,11 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_service_tiers(&self) -> Vec<&'static str> {
-        vec!["priority", "flex"]
+        if jcode_provider_core::service_tier::openai_model_supports_ultrafast(&self.model()) {
+            vec!["priority", "ultrafast", "flex"]
+        } else {
+            vec!["priority", "flex"]
+        }
     }
 
     fn transport(&self) -> Option<String> {

@@ -110,7 +110,7 @@ impl App {
                 "/effort\nShow current effort.\n\n/effort <level>\nSet effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep). Which levels apply depends on the model. The swarm rungs [Beta] turn on swarm orchestration (swarm: light fan-out, swarm-deep: deep task graph). Root reasoning is configurable via [agents] swarm_root_effort and swarm_deep_root_effort (both default to max).\n\nAlso: {effort_keys} to cycle."
             }
             "fast" => {
-                "/fast\nShow whether fast mode is enabled, plus the saved default.\n\n/fast on\nEnable fast mode (service_tier = priority) for the current session.\n\n/fast off\nDisable fast mode for the current session.\n\n/fast status\nShow current fast-mode status.\n\n/fast default on\nSave fast mode as the default on startup.\n\n/fast default off\nSave fast mode as the default off on startup.\n\n/fast default status\nShow the saved fast-mode default."
+                "/fast\nShow whether fast mode is enabled, plus the saved default.\n\n/fast on\nEnable fast mode (service_tier = priority) for the current session.\n\n/fast ultra\nEnable OpenAI Ultrafast (service_tier = ultrafast) on models that support it, such as GPT-6 Astra.\n\n/fast off\nDisable fast mode for the current session.\n\nAlt+Up / Alt+Down cycle Standard -> Fast -> Ultrafast (configure speed_increase / speed_decrease).\n\n/fast status\nShow current fast-mode status.\n\n/fast default on\nSave fast mode as the default on startup.\n\n/fast default off\nSave fast mode as the default off on startup.\n\n/fast default status\nShow the saved fast-mode default."
             }
             "memory" => "/memory [on|off|status]\nToggle memory features for this session.",
             "log" => {

@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 pub use jcode_tui_core::keybind::{
     CenteredToggleKeys, EffortSwitchKeys, KeyBinding, ModelSwitchKeys, OptionalBinding, ScrollKeys,
-    WorkspaceNavigationDirection, WorkspaceNavigationKeys,
+    SpeedSwitchKeys, WorkspaceNavigationDirection, WorkspaceNavigationKeys,
 };
 use jcode_tui_core::keybind::{
     format_binding, is_disabled, macos_option_char_to_ascii_key, parse_bindings_or_default,
@@ -261,6 +261,39 @@ pub fn load_effort_switch_keys() -> EffortSwitchKeys {
     );
 
     EffortSwitchKeys { increase, decrease }
+}
+
+pub fn load_speed_switch_keys() -> SpeedSwitchKeys {
+    let cfg = config();
+    let (increase, _) = parse_optional(
+        &cfg.keybindings.speed_increase,
+        KeyBinding {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::ALT,
+        },
+        "Alt+Up",
+    );
+    let (decrease, _) = parse_optional(
+        &cfg.keybindings.speed_decrease,
+        KeyBinding {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::ALT,
+        },
+        "Alt+Down",
+    );
+    SpeedSwitchKeys { increase, decrease }
+}
+
+/// User-facing label for the speed cycle keys, e.g. "Alt+Down / Alt+Up".
+pub fn speed_switch_keys_label() -> Option<String> {
+    let keys = load_speed_switch_keys();
+    match (keys.decrease.as_ref(), keys.increase.as_ref()) {
+        (Some(down), Some(up)) => {
+            Some(format!("{} / {}", format_binding(down), format_binding(up)))
+        }
+        (Some(only), None) | (None, Some(only)) => Some(format_binding(only)),
+        (None, None) => None,
+    }
 }
 
 /// User-facing label for the effort cycle keys, e.g. "Cmd+Left / Cmd+Right".
