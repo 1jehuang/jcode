@@ -235,25 +235,28 @@ pub async fn login(no_browser: bool) -> Result<AntigravityTokens> {
     if !crate::auth::browser_suppressed(no_browser)
         && let Ok(listener) = crate::auth::oauth::bind_callback_listener(DEFAULT_PORT)
     {
-        eprintln!("\nOpening browser for Antigravity login...\n");
-        eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
+        crate::console::eprintln_best_effort("\nOpening browser for Antigravity login...\n");
+        crate::console::eprintln_best_effort(&format!(
+            "If the browser didn't open, visit:\n{}\n",
+            auth_url
+        ));
         if let Some(qr) = crate::login_qr::indented_section(
             &auth_url,
             "Scan this QR on another device if this machine has no browser:",
             "    ",
             crate::auth::browser_suppressed(no_browser),
         ) {
-            eprintln!("{qr}\n");
+            crate::console::eprintln_best_effort(&format!("{qr}\n"));
         }
 
         let browser_opened = open::that(&auth_url).is_ok();
         if browser_opened {
-            eprintln!(
+            crate::console::eprintln_best_effort(&format!(
                 "Waiting up to 300s for automatic callback on {}",
                 redirect_uri
-            );
-            eprintln!(
-                "If the browser lands on a loopback error page instead of returning to jcode, copy the full URL from the address bar and re-run with `--no-browser` to paste it manually."
+            ));
+            crate::console::eprintln_best_effort(
+                "If the browser lands on a loopback error page instead of returning to jcode, copy the full URL from the address bar and re-run with `--no-browser` to paste it manually.",
             );
             match tokio::time::timeout(
                 std::time::Duration::from_secs(300),
@@ -265,19 +268,19 @@ pub async fn login(no_browser: bool) -> Result<AntigravityTokens> {
                     return exchange_callback_code(&code, &verifier, &redirect_uri).await;
                 }
                 Ok(Err(err)) => {
-                    eprintln!(
+                    crate::console::eprintln_best_effort(&format!(
                         "Automatic callback failed ({err}). Falling back to manual callback paste."
-                    );
+                    ));
                 }
                 Err(_) => {
-                    eprintln!(
-                        "Timed out waiting for callback. Falling back to manual callback paste."
+                    crate::console::eprintln_best_effort(
+                        "Timed out waiting for callback. Falling back to manual callback paste.",
                     );
                 }
             }
         } else {
-            eprintln!(
-                "Couldn't open a browser on this machine. Falling back to manual callback paste.\n"
+            crate::console::eprintln_best_effort(
+                "Couldn't open a browser on this machine. Falling back to manual callback paste.\n",
             );
         }
     }
@@ -298,26 +301,29 @@ async fn manual_login(
         );
     }
 
-    eprintln!("\nManual Antigravity auth required.\n");
-    eprintln!("Open this URL in your browser:\n\n{}\n", auth_url);
+    crate::console::eprintln_best_effort("\nManual Antigravity auth required.\n");
+    crate::console::eprintln_best_effort(&format!(
+        "Open this URL in your browser:\n\n{}\n",
+        auth_url
+    ));
     if let Some(qr) = crate::login_qr::indented_section(
         auth_url,
         "Scan this QR on another device if needed:",
         "    ",
         crate::auth::browser_suppressed(no_browser),
     ) {
-        eprintln!("{qr}\n");
+        crate::console::eprintln_best_effort(&format!("{qr}\n"));
     }
     if !crate::auth::browser_suppressed(no_browser) {
         let _ = open::that(auth_url);
     }
-    eprintln!(
-        "After approving access, paste the full callback URL (or query string) here so jcode can verify the login state.\n"
+    crate::console::eprintln_best_effort(
+        "After approving access, paste the full callback URL (or query string) here so jcode can verify the login state.\n",
     );
-    eprintln!(
-        "If the browser shows a local callback error, copy the full URL from the address bar before closing the tab.\n"
+    crate::console::eprintln_best_effort(
+        "If the browser shows a local callback error, copy the full URL from the address bar before closing the tab.\n",
     );
-    eprint!("Callback URL: ");
+    crate::console::eprompt_best_effort("Callback URL: ");
     io::stdout().flush()?;
     let input = crate::secret_input::read_secret_line()?;
     if input.trim().is_empty() {
