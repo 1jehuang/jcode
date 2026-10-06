@@ -120,6 +120,8 @@ mod tests {
             tool_calls: vec![],
             tool_data: None,
             response_stats: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
     fn tool_call(message: &mut StoredMessage) {
@@ -222,6 +224,31 @@ mod tests {
         let wire = serde_json::to_value(&rows[2]).unwrap();
         assert_eq!(wire["response_stats"]["input_tokens"], 30);
         assert!(wire["response_stats"].get("duration_secs").is_none());
+    }
+    #[test]
+    fn stored_timestamp_flows_through_real_rendering() {
+        // #1454: StoredMessage.timestamp must survive render_messages so tool
+        // rows can stamp their completion time. Serialized-then-reloaded, as
+        // the persisted-session path sees it.
+        let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:23:35Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut messages = vec![
+            text(Role::User, "prompt", None),
+            text(Role::Assistant, "final", usage(20)),
+        ];
+        messages[1].timestamp = Some(stamp);
+        let encoded = serde_json::to_string(&messages).unwrap();
+        let mut session = super::super::Session::create(None, None);
+        session.messages = serde_json::from_str(&encoded).unwrap();
+        let rows = super::super::render_messages(&session);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].timestamp, None);
+        assert_eq!(rows[1].timestamp, Some(stamp));
+        // The stamped row survives its own serialization hop (the wire shape
+        // the remote client decodes).
+        let wire = serde_json::to_value(&rows[1]).unwrap();
+        assert_eq!(wire["timestamp"], "2026-09-23T20:23:35Z");
     }
     #[test]
     fn response_stats_internal_rows_do_not_split_and_overflow_is_unknown() {

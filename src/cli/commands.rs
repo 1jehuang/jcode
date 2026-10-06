@@ -3273,6 +3273,7 @@ fn emit_ndjson_event(
             name,
             output,
             error,
+            duration_ms,
         } => write_json_line(
             stdout,
             &serde_json::json!({
@@ -3281,6 +3282,7 @@ fn emit_ndjson_event(
                 "name": name,
                 "output": output,
                 "error": error,
+                "duration_ms": duration_ms,
             }),
         ),
         ServerEvent::TokenUsage {

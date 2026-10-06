@@ -7,6 +7,7 @@ pub(super) fn handle_tool_done(
     name: String,
     output: String,
     error: Option<String>,
+    duration_ms: Option<u64>,
 ) -> bool {
     let display_output = remote.handle_tool_done(&id, &name, &output);
     let display_output = if error.is_some()
@@ -42,6 +43,13 @@ pub(super) fn handle_tool_done(
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call.clone()),
+        // #1453: the live row shows the server-measured duration the moment
+        // the ToolDone event lands, no history reload needed.
+        tool_duration_ms: duration_ms,
+        // #1454: the ToolDone event carries no wall-clock time, so the live
+        // row stamps itself at completion time; the stored session timestamp
+        // takes over on the next history reload.
+        timestamp: Some(chrono::Utc::now()),
     });
     app.note_todo_gate_result(&tool_call, &output, error.is_some());
     if is_batch {
@@ -92,6 +100,8 @@ pub(super) fn handle_generated_image(
         duration_secs: None,
         title: Some("Generated image".to_string()),
         tool_data: Some(tool_call),
+        timestamp: None,
+        tool_duration_ms: None,
     });
     app.status = ProcessingStatus::Streaming;
     true

@@ -406,6 +406,8 @@ pub(super) fn apply_replay_event(
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
+                tool_duration_ms: None,
             });
         }
         ReplayEvent::StartProcessing => {
@@ -445,6 +447,8 @@ pub(super) fn apply_replay_event(
                 duration_secs: None,
                 title: title.clone(),
                 tool_data: None,
+                timestamp: None,
+                tool_duration_ms: None,
             });
         }
         ReplayEvent::SwarmStatus { members } => {

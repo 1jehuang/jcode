@@ -442,6 +442,8 @@ impl App {
                                                     duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
+                                                    timestamp: None,
+                                                    tool_duration_ms: None,
                                                 });
                                                 }
                                             }
@@ -501,6 +503,8 @@ impl App {
                                                     duration_secs: None,
                                                     title: None,
                                                     tool_data: None,
+                                                    timestamp: None,
+                                                    tool_duration_ms: None,
                                                 });
                                                 }
                                             }
@@ -514,6 +518,8 @@ impl App {
                                             duration_secs: None,
                                             title: None,
                                             tool_data: None,
+                                            timestamp: None,
+                                            tool_duration_ms: None,
                                         });
                                         // Clear streaming state and continue with new turn
                                         self.clear_streaming_render_state();
@@ -703,6 +709,8 @@ impl App {
                                                 duration_secs: None,
                                                 title: None,
                                                 tool_data: Some(tool.clone()),
+                                                timestamp: None,
+                                                tool_duration_ms: None,
                                             });
 
                                             tool_calls.push(tool);
@@ -1088,6 +1096,8 @@ impl App {
                                             duration_secs: None,
                                             title: Some("Generated image".to_string()),
                                             tool_data: Some(tool_call),
+                                            timestamp: None,
+                                            tool_duration_ms: None,
                                         });
                                         if let Some(image) = crate::message::generated_image_rendered_image(
                                             &id,
@@ -1295,6 +1305,8 @@ impl App {
                         duration_secs: duration,
                         title: None,
                         tool_data: None,
+                        timestamp: None,
+                        tool_duration_ms: None,
                     });
                     self.push_turn_footer(duration);
                 }
@@ -1312,6 +1324,8 @@ impl App {
                             duration_secs: duration,
                             title: None,
                             tool_data: None,
+                            timestamp: None,
+                            tool_duration_ms: None,
                         });
                     }
                 }
@@ -1375,7 +1389,10 @@ impl App {
                         title: None,
                     }));
 
-                    // Update the tool's DisplayMessage with the output
+                    // Update the tool's DisplayMessage with the output. The
+                    // SDK executes remotely, so there is no locally measured
+                    // duration, but the completion wall-clock time is known
+                    // and stamps the live row (#1454).
                     let display_output = if sdk_is_error
                         && !sdk_content.starts_with("Error:")
                         && !sdk_content.starts_with("error:")
@@ -1385,7 +1402,13 @@ impl App {
                     } else {
                         sdk_content.clone()
                     };
-                    let _ = self.replace_latest_tool_display_message(&tc.id, None, display_output);
+                    let _ = self.replace_latest_tool_display_message_with_timing(
+                        &tc.id,
+                        None,
+                        display_output,
+                        None,
+                        Some(chrono::Utc::now()),
+                    );
 
                     self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
                     self.note_tool_completed(&tc, sdk_is_error);
@@ -1484,6 +1507,8 @@ impl App {
                                                     duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
+                                                    timestamp: None,
+                                                    tool_duration_ms: None,
                                                 });
                                                 }
                                             }
@@ -1623,10 +1648,11 @@ impl App {
                 };
 
                 // Update the tool's DisplayMessage with the output
-                let _ = self.replace_latest_tool_display_message(
+                let _ = self.replace_latest_tool_display_message_with_duration(
                     &tc.id,
                     tool_title.clone(),
                     output.clone(),
+                    Some(tool_duration_ms),
                 );
 
                 self.add_provider_message(Message::tool_result_with_duration(

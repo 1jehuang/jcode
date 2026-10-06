@@ -1,3 +1,89 @@
+/// #1453: a live tool row gets its duration from the ToolDone event itself.
+/// The row renders the badge the moment the result lands, before any history
+/// reload; when the event omits `duration_ms` (legacy server), the row simply
+/// carries no duration and renders no badge.
+#[test]
+fn test_live_tool_row_receives_duration_from_tool_done_event() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    app.is_processing = true;
+    app.auto_poke_incomplete_todos = false;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(42);
+    app.processing_started = Some(Instant::now());
+    app.visible_turn_started = Some(Instant::now());
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolStart {
+            id: "tool_timed".to_string(),
+            name: "bash".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolDone {
+            id: "tool_timed".to_string(),
+            name: "bash".to_string(),
+            output: "ok".to_string(),
+            error: None,
+            duration_ms: Some(48_300),
+        },
+        &mut remote,
+    );
+
+    let timed_msg = app
+        .display_messages()
+        .iter()
+        .rev()
+        .find(|dm| {
+            dm.tool_data
+                .as_ref()
+                .is_some_and(|td| td.id == "tool_timed")
+        })
+        .expect("missing tool_timed display message");
+    assert_eq!(
+        timed_msg.tool_duration_ms,
+        Some(48_300),
+        "live row must carry the ToolDone duration"
+    );
+
+    // Legacy wire: the event may omit duration_ms entirely.
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolStart {
+            id: "tool_untimed".to_string(),
+            name: "bash".to_string(),
+        },
+        &mut remote,
+    );
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ToolDone {
+            id: "tool_untimed".to_string(),
+            name: "bash".to_string(),
+            output: "ok".to_string(),
+            error: None,
+            duration_ms: None,
+        },
+        &mut remote,
+    );
+    let untimed_msg = app
+        .display_messages()
+        .iter()
+        .rev()
+        .find(|dm| {
+            dm.tool_data
+                .as_ref()
+                .is_some_and(|td| td.id == "tool_untimed")
+        })
+        .expect("missing tool_untimed display message");
+    assert_eq!(
+        untimed_msg.tool_duration_ms, None,
+        "omitted duration stays None"
+    );
+}
+
 #[test]
 fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text() {
     let mut app = create_test_app();
@@ -48,6 +134,7 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
             name: "read".to_string(),
             output: "1 fn main() {}".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
@@ -360,6 +447,8 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
                 content: "hello".to_string(),
                 tool_calls: None,
                 tool_data: None,
+                timestamp: None,
+                tool_duration_ms: None,
             }],
             images: vec![],
             provider_name: Some("mock".to_string()),
