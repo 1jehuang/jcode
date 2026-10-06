@@ -38,7 +38,7 @@
     "crates/jcode-base/src/provider/mod.rs": 2984,
     "crates/jcode-base/src/provider/models.rs": 1252,
     "crates/jcode-base/src/provider_catalog.rs": 1277,
-    "crates/jcode-base/src/session.rs": 1751,
+    "crates/jcode-base/src/session.rs": 1754,
     "crates/jcode-base/src/sidecar.rs": 1605,
     "crates/jcode-base/src/skill.rs": 1582,
     "crates/jcode-base/src/subscription_api.rs": 1206,
