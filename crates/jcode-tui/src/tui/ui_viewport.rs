@@ -1,4 +1,5 @@
 use super::*;
+use ratatui::widgets::{Block, BorderType, Borders};
 use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
@@ -361,14 +362,13 @@ pub(super) fn draw_messages(
     let viewport_height = render_area.height as usize;
     // Pinned todo band (display.pin_todos): the full todo card rendered beneath
     // the sticky previous-prompt preview, including at the top of the transcript.
-    let (pinned_todo_band, pinned_todo_more_line) =
-        pinned_todo_band_lines(app, text_render_area.width, render_area.height);
+    let pinned_todo_band = pinned_todo_band_lines(app, text_render_area.width, render_area.height);
     let max_scroll = compute_max_scroll_with_prompt_preview(
         total_lines,
         wrapped_user_prompt_starts,
         user_prompt_texts,
         text_render_area,
-        pinned_todo_band.len() as u16,
+        pinned_todo_band.height(),
     );
 
     super::set_last_max_scroll(max_scroll);
@@ -429,15 +429,18 @@ pub(super) fn draw_messages(
     } else {
         0u16
     };
-    let pinned_todo_lines = pinned_todo_band.len() as u16;
-    set_pinned_todo_more_area(pinned_todo_more_line.map(|line| {
+    let pinned_todo_lines = pinned_todo_band.height();
+    // The `… +N more` row sits inside the bordered card: one row below the
+    // top border and one column right of the left border.
+    set_pinned_todo_more_area(pinned_todo_band.more_line.map(|line| {
         Rect {
-            x: text_render_area.x,
+            x: text_render_area.x.saturating_add(2),
             y: render_area
                 .y
                 .saturating_add(prompt_preview_lines)
+                .saturating_add(1)
                 .saturating_add(line as u16),
-            width: text_render_area.width,
+            width: text_render_area.width.saturating_sub(4),
             height: 1,
         }
     }));
@@ -1233,7 +1236,7 @@ pub(super) fn draw_messages(
             height: pinned_todo_lines.min(render_area.height),
         };
         clear_area(frame, band_area);
-        frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
+        render_pinned_todo_band(frame, band_area, pinned_todo_band);
     }
 
     if crate::config::config().display.prompt_preview && scroll > 0 {
@@ -1377,62 +1380,129 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
     out
 }
 
-/// Lines for the pinned status band: optional todos followed by exactly one
-/// compact row per relevant background task. Completed tasks are shown briefly
-/// as confirmation, while running and failed tasks remain actionable.
-fn pinned_todo_band_lines(
-    app: &dyn TuiState,
-    width: u16,
-    viewport_height: u16,
-) -> (Vec<Line<'static>>, Option<usize>) {
-    if width < 16 || viewport_height < 3 {
-        return (Vec::new(), None);
+/// Pinned status band: an optional bordered todo card followed by exactly one
+/// compact row per relevant background task (unboxed, below the card).
+#[derive(Default)]
+struct PinnedTodoBand {
+    /// Todo rows drawn inside the rounded border. Empty means no box.
+    card: Vec<Line<'static>>,
+    title: String,
+    /// Index of the `… +N more` row within `card`.
+    more_line: Option<usize>,
+    tasks: Vec<Line<'static>>,
+}
+
+impl PinnedTodoBand {
+    fn card_height(&self) -> u16 {
+        if self.card.is_empty() {
+            0
+        } else {
+            self.card.len() as u16 + 2
+        }
     }
 
-    let task_lines: Vec<_> = app
+    fn height(&self) -> u16 {
+        self.card_height() + self.tasks.len() as u16
+    }
+}
+
+fn render_pinned_todo_band(frame: &mut Frame, area: Rect, band: PinnedTodoBand) {
+    let card_height = band.card_height().min(area.height);
+    if card_height > 0 {
+        let border_style = Style::default().fg(super::messages::todo_border_color());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(border_style)
+            .padding(ratatui::widgets::Padding::horizontal(1))
+            .title(Span::styled(
+                band.title,
+                border_style.add_modifier(Modifier::BOLD),
+            ));
+        let card_area = Rect {
+            height: card_height,
+            ..area
+        };
+        frame.render_widget(Paragraph::new(band.card).block(block), card_area);
+    }
+    if !band.tasks.is_empty() && area.height > card_height {
+        let tasks_area = Rect {
+            y: area.y + card_height,
+            height: area.height - card_height,
+            ..area
+        };
+        frame.render_widget(Paragraph::new(band.tasks), tasks_area);
+    }
+}
+
+/// Build the pinned status band. Todos are shown briefly as a bordered card;
+/// completed tasks are shown briefly as confirmation, while running and failed
+/// tasks remain actionable.
+fn pinned_todo_band_lines(app: &dyn TuiState, width: u16, viewport_height: u16) -> PinnedTodoBand {
+    if width < 16 || viewport_height < 3 {
+        return PinnedTodoBand::default();
+    }
+
+    let tasks: Vec<_> = app
         .background_task_rows()
         .iter()
         .map(|task| active_background_task_line(task, width))
         .collect();
+    // Card content lives inside the border plus one column of padding per side.
+    let inner_width = width.saturating_sub(4);
+    let mut title = String::from(" Todos ");
     let card_lines = if crate::config::config().display.pin_todos {
         app.pinned_todos_payload()
             .map(|payload| {
-                let msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                if let Some((done, total)) = super::messages::todo_payload_counts(payload) {
+                    title = format!(" Todos {}/{} ", done, total);
+                }
+                // Unboxed body: the band draws its own border below. Go through
+                // the shared message-line cache so an unchanged list is not
+                // re-rendered on every frame. The distinct title keeps this
+                // entry apart from the boxed inline card for the same payload.
+                let msg = crate::tui::DisplayMessage::todos(payload.to_string())
+                    .with_title("Todos (pinned body)");
                 super::messages::get_cached_message_lines(
                     &msg,
-                    width,
+                    inner_width,
                     app.diff_mode(),
-                    super::messages::render_todos_message,
+                    |msg, width, _| {
+                        super::messages::render_todo_card_body(&msg.content, width)
+                            .unwrap_or_default()
+                    },
                 )
             })
             .unwrap_or_default()
     } else {
         Vec::new()
     };
-    if card_lines.is_empty() && task_lines.is_empty() {
-        return (Vec::new(), None);
-    }
 
-    // Band budget: about a third of the viewport.
+    // Band budget: about a third of the viewport, including the two border
+    // rows around the card and the task rows below it.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
-    let content_budget = budget.saturating_sub(task_lines.len()).max(2);
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let content_budget = budget.saturating_sub(tasks.len()).saturating_sub(2).max(2);
+    let mut card: Vec<Line<'static>> = Vec::new();
     let has_more = card_lines.len() > content_budget && !app.pinned_todos_expanded();
     let mut more_line = None;
     if has_more {
         let shown = content_budget.saturating_sub(1);
         let hidden = card_lines.len() - shown;
-        lines.extend(card_lines.into_iter().take(shown));
-        more_line = Some(lines.len());
-        lines.push(Line::from(Span::styled(
-            format!("  … +{} more (todo)", hidden),
+        card.extend(card_lines.into_iter().take(shown));
+        more_line = Some(card.len());
+        card.push(Line::from(Span::styled(
+            format!("… +{} more (todo)", hidden),
             Style::default().fg(dim_color()),
         )));
     } else {
-        lines.extend(card_lines);
+        card.extend(card_lines);
     }
-    lines.extend(task_lines);
-    (lines, more_line)
+    PinnedTodoBand {
+        card,
+        title,
+        more_line,
+        tasks,
+    }
 }
 
 fn active_background_task_line(task: &crate::tui::BackgroundTaskRow, width: u16) -> Line<'static> {
