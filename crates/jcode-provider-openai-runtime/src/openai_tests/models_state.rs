@@ -485,3 +485,36 @@ fn resolve_api_base_precedence_and_validation() {
     let _p5 = EnvVarGuard::set("JCODE_OPENAI_API_BASE", "not-a-url");
     assert_eq!(OpenAIProvider::resolve_api_base(), "https://b.example/v1");
 }
+
+#[test]
+fn test_ultrafast_service_tier_round_trips_into_request_payload() {
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    // Write the model directly: set_model validates against the machine's
+    // cached account catalog, which is not what this test is about.
+    *provider.model.try_write().unwrap() = "gpt-6-astra".to_string();
+    assert_eq!(
+        provider.available_service_tiers(),
+        vec!["priority", "ultrafast", "flex"]
+    );
+
+    for alias in ["ultrafast", "ultra", "Ultra-Fast"] {
+        provider.set_service_tier(alias).unwrap();
+        assert_eq!(provider.service_tier().as_deref(), Some("ultrafast"));
+    }
+    let request = provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", true);
+    assert_eq!(request["service_tier"], serde_json::json!("ultrafast"));
+
+    provider.set_service_tier("off").unwrap();
+    assert_eq!(provider.service_tier(), None);
+    let request = provider.response_request_for_model("gpt-6-astra", &[], &[], "sys", true);
+    assert!(request.get("service_tier").is_none());
+
+    *provider.model.try_write().unwrap() = "gpt-5.5".to_string();
+    assert_eq!(provider.available_service_tiers(), vec!["priority", "flex"]);
+}
