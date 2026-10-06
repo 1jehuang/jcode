@@ -580,6 +580,22 @@ pub(super) fn resolve_swarm_spawn_effort(
     clean(requested_effort).or_else(|| clean(configured_swarm_effort))
 }
 
+/// Spawn mode for one swarm spawn. An explicit per-call mode wins, except
+/// `auto`: a model passing `auto` expresses no preference, so the user's
+/// configured `agents.swarm_spawn_mode` (inline by default) decides. Without
+/// this, `auto` tried a visible window first and, from terminals jcode cannot
+/// target (VS Code, Cursor), opened a separate terminal app instead of the
+/// inline gallery the user configured. Configuring `auto` still works.
+pub(super) fn resolve_swarm_spawn_mode(
+    requested: Option<SwarmSpawnMode>,
+    configured: SwarmSpawnMode,
+) -> SwarmSpawnMode {
+    match requested {
+        Some(SwarmSpawnMode::Auto) | None => configured,
+        Some(mode) => mode,
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
@@ -618,7 +634,7 @@ pub(super) async fn spawn_swarm_agent(
         client_terminal_env_for_session(req_session_id, client_connections).await;
     let agents_config = &crate::config::config().agents;
     let configured_swarm_model = agents_config.swarm_model.clone();
-    let resolved_spawn_mode = spawn_mode.unwrap_or(agents_config.swarm_spawn_mode);
+    let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);
     let selection = resolve_swarm_spawn_selection(
         requested_model.clone(),
         configured_swarm_model.clone(),

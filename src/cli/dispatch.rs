@@ -330,7 +330,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             flow_id,
             cancel,
             no_validate,
-            google_access_tier,
+            google,
             api_base,
             api_key,
             api_key_env,
@@ -342,32 +342,27 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 _ => None,
             };
             let before = default_family.map(login_account_labels);
+            let mut options = login::LoginOptions {
+                no_browser,
+                print_auth_url,
+                callback_url,
+                auth_code,
+                json,
+                complete,
+                flow_id,
+                cancel,
+                no_validate,
+                openai_compatible_api_base: api_base,
+                openai_compatible_api_key: api_key,
+                openai_compatible_api_key_env: api_key_env,
+                openai_compatible_default_model: args.model.clone(),
+                ..Default::default()
+            };
+            google.apply(&mut options)?;
             login::run_login(
                 &login_choice,
                 account.as_deref(),
-                login::LoginOptions {
-                    no_browser,
-                    print_auth_url,
-                    callback_url,
-                    auth_code,
-                    json,
-                    complete,
-                    flow_id,
-                    cancel,
-                    no_validate,
-                    google_access_tier: google_access_tier.map(|tier| match tier {
-                        super::args::GoogleAccessTierArg::Full => {
-                            auth::google::GmailAccessTier::Full
-                        }
-                        super::args::GoogleAccessTierArg::Readonly => {
-                            auth::google::GmailAccessTier::ReadOnly
-                        }
-                    }),
-                    openai_compatible_api_base: api_base,
-                    openai_compatible_api_key: api_key,
-                    openai_compatible_api_key_env: api_key_env,
-                    openai_compatible_default_model: args.model.clone(),
-                },
+                options,
             )
             .await?;
             if make_default {

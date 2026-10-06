@@ -1,9 +1,9 @@
 {
-  "total": 3730,
+  "total": 3744,
   "totals_by_pattern": {
-    "dot_ok": 1427,
+    "dot_ok": 1436,
     "let_underscore": 1383,
-    "unwrap_or_default": 920
+    "unwrap_or_default": 925
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -352,7 +352,7 @@
       "unwrap_or_default": 1
     },
     "crates/jcode-app-core/src/server/util.rs": {
-      "dot_ok": 13,
+      "dot_ok": 12,
       "let_underscore": 0,
       "unwrap_or_default": 0
     },
@@ -529,7 +529,7 @@
     "crates/jcode-app-core/src/tool/mcp.rs": {
       "dot_ok": 0,
       "let_underscore": 0,
-      "unwrap_or_default": 3
+      "unwrap_or_default": 5
     },
     "crates/jcode-app-core/src/tool/mod.rs": {
       "dot_ok": 0,
@@ -709,6 +709,11 @@
     "crates/jcode-base/src/auth/google.rs": {
       "dot_ok": 4,
       "let_underscore": 0,
+      "unwrap_or_default": 1
+    },
+    "crates/jcode-base/src/auth/google/setup.rs": {
+      "dot_ok": 6,
+      "let_underscore": 0,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/auth/grok_build.rs": {
@@ -762,13 +767,18 @@
       "unwrap_or_default": 11
     },
     "crates/jcode-base/src/browser.rs": {
-      "dot_ok": 12,
-      "let_underscore": 12,
+      "dot_ok": 11,
+      "let_underscore": 9,
       "unwrap_or_default": 2
     },
     "crates/jcode-base/src/browser_detect.rs": {
       "dot_ok": 4,
       "let_underscore": 0,
+      "unwrap_or_default": 0
+    },
+    "crates/jcode-base/src/browser_session.rs": {
+      "dot_ok": 1,
+      "let_underscore": 3,
       "unwrap_or_default": 0
     },
     "crates/jcode-base/src/bus.rs": {
@@ -861,6 +871,11 @@
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
+    "crates/jcode-base/src/google_calendar.rs": {
+      "dot_ok": 0,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
+    },
     "crates/jcode-base/src/hooks.rs": {
       "dot_ok": 0,
       "let_underscore": 2,
@@ -890,6 +905,11 @@
       "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 0
+    },
+    "crates/jcode-base/src/mcp/budget.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 1
     },
     "crates/jcode-base/src/mcp/client.rs": {
       "dot_ok": 0,
@@ -2585,6 +2605,11 @@
       "dot_ok": 0,
       "let_underscore": 1,
       "unwrap_or_default": 1
+    },
+    "src/cli/login/google.rs": {
+      "dot_ok": 3,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
     },
     "src/cli/login/scriptable.rs": {
       "dot_ok": 0,

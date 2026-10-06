@@ -2,18 +2,16 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
 
+mod google;
+#[allow(unused_imports)]
+pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum TranscriptModeArg {
     Insert,
     Append,
     Replace,
     Send,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum GoogleAccessTierArg {
-    Full,
-    Readonly,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -258,9 +256,8 @@ pub(crate) enum Command {
         #[arg(long)]
         no_validate: bool,
 
-        /// Gmail/Google access tier for non-interactive flows. Defaults to full.
-        #[arg(long, value_enum)]
-        google_access_tier: Option<GoogleAccessTierArg>,
+        #[command(flatten)]
+        google: GoogleLoginArgs,
 
         /// OpenAI-compatible API base URL. Used with --provider openai-compatible/custom profiles.
         #[arg(long)]
