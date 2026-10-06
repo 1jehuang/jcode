@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::io::{self, IsTerminal, Write};
 use std::panic;
+use std::sync::Mutex;
 
 use crate::{id, session, telemetry, tui};
 
@@ -350,13 +351,59 @@ fn init_tui_terminal(inherited_terminal: bool) -> Result<ratatui::DefaultTermina
     if inherited_terminal {
         init_tui_terminal_resume()
     } else {
+        stash_panic_hook_for_ratatui_init();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init)).map_err(|payload| {
             anyhow::anyhow!(
                 "failed to initialize terminal: {}",
                 panic_payload_to_string(payload.as_ref())
             )
         })
+        .inspect(|_| {
+            // `ratatui::init` installs its own panic hook whose restore uses
+            // `eprintln!` for failure reporting. On a terminal that died
+            // mid-session (SIGHUP-killed window, dropped remote client) that
+            // restore fails with EIO and the `eprintln!` itself panics inside
+            // the panic path, aborting the process (issue #599 class).
+            // Discard that wrapper and restore our chain fronted by the quiet
+            // restore.
+            rechain_panic_hook_after_ratatui_init();
+        })
     }
+}
+
+/// The panic-hook chain jcode installed before `ratatui::init` ran.
+///
+/// `ratatui::init` installs its own hook that first restores the terminal with
+/// the loud `restore()`, whose failure reporting (`eprintln!` to a dead
+/// terminal) can itself panic inside the panic path and abort the process
+/// (issue #599 class). We cannot chain through that wrapper, so we drop it
+/// entirely and rebuild the chain from this stashed hook instead.
+static PRE_RATATUI_PANIC_HOOK: Mutex<Option<Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send>>> =
+    Mutex::new(None);
+
+/// Stash the current panic-hook chain just before `ratatui::init` replaces
+/// it, so [`rechain_panic_hook_after_ratatui_init`] can restore the chain
+/// without ratatui's unsafe wrapper.
+fn stash_panic_hook_for_ratatui_init() {
+    if let Ok(mut stash) = PRE_RATATUI_PANIC_HOOK.lock() {
+        *stash = Some(panic::take_hook());
+    }
+}
+
+fn rechain_panic_hook_after_ratatui_init() {
+    // The hook `take_hook` would return here is ratatui's wrapper around our
+    // bookkeeping hook. Discard the wrapper and re-install the stashed original
+    // chain, fronted with the quiet terminal restore so the terminal is still
+    // cleaned up on panic.
+    let original_hook = PRE_RATATUI_PANIC_HOOK
+        .lock()
+        .ok()
+        .and_then(|mut stash| stash.take())
+        .unwrap_or_else(panic::take_hook);
+    panic::set_hook(Box::new(move |info| {
+        jcode_tui_style::restore_terminal_quietly();
+        original_hook(info);
+    }));
 }
 
 pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeGuard)> {

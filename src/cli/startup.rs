@@ -508,10 +508,19 @@ fn report_main_error(error: &anyhow::Error) {
     logging::error(&error_str);
 
     if let Some(session_id) = terminal::get_current_session() {
-        output::stderr_blank_line();
-        output::stderr_info("\x1b[33mTo restore this session, run:\x1b[0m");
-        output::stderr_info(format!("  jcode --resume {}", session_id));
-        output::stderr_blank_line();
+        // The terminal can already be gone by the time a fatal error is
+        // reported (SIGHUP-killed window, detached remote client). A failing
+        // `eprintln!` here would panic inside the panic path and abort the
+        // process with a core dump, so write best-effort and ignore failures.
+        use std::io::Write;
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "\n{}\n  jcode --resume {}\n",
+            "\x1b[33mTo restore this session, run:\x1b[0m",
+            session_id
+        );
+        let _ = stderr.flush();
     }
 }
 

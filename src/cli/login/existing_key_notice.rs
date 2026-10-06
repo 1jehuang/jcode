@@ -42,7 +42,7 @@ fn credential_source(resolved: &ResolvedOpenAiCompatibleProfile) -> String {
 
 pub(super) fn announce_existing_api_key(resolved: &ResolvedOpenAiCompatibleProfile) {
     if let Some(notice) = existing_api_key_notice(resolved) {
-        eprintln!("{}", notice);
+        crate::console::eprintln_best_effort(&format!("{}", notice));
     }
 }
 

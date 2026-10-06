@@ -82,7 +82,9 @@ where
             }
             Err(error) if error.is_temporary() => {
                 if !reported_offline {
-                    eprintln!("  Connection interrupted. Retrying with backoff...");
+                    crate::console::eprintln_best_effort(
+                        "  Connection interrupted. Retrying with backoff...",
+                    );
                     reported_offline = true;
                 }
                 backoff.on_offline_error();
@@ -114,12 +116,16 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
         .map_err(anyhow::Error::new)
         .context("Failed to start Jcode account login")?;
 
-    eprintln!("\nJcode Account Login");
-    eprintln!("  Opening the secure account approval page:");
-    eprintln!("  {}", device.verification_uri_complete);
-    eprintln!("\n  Approve the request in that browser. No terminal email entry is needed.");
+    crate::console::eprintln_best_effort("\nJcode Account Login");
+    crate::console::eprintln_best_effort("  Opening the secure account approval page:");
+    crate::console::eprintln_best_effort(&format!("  {}", device.verification_uri_complete));
+    crate::console::eprintln_best_effort(
+        "\n  Approve the request in that browser. No terminal email entry is needed.",
+    );
     super::maybe_open_browser(&device.verification_uri_complete, no_browser);
-    eprintln!("  Waiting for browser approval. Press Ctrl-C to cancel...");
+    crate::console::eprintln_best_effort(
+        "  Waiting for browser approval. Press Ctrl-C to cancel...",
+    );
 
     let approved = match poll_for_api_key(
         &client,
@@ -133,15 +139,21 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
     {
         KeyPollCompletion::Approved(approved) => approved,
         KeyPollCompletion::Canceled => {
-            eprintln!("\n  Login canceled before approval. No credential was saved.");
+            crate::console::eprintln_best_effort(
+                "\n  Login canceled before approval. No credential was saved.",
+            );
             return Ok(LoginCompletion::CanceledBeforeApproval);
         }
     };
 
     persist_approved_key(&approved)?;
-    eprintln!("\n  Account approved for {}.", approved.email);
-    eprintln!("  Credential saved securely with owner-only permissions.");
-    eprintln!("  Waiting for hosted billing and your spending limit on /v1/me...");
+    crate::console::eprintln_best_effort(&format!("\n  Account approved for {}.", approved.email));
+    crate::console::eprintln_best_effort(
+        "  Credential saved securely with owner-only permissions.",
+    );
+    crate::console::eprintln_best_effort(
+        "  Waiting for hosted billing and your spending limit on /v1/me...",
+    );
 
     let activation = tokio::select! {
         result = subscription_api::poll_for_paid_activation(
@@ -165,15 +177,15 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
                 Some(&me.email),
                 Some(&me.tier),
             )?;
-            eprintln!(
+            crate::console::eprintln_best_effort(&format!(
                 "  ✓ Hosted models are ready with a ${:.2} monthly spending limit.",
                 me.usage.budget_usd
-            );
+            ));
             LoginCompletion::Active
         }
         Some(ActivationOutcome::Canceled(_)) => {
-            eprintln!(
-                "  Billing setup was canceled. Your account key remains saved, but hosted usage is not enabled."
+            crate::console::eprintln_best_effort(
+                "  Billing setup was canceled. Your account key remains saved, but hosted usage is not enabled.",
             );
             print_recovery_actions();
             LoginCompletion::KeySavedPlanPending
@@ -182,13 +194,15 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
             last_error_was_offline,
         }) => {
             if last_error_was_offline {
-                eprintln!(
-                    "  Hosted billing could not be confirmed before timeout because the account API remained unreachable."
+                crate::console::eprintln_best_effort(
+                    "  Hosted billing could not be confirmed before timeout because the account API remained unreachable.",
                 );
             } else {
-                eprintln!("  A spending limit was not detected before timeout.");
+                crate::console::eprintln_best_effort(
+                    "  A spending limit was not detected before timeout.",
+                );
             }
-            eprintln!("  Your valid account key remains saved.");
+            crate::console::eprintln_best_effort("  Your valid account key remains saved.");
             print_recovery_actions();
             LoginCompletion::KeySavedPlanPending
         }
@@ -205,7 +219,9 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
             );
         }
         None => {
-            eprintln!("\n  Activation wait canceled. Your valid account key remains saved.");
+            crate::console::eprintln_best_effort(
+                "\n  Activation wait canceled. Your valid account key remains saved.",
+            );
             print_recovery_actions();
             LoginCompletion::KeySavedPlanPending
         }
@@ -216,9 +232,9 @@ pub(super) async fn login_jcode_device_flow(no_browser: bool) -> Result<LoginCom
 }
 
 fn print_recovery_actions() {
-    eprintln!("  Check:   jcode account status");
-    eprintln!("  Manage:  jcode account manage");
-    eprintln!("  Log out: jcode account logout");
+    crate::console::eprintln_best_effort("  Check:   jcode account status");
+    crate::console::eprintln_best_effort("  Manage:  jcode account manage");
+    crate::console::eprintln_best_effort("  Log out: jcode account logout");
 }
 
 #[cfg(test)]

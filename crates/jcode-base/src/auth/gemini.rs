@@ -361,25 +361,28 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
         let redirect_uri = format!("http://127.0.0.1:{port}/oauth2callback");
         let auth_url = build_web_auth_url(&redirect_uri, &challenge, &state)?;
 
-        eprintln!("\nOpening browser for Gemini login...\n");
-        eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
+        crate::console::eprintln_best_effort("\nOpening browser for Gemini login...\n");
+        crate::console::eprintln_best_effort(&format!(
+            "If the browser didn't open, visit:\n{}\n",
+            auth_url
+        ));
         if let Some(qr) = crate::login_qr::indented_section(
             &auth_url,
             "Scan this QR on another device if this machine has no browser:",
             "    ",
             crate::auth::browser_suppressed(no_browser),
         ) {
-            eprintln!("{qr}\n");
+            crate::console::eprintln_best_effort(&format!("{qr}\n"));
         }
 
         let browser_opened = open::that(&auth_url).is_ok();
         if browser_opened {
-            eprintln!(
+            crate::console::eprintln_best_effort(&format!(
                 "Waiting up to 300s for automatic callback on {}",
                 redirect_uri
-            );
-            eprintln!(
-                "If the page says sign-in succeeded but jcode does not continue within a few seconds, press Ctrl+C and retry with `--no-browser` to use the manual code flow."
+            ));
+            crate::console::eprintln_best_effort(
+                "If the page says sign-in succeeded but jcode does not continue within a few seconds, press Ctrl+C and retry with `--no-browser` to use the manual code flow.",
             );
             match tokio::time::timeout(
                 std::time::Duration::from_secs(300),
@@ -395,19 +398,19 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
                     return Ok(tokens);
                 }
                 Ok(Err(err)) => {
-                    eprintln!(
+                    crate::console::eprintln_best_effort(&format!(
                         "Automatic callback failed ({err}). Falling back to manual auth code entry."
-                    );
+                    ));
                 }
                 Err(_) => {
-                    eprintln!(
-                        "Timed out waiting for callback. Falling back to manual auth code entry."
+                    crate::console::eprintln_best_effort(
+                        "Timed out waiting for callback. Falling back to manual auth code entry.",
                     );
                 }
             }
         } else {
-            eprintln!(
-                "Couldn't open a browser on this machine. Falling back to manual auth code entry.\n"
+            crate::console::eprintln_best_effort(
+                "Couldn't open a browser on this machine. Falling back to manual auth code entry.\n",
             );
         }
     }
@@ -428,21 +431,26 @@ async fn manual_login(
     }
 
     let auth_url = build_manual_auth_url(GEMINI_MANUAL_REDIRECT_URI, challenge, state)?;
-    eprintln!("\nManual Gemini auth required.\n");
-    eprintln!("Open this URL in your browser:\n\n{}\n", auth_url);
+    crate::console::eprintln_best_effort("\nManual Gemini auth required.\n");
+    crate::console::eprintln_best_effort(&format!(
+        "Open this URL in your browser:\n\n{}\n",
+        auth_url
+    ));
     if let Some(qr) = crate::login_qr::indented_section(
         &auth_url,
         "Scan this QR on another device if needed:",
         "    ",
         crate::auth::browser_suppressed(no_browser),
     ) {
-        eprintln!("{qr}\n");
+        crate::console::eprintln_best_effort(&format!("{qr}\n"));
     }
     if !crate::auth::browser_suppressed(no_browser) {
         let _ = open::that(&auth_url);
     }
-    eprintln!("After approving access, Google will show an authorization code. Paste it below.\n");
-    eprint!("Authorization code: ");
+    crate::console::eprintln_best_effort(
+        "After approving access, Google will show an authorization code. Paste it below.\n",
+    );
+    crate::console::eprompt_best_effort("Authorization code: ");
     io::stdout().flush()?;
     let code = crate::secret_input::read_secret_line()?;
     if code.trim().is_empty() {
