@@ -31,13 +31,13 @@ struct McpSearchResult {
 /// tool references, so an empty or broad query cannot pull in a whole catalog.
 const MAX_SEARCH_TOOL_REFERENCES: usize = 32;
 
-/// Matches returned with full descriptions and input schemas. Further matches
-/// are listed by name only, so a broad query cannot flood the context.
-const MAX_DETAILED_SEARCH_RESULTS: usize = 12;
+/// Token budget for one `mcp_search` result. Descriptions and schemas are
+/// fitted to it adaptively: a narrow query keeps everything, a broad one
+/// trims long descriptions first, then drops schemas for lower matches.
+const SEARCH_TOKEN_BUDGET: usize = 6_000;
 
-/// Descriptions are clipped in search results; long vendor descriptions
-/// (scopes, field glossaries, examples) dominate token cost otherwise.
-const MAX_SEARCH_DESCRIPTION_CHARS: usize = 400;
+/// Shortest a description is clipped to when fitting the search budget.
+const MIN_SEARCH_DESCRIPTION_CHARS: usize = 120;
 
 /// Clip `text` to `max` chars on a char boundary, marking the cut.
 fn clip_description(text: &str, max: usize) -> String {
@@ -78,6 +78,73 @@ fn match_rank(
         .iter()
         .all(|term| all.contains(term.as_str()))
         .then_some(MatchRank::Description)
+}
+
+/// Render search matches within `budget` tokens. Tries the loosest settings
+/// first: every match in full, then shorter descriptions, then full detail for
+/// only the leading matches with the rest listed by name. The first rendering
+/// that fits wins, so small results are never trimmed.
+fn fit_search_results(matches: &[McpSearchResult], budget: usize) -> (String, usize) {
+    use jcode_core::util::estimate_tokens;
+    let render = |detailed: usize, description_chars: Option<usize>| {
+        let head: Vec<McpSearchResult> = matches[..detailed]
+            .iter()
+            .map(|m| McpSearchResult {
+                name: m.name.clone(),
+                server: m.server.clone(),
+                tool: m.tool.clone(),
+                description: description_chars.map_or_else(
+                    || m.description.clone(),
+                    |max| clip_description(&m.description, max),
+                ),
+                input_schema: m.input_schema.clone(),
+            })
+            .collect();
+        let mut out = serde_json::to_string(&head).unwrap_or_default();
+        if detailed < matches.len() {
+            let rest: Vec<&str> = matches[detailed..]
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect();
+            out.push_str(&format!(
+                "\n\n{} more matches (names only; search for one by name for its schema): {}",
+                rest.len(),
+                rest.join(", ")
+            ));
+        }
+        out
+    };
+    let fits = |out: &String| estimate_tokens(out) <= budget;
+
+    let full = render(matches.len(), None);
+    if fits(&full) {
+        return (full, matches.len());
+    }
+    // Shorten descriptions progressively, keeping every schema.
+    let longest = matches
+        .iter()
+        .map(|m| m.description.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut chars = longest / 2;
+    while chars >= MIN_SEARCH_DESCRIPTION_CHARS {
+        let out = render(matches.len(), Some(chars));
+        if fits(&out) {
+            return (out, matches.len());
+        }
+        chars /= 2;
+    }
+    // Keep full detail for as many leading matches as fit.
+    let (mut lo, mut hi) = (0usize, matches.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(&render(mid, Some(MIN_SEARCH_DESCRIPTION_CHARS))) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    (render(lo, Some(MIN_SEARCH_DESCRIPTION_CHARS)), lo)
 }
 
 /// Fixed MCP discovery surface used when individual server definitions are deferred.
@@ -127,6 +194,7 @@ impl Tool for McpSearchTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let input_flags = input.clone();
         let params: McpSearchInput = serde_json::from_value(input)?;
         let server_filter = params
             .server
@@ -190,10 +258,11 @@ impl Tool for McpSearchTool {
                         name,
                         server,
                         tool: tool.name,
-                        description: clip_description(
-                            tool.description.as_deref().unwrap_or("MCP tool"),
-                            MAX_SEARCH_DESCRIPTION_CHARS,
-                        ),
+                        description: tool
+                            .description
+                            .unwrap_or_else(|| "MCP tool".to_string())
+                            .trim()
+                            .to_string(),
                         input_schema: tool.input_schema,
                     },
                 ))
@@ -203,36 +272,28 @@ impl Tool for McpSearchTool {
         // Name matches win. Description-only matches are noise once any tool
         // matches by name, so they are dropped rather than ranked below.
         let best = ranked.iter().map(|(rank, _)| *rank).max();
-        let mut matches: Vec<McpSearchResult> = ranked
+        let matches: Vec<McpSearchResult> = ranked
             .into_iter()
             .filter(|(rank, _)| Some(*rank) == best)
             .map(|(_, result)| result)
             .collect();
         let total = matches.len();
-        let overflow: Vec<McpSearchResult> = if matches.len() > MAX_DETAILED_SEARCH_RESULTS {
-            matches.split_off(MAX_DETAILED_SEARCH_RESULTS)
+        let budget = if super::accepts_large_output(&input_flags) {
+            usize::MAX
         } else {
-            Vec::new()
+            SEARCH_TOKEN_BUDGET
         };
+        let (output, detailed) = fit_search_results(&matches, budget);
 
         // Ask the agent to load the matched definitions natively. With
         // provider-native deferred loading these become directly callable
         // tools without changing the cached prompt prefix; other providers
         // ignore the references and use `mcp_call` with the schemas above.
-        let references: Vec<&str> = matches
+        let references: Vec<&str> = matches[..detailed]
             .iter()
             .take(MAX_SEARCH_TOOL_REFERENCES)
             .map(|m| m.name.as_str())
             .collect();
-        let mut output = serde_json::to_string(&matches)?;
-        if !overflow.is_empty() {
-            let rest: Vec<&str> = overflow.iter().map(|m| m.name.as_str()).collect();
-            output.push_str(&format!(
-                "\n\n{} more matches (names only; search for one by name for its schema): {}",
-                rest.len(),
-                rest.join(", ")
-            ));
-        }
         Ok(ToolOutput::new(output)
             .with_title(format!("MCP tools ({})", total))
             .with_metadata(json!({ "tool_references": references })))
@@ -294,6 +355,7 @@ impl Tool for McpCallTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let input_flags = input.clone();
         let mut params: McpCallInput = serde_json::from_value(input)?;
         let dispatched_name = dispatch_name(&params.server, &params.tool);
         // Check the current alias too: a per-alias deny must not be bypassed
@@ -335,6 +397,9 @@ impl Tool for McpCallTool {
         if params.arguments.is_null() {
             params.arguments = Value::Object(serde_json::Map::new());
         }
+        // The escape hatch may arrive at either level; never forward it.
+        let accept_large_output = super::accepts_large_output(&input_flags)
+            | crate::mcp::take_accept_large_output(&mut params.arguments);
 
         // Deferred dispatch must honor the same session-local replacement as
         // eager and batched dispatch. Never fall through to the real MCP server
@@ -392,6 +457,11 @@ impl Tool for McpCallTool {
             }
         }
         let output = output_parts.join("\n");
+        let output = if accept_large_output {
+            output
+        } else {
+            crate::mcp::budget::fit_to_budget(&output, crate::mcp::budget::MCP_RESULT_TOKEN_BUDGET)
+        };
         let title = format!("mcp:{}:{}", params.server, params.tool);
         if result.is_error {
             Ok(ToolOutput::new(format!("Error: {}", output)).with_title(title))
@@ -1114,9 +1184,47 @@ mod tests {
     fn search_descriptions_are_clipped() {
         assert_eq!(clip_description("  short  ", 10), "short");
         let long = "é".repeat(500);
-        let clipped = clip_description(&long, MAX_SEARCH_DESCRIPTION_CHARS);
-        assert_eq!(clipped.chars().count(), MAX_SEARCH_DESCRIPTION_CHARS + 1);
+        let clipped = clip_description(&long, 400);
+        assert_eq!(clipped.chars().count(), 401);
         assert!(clipped.ends_with('…'));
+    }
+
+    fn search_result(n: usize, description_chars: usize) -> McpSearchResult {
+        McpSearchResult {
+            name: format!("mcp__s__tool_{n}"),
+            server: "s".into(),
+            tool: format!("tool_{n}"),
+            description: "d".repeat(description_chars),
+            input_schema: json!({"type": "object", "properties": {"q": {"type": "string"}}}),
+        }
+    }
+
+    #[test]
+    fn search_results_fit_the_budget_adaptively() {
+        // Small results come back whole, long descriptions included.
+        let small = vec![search_result(0, 2_000)];
+        let (out, detailed) = fit_search_results(&small, SEARCH_TOKEN_BUDGET);
+        assert_eq!(detailed, 1);
+        assert!(out.contains(&"d".repeat(2_000)));
+
+        // Moderately over budget: every match keeps its schema, descriptions shrink.
+        let medium: Vec<_> = (0..10).map(|n| search_result(n, 4_000)).collect();
+        let (out, detailed) = fit_search_results(&medium, SEARCH_TOKEN_BUDGET);
+        assert_eq!(detailed, 10);
+        assert!(jcode_core::util::estimate_tokens(&out) <= SEARCH_TOKEN_BUDGET);
+        assert!(!out.contains("more matches"));
+
+        // Far over budget: leading matches keep detail, the rest are named.
+        let large: Vec<_> = (0..400).map(|n| search_result(n, 1_000)).collect();
+        let (out, detailed) = fit_search_results(&large, SEARCH_TOKEN_BUDGET);
+        assert!(detailed > 0 && detailed < 400, "{detailed}");
+        assert!(out.contains(&format!("{} more matches", 400 - detailed)));
+        assert!(out.contains("mcp__s__tool_399"));
+        assert!(jcode_core::util::estimate_tokens(&out) <= SEARCH_TOKEN_BUDGET + 2_000);
+
+        // Opting in returns everything.
+        let (_, detailed) = fit_search_results(&large, usize::MAX);
+        assert_eq!(detailed, 400);
     }
 
     #[tokio::test]
