@@ -1,10 +1,12 @@
+use super::subscribe_working_dir_policy::{
+    effective_subscribe_working_dir, subscribe_working_dir_replacement,
+};
 use super::{
-    apply_or_defer_subscribe_working_dir, claim_live_target_agent, effective_subscribe_working_dir,
-    handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
-    mark_remote_reload_started, prewarm_idle_agent, remove_detached_source_if_unclaimed,
-    rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
+    apply_or_defer_subscribe_working_dir, claim_live_target_agent, handle_clear_session,
+    handle_reload, handle_resume_session, handle_subscribe, mark_remote_reload_started,
+    prewarm_idle_agent, remove_detached_source_if_unclaimed, rename_shutdown_signal,
+    rename_swarm_member_session, restored_session_was_interrupted,
     session_was_interrupted_by_reload, session_working_dir_for_client, subscribe_should_mark_ready,
-    subscribe_working_dir_replacement,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -571,7 +573,7 @@ async fn apply_subscribe_working_dir_keeps_project_when_client_reports_another_d
     );
 
     // A client whose inherited cwd is home must not re-pin the session (issue #481).
-    apply_or_defer_subscribe_working_dir(&agent, &home_str, "session_test_481");
+    apply_or_defer_subscribe_working_dir(&agent, &home_str, "session_test_481", false);
     assert_eq!(
         agent.lock().await.working_dir(),
         Some(project_str.as_str()),
@@ -586,7 +588,7 @@ async fn apply_subscribe_working_dir_keeps_project_when_client_reports_another_d
     // explicit request that does not exist yet.
     let other = home.join("jcode-481-other");
     let other_str = other.to_string_lossy().to_string();
-    apply_or_defer_subscribe_working_dir(&agent, &other_str, "session_test_481");
+    apply_or_defer_subscribe_working_dir(&agent, &other_str, "session_test_481", false);
     assert_eq!(
         agent.lock().await.working_dir(),
         Some(project_str.as_str()),
@@ -621,7 +623,22 @@ async fn apply_subscribe_working_dir_keeps_project_when_client_reports_another_d
         "precondition: the fresh session has no directory yet"
     );
 
-    apply_or_defer_subscribe_working_dir(&fresh, &other_str, "session_test_481_fresh");
+    // An existing unattributed session being attached to (is_creation: false)
+    // must NOT adopt the client directory (issue 3).
+    apply_or_defer_subscribe_working_dir(
+        &fresh,
+        &other_str,
+        "session_test_481_unattributed",
+        false,
+    );
+    assert_eq!(
+        fresh.lock().await.working_dir(),
+        None,
+        "an existing unattributed session being attached to must not adopt the subscriber's directory"
+    );
+
+    // But during session creation (is_creation: true), it adopts it.
+    apply_or_defer_subscribe_working_dir(&fresh, &other_str, "session_test_481_fresh", true);
     assert_eq!(
         fresh.lock().await.working_dir(),
         Some(other_str.as_str()),

@@ -1634,11 +1634,10 @@ pub(super) async fn handle_client(
                 continue_on_disconnect: requested_continuation,
                 terminal_env,
             } => {
-                if let Err(message) =
-                    validated_subscribe_working_dir(
-                        subscribe_working_dir.as_deref(), requested_continuation,
-                    )
-                {
+                if let Err(message) = validated_subscribe_working_dir(
+                    subscribe_working_dir.as_deref(),
+                    requested_continuation,
+                ) {
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
                         message,
@@ -1734,6 +1733,7 @@ pub(super) async fn handle_client(
                                 subscribe_working_dir,
                                 selfdev,
                                 false,
+                                false,
                                 &mut client_selfdev,
                                 &client_session_id,
                                 &client_connection_id,
@@ -1754,13 +1754,11 @@ pub(super) async fn handle_client(
                                 &swarm_event_tx,
                             )
                             .await;
-                            if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                                last_available_models_snapshot = Some(snapshot);
-                            }
+                            last_available_models_snapshot =
+                                try_available_models_snapshot(&agent).or(last_available_models_snapshot);
                         } else {
                             crate::logging::warn(&format!(
-                                "Target-aware subscribe failed to bind {} from temporary {}; closing temporary client connection {}",
-                                target_session_id, pre_resume_session_id, client_connection_id
+                                "Target-aware subscribe failed to bind {target_session_id} from temporary {pre_resume_session_id}; closing temporary client connection {client_connection_id}"
                             ));
                             break;
                         }
@@ -1773,6 +1771,7 @@ pub(super) async fn handle_client(
                             subscribe_working_dir,
                             selfdev,
                             true,
+                            provisional_session,
                             &mut client_selfdev,
                             &client_session_id,
                             &client_connection_id,
@@ -1803,6 +1802,7 @@ pub(super) async fn handle_client(
                         subscribe_working_dir,
                         selfdev,
                         true,
+                        provisional_session,
                         &mut client_selfdev,
                         &client_session_id,
                         &client_connection_id,
@@ -1823,9 +1823,8 @@ pub(super) async fn handle_client(
                         &swarm_event_tx,
                     )
                     .await;
-                    if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                        last_available_models_snapshot = Some(snapshot);
-                    }
+                    last_available_models_snapshot =
+                        try_available_models_snapshot(&agent).or(last_available_models_snapshot);
                 }
                 client_subscribed = true;
                 provisional_session = false;

@@ -21,6 +21,7 @@ use super::Agent;
 /// resolution) must agree on this one answer, otherwise the session's tools,
 /// swarm grouping, and MCP config can each resolve against a different
 /// directory (issue #481).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn effective_subscribe_working_dir(
     current: Option<&str>,
     reported: &str,
@@ -78,10 +79,32 @@ pub(super) fn log_ignored_subscribe_working_dir(session_id: &str, current: &str,
     ));
 }
 
+/// Resolve the authoritative working directory across all consumers
+/// (agent state, swarm member bookkeeping, and project-local MCP discovery).
+pub(super) fn resolve_authoritative_subscribe_working_dir(
+    established_dir: Option<&str>,
+    reported_dir: Option<&str>,
+    home: Option<&Path>,
+    is_creation: bool,
+) -> Option<String> {
+    match reported_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(reported) => {
+            let accepted = subscribe_working_dir_replacement(established_dir, reported, home);
+            session_working_dir_for_client(
+                established_dir,
+                accepted.as_deref().or(Some(reported)),
+                is_creation,
+            )
+        }
+        None => established_dir.map(str::to_string),
+    }
+}
+
 pub(super) fn apply_or_defer_subscribe_working_dir(
     agent: &Arc<Mutex<Agent>>,
     working_dir: &str,
     session_id: &str,
+    is_creation: bool,
 ) {
     let home = dirs::home_dir();
     if let Ok(mut agent_guard) = agent.try_lock() {
@@ -91,16 +114,11 @@ pub(super) fn apply_or_defer_subscribe_working_dir(
             home.as_deref(),
         ) {
             Some(accepted) => {
-                // An existing project directory always wins over a client-reported
-                // one. See `session_working_dir_for_client`: a client's directory
-                // is creation-only, and a target attachment reports the attaching
-                // client's project, not this session's.
-                let accepted = match agent_guard.working_dir() {
-                    Some(existing) => {
-                        session_working_dir_for_client(Some(existing), Some(&accepted), false)
-                    }
-                    None => Some(accepted),
-                };
+                let accepted = session_working_dir_for_client(
+                    agent_guard.working_dir(),
+                    Some(&accepted),
+                    is_creation,
+                );
                 if let Some(accepted) = accepted {
                     agent_guard.set_working_dir(&accepted);
                 } else if let Some(current) = agent_guard.working_dir()
@@ -131,16 +149,11 @@ pub(super) fn apply_or_defer_subscribe_working_dir(
             home.as_deref(),
         ) {
             Some(accepted) => {
-                // Same rule as the synchronous branch above. Without it the guard
-                // would hold only while the session was idle and quietly lapse
-                // mid-turn, which is exactly when a desktop attaches to a live
-                // session.
-                let accepted = match agent_guard.working_dir() {
-                    Some(existing) => {
-                        session_working_dir_for_client(Some(existing), Some(&accepted), false)
-                    }
-                    None => Some(accepted),
-                };
+                let accepted = session_working_dir_for_client(
+                    agent_guard.working_dir(),
+                    Some(&accepted),
+                    is_creation,
+                );
                 match accepted {
                     Some(accepted) => {
                         agent_guard.set_working_dir(&accepted);

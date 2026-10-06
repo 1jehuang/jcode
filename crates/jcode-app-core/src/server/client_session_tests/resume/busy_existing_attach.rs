@@ -150,6 +150,7 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
             Some("/tmp/jcode-busy-desktop-attach".to_string()),
             Some(true),
             false,
+            false,
             &mut client_selfdev,
             target_session_id,
             "conn_new",

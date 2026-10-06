@@ -191,6 +191,7 @@ async fn cross_project_attach_preserves_target_session_working_dir() -> Result<(
         Some(project_a.to_string()),
         None,
         false,
+        false,
         &mut client_selfdev,
         target_session_id,
         "conn_new",
@@ -372,6 +373,353 @@ async fn cross_project_attach_of_offline_session_preserves_its_working_dir() -> 
         after_restore.as_deref(),
         Some(project_b),
         "restoring an offline session from another project installed the subscriber's directory"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn busy_cross_project_attach_preserves_member_working_dir() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let (_runtime, prev_runtime) = setup_runtime_dir()?;
+    let _ = prev_runtime;
+
+    let target_session_id = "session_busy_cross_target";
+    let project_b = "/home/tester/work/project-b";
+    let project_a = "/home/tester/work/project-a";
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let target_registry = Registry::new(provider.clone()).await;
+    let existing_agent = target_agent_in_project(
+        provider.clone(),
+        target_registry.clone(),
+        target_session_id,
+        project_b,
+    )
+    .await;
+
+    let swarm_members = Arc::new(RwLock::new(HashMap::<String, SwarmMember>::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::<String, HashSet<String>>::new()));
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+    let mut client_selfdev = false;
+
+    // Simulate an in-flight turn: lock the agent mutex so try_lock fails during attach.
+    let busy_turn = existing_agent.lock().await;
+
+    // Attaching client connects reporting project A (issue 1).
+    handle_subscribe(
+        101,
+        Some(project_a.to_string()),
+        None,
+        false,
+        false,
+        &mut client_selfdev,
+        target_session_id,
+        "conn_busy_attach",
+        &None,
+        &existing_agent,
+        &target_registry,
+        true,
+        &swarm_members,
+        &swarms_by_id,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &swarm_plans,
+        &swarm_coordinators,
+        &client_event_tx,
+        &mcp_pool,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let member_dir = swarm_members
+        .read()
+        .await
+        .get(target_session_id)
+        .and_then(|m| m.working_dir.as_ref())
+        .map(|p| p.to_string_lossy().into_owned());
+    assert_eq!(
+        member_dir.as_deref(),
+        Some(project_b),
+        "busy session attach recorded the subscriber's project in swarm member state"
+    );
+
+    drop(busy_turn);
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_subscribe_without_target_preserves_project_and_mcp_dir() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let (_runtime, prev_runtime) = setup_runtime_dir()?;
+    let _ = prev_runtime;
+
+    let session_id = "session_repeated_subscribe";
+    let project_b = "/home/tester/work/project-b";
+    let project_a = "/home/tester/work/project-a";
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = target_agent_in_project(
+        provider.clone(),
+        registry.clone(),
+        session_id,
+        project_b,
+    )
+    .await;
+
+    let swarm_members = Arc::new(RwLock::new(HashMap::<String, SwarmMember>::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::<String, HashSet<String>>::new()));
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+    let mut client_selfdev = false;
+
+    // First subscribe creates/initializes session in project B.
+    handle_subscribe(
+        201,
+        Some(project_b.to_string()),
+        None,
+        true,
+        true,
+        &mut client_selfdev,
+        session_id,
+        "conn_repeat_1",
+        &None,
+        &agent,
+        &registry,
+        true,
+        &swarm_members,
+        &swarms_by_id,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &swarm_plans,
+        &swarm_coordinators,
+        &client_event_tx,
+        &mcp_pool,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    // Second repeated subscribe without target_session_id reports project A (issue 2).
+    // is_creation is false for repeated subscriptions on the same connection.
+    handle_subscribe(
+        202,
+        Some(project_a.to_string()),
+        None,
+        true,
+        false,
+        &mut client_selfdev,
+        session_id,
+        "conn_repeat_1",
+        &None,
+        &agent,
+        &registry,
+        true,
+        &swarm_members,
+        &swarms_by_id,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &swarm_plans,
+        &swarm_coordinators,
+        &client_event_tx,
+        &mcp_pool,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let agent_dir = agent.lock().await.working_dir().map(str::to_string);
+    assert_eq!(
+        agent_dir.as_deref(),
+        Some(project_b),
+        "repeated subscribe re-pinned agent working directory"
+    );
+
+    let member_dir = swarm_members
+        .read()
+        .await
+        .get(session_id)
+        .and_then(|m| m.working_dir.as_ref())
+        .map(|p| p.to_string_lossy().into_owned());
+    assert_eq!(
+        member_dir.as_deref(),
+        Some(project_b),
+        "repeated subscribe re-pinned swarm member directory"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconnect_to_unattributed_session_stays_unattributed() -> Result<()> {
+    let _guard = crate::storage::lock_test_env();
+    let (_runtime, prev_runtime) = setup_runtime_dir()?;
+    let _ = prev_runtime;
+
+    let session_id = "session_unattributed_target";
+    let project_a = "/home/tester/work/project-a";
+
+    // Persist a session with working_dir: None (unattributed session)
+    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    session.ensure_initial_session_context_message();
+    session.working_dir = None;
+    session.save_prepared().expect("persist unattributed session");
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        registry.clone(),
+        session,
+        None,
+    )));
+
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.to_string(),
+        Arc::clone(&agent),
+    )])));
+    let shutdown_signals = Arc::new(RwLock::new(HashMap::new()));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let now = Instant::now();
+    let client_connections = Arc::new(RwLock::new(HashMap::from([(
+        "conn_unattr".to_string(),
+        ClientConnectionInfo {
+            client_id: "conn_unattr".to_string(),
+            session_id: session_id.to_string(),
+            client_instance_id: None,
+            debug_client_id: None,
+            connected_at: now,
+            last_seen: now,
+            is_processing: false,
+            current_tool_name: None,
+            terminal_env: Vec::new(),
+            disconnect_tx: mpsc::unbounded_channel().0,
+        },
+    )])));
+    let swarm_members = Arc::new(RwLock::new(HashMap::<String, SwarmMember>::new()));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::<String, HashSet<String>>::new()));
+    let file_touch = FileTouchService::new();
+    let channel_subscriptions = Arc::new(RwLock::new(HashMap::new()));
+    let channel_subscriptions_by_session = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::new()));
+    let swarm_coordinators = Arc::new(RwLock::new(HashMap::new()));
+    let client_count = Arc::new(RwLock::new(1usize));
+    let (writer, _peer_stream) = test_writer()?;
+    let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));
+    let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
+    let mcp_pool = Arc::new(crate::mcp::SharedMcpPool::from_default_config());
+    let mut client_selfdev = false;
+    let mut client_session_id = "session_unattributed_sub".to_string();
+
+    let rebound_agent = handle_resume_session(
+        301,
+        session_id.to_string(),
+        Some(project_a),
+        None,
+        false,
+        false,
+        &mut client_selfdev,
+        &mut client_session_id,
+        "conn_unattr",
+        &agent,
+        &provider,
+        &registry,
+        &sessions,
+        &shutdown_signals,
+        &soft_interrupt_queues,
+        &client_connections,
+        &Arc::new(RwLock::new(ClientDebugState::default())),
+        &swarm_members,
+        &swarms_by_id,
+        &file_touch,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &swarm_plans,
+        &swarm_coordinators,
+        &client_count,
+        &writer,
+        "test-server",
+        "\u{1f33f}",
+        &client_event_tx,
+        &mcp_pool,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+        false,
+    )
+    .await?;
+
+    assert_eq!(
+        rebound_agent.lock().await.working_dir(),
+        None,
+        "resume assigned client project to unattributed session"
+    );
+
+    // Follow-up target-aware subscribe (is_creation = false, issue 3)
+    handle_subscribe(
+        302,
+        Some(project_a.to_string()),
+        None,
+        false,
+        false,
+        &mut client_selfdev,
+        session_id,
+        "conn_unattr",
+        &None,
+        &rebound_agent,
+        &registry,
+        true,
+        &swarm_members,
+        &swarms_by_id,
+        &channel_subscriptions,
+        &channel_subscriptions_by_session,
+        &swarm_plans,
+        &swarm_coordinators,
+        &client_event_tx,
+        &mcp_pool,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    assert_eq!(
+        rebound_agent.lock().await.working_dir(),
+        None,
+        "subscribe assigned client project to unattributed session"
+    );
+
+    let member_dir = swarm_members
+        .read()
+        .await
+        .get(session_id)
+        .and_then(|m| m.working_dir.as_ref())
+        .map(|p| p.to_string_lossy().into_owned());
+    assert_eq!(
+        member_dir, None,
+        "swarm member assigned client project to unattributed session"
     );
 
     Ok(())
