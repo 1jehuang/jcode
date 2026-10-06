@@ -52,8 +52,10 @@ type passwords or 2FA codes.
 
 1. **Pick services.** Default to all (`gmail,calendar`) so the user only goes
    through the console once.
-2. **Project and APIs.** If `gcloud config get-value account` prints an
-   account, run:
+2. **Project and APIs.** If
+   `gcloud auth list --filter=status:ACTIVE --format="value(account)"` prints
+   an account (`config get-value account` is not enough: it reports accounts
+   with no credentials), run:
    ```
    gcloud projects create jcode-<6 digits> --name jcode --quiet
    gcloud services enable gmail.googleapis.com calendar-json.googleapis.com --project <id> --quiet

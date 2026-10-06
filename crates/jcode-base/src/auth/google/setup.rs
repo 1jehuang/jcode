@@ -127,9 +127,18 @@ pub fn gcloud_status() -> GcloudStatus {
             project: None,
         };
     }
-    let account = gcloud_output(&["config", "get-value", "account"])
-        .ok()
-        .and_then(|o| non_empty(&o.stdout));
+    // `config get-value account` reports a configured account even when it
+    // has no credentials (verified on gcloud 587), so ask for accounts with
+    // usable credentials instead.
+    let account = gcloud_output(&[
+        "auth",
+        "list",
+        "--filter=status:ACTIVE",
+        "--format=value(account)",
+    ])
+    .ok()
+    .filter(|o| o.status.success())
+    .and_then(|o| non_empty(&o.stdout));
     let project = gcloud_output(&["config", "get-value", "project"])
         .ok()
         .and_then(|o| non_empty(&o.stdout));
@@ -141,13 +150,24 @@ pub fn gcloud_status() -> GcloudStatus {
 }
 
 fn stderr_summary(output: &std::process::Output) -> String {
-    let text = String::from_utf8_lossy(&output.stderr);
-    let text = text.trim();
-    let mut lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() > 6 {
-        lines = lines.split_off(lines.len() - 6);
-    }
-    lines.join("\n")
+    summarize_gcloud_error(&String::from_utf8_lossy(&output.stderr))
+}
+
+/// Short form of gcloud's stderr: the `ERROR:` headline plus a few lines of
+/// guidance. gcloud's own errors put the headline first and remedies after,
+/// so keep the start rather than the tail.
+fn summarize_gcloud_error(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("ERROR:"))
+        .unwrap_or(0);
+    lines[start..]
+        .iter()
+        .take(6)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Derive a valid, likely-unique project id from a display name.
@@ -418,6 +438,20 @@ mod tests {
             || true,
         );
         assert!(found.is_none());
+    }
+
+    #[test]
+    fn gcloud_error_summary_keeps_headline() {
+        // Verbatim from gcloud 587.0.0 `projects create` while signed out.
+        let real = "WARNING: some noise\nERROR: (gcloud.projects.create) You do not currently have an active account selected.\nPlease run:\n\n  $ gcloud auth login\n\nto obtain new credentials.\n\nIf you have already logged in with a different account, run:\n\n  $ gcloud config set account ACCOUNT\n\nto select an already authenticated account to use.\n";
+        let summary = summarize_gcloud_error(real);
+        assert!(
+            summary.starts_with("ERROR: (gcloud.projects.create)"),
+            "{summary}"
+        );
+        assert!(summary.contains("gcloud auth login"), "{summary}");
+        assert!(!summary.contains("WARNING"), "{summary}");
+        assert_eq!(summarize_gcloud_error("plain failure"), "plain failure");
     }
 
     #[test]
