@@ -361,8 +361,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw
 }
 
-/// Forward the reasoning-effort variant staged by a model-picker selection
-/// (e.g. "gpt-5.5 (high)") to the server right after the model-switch request.
+/// Forward the reasoning level staged by a model-picker selection (e.g.
+/// gpt-5.5 at high) to the server right after the model-switch request.
 /// In remote mode the picker cannot apply effort to `app.provider` (a local
 /// stand-in), so skipping this leaves the server on its configured default
 /// effort - typically low - silently downgrading the request (issue #427).

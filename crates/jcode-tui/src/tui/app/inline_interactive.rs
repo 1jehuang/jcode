@@ -170,14 +170,23 @@ fn filter_routes_by_provider_allowlist(
     }
 }
 
-fn model_picker_usage_key(model_name: &str, route: &PickerOption, effort: Option<&str>) -> String {
+/// Usage and favorites key for a model row: model + route. The trailing field
+/// once held the reasoning effort of per-effort rows, so it stays (empty) to
+/// keep one key format, and older effort-keyed entries fold into it on load.
+fn model_picker_usage_key(model_name: &str, route: &PickerOption) -> String {
     format!(
-        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
-        model_name,
-        route.provider,
-        route.api_method,
-        effort.unwrap_or("")
+        "{}\u{1f}{}\u{1f}{}\u{1f}",
+        model_name, route.provider, route.api_method
     )
+}
+
+/// Drop the effort field of a stored key (`model␟provider␟method␟effort`), so
+/// history recorded for "model (high)" rows counts for the model's row.
+fn model_picker_key_without_effort(key: &str) -> String {
+    match key.rsplit_once('\u{1f}') {
+        Some((route, _effort)) => format!("{route}\u{1f}"),
+        None => key.to_string(),
+    }
 }
 
 fn load_model_picker_usage_store() -> ModelPickerUsageStore {
@@ -194,7 +203,22 @@ fn load_model_picker_usage_store() -> ModelPickerUsageStore {
         return ModelPickerUsageStore::default();
     }
     store.selections.retain(|_, entry| entry.count > 0);
+    fold_model_picker_usage_efforts(&mut store);
     store
+}
+
+fn fold_model_picker_usage_efforts(store: &mut ModelPickerUsageStore) {
+    let mut folded: HashMap<String, ModelPickerUsageEntry> = HashMap::new();
+    for (key, entry) in std::mem::take(&mut store.selections) {
+        let merged = folded
+            .entry(model_picker_key_without_effort(&key))
+            .or_default();
+        merged.count = merged.count.saturating_add(entry.count);
+        merged.last_selected_unix_secs = merged
+            .last_selected_unix_secs
+            .max(entry.last_selected_unix_secs);
+    }
+    store.selections = folded;
 }
 
 fn save_model_picker_usage_store(store: &ModelPickerUsageStore) {
@@ -213,19 +237,18 @@ fn model_picker_usage_score(
     store: &ModelPickerUsageStore,
     model_name: &str,
     route: &PickerOption,
-    effort: Option<&str>,
 ) -> u32 {
     store
         .selections
-        .get(&model_picker_usage_key(model_name, route, effort))
+        .get(&model_picker_usage_key(model_name, route))
         .map(|entry| entry.count.saturating_mul(100).saturating_add(50))
         .unwrap_or(0)
 }
 
-fn record_model_picker_selection(model_name: &str, route: &PickerOption, effort: Option<&str>) {
+fn record_model_picker_selection(model_name: &str, route: &PickerOption) {
     let mut store = load_model_picker_usage_store();
     store.version = MODEL_PICKER_USAGE_VERSION;
-    let key = model_picker_usage_key(model_name, route, effort);
+    let key = model_picker_usage_key(model_name, route);
     let entry = store.selections.entry(key).or_default();
     entry.count = entry.count.saturating_add(1);
     entry.last_selected_unix_secs = remote_model_catalog_observed_at_unix_secs();
@@ -245,7 +268,13 @@ fn load_model_picker_favorites_store() -> ModelPickerFavoritesStore {
     if store.version != MODEL_PICKER_FAVORITES_VERSION {
         return ModelPickerFavoritesStore::default();
     }
-    store.favorites.retain(|key| !key.trim().is_empty());
+    // Favorites saved for "model (high)" rows mark the model's row.
+    store.favorites = store
+        .favorites
+        .iter()
+        .filter(|key| !key.trim().is_empty())
+        .map(|key| model_picker_key_without_effort(key))
+        .collect();
     store
 }
 
@@ -265,11 +294,10 @@ fn model_picker_is_favorite(
     store: &ModelPickerFavoritesStore,
     model_name: &str,
     route: &PickerOption,
-    effort: Option<&str>,
 ) -> bool {
     store
         .favorites
-        .contains(&model_picker_usage_key(model_name, route, effort))
+        .contains(&model_picker_usage_key(model_name, route))
 }
 
 /// Return the filtered position of the favorite after the current model in a
@@ -288,11 +316,7 @@ fn next_model_favorite_after_current(picker: &InlineInteractiveState) -> Option<
             }
             let route = entry.active_option()?;
             Some((
-                model_picker_usage_key(
-                    &model_entry_base_name(entry),
-                    route,
-                    entry.effort.as_deref(),
-                ),
+                model_picker_usage_key(&model_entry_base_name(entry), route),
                 filtered_pos,
                 entry.is_current,
             ))
@@ -312,10 +336,232 @@ fn next_model_favorite_after_current(picker: &InlineInteractiveState) -> Option<
 
 fn picker_is_runtime_model_picker(picker: &InlineInteractiveState) -> bool {
     picker.kind == PickerKind::Model
+        && picker.effort_step.is_none()
         && picker
             .entries
             .iter()
             .any(|entry| matches!(entry.action, PickerAction::Model))
+}
+
+/// Reasoning levels the route's runtime can apply to `model`, in ladder
+/// order. Uses the route's own vocabulary: native OpenAI has a real `max`,
+/// OpenRouter aliases it to `xhigh`, so model-id-only inference would
+/// over-advertise. Swarm modes are orchestration rungs, not reasoning levels.
+/// Empty means the route switches at once without a level step.
+pub(super) fn model_route_effort_levels(model: &str, route: &PickerOption) -> Vec<&'static str> {
+    if !route_supports_reasoning_effort(&route.api_method) {
+        return Vec::new();
+    }
+    inferred_reasoning_efforts(Some(&route.api_method), Some(model))
+        .into_iter()
+        .filter(|effort| !crate::prompt::is_swarm_mode_effort(effort))
+        .collect()
+}
+
+/// Short label for a reasoning level row.
+pub(crate) fn reasoning_effort_picker_label(effort: &str) -> &str {
+    match effort {
+        "medium" => "med",
+        other => other,
+    }
+}
+
+/// The saved default reasoning effort for the provider family of `route`
+/// (`anthropic_reasoning_effort` / `openai_reasoning_effort`), if any.
+fn saved_default_reasoning_effort(model: &str, route: &PickerOption) -> Option<String> {
+    // Provider defaults of an SSH-remote session are not the local config's.
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
+    let selection = crate::provider::MultiProvider::default_model_selection_from_route(
+        model,
+        &route.api_method,
+        &route.provider,
+    );
+    let config = crate::config::config();
+    match selection.provider_key.as_deref() {
+        Some("claude-oauth") | Some("claude-api") => {
+            config.provider.anthropic_reasoning_effort.clone()
+        }
+        Some("openai-oauth") | Some("openai-api") => {
+            config.provider.openai_reasoning_effort.clone()
+        }
+        _ => None,
+    }
+}
+
+/// Which level the step starts on: the session's effort when this is the
+/// current model, else the saved default for the provider family, else
+/// `high` (the recommended level), else the first level.
+fn model_effort_step_preselection(
+    levels: &[&str],
+    current_effort: Option<&str>,
+    saved_effort: Option<&str>,
+) -> usize {
+    let find = |wanted: &str| levels.iter().position(|e| e.eq_ignore_ascii_case(wanted));
+    current_effort
+        .and_then(find)
+        .or_else(|| saved_effort.and_then(find))
+        .or_else(|| find("high"))
+        .unwrap_or(0)
+}
+
+/// Split a model-picker filter into `@provider` scopes and free search text.
+/// `@openrouter gpt` keeps OpenRouter routes and fuzzy-matches `gpt`. Only
+/// whitespace-separated tokens that start with `@` are scopes, so the direct
+/// `/model name@provider` syntax still searches as typed.
+pub(crate) fn split_model_picker_filter(filter: &str) -> (Vec<String>, String) {
+    let mut scopes = Vec::new();
+    let mut search = Vec::new();
+    for token in filter.split_whitespace() {
+        match token.strip_prefix('@') {
+            Some(scope) if !scope.is_empty() => {
+                scopes.push(crate::provider::normalize_model_route_provider_label(scope))
+            }
+            Some(_) => {}
+            None => search.push(token),
+        }
+    }
+    (scopes, search.join(" "))
+}
+
+/// Provider a route is grouped under for `@provider` filtering and Ctrl+P
+/// cycling. OpenRouter routes name their upstream (e.g. `Fireworks`), but the
+/// user reaches them through OpenRouter.
+pub(super) fn model_route_provider_group(option: &crate::tui::PickerOption) -> String {
+    if crate::provider::ModelRouteApiMethod::parse(&option.api_method).is_openrouter() {
+        "OpenRouter".to_string()
+    } else {
+        option.provider.clone()
+    }
+}
+
+/// Whether a route belongs to every `@provider` scope. Scopes match the
+/// provider group the route is reached through, so `@fireworks` never picks an
+/// OpenRouter route that merely names Fireworks upstream (selecting it would
+/// send the request through OpenRouter); `@openrouter` covers those routes.
+pub(super) fn model_route_matches_scopes(
+    option: &crate::tui::PickerOption,
+    scopes: &[String],
+) -> bool {
+    use crate::provider::normalize_model_route_provider_label as normalize;
+    let group = normalize(&model_route_provider_group(option));
+    let via_openrouter =
+        crate::provider::ModelRouteApiMethod::parse(&option.api_method).is_openrouter();
+    let method = normalize(&option.api_method);
+    scopes.iter().all(|scope| {
+        group.contains(scope.as_str()) || (!via_openrouter && method.contains(scope.as_str()))
+    })
+}
+
+/// The `@provider` scopes currently narrowing a runtime model picker.
+pub(super) fn model_picker_scopes(picker: &InlineInteractiveState) -> Vec<String> {
+    if picker_is_runtime_model_picker(picker) {
+        split_model_picker_filter(&picker.filter).0
+    } else {
+        Vec::new()
+    }
+}
+
+/// Next route of `entry` in `direction` (-1 or 1) that the scopes allow,
+/// staying put at the ends. Keeps route-column navigation inside the filter
+/// the header shows.
+pub(super) fn step_scoped_route(
+    entry: &crate::tui::PickerEntry,
+    scopes: &[String],
+    forward: bool,
+) -> usize {
+    let allowed = |index: &usize| {
+        scopes.is_empty() || model_route_matches_scopes(&entry.options[*index], scopes)
+    };
+    let current = entry.selected_option;
+    let next = if forward {
+        (current + 1..entry.options.len()).find(allowed)
+    } else {
+        (0..current).rev().find(allowed)
+    };
+    next.unwrap_or(current)
+}
+
+/// Enter on a model picker with no search text and no explicit row choice
+/// opens the browser instead of switching to whatever model is listed first.
+pub(super) fn picker_enter_should_focus_model_browser(picker: &InlineInteractiveState) -> bool {
+    picker_is_runtime_model_picker(picker)
+        && picker.selected == 0
+        && split_model_picker_filter(&picker.filter).1.is_empty()
+}
+
+/// Distinct provider groups in picker order, used by Ctrl+P.
+pub(super) fn model_picker_provider_groups(picker: &InlineInteractiveState) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut groups = Vec::new();
+    for entry in &picker.entries {
+        if !matches!(entry.action, PickerAction::Model) {
+            continue;
+        }
+        for option in &entry.options {
+            let group = model_route_provider_group(option);
+            if seen.insert(crate::provider::normalize_model_route_provider_label(
+                &group,
+            )) {
+                groups.push(group);
+            }
+        }
+    }
+    groups
+}
+
+/// `@scope` token for a provider group, e.g. `GitHub Copilot` -> `@githubcopilot`.
+fn provider_scope_token(group: &str) -> String {
+    format!(
+        "@{}",
+        crate::provider::normalize_model_route_provider_label(group)
+    )
+}
+
+/// Ctrl+P / Ctrl+Shift+P: step the picker's provider scope through every
+/// provider group, then back to all providers. Keeps the search text.
+pub(super) fn cycle_model_picker_provider(picker: &mut InlineInteractiveState, forward: bool) {
+    let groups = model_picker_provider_groups(picker);
+    if groups.is_empty() {
+        return;
+    }
+    let (scopes, search) = split_model_picker_filter(&picker.filter);
+    let current = match scopes.as_slice() {
+        [scope] => groups.iter().position(|group| {
+            crate::provider::normalize_model_route_provider_label(group) == *scope
+        }),
+        _ => None,
+    };
+    // Positions 0..len are providers, len is "all providers".
+    let slots = groups.len() + 1;
+    let at = current.unwrap_or(groups.len());
+    let next = if forward {
+        (at + 1) % slots
+    } else {
+        (at + slots - 1) % slots
+    };
+    picker.filter = match groups.get(next) {
+        Some(group) if search.is_empty() => format!("{} ", provider_scope_token(group)),
+        Some(group) => format!("{} {}", provider_scope_token(group), search),
+        None => search,
+    };
+    picker.selected = 0;
+    App::apply_inline_interactive_filter(picker);
+}
+
+/// Provider group named by the picker's single `@scope`, for display.
+pub(crate) fn model_picker_active_provider(picker: &InlineInteractiveState) -> Option<String> {
+    let (scopes, _) = split_model_picker_filter(&picker.filter);
+    let [scope] = scopes.as_slice() else {
+        return (!scopes.is_empty()).then(|| scopes.join(", "));
+    };
+    Some(
+        model_picker_provider_groups(picker)
+            .into_iter()
+            .find(|group| crate::provider::normalize_model_route_provider_label(group) == *scope)
+            .unwrap_or_else(|| scope.clone()),
+    )
 }
 
 fn key_char_eq_ignore_ascii_case(code: KeyCode, expected: char) -> bool {
@@ -495,31 +741,6 @@ fn model_picker_route_provider_matches_key(
         route_provider_label,
         desired_provider,
     )
-}
-
-/// Whether an effort-qualified picker entry matches the persisted reasoning
-/// effort for its route's provider family. Entries without an effort always
-/// match. When no effort is persisted for the family, every variant matches
-/// (legacy model-level behavior) so we never hide the `default` marker
-/// entirely (issue #675).
-fn model_picker_effort_matches_default(
-    provider_key: Option<&str>,
-    entry_effort: Option<&str>,
-    anthropic_effort: Option<&str>,
-    openai_effort: Option<&str>,
-) -> bool {
-    let Some(effort) = entry_effort else {
-        return true;
-    };
-    let stored = match provider_key {
-        Some("claude-oauth") | Some("claude-api") => anthropic_effort,
-        Some("openai-oauth") | Some("openai-api") => openai_effort,
-        _ => None,
-    };
-    match stored {
-        Some(stored) => stored.eq_ignore_ascii_case(effort),
-        None => true,
-    }
 }
 
 fn model_picker_route_is_default(
@@ -995,7 +1216,7 @@ impl App {
         )
     }
 
-    fn model_picker_cache_signature(
+    pub(super) fn model_picker_cache_signature(
         &self,
         current_model: &str,
         config_default_model: Option<String>,
@@ -1064,6 +1285,8 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         });
         if !preserve_input {
             self.input.clear();
@@ -1273,7 +1496,7 @@ impl App {
             // take seconds on a large catalog, so for big catalogs open
             // instantly with lightweight names-only routes and upgrade in the
             // background. Small catalogs stay synchronous so the first paint
-            // already has effort-expanded, provider-classified rows.
+            // already has provider-classified rows.
             const SYNC_REMOTE_FALLBACK_MAX_MODELS: usize = 64;
             if crate::tui::is_ssh_remote() {
                 self.build_remote_model_routes_lightweight_fallback(&current_model)
@@ -1365,6 +1588,8 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         });
         self.set_status_notice("Updating model list…");
     }
@@ -1413,6 +1638,15 @@ impl App {
     }
 
     pub(super) fn poll_model_picker_load(&mut self) -> bool {
+        // Rebuilding the list now would drop the open level step. The load
+        // stays pending and lands once the user is back in the list.
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.effort_step.is_some())
+        {
+            return false;
+        }
         let Some(pending) = self.pending_model_picker_load.as_ref() else {
             return false;
         };
@@ -1531,33 +1765,15 @@ impl App {
         };
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
-        let config_anthropic_effort = config.provider.anthropic_reasoning_effort.clone();
-        let config_openai_effort = config.provider.openai_reasoning_effort.clone();
-        let current_effort = if self.is_remote {
-            self.remote_reasoning_effort.clone()
-        } else {
-            self.provider.reasoning_effort()
-        };
 
-        let is_config_default = |name: &str, route: &PickerOption, effort: Option<&str>| -> bool {
-            if !model_picker_route_is_default(
+        // A row is the default when its model + route is. The saved level is
+        // picked in the reasoning step, so it no longer splits rows.
+        let is_config_default = |name: &str, route: &PickerOption| -> bool {
+            model_picker_route_is_default(
                 name,
                 route,
                 config_default_model.as_deref(),
                 config_default_provider.as_deref(),
-            ) {
-                return false;
-            }
-            let selection = crate::provider::MultiProvider::default_model_selection_from_route(
-                name,
-                &route.api_method,
-                &route.provider,
-            );
-            model_picker_effort_matches_default(
-                selection.provider_key.as_deref(),
-                effort,
-                config_anthropic_effort.as_deref(),
-                config_openai_effort.as_deref(),
             )
         };
 
@@ -1717,99 +1933,14 @@ impl App {
                 }
             }
 
-            // Expand each route only across the effort ladder its runtime can
-            // actually apply. The same model can be reachable through native
-            // OpenAI (where `max` is real) and OpenRouter (where `max` aliases
-            // `xhigh`), so model-id-only inference over-advertises values.
-            let mut effort_routes = Vec::new();
-            let mut plain_routes = Vec::new();
-            let mut model_efforts = Vec::new();
-            for route in entry_routes {
-                let efforts = if route_supports_reasoning_effort(&route.api_method) {
-                    inferred_reasoning_efforts(Some(&route.api_method), Some(name))
-                } else {
-                    Vec::new()
-                };
-                if efforts.is_empty() {
-                    plain_routes.push(route);
-                } else {
-                    for effort in &efforts {
-                        if !model_efforts.contains(effort) {
-                            model_efforts.push(*effort);
-                        }
-                    }
-                    effort_routes.push((route, efforts));
-                }
-            }
-
-            if !effort_routes.is_empty() {
-                for effort in &model_efforts {
-                    // Swarm modes (swarm / swarm-deep) are orchestration rungs on
-                    // the effort ladder, not per-model reasoning variants. They
-                    // must not generate `model (swarm)` picker rows.
-                    if crate::prompt::is_swarm_mode_effort(effort) {
-                        continue;
-                    }
-                    let effort_label = match *effort {
-                        "xhigh" => "xhigh",
-                        "max" => "max",
-                        "high" => "high",
-                        "medium" => "med",
-                        "low" => "low",
-                        "none" => "none",
-                        other => other,
-                    };
-                    let display_name = format!("{} ({})", name, effort_label);
-                    let effort_matches_current =
-                        *name == current_model && current_effort.as_deref() == Some(*effort);
-                    let or_created = openrouter_created_timestamp(name);
-                    for (route, route_efforts) in &effort_routes {
-                        if !route_efforts.contains(effort) {
-                            continue;
-                        }
-                        let is_this_current = effort_matches_current
-                            && model_picker_route_is_current(
-                                name,
-                                route,
-                                &current_model,
-                                &current_provider,
-                                current_api_method.as_deref(),
-                            );
-                        entries.push(PickerEntry {
-                            name: display_name.clone(),
-                            options: vec![route.clone()],
-                            action: PickerAction::Model,
-                            selected_option: 0,
-                            is_current: is_this_current,
-                            recommended: *effort == "high"
-                                && model_picker_route_is_recommended(name, route),
-                            recommendation_rank: model_picker_recommendation_rank(name),
-                            usage_score: model_picker_usage_score(
-                                &usage_store,
-                                name,
-                                route,
-                                Some(effort),
-                            ),
-                            old: old_threshold_secs > 0
-                                && or_created.map(|t| t < old_threshold_secs).unwrap_or(false),
-                            created_date: or_created.map(format_created),
-                            effort: Some(effort.to_string()),
-                            is_default: is_config_default(name, route, Some(effort)),
-                            is_favorite: model_picker_is_favorite(
-                                &favorites_store,
-                                name,
-                                route,
-                                Some(effort),
-                            ),
-                        });
-                    }
-                }
-            }
+            // One row per model and route. A route with a reasoning ladder
+            // gets its level in a second step after the row is picked
+            // (`open_model_effort_step`), not one row per level.
             {
                 let or_created = openrouter_created_timestamp(name);
                 let is_old = old_threshold_secs > 0
                     && or_created.map(|t| t < old_threshold_secs).unwrap_or(false);
-                for route in plain_routes {
+                for route in entry_routes {
                     let is_recommended = model_picker_route_is_recommended(name, &route);
                     let is_current = model_picker_route_is_current(
                         name,
@@ -1818,7 +1949,7 @@ impl App {
                         &current_provider,
                         current_api_method.as_deref(),
                     );
-                    let is_default = is_config_default(name, &route, None);
+                    let is_default = is_config_default(name, &route);
                     entries.push(PickerEntry {
                         name: name.clone(),
                         options: vec![route.clone()],
@@ -1827,12 +1958,12 @@ impl App {
                         is_current,
                         recommended: is_recommended,
                         recommendation_rank: model_picker_recommendation_rank(name),
-                        usage_score: model_picker_usage_score(&usage_store, name, &route, None),
+                        usage_score: model_picker_usage_score(&usage_store, name, &route),
                         old: is_old,
                         created_date: or_created.map(format_created),
                         effort: None,
                         is_default,
-                        is_favorite: model_picker_is_favorite(&favorites_store, name, &route, None),
+                        is_favorite: model_picker_is_favorite(&favorites_store, name, &route),
                     });
                 }
             }
@@ -2035,6 +2166,8 @@ impl App {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         });
 
         if let Some((preview, filter, selected, column, subagent_model)) = previous_picker
@@ -2273,6 +2406,19 @@ impl App {
             self.handle_inline_interactive_key(code, modifiers)?;
             return Ok(true);
         }
+        // Ctrl+P filters by provider. The preview's filter is owned by the
+        // typed `/model …` text, so move into the focused browser first and
+        // carry the typed search over.
+        if modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'p') {
+            if let Some(ref mut picker) = self.inline_interactive_state {
+                picker.preview = false;
+                picker.column = 0;
+            }
+            self.input.clear();
+            self.cursor_pos = 0;
+            self.handle_inline_interactive_key(code, modifiers)?;
+            return Ok(true);
+        }
         Ok(false)
     }
 
@@ -2344,6 +2490,15 @@ impl App {
                         && picker.filter.is_empty()
                         && picker.selected == 0
                     {
+                        picker.preview = false;
+                        picker.column = 0;
+                        self.input.clear();
+                        self.cursor_pos = 0;
+                        return Ok(true);
+                    }
+                    // Bare `/model` + Enter (or only `@provider` scopes) is a
+                    // request to browse, not to pick whatever row is first.
+                    if picker_enter_should_focus_model_browser(picker) {
                         picker.preview = false;
                         picker.column = 0;
                         self.input.clear();
@@ -3167,6 +3322,415 @@ impl App {
         Ok(())
     }
 
+    /// Switch to the picked model row, applying `effort` (the level chosen
+    /// in the reasoning step) with it. Local sessions set it on the provider,
+    /// remote ones stage it so the dispatcher forwards it after the switch.
+    fn apply_model_picker_choice(&mut self, entry: PickerEntry, effort: Option<String>) {
+        let Some(route) = entry.options.get(entry.selected_option) else {
+            return;
+        };
+        // The choice is made: a route load still running for this picker
+        // must not reopen the list over the confirmed selection.
+        self.pending_model_picker_load = None;
+        self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
+        let effort_suffix = effort
+            .as_deref()
+            .map(|effort| format!(" ({})", reasoning_effort_picker_label(effort)))
+            .unwrap_or_default();
+        if !route.available {
+            self.push_display_message(DisplayMessage::error(
+                crate::tui::app::model_context::unavailable_model_route_message(
+                    &entry.name,
+                    &route.provider,
+                    &route.detail,
+                    self.is_remote,
+                ),
+            ));
+            self.set_status_notice("Model unavailable");
+            return;
+        }
+
+        let bare_name = model_entry_base_name(&entry);
+        let spec = if crate::provider::ModelRouteApiMethod::parse(&route.api_method).is_openrouter()
+            && route.provider == "auto"
+        {
+            openrouter_route_model_id(&bare_name)
+        } else {
+            picker_route_model_spec(&entry, route)
+        };
+        let route_selection = picker_route_selection(&entry, route);
+
+        record_model_picker_selection(&bare_name, route);
+        let method_label =
+            crate::provider::ModelRouteApiMethod::parse(&route.api_method).display_label();
+        // Placeholder routes ("remote-catalog"/"current") are
+        // catalog-refresh stand-ins, not real provider routes:
+        // surfacing them produced confusing notices like
+        // "Model → x via Claude (remote-catalog) · refreshing
+        // route details…" right before the real switch
+        // confirmation. Show just the model in that case.
+        let placeholder_route = placeholder_routes::is_placeholder_route_method(&route.api_method);
+        let notice = if placeholder_route {
+            format!("Model → {}{}", entry.name, effort_suffix)
+        } else {
+            format!(
+                "Model → {} via {} ({})",
+                entry.name, route.provider, method_label
+            )
+        };
+        let route_detail = if placeholder_route {
+            String::new()
+        } else {
+            route.detail.trim().to_string()
+        };
+
+        // Record exactly which model spec + route the user chose
+        // and how it will be applied. Pairs with the server-side
+        // model-switch logs so we can trace a `/model` choice all
+        // the way to the provider endpoint that ends up serving it
+        // (issues #292/#278: switch routes to wrong endpoint).
+        crate::logging::event_info(
+            "model_picker_select",
+            vec![
+                ("entry", entry.name.clone()),
+                ("spec", spec.clone()),
+                ("provider", route.provider.clone()),
+                ("api_method", route.api_method.clone()),
+                ("route_provider", route_selection.provider_label.clone()),
+                ("route_model", route_selection.model.clone()),
+                ("route_api_method", route_selection.api_method.clone()),
+                (
+                    "effort",
+                    effort.clone().unwrap_or_else(|| "none".to_string()),
+                ),
+                ("remote", self.is_remote.to_string()),
+            ],
+        );
+
+        if self.is_remote {
+            self.inline_interactive_state = None;
+            self.upstream_provider = None;
+            self.status_detail = None;
+            // Track the chosen method client-side so post-error
+            // fallback picks know which credential path the
+            // active route uses (remote sessions have no other
+            // route bookkeeping).
+            self.session.route_api_method = Some(route_selection.api_method.clone());
+            self.pending_route_selection = Some(route_selection);
+            self.pending_model_switch = Some(spec);
+            // In remote mode `self.provider` is a local
+            // stand-in, so applying the picked level to it does
+            // not reach the server. Stage it so the remote
+            // dispatcher forwards it right after the model
+            // switch; otherwise the server keeps its configured
+            // default (low) and silently runs e.g. gpt-5.5
+            // picked at high at low effort (issue #427).
+            self.pending_reasoning_effort = effort.clone();
+        } else {
+            match self.provider.set_route_selection(&route_selection) {
+                Ok(()) => {
+                    self.inline_interactive_state = None;
+                    self.provider_session_id = None;
+                    self.session.provider_session_id = None;
+                    self.upstream_provider = None;
+                    self.status_detail = None;
+                    self.invalidate_model_picker_cache();
+                    let active_model = self.provider.model();
+                    self.update_context_limit_for_model(&active_model, None);
+                    self.session.provider_key =
+                        crate::provider::MultiProvider::session_provider_key_after_model_switch(
+                            &spec,
+                            self.provider.name(),
+                            self.session.provider_key.as_deref(),
+                        );
+                    self.session.model = Some(active_model.clone());
+                    self.session.route_api_method = Some(route_selection.api_method.clone());
+                    let _ = self.session.save();
+                    crate::logging::event_info(
+                        "model_picker_select_applied",
+                        vec![
+                            ("spec", spec.clone()),
+                            ("active_model", active_model),
+                            ("provider", self.provider.name().to_string()),
+                            ("api_method", route_selection.api_method.clone()),
+                        ],
+                    );
+                }
+                Err(error) => {
+                    crate::logging::event_error(
+                        "model_picker_select_failed",
+                        vec![
+                            ("spec", spec.clone()),
+                            ("provider", route.provider.clone()),
+                            ("api_method", route_selection.api_method.clone()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    self.push_display_message(DisplayMessage::error(
+                        crate::tui::app::model_context::model_switch_failure_message(
+                            &error.to_string(),
+                            self.is_remote,
+                        ),
+                    ));
+                    self.set_status_notice("Model switch failed");
+                    return;
+                }
+            }
+        }
+        if let Some(effort) = effort {
+            let _ = self.provider.set_reasoning_effort(&effort);
+        }
+        if !route_detail.is_empty() {
+            self.push_display_message(DisplayMessage::system(format!(
+                "{}\n{}",
+                notice, route_detail
+            )));
+        }
+        self.set_status_notice(if route_detail.is_empty() {
+            notice
+        } else {
+            format!("{} · {}", notice, route_detail)
+        });
+        // First-run onboarding: a model choice advances the flow.
+        self.onboarding_after_model_select();
+    }
+
+    /// The save-default key on a model row. A route with a reasoning ladder
+    /// opens the level step first so the default is saved with a level;
+    /// other routes save the model at once.
+    fn model_picker_save_default_key(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Saving a default model") {
+            return;
+        }
+        let Some(picker) = self.inline_interactive_state.as_ref() else {
+            return;
+        };
+        if !picker_is_runtime_model_picker(picker) {
+            return;
+        }
+        let Some(idx) = picker.selected_entry_index() else {
+            return;
+        };
+        let entry = &picker.entries[idx];
+        if !matches!(entry.action, PickerAction::Model) {
+            return;
+        }
+        let has_levels = entry
+            .active_option()
+            .is_some_and(|route| !model_route_effort_levels(&entry.name, route).is_empty());
+        if has_levels {
+            self.open_model_effort_step(true);
+        } else {
+            let entry = entry.clone();
+            self.save_model_picker_default(idx, &entry, None);
+        }
+    }
+
+    /// Save `entry` (row `idx` of the open model list) as the default model,
+    /// with `effort` as the saved reasoning level of its provider family.
+    fn save_model_picker_default(&mut self, idx: usize, entry: &PickerEntry, effort: Option<&str>) {
+        let bare_name = model_entry_base_name(entry);
+        let (model_spec, provider_key) = if let Some(r) = entry.active_option() {
+            let selection = crate::provider::MultiProvider::default_model_selection_from_route(
+                &bare_name,
+                &r.api_method,
+                &r.provider,
+            );
+            (selection.model_spec, selection.provider_key)
+        } else {
+            (bare_name.clone(), None)
+        };
+        let effort_suffix = effort
+            .map(|effort| format!(" ({})", reasoning_effort_picker_label(effort)))
+            .unwrap_or_default();
+
+        let notice = format!(
+            "Default → {}{} via {}",
+            model_spec,
+            effort_suffix,
+            provider_key.as_deref().unwrap_or("auto")
+        );
+
+        match crate::config::Config::set_default_model(Some(&model_spec), provider_key.as_deref()) {
+            Ok(()) => {
+                // Persist the level picked in the reasoning step so the
+                // default survives restarts with its effort (issue #675).
+                if let Some(effort) = effort {
+                    let save_result = match provider_key.as_deref() {
+                        Some("claude-oauth") | Some("claude-api") => Some(
+                            crate::config::Config::set_anthropic_reasoning_effort(Some(effort)),
+                        ),
+                        Some("openai-oauth") | Some("openai-api") => Some(
+                            crate::config::Config::set_openai_reasoning_effort(Some(effort)),
+                        ),
+                        _ => None,
+                    };
+                    if let Some(Err(e)) = save_result {
+                        self.push_display_message(DisplayMessage::error(format!(
+                            "Saved default model, but failed to save effort: {}",
+                            e
+                        )));
+                    }
+                }
+                self.invalidate_model_picker_cache();
+                if let Some(ref mut picker) = self.inline_interactive_state {
+                    for entry in &mut picker.entries {
+                        entry.is_default = false;
+                    }
+                    if let Some(entry) = picker.entries.get_mut(idx) {
+                        entry.is_default = true;
+                    }
+                }
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Saved default model: {}{} via {}. This affects future sessions.",
+                    model_spec,
+                    effort_suffix,
+                    provider_key.as_deref().unwrap_or("auto")
+                )));
+                self.set_status_notice(notice)
+            }
+            Err(e) => self.set_status_notice(format!("Failed to save default: {}", e)),
+        }
+    }
+
+    /// Replace the model list with the reasoning-level step for the selected
+    /// row. The list is kept inside the step so Esc returns to it as it was.
+    /// With `save_default`, confirming saves model + level as the default
+    /// instead of switching.
+    pub(super) fn open_model_effort_step(&mut self, save_default: bool) {
+        let current_model = if self.is_remote {
+            self.remote_provider_model.clone().unwrap_or_default()
+        } else {
+            self.provider.model()
+        };
+        let current_effort = if self.is_remote {
+            self.remote_reasoning_effort.clone()
+        } else {
+            self.provider.reasoning_effort()
+        };
+        let Some(mut parent) = self.inline_interactive_state.take() else {
+            return;
+        };
+        let Some(model) = parent.selected_entry().cloned() else {
+            self.inline_interactive_state = Some(parent);
+            return;
+        };
+        let Some(route) = model.active_option().cloned() else {
+            self.inline_interactive_state = Some(parent);
+            return;
+        };
+        let levels = model_route_effort_levels(&model.name, &route);
+        // The session's level belongs to the route it runs on. Another route
+        // of the same model is a different choice and starts on the saved
+        // level. Match by name only when no row knows the current route
+        // (for example a names-only remote catalog).
+        let any_row_is_current = parent.entries.iter().any(|entry| entry.is_current);
+        let is_current_model =
+            model.is_current || (!any_row_is_current && model.name == current_model);
+        let current_effort = current_effort.filter(|_| is_current_model);
+        let saved_effort = saved_default_reasoning_effort(&model.name, &route);
+        let selected = model_effort_step_preselection(
+            &levels,
+            current_effort.as_deref(),
+            saved_effort.as_deref(),
+        );
+
+        let entries: Vec<PickerEntry> = levels
+            .iter()
+            .map(|effort| PickerEntry {
+                name: reasoning_effort_picker_label(effort).to_string(),
+                options: Vec::new(),
+                action: PickerAction::Model,
+                selected_option: 0,
+                is_current: current_effort.as_deref() == Some(*effort),
+                is_default: false,
+                is_favorite: false,
+                recommended: *effort == "high",
+                recommendation_rank: usize::MAX,
+                usage_score: 0,
+                old: false,
+                created_date: None,
+                effort: Some((*effort).to_string()),
+            })
+            .collect();
+
+        // The typed `/model …` text belonged to the list's preview. The step
+        // is focused, and Esc goes back to a focused list with that filter.
+        if parent.preview {
+            parent.preview = false;
+            self.input.clear();
+            self.cursor_pos = 0;
+        }
+        parent.column = 0;
+        self.inline_interactive_state = Some(InlineInteractiveState {
+            kind: PickerKind::Model,
+            filtered: (0..entries.len()).collect(),
+            entries,
+            selected,
+            column: 0,
+            filter: String::new(),
+            preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: Some(Box::new(crate::tui::ModelEffortStep {
+                model,
+                parent,
+                save_default,
+            })),
+        });
+    }
+
+    /// Keys while the reasoning-level step is open: move, confirm, go back.
+    fn handle_model_effort_step_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let Some(picker) = self.inline_interactive_state.as_mut() else {
+            return;
+        };
+        let last = picker.filtered.len().saturating_sub(1);
+        match code {
+            KeyCode::Esc => {
+                if let Some(step) = picker.effort_step.take() {
+                    self.inline_interactive_state = Some(step.parent);
+                }
+            }
+            KeyCode::Up | KeyCode::BackTab => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+                picker.selected = picker.selected.saturating_sub(1)
+            }
+            KeyCode::Char('k') | KeyCode::Char('K') => {
+                picker.selected = picker.selected.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Tab | KeyCode::Char('j') | KeyCode::Char('J') => {
+                picker.selected = (picker.selected + 1).min(last)
+            }
+            KeyCode::Home | KeyCode::PageUp => picker.selected = 0,
+            KeyCode::End | KeyCode::PageDown => picker.selected = last,
+            KeyCode::Enter => {
+                let effort = picker
+                    .selected_entry()
+                    .and_then(|entry| entry.effort.clone());
+                let Some(step) = picker.effort_step.take() else {
+                    return;
+                };
+                let crate::tui::ModelEffortStep {
+                    model,
+                    parent,
+                    save_default,
+                } = *step;
+                let parent_index = parent.selected_entry_index();
+                // Back to the list first: a failed switch or a saved default
+                // leaves the user in the model list, not in the step.
+                self.inline_interactive_state = Some(parent);
+                if save_default {
+                    if let Some(idx) = parent_index {
+                        self.save_model_picker_default(idx, &model, effort.as_deref());
+                    }
+                } else {
+                    self.apply_model_picker_choice(model, effort);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn toggle_selected_model_favorite(&mut self) {
         if super::commands_dispatch::ssh_local_action_blocked(self, "Saving model favorites") {
             return;
@@ -3182,9 +3746,8 @@ impl App {
                 return None;
             }
             let base_name = model_entry_base_name(entry);
-            let effort = entry.effort.clone();
             let route = entry.options.get(entry.selected_option).cloned()?;
-            let key = model_picker_usage_key(&base_name, &route, effort.as_deref());
+            let key = model_picker_usage_key(&base_name, &route);
             let mut store = load_model_picker_favorites_store();
             store.version = MODEL_PICKER_FAVORITES_VERSION;
             let is_favorite = if store.favorites.remove(&key) {
@@ -3269,6 +3832,13 @@ impl App {
         if self
             .inline_interactive_state
             .as_ref()
+            .is_some_and(|picker| picker.effort_step.is_some())
+        {
+            return;
+        }
+        if self
+            .inline_interactive_state
+            .as_ref()
             .map(picker_is_runtime_model_picker)
             .unwrap_or(false)
         {
@@ -3288,6 +3858,16 @@ impl App {
         }
         if self.cycle_model_favorite_after_current() {
             let _ = self.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE);
+            // The hotkey switches at once: a favorite with a reasoning ladder
+            // takes its preselected level (current, saved default, or high)
+            // instead of stopping in the level step.
+            if self
+                .inline_interactive_state
+                .as_ref()
+                .is_some_and(|picker| picker.effort_step.is_some())
+            {
+                let _ = self.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE);
+            }
         }
     }
 
@@ -3296,6 +3876,14 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.effort_step.is_some())
+        {
+            self.handle_model_effort_step_key(code, modifiers);
+            return Ok(());
+        }
         match code {
             KeyCode::Esc => {
                 if let Some(ref mut picker) = self.inline_interactive_state
@@ -3327,8 +3915,9 @@ impl App {
                     if picker.column == 0 {
                         picker.selected = picker.selected.saturating_sub(1);
                     } else if let Some(&idx) = picker.filtered.get(picker.selected) {
-                        let entry = &mut picker.entries[idx];
-                        entry.selected_option = entry.selected_option.saturating_sub(1);
+                        let scopes = model_picker_scopes(picker);
+                        let next = step_scoped_route(&picker.entries[idx], &scopes, false);
+                        picker.choose_route(idx, next);
                     }
                 }
             }
@@ -3353,10 +3942,22 @@ impl App {
                         let max = picker.filtered.len().saturating_sub(1);
                         picker.selected = (picker.selected + 1).min(max);
                     } else if let Some(&idx) = picker.filtered.get(picker.selected) {
-                        let entry = &mut picker.entries[idx];
-                        let max = entry.options.len().saturating_sub(1);
-                        entry.selected_option = (entry.selected_option + 1).min(max);
+                        let scopes = model_picker_scopes(picker);
+                        let next = step_scoped_route(&picker.entries[idx], &scopes, true);
+                        picker.choose_route(idx, next);
                     }
+                }
+            }
+            KeyCode::PageDown | KeyCode::PageUp | KeyCode::Home | KeyCode::End => {
+                if let Some(ref mut picker) = self.inline_interactive_state {
+                    let max = picker.filtered.len().saturating_sub(1);
+                    picker.column = 0;
+                    picker.selected = match code {
+                        KeyCode::PageDown => (picker.selected + 10).min(max),
+                        KeyCode::PageUp => picker.selected.saturating_sub(10),
+                        KeyCode::Home => 0,
+                        _ => max,
+                    };
                 }
             }
             KeyCode::Right => {
@@ -3406,7 +4007,10 @@ impl App {
                     if picker.uses_compact_navigation() {
                         return Ok(());
                     }
-                    if picker.column == 0 && !picker.filter.is_empty() {
+                    if picker.column == 0
+                        && !picker.filter.is_empty()
+                        && split_model_picker_filter(&picker.filter).0.is_empty()
+                    {
                         Self::tab_complete_inline_interactive_filter(picker);
                     } else if picker.column < picker.max_navigable_column()
                         && let Some(&idx) = picker.filtered.get(picker.selected)
@@ -3417,98 +4021,23 @@ impl App {
                 }
             }
             code if modifiers.contains(KeyModifiers::CONTROL)
+                && key_char_eq_ignore_ascii_case(code, 'p')
+                && self
+                    .inline_interactive_state
+                    .as_ref()
+                    .is_some_and(picker_is_runtime_model_picker) =>
+            {
+                if let Some(ref mut picker) = self.inline_interactive_state {
+                    let forward = !modifiers.contains(KeyModifiers::SHIFT)
+                        && !matches!(code, KeyCode::Char('P'));
+                    cycle_model_picker_provider(picker, forward);
+                    picker.column = 0;
+                }
+            }
+            code if modifiers.contains(KeyModifiers::CONTROL)
                 && key_char_eq_ignore_ascii_case(code, 'o') =>
             {
-                if super::commands_dispatch::ssh_local_action_blocked(
-                    self,
-                    "Saving a default model",
-                ) {
-                    return Ok(());
-                }
-                if let Some(ref picker) = self.inline_interactive_state {
-                    if !picker_is_runtime_model_picker(picker) {
-                        return Ok(());
-                    }
-                    if picker.filtered.is_empty() {
-                        return Ok(());
-                    }
-                    let idx = picker.filtered[picker.selected];
-                    let entry = &picker.entries[idx];
-                    if !matches!(entry.action, PickerAction::Model) {
-                        return Ok(());
-                    }
-                    let route = entry.options.get(entry.selected_option);
-
-                    let bare_name = model_entry_base_name(entry);
-                    let entry_effort = entry.effort.clone();
-
-                    let (model_spec, provider_key) = if let Some(r) = route {
-                        let selection =
-                            crate::provider::MultiProvider::default_model_selection_from_route(
-                                &bare_name,
-                                &r.api_method,
-                                &r.provider,
-                            );
-                        (selection.model_spec, selection.provider_key)
-                    } else {
-                        (bare_name.clone(), None)
-                    };
-
-                    let notice = format!(
-                        "Default → {} via {}",
-                        model_spec,
-                        provider_key.as_deref().unwrap_or("auto")
-                    );
-
-                    match crate::config::Config::set_default_model(
-                        Some(&model_spec),
-                        provider_key.as_deref(),
-                    ) {
-                        Ok(()) => {
-                            // Persist the effort variant the user picked, so an
-                            // effort-qualified entry (e.g. "Claude Opus 5 (high)")
-                            // survives restarts instead of silently dropping the
-                            // effort (issue #675).
-                            if let Some(effort) = entry_effort.as_deref() {
-                                let save_result = match provider_key.as_deref() {
-                                    Some("claude-oauth") | Some("claude-api") => {
-                                        Some(crate::config::Config::set_anthropic_reasoning_effort(
-                                            Some(effort),
-                                        ))
-                                    }
-                                    Some("openai-oauth") | Some("openai-api") => {
-                                        Some(crate::config::Config::set_openai_reasoning_effort(
-                                            Some(effort),
-                                        ))
-                                    }
-                                    _ => None,
-                                };
-                                if let Some(Err(e)) = save_result {
-                                    self.push_display_message(DisplayMessage::error(format!(
-                                        "Saved default model, but failed to save effort: {}",
-                                        e
-                                    )));
-                                }
-                            }
-                            self.invalidate_model_picker_cache();
-                            if let Some(ref mut picker) = self.inline_interactive_state {
-                                for entry in &mut picker.entries {
-                                    entry.is_default = false;
-                                }
-                                if let Some(entry) = picker.entries.get_mut(idx) {
-                                    entry.is_default = true;
-                                }
-                            }
-                            self.push_display_message(DisplayMessage::system(format!(
-                                "Saved default model: {} via {}. This affects future sessions.",
-                                model_spec,
-                                provider_key.as_deref().unwrap_or("auto")
-                            )));
-                            self.set_status_notice(notice)
-                        }
-                        Err(e) => self.set_status_notice(format!("Failed to save default: {}", e)),
-                    }
-                }
+                self.model_picker_save_default_key();
             }
             code if modifiers.contains(KeyModifiers::CONTROL)
                 && key_char_eq_ignore_ascii_case(code, 'n') =>
@@ -3668,167 +4197,15 @@ impl App {
                         let _ = self.session.save();
                     }
                     PickerAction::Model => {
-                        if !route.available {
-                            self.push_display_message(DisplayMessage::error(
-                                crate::tui::app::model_context::unavailable_model_route_message(
-                                    &entry.name,
-                                    &route.provider,
-                                    &route.detail,
-                                    self.is_remote,
-                                ),
-                            ));
-                            self.set_status_notice("Model unavailable");
-                            return Ok(());
-                        }
-
-                        let bare_name = model_entry_base_name(&entry);
-                        let spec = if crate::provider::ModelRouteApiMethod::parse(&route.api_method)
-                            .is_openrouter()
-                            && route.provider == "auto"
+                        // A route with a reasoning ladder asks for the level
+                        // first. Others switch at once.
+                        if model_route_effort_levels(&model_entry_base_name(&entry), route)
+                            .is_empty()
                         {
-                            openrouter_route_model_id(&bare_name)
+                            self.apply_model_picker_choice(entry, None);
                         } else {
-                            picker_route_model_spec(&entry, route)
-                        };
-                        let route_selection = picker_route_selection(&entry, route);
-
-                        let effort = entry.effort.clone();
-                        record_model_picker_selection(&bare_name, route, effort.as_deref());
-                        let method_label =
-                            crate::provider::ModelRouteApiMethod::parse(&route.api_method)
-                                .display_label();
-                        // Placeholder routes ("remote-catalog"/"current") are
-                        // catalog-refresh stand-ins, not real provider routes:
-                        // surfacing them produced confusing notices like
-                        // "Model → x via Claude (remote-catalog) · refreshing
-                        // route details…" right before the real switch
-                        // confirmation. Show just the model in that case.
-                        let placeholder_route =
-                            placeholder_routes::is_placeholder_route_method(&route.api_method);
-                        let notice = if placeholder_route {
-                            format!("Model → {}", entry.name)
-                        } else {
-                            format!(
-                                "Model → {} via {} ({})",
-                                entry.name, route.provider, method_label
-                            )
-                        };
-                        let route_detail = if placeholder_route {
-                            String::new()
-                        } else {
-                            route.detail.trim().to_string()
-                        };
-
-                        // Record exactly which model spec + route the user chose
-                        // and how it will be applied. Pairs with the server-side
-                        // model-switch logs so we can trace a `/model` choice all
-                        // the way to the provider endpoint that ends up serving it
-                        // (issues #292/#278: switch routes to wrong endpoint).
-                        crate::logging::event_info(
-                            "model_picker_select",
-                            vec![
-                                ("entry", entry.name.clone()),
-                                ("spec", spec.clone()),
-                                ("provider", route.provider.clone()),
-                                ("api_method", route.api_method.clone()),
-                                ("route_provider", route_selection.provider_label.clone()),
-                                ("route_model", route_selection.model.clone()),
-                                ("route_api_method", route_selection.api_method.clone()),
-                                (
-                                    "effort",
-                                    effort.clone().unwrap_or_else(|| "none".to_string()),
-                                ),
-                                ("remote", self.is_remote.to_string()),
-                            ],
-                        );
-
-                        if self.is_remote {
-                            self.inline_interactive_state = None;
-                            self.upstream_provider = None;
-                            self.status_detail = None;
-                            // Track the chosen method client-side so post-error
-                            // fallback picks know which credential path the
-                            // active route uses (remote sessions have no other
-                            // route bookkeeping).
-                            self.session.route_api_method =
-                                Some(route_selection.api_method.clone());
-                            self.pending_route_selection = Some(route_selection);
-                            self.pending_model_switch = Some(spec);
-                            // In remote mode `self.provider` is a local
-                            // stand-in, so applying the picked effort variant
-                            // to it does not reach the server. Stage it so the
-                            // remote dispatcher forwards it right after the
-                            // model switch; otherwise the server keeps its
-                            // configured default (low) and silently runs e.g.
-                            // "gpt-5.5 (high)" at low effort (issue #427).
-                            self.pending_reasoning_effort = effort.clone();
-                        } else {
-                            match self.provider.set_route_selection(&route_selection) {
-                                Ok(()) => {
-                                    self.inline_interactive_state = None;
-                                    self.provider_session_id = None;
-                                    self.session.provider_session_id = None;
-                                    self.upstream_provider = None;
-                                    self.status_detail = None;
-                                    self.invalidate_model_picker_cache();
-                                    let active_model = self.provider.model();
-                                    self.update_context_limit_for_model(&active_model, None);
-                                    self.session.provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
-                                        &spec,
-                                        self.provider.name(),
-                                        self.session.provider_key.as_deref(),
-                                    );
-                                    self.session.model = Some(active_model.clone());
-                                    self.session.route_api_method =
-                                        Some(route_selection.api_method.clone());
-                                    let _ = self.session.save();
-                                    crate::logging::event_info(
-                                        "model_picker_select_applied",
-                                        vec![
-                                            ("spec", spec.clone()),
-                                            ("active_model", active_model),
-                                            ("provider", self.provider.name().to_string()),
-                                            ("api_method", route_selection.api_method.clone()),
-                                        ],
-                                    );
-                                }
-                                Err(error) => {
-                                    crate::logging::event_error(
-                                        "model_picker_select_failed",
-                                        vec![
-                                            ("spec", spec.clone()),
-                                            ("provider", route.provider.clone()),
-                                            ("api_method", route_selection.api_method.clone()),
-                                            ("error", error.to_string()),
-                                        ],
-                                    );
-                                    self.push_display_message(DisplayMessage::error(
-                                        crate::tui::app::model_context::model_switch_failure_message(
-                                            &error.to_string(),
-                                            self.is_remote,
-                                        ),
-                                    ));
-                                    self.set_status_notice("Model switch failed");
-                                    return Ok(());
-                                }
-                            }
+                            self.open_model_effort_step(false);
                         }
-                        if let Some(effort) = effort {
-                            let _ = self.provider.set_reasoning_effort(&effort);
-                        }
-                        if !route_detail.is_empty() {
-                            self.push_display_message(DisplayMessage::system(format!(
-                                "{}\n{}",
-                                notice, route_detail
-                            )));
-                        }
-                        self.set_status_notice(if route_detail.is_empty() {
-                            notice
-                        } else {
-                            format!("{} · {}", notice, route_detail)
-                        });
-                        // First-run onboarding: a model choice advances the flow.
-                        self.onboarding_after_model_select();
                     }
                 }
             }
@@ -3862,18 +4239,59 @@ impl App {
     }
 
     pub(super) fn apply_inline_interactive_filter(picker: &mut InlineInteractiveState) {
-        if picker.filter.is_empty() {
-            picker.filtered = (0..picker.entries.len()).collect();
+        // Runtime model pickers accept `@provider` scopes next to the search
+        // text. Scope each entry to its first matching route so the row shows
+        // (and Enter selects) that provider's route.
+        let (scopes, search) = if picker_is_runtime_model_picker(picker) {
+            split_model_picker_filter(&picker.filter)
         } else {
-            let query = picker.filter.trim();
+            (Vec::new(), picker.filter.clone())
+        };
+        // Put back routes an earlier scope switched, so each pass starts from
+        // the user's own route choices. Entries still in scope are switched
+        // again below; the rest keep the route the user had before.
+        for (index, original) in std::mem::take(&mut picker.scoped_route_restore) {
+            if let Some(entry) = picker.entries.get_mut(index)
+                && original < entry.options.len()
+            {
+                entry.selected_option = original;
+            }
+        }
+        let mut scoped: Option<Vec<usize>> = None;
+        if !scopes.is_empty() {
+            let mut keep = Vec::new();
+            for (index, entry) in picker.entries.iter_mut().enumerate() {
+                if let Some(option_index) = entry
+                    .options
+                    .iter()
+                    .position(|option| model_route_matches_scopes(option, &scopes))
+                {
+                    if !entry
+                        .active_option()
+                        .is_some_and(|option| model_route_matches_scopes(option, &scopes))
+                    {
+                        picker
+                            .scoped_route_restore
+                            .push((index, entry.selected_option));
+                        entry.selected_option = option_index;
+                    }
+                    keep.push(index);
+                }
+            }
+            scoped = Some(keep);
+        }
+        let candidates: Vec<usize> = scoped.unwrap_or_else(|| (0..picker.entries.len()).collect());
+        if search.trim().is_empty() {
+            picker.filtered = candidates;
+        } else {
+            let query = search.trim();
             // Prepare the query once per keystroke instead of re-parsing and
             // re-lowercasing it for every entry.
-            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&picker.filter);
-            let mut scored: Vec<(usize, bool, i32)> = picker
-                .entries
-                .iter()
-                .enumerate()
-                .filter_map(|(i, m)| {
+            let prepared = jcode_fuzzy::PreparedTokenQuery::new(&search);
+            let mut scored: Vec<(usize, bool, i32)> = candidates
+                .into_iter()
+                .filter_map(|i| {
+                    let m = &picker.entries[i];
                     let filter_text = picker.filter_text(m);
                     prepared.score(&filter_text).map(|s| {
                         let usage_bonus = m.usage_score.min(i32::MAX as u32) as i32;
@@ -3999,12 +4417,13 @@ mod tests {
     use super::{
         REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS, REMOTE_MODEL_CATALOG_CACHE_VERSION,
         REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES, RemoteModelCatalogCache,
-        filter_routes_by_provider_allowlist, key_char_eq_ignore_ascii_case,
-        model_picker_effort_matches_default, model_picker_route_is_current,
-        model_picker_route_is_default, model_picker_route_is_recommended,
-        next_model_favorite_after_current, picker_is_runtime_model_picker,
-        remote_model_catalog_cache_is_fresh, remote_model_catalog_cache_origin,
-        remote_model_catalog_snapshot_is_safe, route_supports_reasoning_effort,
+        filter_routes_by_provider_allowlist, fold_model_picker_usage_efforts,
+        key_char_eq_ignore_ascii_case, model_effort_step_preselection,
+        model_picker_route_is_current, model_picker_route_is_default,
+        model_picker_route_is_recommended, next_model_favorite_after_current,
+        picker_is_runtime_model_picker, remote_model_catalog_cache_is_fresh,
+        remote_model_catalog_cache_origin, remote_model_catalog_snapshot_is_safe,
+        route_supports_reasoning_effort,
     };
     use crate::tui::{
         AgentModelTarget, App, InlineInteractiveState, PickerAction, PickerEntry, PickerKind,
@@ -4062,6 +4481,8 @@ mod tests {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         };
         let mut agent_entry = picker_entry("Swarm / subagent", "gpt-5 default", 0);
         agent_entry.action = PickerAction::AgentTarget(AgentModelTarget::Swarm);
@@ -4073,6 +4494,8 @@ mod tests {
             column: 0,
             filter: String::new(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         };
 
         assert!(picker_is_runtime_model_picker(&runtime));
@@ -4081,13 +4504,15 @@ mod tests {
 
     #[test]
     fn favorite_cycle_reaches_every_favorite_across_fresh_picker_sorts() {
+        // Favorites are model + route rows (the reasoning level is chosen in
+        // a second step), so one model can be a favorite on several routes.
         let favorite_specs = [
-            ("claude-opus-5", "high", 2550),
-            ("claude-opus-4-8", "high", 950),
-            ("claude-opus-4-8", "medium", 0),
-            ("claude-opus-4-8", "low", 0),
+            ("claude-opus-5", "Anthropic", 2550),
+            ("claude-opus-4-8", "Anthropic", 950),
+            ("claude-opus-4-8", "Bedrock", 0),
+            ("claude-opus-4-8", "Copilot", 0),
         ];
-        let mut current_name = "claude-opus-5 (high)".to_string();
+        let mut current = ("claude-opus-5".to_string(), "Anthropic".to_string());
         let mut visited = Vec::new();
 
         for _ in 0..favorite_specs.len() {
@@ -4096,16 +4521,10 @@ mod tests {
             // favorites retain their usage-based ranking.
             let mut entries: Vec<_> = favorite_specs
                 .iter()
-                .map(|(model, effort, usage_score)| {
-                    let effort_label = if *effort == "medium" { "med" } else { effort };
-                    let mut entry = picker_entry(
-                        &format!("{model} ({effort_label})"),
-                        "Anthropic",
-                        *usage_score,
-                    );
-                    entry.effort = Some((*effort).to_string());
+                .map(|(model, provider, usage_score)| {
+                    let mut entry = picker_entry(model, provider, *usage_score);
                     entry.is_favorite = true;
-                    entry.is_current = entry.name == current_name;
+                    entry.is_current = (model.to_string(), provider.to_string()) == current;
                     entry
                 })
                 .collect();
@@ -4124,21 +4543,27 @@ mod tests {
                 column: 0,
                 filter: String::new(),
                 preview: false,
+                scoped_route_restore: Vec::new(),
+                effort_step: None,
             };
 
             let next = next_model_favorite_after_current(&picker)
                 .expect("a favorited model should be selectable");
-            current_name = picker.entries[picker.filtered[next]].name.clone();
-            visited.push(current_name.clone());
+            let entry = &picker.entries[picker.filtered[next]];
+            current = (
+                entry.name.clone(),
+                entry.active_option().unwrap().provider.clone(),
+            );
+            visited.push(format!("{} via {}", current.0, current.1));
         }
 
         assert_eq!(
             visited,
             [
-                "claude-opus-4-8 (high)",
-                "claude-opus-4-8 (low)",
-                "claude-opus-4-8 (med)",
-                "claude-opus-5 (high)",
+                "claude-opus-4-8 via Anthropic",
+                "claude-opus-4-8 via Bedrock",
+                "claude-opus-4-8 via Copilot",
+                "claude-opus-5 via Anthropic",
             ]
         );
     }
@@ -4156,6 +4581,8 @@ mod tests {
             column: 0,
             filter: "opus".to_string(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         };
 
         App::apply_inline_interactive_filter(&mut picker);
@@ -4176,6 +4603,8 @@ mod tests {
             column: 0,
             filter: "codxe".to_string(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         };
 
         App::apply_inline_interactive_filter(&mut picker);
@@ -4196,6 +4625,8 @@ mod tests {
             column: 0,
             filter: "gpt-5".to_string(),
             preview: false,
+            scoped_route_restore: Vec::new(),
+            effort_step: None,
         };
 
         App::apply_inline_interactive_filter(&mut picker);
@@ -4329,54 +4760,53 @@ mod tests {
     }
 
     #[test]
-    fn model_picker_effort_default_matches_only_stored_variant() {
-        // Anthropic: stored effort selects exactly one variant.
-        assert!(model_picker_effort_matches_default(
-            Some("claude-oauth"),
-            Some("high"),
-            Some("high"),
-            None,
-        ));
-        assert!(!model_picker_effort_matches_default(
-            Some("claude-oauth"),
-            Some("low"),
-            Some("high"),
-            None,
-        ));
-        // OpenAI uses its own stored effort.
-        assert!(model_picker_effort_matches_default(
-            Some("openai-oauth"),
-            Some("medium"),
-            None,
-            Some("medium"),
-        ));
-        assert!(!model_picker_effort_matches_default(
-            Some("openai-api"),
-            Some("high"),
-            None,
-            Some("medium"),
-        ));
-        // No stored effort: every variant keeps the legacy default marker.
-        assert!(model_picker_effort_matches_default(
-            Some("claude-oauth"),
-            Some("xhigh"),
-            None,
-            None,
-        ));
-        // Entries without an effort always match.
-        assert!(model_picker_effort_matches_default(
-            Some("claude-oauth"),
-            None,
-            Some("high"),
-            None,
-        ));
-        // Unknown provider families ignore stored efforts.
-        assert!(model_picker_effort_matches_default(
-            Some("openrouter"),
-            Some("high"),
-            Some("low"),
-            Some("low"),
-        ));
+    fn model_effort_step_preselects_current_then_saved_then_high() {
+        let levels = ["none", "low", "medium", "high", "xhigh", "max"];
+        // The session's level wins for the current model.
+        assert_eq!(
+            model_effort_step_preselection(&levels, Some("low"), Some("max")),
+            1
+        );
+        // Otherwise the saved default of the provider family.
+        assert_eq!(
+            model_effort_step_preselection(&levels, None, Some("max")),
+            5
+        );
+        // Otherwise the recommended level.
+        assert_eq!(model_effort_step_preselection(&levels, None, None), 3);
+        // A level this route lacks falls through to the next rule.
+        assert_eq!(
+            model_effort_step_preselection(&levels, Some("minimal"), Some("MAX")),
+            5
+        );
+        assert_eq!(model_effort_step_preselection(&["low"], None, None), 0);
+    }
+
+    #[test]
+    fn model_picker_usage_folds_effort_keyed_history_into_model_rows() {
+        let route = picker_option_with_method("OpenAI", "openai-oauth");
+        let key = |effort: &str| format!("gpt-5.5\u{1f}OpenAI\u{1f}openai-oauth\u{1f}{effort}");
+        let mut store = super::ModelPickerUsageStore::default();
+        for (effort, count, secs) in [("high", 3, 10), ("low", 2, 30), ("", 1, 20)] {
+            store.selections.insert(
+                key(effort),
+                super::ModelPickerUsageEntry {
+                    count,
+                    last_selected_unix_secs: secs,
+                },
+            );
+        }
+
+        fold_model_picker_usage_efforts(&mut store);
+
+        assert_eq!(store.selections.len(), 1);
+        let entry = &store.selections[&super::model_picker_usage_key("gpt-5.5", &route)];
+        assert_eq!(entry.count, 6, "every level's picks count for the model");
+        assert_eq!(entry.last_selected_unix_secs, 30);
+        assert_eq!(
+            super::model_picker_usage_score(&store, "gpt-5.5", &route),
+            650
+        );
     }
 
     #[test]
