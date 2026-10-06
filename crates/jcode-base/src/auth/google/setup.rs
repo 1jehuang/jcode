@@ -375,6 +375,32 @@ mod tests {
     }
 
     #[test]
+    fn project_ids_match_gclouds_create_validator() {
+        // Exact validator from gcloud 587 surface/projects/create.py
+        // (RegexpValidator anchors the whole value), plus the API's
+        // no-trailing-hyphen rule from the non-default-universe pattern.
+        let gcloud = regex::Regex::new(r"^[a-z][a-z0-9-]{5,29}$").unwrap();
+        let names = [
+            "jcode",
+            "J",
+            "9",
+            "a-b",
+            "My  Project!!",
+            "ünïcode",
+            "-x-",
+            "",
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+        ];
+        for name in names {
+            for suffix in [0, 7, 42, 999_999, 1_000_000, u32::MAX] {
+                let id = suggest_project_id(name, suffix);
+                assert!(gcloud.is_match(&id), "{name:?} -> {id}");
+                assert!(!id.ends_with('-'), "{name:?} -> {id}");
+            }
+        }
+    }
+
+    #[test]
     fn project_ids_are_valid() {
         for (name, suffix) in [
             ("jcode", 42),
