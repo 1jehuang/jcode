@@ -339,29 +339,29 @@ impl App {
             self.session.provider_session_id = None;
             let mut restored_model = false;
             if let Some(model) = self.session.model.clone() {
-                let model_request =
-                    crate::provider::MultiProvider::model_switch_request_for_session_route(
-                        &model,
-                        self.session.provider_key.as_deref(),
-                        self.session.route_api_method.as_deref(),
-                    );
-                if let Err(e) = crate::provider::set_model_with_auth_refresh(
+                match crate::provider::restore_session_model(
                     self.provider.as_ref(),
-                    &model_request,
+                    &model,
+                    self.session.provider_key.as_deref(),
+                    self.session.route_api_method.as_deref(),
                 ) {
-                    self.push_display_message(DisplayMessage {
-                        role: "system".to_string(),
-                        content: format!(
-                            "⚠ Failed to restore model '{}' via '{}': {}",
-                            model, model_request, e
-                        ),
-                        tool_calls: vec![],
-                        duration_secs: None,
-                        title: None,
-                        tool_data: None,
-                    });
-                } else {
-                    restored_model = true;
+                    Err(e) => {
+                        self.push_display_message(DisplayMessage {
+                            role: "system".to_string(),
+                            content: format!("⚠ Failed to restore model '{}': {}", model, e),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                    Ok(restore) => {
+                        if let Some(healed) = restore.healed_route {
+                            self.session.provider_key = healed.provider_key;
+                            self.session.route_api_method = healed.route_api_method;
+                        }
+                        restored_model = true;
+                    }
                 }
             }
 
