@@ -1242,7 +1242,10 @@ impl Provider for OpenAIProvider {
 
     fn context_window(&self) -> usize {
         let model = self.model();
-        jcode_provider_core::context_limit_for_model_with_provider(&model, Some(self.name()))
+        // Resolve through jcode-base so the live OAuth catalog limits (including
+        // an opted-in max_context_window) are honored. The provider-core
+        // resolver alone has no cache and falls back to static family guesses.
+        jcode_base::provider::context_limit_for_model_with_provider(&model, Some(self.name()))
             .unwrap_or(jcode_provider_core::DEFAULT_CONTEXT_LIMIT)
     }
 
