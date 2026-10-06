@@ -608,3 +608,42 @@ fn bridge_update_is_skipped_until_the_bridge_is_installed() {
         None => crate::env::remove_var("JCODE_HOME"),
     }
 }
+
+/// After an update only hosts still running the replaced binary are stopped;
+/// a host the reloaded extension already started from the new file survives.
+#[cfg(target_os = "linux")]
+#[test]
+fn update_stops_only_hosts_running_the_replaced_binary() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let host = temp.path().join("firefox-agent-bridge-host");
+    let sleep = std::path::Path::new("/bin/sleep");
+    std::fs::copy(sleep, &host).expect("copy sleep");
+    let mut old = std::process::Command::new(&host)
+        .arg("30")
+        .spawn()
+        .expect("old host");
+    // Replace the binary the way the updater does (rename over it).
+    let staged = temp.path().join(".staged");
+    std::fs::copy(sleep, &staged).expect("stage");
+    std::fs::rename(&staged, &host).expect("replace");
+    let mut new = std::process::Command::new(&host)
+        .arg("30")
+        .spawn()
+        .expect("new host");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    super::browser_update::stop_hosts_running(&host);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let old_exited = old.try_wait().expect("poll old").is_some();
+    let new_running = new.try_wait().expect("poll new").is_none();
+    let _ = new.kill();
+    let _ = new.wait();
+    let _ = old.kill();
+    let _ = old.wait();
+    assert!(
+        old_exited,
+        "host running the replaced binary must be stopped"
+    );
+    assert!(new_running, "host running the new binary must be kept");
+}

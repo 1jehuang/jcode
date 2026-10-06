@@ -203,7 +203,7 @@ async fn restart_running_hosts() {
 
 /// Terminate native host processes started from `host`. The browser restarts
 /// a host on the extension's next connect attempt.
-fn stop_hosts_running(host: &std::path::Path) {
+pub(super) fn stop_hosts_running(host: &std::path::Path) {
     #[cfg(target_os = "linux")]
     {
         let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -216,11 +216,14 @@ fn stop_hosts_running(host: &std::path::Path) {
             let Ok(exe) = std::fs::read_link(entry.path().join("exe")) else {
                 continue;
             };
-            // The binary was just replaced, so the kernel reports the old
-            // inode as "<path> (deleted)".
+            // The binary was just replaced, so hosts still running the old
+            // one report "<path> (deleted)". A host the reloaded extension
+            // already spawned from the new binary has no suffix and is kept.
             let exe = exe.to_string_lossy();
-            let exe = exe.trim_end_matches(" (deleted)");
-            if std::path::Path::new(exe) == host {
+            let Some(old) = exe.strip_suffix(" (deleted)") else {
+                continue;
+            };
+            if std::path::Path::new(old) == host {
                 // SAFETY: plain signal to a process we matched by executable.
                 unsafe { libc::kill(pid, libc::SIGTERM) };
             }
