@@ -1834,8 +1834,8 @@ fn test_handle_input_shell_completed_renders_markdown_blocks() {
     );
 }
 
-/// Regression for issue #427: selecting an effort-variant model row (e.g.
-/// "gpt-5.5 (high)") in the remote model picker must stage the chosen effort
+/// Regression for issue #427: choosing a model and a reasoning level (e.g.
+/// gpt-5.5 at high) in the remote model picker must stage the chosen effort
 /// alongside the pending model switch. Previously only the model spec was
 /// staged, so the server kept its configured default effort (low) and the
 /// session silently ran gpt-5.5 at low effort.
@@ -1854,21 +1854,31 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     let entry_idx = picker
         .entries
         .iter()
-        .position(|m| m.name == "gpt-5.5 (high)")
-        .expect("gpt-5.5 (high) should be in picker");
-    assert_eq!(
-        picker.entries[entry_idx].effort.as_deref(),
-        Some("high"),
-        "effort variant rows must carry their effort"
+        .position(|m| m.name == "gpt-5.5")
+        .expect("gpt-5.5 should be in picker");
+    assert!(
+        picker.entries[entry_idx].effort.is_none(),
+        "model rows carry no effort; it is picked in the level step"
     );
 
     let filtered_pos = picker
         .filtered
         .iter()
         .position(|&i| i == entry_idx)
-        .expect("gpt-5.5 (high) should be in filtered list");
+        .expect("gpt-5.5 should be in filtered list");
     app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
 
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    {
+        let picker = app.inline_interactive_state.as_mut().expect("level step");
+        assert!(picker.effort_step.is_some(), "Enter opens the level step");
+        picker.selected = picker
+            .entries
+            .iter()
+            .position(|entry| entry.effort.as_deref() == Some("high"))
+            .expect("high level row");
+    }
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
@@ -1880,7 +1890,7 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     assert_eq!(
         app.pending_reasoning_effort.as_deref(),
         Some("high"),
-        "the picked effort variant must be staged so it reaches the server (issue #427)"
+        "the picked level must be staged so it reaches the server (issue #427)"
     );
 }
 
@@ -1899,34 +1909,55 @@ fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
     });
 
     app.open_model_picker();
-    let picker = app
-        .inline_interactive_state
-        .as_ref()
-        .expect("model picker should be open");
-    let has_route_effort = |api_method: &str, effort: &str| {
-        picker.entries.iter().any(|entry| {
-            entry.name.starts_with("gpt-5.5 (")
-                && entry.effort.as_deref() == Some(effort)
-                && entry
-                    .options
-                    .first()
-                    .is_some_and(|route| route.api_method == api_method)
-        })
+    // The level step lists the ladder of the picked route only.
+    let levels_for = |app: &mut App, api_method: &str| -> Vec<String> {
+        {
+            let picker = app.inline_interactive_state.as_mut().expect("picker open");
+            picker.selected = picker
+                .filtered
+                .iter()
+                .position(|&i| {
+                    picker.entries[i].name == "gpt-5.5"
+                        && picker.entries[i]
+                            .active_option()
+                            .is_some_and(|route| route.api_method == api_method)
+                })
+                .expect("gpt-5.5 row for route");
+            picker.column = picker.max_navigable_column();
+        }
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        let levels = app
+            .inline_interactive_state
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|entry| entry.effort.clone())
+            .collect();
+        app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
+        levels
     };
 
-    assert!(has_route_effort("openai-oauth", "max"));
-    assert!(has_route_effort("openai-oauth", "minimal"));
-    assert!(has_route_effort("openrouter", "xhigh"));
-    assert!(has_route_effort("openrouter", "minimal"));
+    let native = levels_for(&mut app, "openai-oauth");
+    let openrouter = levels_for(&mut app, "openrouter");
+    assert!(native.iter().any(|e| e == "max"));
+    assert!(native.iter().any(|e| e == "minimal"));
+    assert!(openrouter.iter().any(|e| e == "xhigh"));
+    assert!(openrouter.iter().any(|e| e == "minimal"));
     assert!(
-        !has_route_effort("openrouter", "max"),
+        !openrouter.iter().any(|e| e == "max"),
         "OpenRouter must not advertise max as a distinct rung because it aliases xhigh"
+    );
+    assert!(
+        !native.iter().chain(&openrouter).any(|e| e.starts_with("swarm")),
+        "swarm modes are not reasoning levels"
     );
 }
 
-/// Plain model rows (no effort suffix) must not stage a reasoning effort.
-/// Routes whose runtime cannot apply a reasoning effort (e.g. Copilot) get
-/// plain rows even for models that have an effort ladder elsewhere.
+/// Routes whose runtime cannot apply a reasoning effort (e.g. Copilot) switch
+/// at once without a level step and must not stage a reasoning effort, even
+/// for models that have an effort ladder on other routes.
 #[test]
 fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     let mut app = create_test_app();
@@ -1953,8 +1984,12 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     let entry_idx = picker
         .entries
         .iter()
-        .position(|m| m.name == "claude-opus-4-8" && m.effort.is_none())
-        .expect("claude-opus-4-8 should be in picker without an effort variant");
+        .position(|m| {
+            m.name == "claude-opus-4-8"
+                && m.active_option()
+                    .is_some_and(|route| route.api_method == "copilot")
+        })
+        .expect("claude-opus-4-8 via Copilot should be in picker");
 
     let filtered_pos = picker
         .filtered

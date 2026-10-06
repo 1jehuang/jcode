@@ -1,8 +1,8 @@
 use super::{
     build_resume_command, effort_display_label, effort_display_label_with_root,
     extract_bracketed_system_message, format_countdown_until, gather_ambient_info_inner,
-    inferred_reasoning_efforts, partition_queued_messages, resume_invocation_args,
-    resumed_window_title,
+    inferred_reasoning_efforts, named_profile_reasoning_efforts, partition_queued_messages,
+    resume_invocation_args, resumed_window_title,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -158,6 +158,154 @@ fn inferred_reasoning_efforts_use_provider_specific_order_and_max_semantics() {
         "DeepSeek direct keeps max as a real provider level"
     );
     assert!(inferred_reasoning_efforts(Some("ollama"), Some("llama3")).is_empty());
+}
+
+#[test]
+fn named_compatible_profile_exposes_explicit_effort_levels_to_remote_client() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "custom".into(),
+        crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(true),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("kimi-k3")),
+        Some(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()),
+    );
+}
+
+#[test]
+fn named_compatible_profile_disables_effort_for_model_with_reasoning_off() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "custom".into(),
+        crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(true),
+            models: vec![crate::config::NamedProviderModelConfig {
+                id: "kimi-k3".into(),
+                reasoning: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("openai-compatible:custom"), Some("kimi-k3")),
+        Some(Vec::new()),
+    );
+}
+
+#[test]
+fn named_compatible_profile_respects_explicit_effort_disable() {
+    let mut config = crate::config::Config::default();
+    config.providers.insert(
+        "custom".into(),
+        crate::config::NamedProviderConfig {
+            supports_reasoning_effort: Some(false),
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("openai-compatible:custom"), Some("kimi-k3")),
+        Some(Vec::new()),
+    );
+}
+
+#[test]
+fn unconfigured_named_profile_preserves_existing_inference() {
+    assert_eq!(
+        named_profile_reasoning_efforts(
+            &crate::config::Config::default(),
+            Some("openai-compatible:missing"),
+            Some("kimi-k3")
+        ),
+        None,
+    );
+}
+
+fn named_profile_config(profile: crate::config::NamedProviderConfig) -> crate::config::Config {
+    let mut config = crate::config::Config::default();
+    config.providers.insert("custom".into(), profile);
+    config
+}
+
+fn named_model(id: &str, reasoning: Option<bool>) -> crate::config::NamedProviderModelConfig {
+    crate::config::NamedProviderModelConfig {
+        id: id.into(),
+        reasoning,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn named_profile_deepseek_model_with_reasoning_on_uses_deepseek_levels() {
+    // Greptile #1689: the runtime treats a DeepSeek-family model as
+    // DeepSeek-style even when `reasoning = true`, so `minimal`/`xhigh`
+    // would be rejected.
+    let config = named_profile_config(crate::config::NamedProviderConfig {
+        models: vec![named_model("deepseek-v4-pro", Some(true))],
+        ..Default::default()
+    });
+    let levels = named_profile_reasoning_efforts(
+        &config,
+        Some("openai-compatible:custom"),
+        Some("deepseek-v4-pro"),
+    )
+    .unwrap();
+    assert_eq!(
+        levels,
+        jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()
+    );
+    assert!(!levels.contains(&"minimal") && !levels.contains(&"xhigh"));
+}
+
+#[test]
+fn named_profile_without_explicit_reasoning_infers_from_model_family() {
+    let config = named_profile_config(crate::config::NamedProviderConfig::default());
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("gpt-5.5")),
+        Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()),
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("deepseek-v4")),
+        Some(jcode_provider_core::DEEPSEEK_SELECTABLE_EFFORTS.to_vec()),
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("kimi-k3")),
+        Some(Vec::new()),
+    );
+
+    // Heuristics off: only explicit settings count.
+    let config = named_profile_config(crate::config::NamedProviderConfig {
+        disable_reasoning_heuristics: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("gpt-5.5")),
+        Some(Vec::new()),
+    );
+}
+
+#[test]
+fn named_profile_effort_off_still_honors_model_that_enables_it() {
+    let config = named_profile_config(crate::config::NamedProviderConfig {
+        supports_reasoning_effort: Some(false),
+        models: vec![named_model("kimi-k3", Some(true))],
+        ..Default::default()
+    });
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("kimi-k3")),
+        Some(jcode_provider_core::OPENAI_SELECTABLE_EFFORTS.to_vec()),
+    );
+    assert_eq!(
+        named_profile_reasoning_efforts(&config, Some("custom"), Some("other")),
+        Some(Vec::new()),
+    );
 }
 
 #[test]

@@ -26,7 +26,7 @@ impl App {
                 "/cls\nClear the rendered view only. The model keeps its full context; nothing is sent or forgotten. (Ctrl+L clears the screen but keeps history in scrollback.)"
             }
             "model" => {
-                "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."
+                "/model\nOpen the model browser: type to search, ↑↓/PgUp/PgDn to scroll, Ctrl+P (Shift for back) to filter by provider, Enter to select.\n\n/model @<provider> [search]\nBrowse one provider's models, e.g. /model @openrouter claude.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."
             }
             "provider-test-coverage"
             | "provider test coverage"

@@ -1344,14 +1344,14 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         );
     }
 
-    // Models with reasoning-effort support expand into effort rows (issue
-    // #458); the hydrated route must be preserved on each variant.
+    // Models with reasoning-effort support keep one row per route (the
+    // level is picked in a second step); the hydrated route is preserved.
     assert_eq!(
-        routes_by_model.get("gpt-5.5 (high)"),
+        routes_by_model.get("gpt-5.5"),
         Some(&("OpenAI".to_string(), "openai-oauth".to_string()))
     );
     assert_eq!(
-        routes_by_model.get("claude-opus-4-6 (high)"),
+        routes_by_model.get("claude-opus-4-6"),
         Some(&("Anthropic".to_string(), "claude-oauth".to_string()))
     );
     assert_eq!(
@@ -1359,7 +1359,7 @@ fn test_model_picker_state_space_preserves_provider_labels_after_route_hydration
         Some(&("Chutes".to_string(), "openai-compatible:chutes".to_string()))
     );
     assert_eq!(
-        routes_by_model.get("deepseek/deepseek-v4-pro (high)"),
+        routes_by_model.get("deepseek/deepseek-v4-pro"),
         Some(&("auto".to_string(), "openrouter".to_string()))
     );
 
@@ -1853,8 +1853,8 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
     let model_idx = picker
         .entries
         .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
+        .position(|entry| entry.name == "gpt-5.4")
+        .expect("openrouter-backed OpenAI entry should be in picker");
     let filtered_pos = picker
         .filtered
         .iter()
@@ -1862,8 +1862,13 @@ fn test_local_model_picker_openrouter_bare_openai_route_uses_openai_catalog_pref
         .expect("entry should be in filtered list");
 
     app.inline_interactive_state.as_mut().unwrap().selected = filtered_pos;
+    // Enter opens the level step. The model only switches once a level is
+    // confirmed.
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .expect("model picker selection should succeed");
+    assert!(set_model_calls.lock().unwrap().is_empty());
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .expect("level selection should succeed");
 
     assert_eq!(
         set_model_calls.lock().unwrap().as_slice(),
@@ -1884,8 +1889,8 @@ fn test_agent_model_picker_openrouter_bare_openai_route_saves_openai_catalog_pre
     let model_idx = picker
         .entries
         .iter()
-        .position(|entry| entry.name == "gpt-5.4 (high)")
-        .expect("openrouter-backed OpenAI effort entry should be in picker");
+        .position(|entry| entry.name == "gpt-5.4")
+        .expect("openrouter-backed OpenAI entry should be in picker");
     let filtered_pos = picker
         .filtered
         .iter()
@@ -1929,7 +1934,7 @@ fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_
     let gpt_text = render_filtered(&mut app, "gpt-oss-120b-medium");
 
     assert!(
-        claude_text.contains("▸ Claude Sonnet 4.6") && claude_text.contains("↑↓ choose"),
+        claude_text.contains("▸ Claude Sonnet 4.6") && claude_text.contains("Search: claude-sonnet-4-6"),
         "rendered /model suggestions should show the selected row and navigation, got:
 {}",
         claude_text
@@ -1989,9 +1994,8 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
         render_and_snap(app, &mut terminal)
     };
 
-    // Effort-capable routes now expand into multiple rows. Render focused
-    // slices so each provider remains observable without assuming the complete
-    // catalog fits in one terminal viewport.
+    // Render focused slices so each provider remains observable without
+    // assuming the complete catalog fits in one terminal viewport.
     let openai_text = render_filtered(&mut app, "gpt-5.4");
     let comtegra_text = render_filtered(&mut app, "glm-51-nvfp4");
     let copilot_text = render_filtered(&mut app, "claude-opus-4.6");
@@ -2000,7 +2004,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     let openrouter_openai_text = render_filtered(&mut app, "openai/gpt-5.5");
 
     assert!(
-        openai_text.contains("▸ GPT-5.4") && openai_text.contains("↑↓ choose"),
+        openai_text.contains("▸ GPT-5.4") && openai_text.contains("type to search"),
         "rendered /model suggestions should show the selected row and navigation, got:\n{}",
         openai_text
     );
@@ -2014,7 +2018,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let glm_row = comtegra_text
         .lines()
-        .find(|line| line.contains("glm-51-nvfp4"))
+        .find(|line| !line.starts_with("Search:") && line.contains("glm-51-nvfp4"))
         .unwrap_or("");
     assert!(
         glm_row.contains("Comtegra GPU Cloud")
@@ -2043,11 +2047,11 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let deepseek_auto_row = deepseek_text
         .lines()
-        .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("auto"))
+        .find(|line| !line.starts_with("Search:") && line.contains("deepseek/deepseek-v4-pro") && line.contains("auto"))
         .unwrap_or("");
     let deepseek_provider_row = deepseek_text
         .lines()
-        .find(|line| line.contains("deepseek/deepseek-v4-pro") && line.contains("DeepSeek"))
+        .find(|line| !line.starts_with("Search:") && line.contains("deepseek/deepseek-v4-pro") && line.contains("DeepSeek"))
         .unwrap_or("");
     assert!(
         !deepseek_auto_row.contains('★'),
@@ -2063,7 +2067,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let kimi25_row = kimi_text
         .lines()
-        .find(|line| line.contains("moonshotai/kimi-k2.5"))
+        .find(|line| !line.starts_with("Search:") && line.contains("moonshotai/kimi-k2.5"))
         .unwrap_or("");
     assert!(
         !kimi25_row.contains('★'),
@@ -2073,7 +2077,7 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     );
     let openrouter_openai_row = openrouter_openai_text
         .lines()
-        .find(|line| line.contains("openai/gpt-5.5"))
+        .find(|line| !line.starts_with("Search:") && line.contains("openai/gpt-5.5"))
         .unwrap_or("");
     assert!(
         openrouter_openai_row.contains("OpenRou")
