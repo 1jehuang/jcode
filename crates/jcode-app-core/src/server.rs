@@ -2278,6 +2278,11 @@ impl Server {
 
     /// Start the server (both main and debug sockets)
     pub async fn run(&self) -> Result<()> {
+        // Pin the binary this server runs before a later install can repoint
+        // the channel link it was started through (see running_server_binary).
+        if let Some(binary) = self::util::running_server_binary() {
+            crate::logging::info(&format!("Server binary: {}", binary.display()));
+        }
         // Ensure socket directory exists (for named sockets like /run/user/1000/jcode/)
         if let Some(parent) = self.socket_path.parent() {
             std::fs::create_dir_all(parent)?;

@@ -659,3 +659,28 @@ async fn direct_update_notification_is_lost_on_stale_cached_event_tx() {
         "fanout-delivered event should arrive on the live attachment"
     );
 }
+
+#[tokio::test]
+async fn coordinator_plan_update_releases_member_guard_before_queueing_interrupts() {
+    let (_env, _runtime) = RuntimeEnvGuard::new();
+    let fixture = plan_fixture("swarm-lock", "coord", "worker");
+    let mut item = plan_item("a", &[]);
+    item.assigned_to = Some(fixture.worker.clone());
+
+    // Park the handler inside queue_soft_interrupt_for_session.
+    let queues = fixture.soft_interrupt_queues.write().await;
+    let update = fixture.propose(&fixture.coord, vec![item]);
+    tokio::pin!(update);
+    let wait = std::time::Duration::from_millis(50);
+    assert!(tokio::time::timeout(wait, &mut update).await.is_err());
+
+    let members = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fixture.swarm_members.write(),
+    )
+    .await
+    .expect("plan update must not hold swarm_members while queueing interrupts");
+    drop(members);
+    drop(queues);
+    update.await;
+}
