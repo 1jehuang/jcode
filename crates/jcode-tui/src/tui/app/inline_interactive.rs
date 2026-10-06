@@ -438,7 +438,10 @@ fn model_picker_route_is_current(
             .unwrap_or(true)
 }
 
-const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-8"];
+const RECOMMENDED_MODELS: &[&str] = &[
+    jcode_provider_core::DEFAULT_OPENAI_MODEL,
+    jcode_provider_core::DEFAULT_CLAUDE_MODEL,
+];
 
 fn model_picker_recommendation_rank(name: &str) -> usize {
     RECOMMENDED_MODELS
@@ -4433,39 +4436,39 @@ mod tests {
         };
 
         assert!(model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &openai_oauth_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &openai_api_key_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &copilot_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &unavailable_openai_oauth_route,
         ));
 
-        // Current policy (see jcode-provider-core): claude-opus-4-8 is the
-        // recommended Anthropic flagship; older Opus and OpenRouter/Copilot
-        // routes are not recommended.
+        // Recommendations follow the curated defaults (see jcode-provider-core):
+        // the default Claude flagship is recommended; older Opus and
+        // OpenRouter/Copilot routes are not.
         assert!(model_picker_route_is_recommended(
-            "claude-opus-4-8",
-            &claude_oauth_route,
-        ));
-        assert!(!model_picker_route_is_recommended(
-            "claude-opus-4-7",
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &claude_oauth_route,
         ));
         assert!(!model_picker_route_is_recommended(
             "claude-opus-4-8",
+            &claude_oauth_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &claude_openrouter_route,
         ));
         assert!(!model_picker_route_is_recommended(
-            "claude-opus-4-8",
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &copilot_route,
         ));
 

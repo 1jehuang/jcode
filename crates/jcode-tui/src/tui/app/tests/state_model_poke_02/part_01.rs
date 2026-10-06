@@ -1050,7 +1050,10 @@ fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
                 .unwrap(),
             );
         }
-        let last = assigned.last().expect("three accounts were created").clone();
+        let last = assigned
+            .last()
+            .expect("three accounts were created")
+            .clone();
         crate::auth::claude::set_active_account(&last).unwrap();
 
         let labels: Vec<_> = crate::auth::claude::list_accounts()
@@ -1263,11 +1266,16 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         "gpt-5.3-codex-spark".to_string(),
         "gpt-5.3-codex".to_string(),
         "claude-opus-4-8".to_string(),
+        jcode_provider_core::DEFAULT_OPENAI_MODEL.to_string(),
+        jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
     ];
     app.remote_model_options = app
         .remote_available_entries
         .iter()
-        .filter(|model| model.as_str() != "claude-opus-4-8")
+        .filter(|model| {
+            model.as_str() != "claude-opus-4-8"
+                && model.as_str() != jcode_provider_core::DEFAULT_CLAUDE_MODEL
+        })
         .cloned()
         .map(|model| crate::provider::ModelRoute {
             model,
@@ -1297,6 +1305,17 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         usage: None,
         cheapness: None,
     });
+    for api_method in ["claude-oauth", "claude-api"] {
+        app.remote_model_options.push(crate::provider::ModelRoute {
+            model: jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string(),
+            provider: "Anthropic".to_string(),
+            api_method: api_method.to_string(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        });
+    }
 }
 
 fn configure_test_remote_openrouter_provider_routes(app: &mut App) {

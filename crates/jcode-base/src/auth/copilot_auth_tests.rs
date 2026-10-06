@@ -366,6 +366,47 @@ fn choose_default_model_with_opus() {
     assert_eq!(choose_default_model(&models), "claude-opus-4.6");
 }
 
+fn copilot_models(ids: &[&str]) -> Vec<CopilotModelInfo> {
+    ids.iter()
+        .map(|id| CopilotModelInfo {
+            id: id.to_string(),
+            name: String::new(),
+            vendor: String::new(),
+            version: String::new(),
+            model_picker_enabled: true,
+            capabilities: Default::default(),
+        })
+        .collect()
+}
+
+#[test]
+fn choose_default_model_prefers_newest_claude_flagship() {
+    let models = copilot_models(&[
+        "claude-sonnet-4.6",
+        "claude-opus-4.6",
+        "claude-opus-4.8",
+        "claude-opus-5.5",
+        "gpt-5.5",
+    ]);
+    assert_eq!(choose_default_model(&models), "claude-opus-5.5");
+}
+
+#[test]
+fn choose_default_model_auto_promotes_unlisted_newer_opus() {
+    let models = copilot_models(&["claude-opus-4.6", "claude-opus-5.5", "claude-opus-5.9"]);
+    assert_eq!(choose_default_model(&models), "claude-opus-5.9");
+}
+
+#[test]
+fn choose_default_model_ignores_fast_and_cheap_variants() {
+    let models = copilot_models(&[
+        "claude-haiku-4.5",
+        "claude-opus-4.6-fast",
+        "claude-opus-4.8",
+    ]);
+    assert_eq!(choose_default_model(&models), "claude-opus-4.8");
+}
+
 #[test]
 fn choose_default_model_without_opus() {
     let models = vec![CopilotModelInfo {
