@@ -108,8 +108,10 @@ impl CalendarClient {
             )
         } else {
             format!(
-                "Google Calendar is not configured. Ask the user to run `jcode login google \
-                 --google-services calendar` (enable the Google Calendar API at {} first), then retry.",
+                "Google Calendar is not configured. Offer to set it up: follow jcode_docs \
+                 docs/GOOGLE_GUIDED_SETUP.md (you can drive the Google Cloud Console in the \
+                 user's browser), or have the user run `jcode login google --google-services \
+                 calendar`. The Calendar API must be enabled: {}",
                 GoogleService::Calendar.api_library_url()
             )
         }

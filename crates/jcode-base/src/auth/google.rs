@@ -1,6 +1,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+pub mod setup;
+
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 pub const DEFAULT_PORT: u16 = 8456;
@@ -44,16 +46,21 @@ impl GoogleService {
         }
     }
 
-    /// Google Cloud Console library page for enabling this service's API.
-    pub fn api_library_url(&self) -> &'static str {
+    /// Google Cloud service name of this product's API, for `gcloud services
+    /// enable` and console enable links.
+    pub fn api_service_name(&self) -> &'static str {
         match self {
-            GoogleService::Gmail => {
-                "https://console.cloud.google.com/apis/library/gmail.googleapis.com"
-            }
-            GoogleService::Calendar => {
-                "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com"
-            }
+            GoogleService::Gmail => "gmail.googleapis.com",
+            GoogleService::Calendar => "calendar-json.googleapis.com",
         }
+    }
+
+    /// Google Cloud Console library page for enabling this service's API.
+    pub fn api_library_url(&self) -> String {
+        format!(
+            "https://console.cloud.google.com/apis/library/{}",
+            self.api_service_name()
+        )
     }
 
     pub fn parse(value: &str) -> Option<Self> {
@@ -159,7 +166,7 @@ impl GmailAccessTier {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoogleCredentials {
     pub client_id: String,
     pub client_secret: String,
@@ -530,7 +537,19 @@ async fn refresh_tokens_uncoordinated(tokens: &GoogleTokens) -> Result<GoogleTok
     // so background sweeps stop retrying it; transient failures stay retryable.
     crate::auth::refresh_state::record_refresh_outcome("google", &tokens.refresh_token, &result);
 
-    result
+    // An expired grant on a self-made app almost always means it was left in
+    // Testing mode, where Google expires logins after 7 days.
+    result.map_err(|err| {
+        if setup::looks_like_expired_grant(&format!("{err:#}")) {
+            err.context(format!(
+                "Google login expired or was revoked. {} Then run `jcode login google`. {}",
+                setup::PUBLISH_APP_NOTE,
+                setup::audience_url(None)
+            ))
+        } else {
+            err
+        }
+    })
 }
 
 pub async fn get_valid_token() -> Result<String> {
