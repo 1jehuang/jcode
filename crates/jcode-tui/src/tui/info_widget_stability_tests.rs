@@ -442,3 +442,87 @@ fn demo_lookahead_sweep() {
         }
     }
 }
+
+/// Review #1456: holding still in the middle of the viewport while the
+/// transcript scrolls is real drift and must be counted. Only a widget flush
+/// against the top or bottom edge (stuck there on purpose) is excused.
+#[test]
+fn stationary_widget_counts_as_drift_except_at_the_edge() {
+    let at = |y: u16| {
+        vec![PlacedRect {
+            kind: "overview",
+            x: 60,
+            y,
+            width: 40,
+            height: 8,
+        }]
+    };
+    let tops: Vec<i64> = (0..5).collect();
+    let middle: Vec<_> = (0..5).map(|_| at(10)).collect();
+    let report = analyze_frames_with_viewport(&middle, &tops, Some(24));
+    assert_eq!(report.total_content_travel, 4, "{report:#?}");
+    for edge_y in [0u16, 16] {
+        let edge: Vec<_> = (0..5).map(|_| at(edge_y)).collect();
+        let report = analyze_frames_with_viewport(&edge, &tops, Some(24));
+        assert_eq!(report.total_content_travel, 0, "y={edge_y}: {report:#?}");
+    }
+    // Without a viewport height every stationary widget is judged.
+    let report = analyze_frames_with_scroll(&middle, &tops);
+    assert_eq!(report.total_content_travel, 4, "{report:#?}");
+}
+
+/// Review #1456: the live benchmark's messages area starts below the header
+/// and a pinned top band, so the edges are not row 0 and the frame height.
+/// A widget stuck right under the band or at the area's bottom is edge-stuck;
+/// the same widget one row further in is drift.
+#[test]
+fn stationary_widget_edges_follow_the_live_viewport_rows() {
+    let at = |y: u16| {
+        vec![PlacedRect {
+            kind: "overview",
+            x: 60,
+            y,
+            width: 40,
+            height: 8,
+        }]
+    };
+    let tops: Vec<i64> = (0..5).collect();
+    // Messages area rows 3..33, top band of 2 rows: widgets live in 5..33.
+    let rows = vec![5u16..33; 5];
+    for edge_y in [5u16, 25] {
+        let frames: Vec<_> = (0..5).map(|_| at(edge_y)).collect();
+        let report = analyze_frames_with_viewport_rows(&frames, &tops, Some(&rows));
+        assert_eq!(report.total_content_travel, 0, "y={edge_y}: {report:#?}");
+        assert_eq!(report.total_recycles, 0, "y={edge_y}: {report:#?}");
+    }
+    let inside: Vec<_> = (0..5).map(|_| at(6)).collect();
+    let report = analyze_frames_with_viewport_rows(&inside, &tops, Some(&rows));
+    assert_eq!(report.total_content_travel, 4, "{report:#?}");
+}
+
+/// Review #1456: the top band can grow mid-run (prompt preview, todos). A
+/// widget that held still in an interior row before the band grew is drift
+/// for those steps, even though the same row becomes the edge afterwards.
+/// Each step must be judged with that frame's own bounds.
+#[test]
+fn stationary_widget_edges_use_each_frames_bounds() {
+    let frames: Vec<_> = (0..5)
+        .map(|_| {
+            vec![PlacedRect {
+                kind: "overview",
+                x: 60,
+                y: 8,
+                width: 40,
+                height: 8,
+            }]
+        })
+        .collect();
+    let tops: Vec<i64> = (0..5).collect();
+    // Band of 2 rows for three frames (row 8 is interior), then it grows to
+    // 5 rows and row 8 becomes the first usable row.
+    let rows = vec![5u16..33, 5..33, 5..33, 8..33, 8..33];
+    let report = analyze_frames_with_viewport_rows(&frames, &tops, Some(&rows));
+    // Steps into frames 1 and 2 are interior drift; steps into 3 and 4 sit
+    // at the (new) edge.
+    assert_eq!(report.total_content_travel, 2, "{report:#?}");
+}

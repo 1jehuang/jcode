@@ -3425,6 +3425,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             left_widths: margins.left_widths.clone(),
             right_widths: margins.right_widths.clone(),
             centered: margins.centered,
+            content_start_row: margins.content_start_row,
         });
     }
     let chrome_start = Instant::now();

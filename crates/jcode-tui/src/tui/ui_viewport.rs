@@ -515,6 +515,7 @@ pub(super) fn draw_messages(
         // prompt preview) is synthetic (not part of the scrolled transcript), so
         // offset by it to keep the content rows aligned.
         scroll_top: scroll.saturating_sub(top_band_lines as usize),
+        content_start_row: top_band_lines as usize,
         ..Default::default()
     };
     margins
