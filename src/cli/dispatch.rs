@@ -359,12 +359,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 ..Default::default()
             };
             google.apply(&mut options)?;
-            login::run_login(
-                &login_choice,
-                account.as_deref(),
-                options,
-            )
-            .await?;
+            login::run_login(&login_choice, account.as_deref(), options).await?;
             if make_default {
                 make_login_default(default_family, before, account.as_deref())?;
             }
