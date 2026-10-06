@@ -84,6 +84,84 @@ pub(super) fn swarm_is_self_or_ancestor(
             .any(|candidate| candidate == ancestor)
 }
 
+/// Members spawned by `session_id`, directly or transitively.
+pub(super) fn swarm_descendants(
+    members: &HashMap<String, SwarmMember>,
+    session_id: &str,
+) -> Vec<String> {
+    let mut descendants: Vec<String> = members
+        .keys()
+        .filter(|candidate| {
+            candidate.as_str() != session_id
+                && swarm_ancestors(members, candidate)
+                    .iter()
+                    .any(|ancestor| ancestor == session_id)
+        })
+        .cloned()
+        .collect();
+    descendants.sort();
+    descendants
+}
+
+/// Stop the running turns of every worker `session_id` spawned (workers run
+/// their own server-side turns, so cancelling only the coordinator left them
+/// spending tokens). Idle workers are left alone. Returns the stopped ids.
+pub(super) async fn cancel_spawned_descendant_turns(
+    session_id: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
+    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
+    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+) -> Vec<String> {
+    let descendants = swarm_descendants(&*swarm_members.read().await, session_id);
+    let mut stopped = Vec::new();
+    for descendant in descendants {
+        let signals = crate::turn_cancel_registry::active_turn_signals(&descendant);
+        if signals.is_empty() {
+            continue;
+        }
+        for signal in &signals {
+            signal.fire();
+        }
+        // Workers usually have no attached client; the status update below
+        // is what the coordinator's swarm view shows.
+        fanout_session_event(
+            swarm_members,
+            &descendant,
+            ServerEvent::TurnStopped {
+                reason: crate::protocol::TurnStopReason::Interrupted,
+                message: format!("Stopped because its coordinator {session_id} was interrupted."),
+                provider_stop_reason: None,
+            },
+        )
+        .await;
+        update_member_status(
+            &descendant,
+            "stopped",
+            Some("coordinator interrupted".to_string()),
+            swarm_members,
+            swarms_by_id,
+            event_history,
+            event_counter,
+            swarm_event_tx,
+        )
+        .await;
+        stopped.push(descendant);
+    }
+    if !stopped.is_empty() {
+        let names = stopped.join(",");
+        crate::logging::info(&format!(
+            "SWARM_CASCADE_CANCEL coordinator={session_id} stopped={names}"
+        ));
+    }
+    stopped
+}
+
+#[cfg(test)]
+#[path = "swarm_cascade_tests.rs"]
+mod swarm_cascade_tests;
+
 const DEFAULT_SWARM_STATUS_DEBOUNCE_MEMBER_THRESHOLD: usize = 2;
 const DEFAULT_SWARM_STATUS_DEBOUNCE_MS: u64 = 75;
 const DEFAULT_SWARM_TASK_HEARTBEAT_SECS: u64 = 10;

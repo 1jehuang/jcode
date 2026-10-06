@@ -882,6 +882,52 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
 }
 
 #[test]
+fn render_todos_message_packs_multiple_goal_gates_per_row() {
+    let todos = vec![crate::todo::TodoItem {
+        id: "1".to_string(),
+        content: "Render the card".to_string(),
+        status: "in_progress".to_string(),
+        priority: "high".to_string(),
+        group: Some("todo rendering".to_string()),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
+        completion_confidence: None,
+        confidence_history: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    let goals = vec![crate::todo::TodoGoal {
+        group: Some("todo rendering".to_string()),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Usable),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        ..Default::default()
+    }];
+    let msg =
+        DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
+
+    let lines = render_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+    let gate_rows: Vec<&String> = rendered
+        .iter()
+        .filter(|line| {
+            ["Closed feedback loop", "Relevance", "Coverage", "Delivery"]
+                .iter()
+                .any(|label| line.contains(label))
+        })
+        .collect();
+    assert!(
+        gate_rows.len() < 4,
+        "gates should share rows instead of one per line: {rendered:#?}"
+    );
+    assert!(
+        gate_rows.iter().any(|line| line.contains(" · ")),
+        "{rendered:#?}"
+    );
+    assert!(lines.iter().all(|line| line.width() <= 78), "{rendered:#?}");
+}
+
+#[test]
 fn render_todos_message_empty_list_shows_placeholder() {
     let msg = DisplayMessage::todos("[]");
     let plain = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)

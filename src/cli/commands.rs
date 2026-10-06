@@ -2562,6 +2562,29 @@ pub async fn run_single_message_command(
     run_single_message_with_agent(&mut agent, provider, message, emit_json, emit_ndjson).await
 }
 
+/// Provider id for `jcode run --json`/`--ndjson` output.
+///
+/// Every direct OpenAI-compatible profile (Ollama, LM Studio, DeepSeek, custom
+/// endpoints, ...) runs on the OpenRouter transport, whose `name()` is the
+/// fixed slot id `openrouter`. Reporting that attributed purely local runs to
+/// a paid third-party aggregator (#804). The session already records the
+/// resolved route identity, so prefer it for that slot and leave every other
+/// provider's established value unchanged.
+fn run_report_provider_name(
+    provider: &dyn crate::provider::Provider,
+    session_provider_key: Option<&str>,
+) -> String {
+    let name = provider.name();
+    if name.eq_ignore_ascii_case("openrouter")
+        && let Some(key) = session_provider_key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    {
+        return key.to_string();
+    }
+    name.to_string()
+}
+
 async fn run_single_message_with_agent(
     agent: &mut crate::agent::Agent,
     provider: std::sync::Arc<dyn crate::provider::Provider>,
@@ -2574,7 +2597,10 @@ async fn run_single_message_with_agent(
             let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
             let report = RunCommandReport {
                 session_id: agent.session_id().to_string(),
-                provider: provider.name().to_string(),
+                provider: run_report_provider_name(
+                    provider.as_ref(),
+                    agent.session_provider_key().as_deref(),
+                ),
                 model: provider.model(),
                 text,
                 usage: agent.last_usage().clone(),
@@ -3024,6 +3050,8 @@ async fn run_single_message_command_ndjson(
 ) -> Result<()> {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let session_id = agent.session_id().to_string();
+    let provider_name =
+        run_report_provider_name(provider.as_ref(), agent.session_provider_key().as_deref());
     let mut stdout = std::io::stdout().lock();
     let mut state = NdjsonRunState {
         session_id: Some(session_id.clone()),
@@ -3034,7 +3062,7 @@ async fn run_single_message_command_ndjson(
         &serde_json::json!({
             "type": "start",
             "session_id": session_id,
-            "provider": provider.name(),
+            "provider": provider_name,
             "model": provider.model(),
         }),
     )?;
@@ -3178,7 +3206,7 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "done",
                     "session_id": session_id,
-                    "provider": provider.name(),
+                    "provider": provider_name,
                     "model": provider.model(),
                     "text": state.text,
                     "usage": state.usage,
@@ -3196,7 +3224,7 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "error",
                     "session_id": session_id,
-                    "provider": provider.name(),
+                    "provider": provider_name,
                     "model": provider.model(),
                     "message": format!("{err:#}"),
                 }),

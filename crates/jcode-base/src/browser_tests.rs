@@ -302,9 +302,10 @@ async fn hanging_browser_cli_times_out_instead_of_blocking_forever() {
     write_executable(&bin, "#!/bin/sh\nexec sleep 600\n");
 
     let started = std::time::Instant::now();
-    let result = run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_millis(300))
-        .await
-        .expect("capped call should not error");
+    let result =
+        run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_millis(300), None)
+            .await
+            .expect("capped call should not error");
     let elapsed = started.elapsed();
 
     assert!(result.is_none(), "a hanging CLI must report a timeout");
@@ -321,7 +322,7 @@ async fn responsive_browser_cli_still_returns_its_output() {
     let bin = temp.path().join("browser");
     write_executable(&bin, "#!/bin/sh\necho pong\n");
 
-    let output = run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_secs(5))
+    let output = run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_secs(5), None)
         .await
         .expect("capped call should not error")
         .expect("a responsive CLI must not report a timeout");
@@ -494,4 +495,68 @@ fn extract_zip_unpacks_deflate_and_rejects_traversal() {
     let evil = build_zip(&[("../escape.txt", b"x")]);
     assert!(extract_zip(&evil, &temp.path().join("sub")).is_err());
     assert!(!temp.path().join("escape.txt").exists());
+}
+
+#[test]
+fn session_daemon_name_includes_the_target_browser() {
+    use super::browser_session::session_name_for;
+    assert_eq!(session_name_for("session_fox_1", None), "session_fox_1");
+    assert_eq!(
+        session_name_for("session_fox_1", Some("chrome")),
+        "session_fox_1-chrome"
+    );
+    assert_ne!(
+        session_name_for("s", Some("chrome")),
+        session_name_for("s", Some("firefox"))
+    );
+}
+
+#[test]
+fn extra_native_host_dirs_come_from_a_path_list() {
+    assert!(extra_native_messaging_dirs(None).is_empty());
+    let joined =
+        std::env::join_paths(["/a/NativeMessagingHosts", "/b/NativeMessagingHosts"]).unwrap();
+    assert_eq!(
+        extra_native_messaging_dirs(Some(&joined)),
+        vec![
+            PathBuf::from("/a/NativeMessagingHosts"),
+            PathBuf::from("/b/NativeMessagingHosts")
+        ]
+    );
+}
+
+/// Each browser's native host takes its own port (#1720); jcode must tell the
+/// bridge CLI which browser's host to use.
+#[cfg(unix)]
+#[tokio::test]
+async fn bridge_cli_is_pointed_at_the_target_browsers_host() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("FAB_BROWSER");
+    crate::env::remove_var("FAB_BROWSER");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bin = temp.path().join("browser");
+    write_executable(&bin, "#!/bin/sh\necho \"target=$FAB_BROWSER\"\n");
+
+    let run = |kind| {
+        let bin = bin.clone();
+        async move {
+            let out =
+                run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_secs(5), kind)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+    };
+    assert_eq!(run(Some(BrowserKind::Chrome)).await, "target=chrome");
+    assert_eq!(run(Some(BrowserKind::Firefox)).await, "target=firefox");
+    assert_eq!(run(None).await, "target=");
+
+    // A user-chosen FAB_BROWSER (e.g. a fork jcode does not know) wins.
+    crate::env::set_var("FAB_BROWSER", "helium");
+    assert_eq!(run(Some(BrowserKind::Chrome)).await, "target=helium");
+    match prev {
+        Some(v) => crate::env::set_var("FAB_BROWSER", v),
+        None => crate::env::remove_var("FAB_BROWSER"),
+    }
 }

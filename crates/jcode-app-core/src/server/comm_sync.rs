@@ -274,9 +274,12 @@ pub(super) async fn handle_comm_status(
         return;
     }
 
+    // Release the member guard before taking client_connections: disconnect
+    // cleanup holds client_connections.write while waiting on swarm_members.write,
+    // so nesting them here wedged every resume and swarm call on the server.
+    let member = swarm_members.read().await.get(&target_session).cloned();
     let snapshot = {
-        let members = swarm_members.read().await;
-        let Some(member) = members.get(&target_session) else {
+        let Some(member) = member else {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id,
                 message: format!("Unknown session '{target_session}'"),

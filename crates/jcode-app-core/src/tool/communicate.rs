@@ -2103,7 +2103,7 @@ impl Tool for CommunicateTool {
                 "spawn_mode": {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
-                    "description": "Spawn UI mode: visible terminal, headless, inline gallery, or auto. Defaults to inline."
+                    "description": "Omit to use the user's configured mode. Set only when the user asks for one."
                 },
                 "model": {
                     "type": "string",

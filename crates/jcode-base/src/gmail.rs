@@ -171,7 +171,7 @@ impl GmailClient {
     /// Whether this backend has credentials available to talk to Gmail.
     pub fn is_configured(&self) -> bool {
         match &self.backend {
-            GmailBackend::Direct => google::has_tokens(),
+            GmailBackend::Direct => google::has_service(google::GoogleService::Gmail),
             GmailBackend::Composio(cfg) => !cfg.api_key.is_empty(),
         }
     }
@@ -203,7 +203,9 @@ impl GmailClient {
     pub fn not_configured_message(&self) -> &'static str {
         match &self.backend {
             GmailBackend::Direct => {
-                "Gmail is not configured. Run `jcode login google` to set up Gmail access."
+                "Gmail is not configured. Offer to set it up: follow jcode_docs \
+                 docs/GOOGLE_GUIDED_SETUP.md (you can drive the Google Cloud Console in the \
+                 user's browser), or have the user run `jcode login google`."
             }
             GmailBackend::Composio(_) => {
                 "Gmail (Composio backend) is not configured. Set COMPOSIO_API_KEY and connect your \
