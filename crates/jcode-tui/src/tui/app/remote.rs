@@ -410,9 +410,9 @@ pub(super) async fn handle_terminal_event(
     Ok(needs_redraw)
 }
 
-async fn apply_terminal_event(
+async fn apply_terminal_event<B: Backend>(
     app: &mut App,
-    _terminal: &mut DefaultTerminal,
+    _terminal: &mut Terminal<B>,
     remote: &mut RemoteConnection,
     event: Option<std::result::Result<Event, std::io::Error>>,
 ) -> Result<bool> {
@@ -462,7 +462,6 @@ async fn apply_terminal_event(
                         }
                         Err(error) => {
                             app.pending_reasoning_effort = None;
-                            // Drop the fallback resend when its route switch fails.
                             app.pending_fallback_resend = None;
                             app.push_display_message(DisplayMessage::error(format!(
                                 "Failed to request model switch: {}",
@@ -821,11 +820,14 @@ pub(super) async fn check_debug_command(
     None
 }
 
-fn handle_terminal_event_while_disconnected(
+fn handle_terminal_event_while_disconnected<B: Backend>(
     app: &mut App,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Terminal<B>,
     event: Option<std::result::Result<Event, std::io::Error>>,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    B::Error: Send + Sync + 'static,
+{
     let mut needs_redraw = false;
 
     match event {
@@ -865,9 +867,7 @@ fn handle_terminal_event_while_disconnected(
             needs_redraw = app.should_redraw_after_resize();
         }
         None => {
-            // Input EOF: if the controlling terminal is gone this client is an
-            // orphan (window died without a deliverable SIGHUP). Quit instead
-            // of reconnect-looping forever with no way to ever receive input.
+            // Exit orphaned clients when input closes and the terminal is gone.
             if super::terminal_liveness::terminal_abandoned() {
                 crate::logging::warn(
                     "Terminal input closed and controlling terminal is gone while disconnected; exiting orphaned client",

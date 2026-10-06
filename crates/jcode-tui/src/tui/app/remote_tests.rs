@@ -12,6 +12,9 @@ use crate::tui::info_widget::{MemoryState, StepStatus};
 use anyhow::Result;
 use std::sync::Arc;
 
+#[path = "remote_tests/korean_input.rs"]
+mod korean_input;
+
 struct MockProvider;
 
 #[async_trait::async_trait]
@@ -39,10 +42,7 @@ impl Provider for MockProvider {
 
 fn create_test_app() -> crate::tui::app::App {
     ensure_test_jcode_home_if_unset();
-    // `has_notification()` (via `unfocused_redraw_warranted`) consults a
-    // process-wide ambient-info cache that another test may have populated
-    // from its own JCODE_HOME (scheduled reminders read as a notification).
-    // Reset it so these tests observe only their own state.
+    // Reset the process-wide ambient cache to isolate redraw assertions.
     crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let rt = tokio::runtime::Runtime::new().expect("runtime");
