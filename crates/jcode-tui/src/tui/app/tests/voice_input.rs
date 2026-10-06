@@ -119,14 +119,14 @@ fn korean_jamo_voice_chord_is_normalized_before_voice_interception() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     // Every terminal read site (local, remote, disconnected, turn loops) normalizes first,
     // so a Korean-layout Ctrl+ㅠ reaches the voice and shortcut handlers as Ctrl+b.
-    let key = crate::tui::app::normalize_key_event(KeyEvent::new(
+    let key = jcode_tui_core::korean_input::normalize_key_event(KeyEvent::new(
         KeyCode::Char('ㅠ'),
         KeyModifiers::CONTROL,
     ));
     assert_eq!(key.code, KeyCode::Char('b'));
     assert_eq!(key.modifiers, KeyModifiers::CONTROL);
 
-    let plain = crate::tui::app::normalize_key_event(KeyEvent::new(
+    let plain = jcode_tui_core::korean_input::normalize_key_event(KeyEvent::new(
         KeyCode::Char('ㅠ'),
         KeyModifiers::NONE,
     ));

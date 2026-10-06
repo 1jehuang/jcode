@@ -437,9 +437,8 @@ async fn apply_terminal_event(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
-            let key = crate::tui::app::normalize_key_event(key);
-            // Start the key-to-paint clock at the moment the key is read, which is
-            // the only point that corresponds to the user's press.
+            let key = jcode_tui_core::korean_input::normalize_key_event(key);
+            // Start key-to-paint timing at the key read, not at dispatch.
             crate::tui::ui::note_key_event_read();
             input_attribution.event = Some(if app.remote_login.is_some() {
                 "ssh_login_key".to_string()
@@ -450,9 +449,9 @@ async fn apply_terminal_event(
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
-            if app.handle_voice_key_event(&key) {
-                // Voice keys work from every screen and never type.
-            } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            if !app.handle_voice_key_event(&key)
+                && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            {
                 handle_remote_key_event(app, key, remote).await?;
                 if let Some(selection) = app.pending_route_selection.take() {
                     app.pending_model_switch = None;
@@ -463,8 +462,7 @@ async fn apply_terminal_event(
                         }
                         Err(error) => {
                             app.pending_reasoning_effort = None;
-                            // A fallback-offer resend must not fire without its
-                            // route switch; drop it with the failed request.
+                            // Drop the fallback resend when its route switch fails.
                             app.pending_fallback_resend = None;
                             app.push_display_message(DisplayMessage::error(format!(
                                 "Failed to request model switch: {}",
@@ -840,13 +838,13 @@ fn handle_terminal_event_while_disconnected(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
-            let key = crate::tui::app::normalize_key_event(key);
+            let key = jcode_tui_core::korean_input::normalize_key_event(key);
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
             app.observe_voice_key_release(&key);
-            if app.handle_voice_key_event(&key) {
-                // Voice keys work from every screen and never type.
-            } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            if !app.handle_voice_key_event(&key)
+                && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            {
                 handle_disconnected_key_event(app, key)?;
             }
             needs_redraw = true;

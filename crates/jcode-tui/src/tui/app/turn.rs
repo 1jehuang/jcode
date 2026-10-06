@@ -185,12 +185,10 @@ impl App {
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
-                                let key = crate::tui::app::normalize_key_event(key);
+                                let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                 self.update_copy_badge_key_event(key);
                                 self.observe_voice_key_release(&key);
-                                if self.handle_voice_key_event(&key) {
-                                    // Voice keys work from every screen and never type.
-                                } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                     let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                     let _ = self.handle_key_press_event(key);
                                     if self.cancel_requested {
@@ -382,12 +380,10 @@ impl App {
                     event = event_stream.next() => {
                         match event {
                             Some(Ok(Event::Key(key))) => {
-                                let key = crate::tui::app::normalize_key_event(key);
+                                let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                 self.update_copy_badge_key_event(key);
                                 self.observe_voice_key_release(&key);
-                                if self.handle_voice_key_event(&key) {
-                                    // Voice keys work from every screen and never type.
-                                } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                     let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                     let _ = self.handle_key_press_event(key);
                                     // Check for cancel request
@@ -1458,12 +1454,10 @@ impl App {
                         event = event_stream.next() => {
                             match event {
                                 Some(Ok(Event::Key(key))) => {
-                                    let key = crate::tui::app::normalize_key_event(key);
+                                    let key = jcode_tui_core::korean_input::normalize_key_event(key);
                                     self.update_copy_badge_key_event(key);
                                     self.observe_voice_key_release(&key);
-                                    if self.handle_voice_key_event(&key) {
-                                        // Voice keys work from every screen and never type.
-                                    } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                                    if !self.handle_voice_key_event(&key) && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                                         let scroll_only = super::input::is_scroll_only_key(self, key.code, key.modifiers);
                                         let _ = self.handle_key_press_event(key);
                                         if self.cancel_requested {
