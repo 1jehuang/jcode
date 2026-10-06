@@ -217,7 +217,10 @@ where
 /// Start local server and wait for OAuth callback
 pub fn wait_for_callback(port: u16, expected_state: &str) -> Result<String> {
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port))?;
-    eprintln!("Waiting for OAuth callback on port {}...", port);
+    crate::console::eprintln_best_effort(&format!(
+        "Waiting for OAuth callback on port {}...",
+        port
+    ));
 
     loop {
         let (mut stream, _) = listener.accept()?;
@@ -438,7 +441,7 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
         if trimmed.is_empty() {
             anyhow::bail!("JCODE_CLAUDE_AUTH_CODE is set but empty");
         }
-        eprintln!("Exchanging code for tokens...");
+        crate::console::eprintln_best_effort("Exchanging code for tokens...");
         return exchange_claude_code(&verifier, trimmed, claude::REDIRECT_URI).await;
     }
 
@@ -456,30 +459,30 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
         let auth_url = claude_auth_url(&redirect_uri, &challenge, &verifier);
         let manual_auth_url = claude_auth_url(claude::REDIRECT_URI, &challenge, &verifier);
 
-        eprintln!("\nOpen this URL in your browser:\n");
-        eprintln!("{}\n", auth_url);
+        crate::console::eprintln_best_effort("\nOpen this URL in your browser:\n");
+        crate::console::eprintln_best_effort(&format!("{}\n", auth_url));
         if let Some(qr) = crate::login_qr::indented_section(
             &manual_auth_url,
             "No browser on this machine? Scan this QR on another device, finish login there, then paste the full callback URL back here:",
             "    ",
             crate::auth::browser_suppressed(no_browser),
         ) {
-            eprintln!("{qr}\n");
+            crate::console::eprintln_best_effort(&format!("{qr}\n"));
         }
-        eprintln!("Opening browser for Claude login...\n");
+        crate::console::eprintln_best_effort("Opening browser for Claude login...\n");
         let browser_opened = if crate::auth::browser_suppressed(no_browser) {
             false
         } else {
             open::that(&auth_url).is_ok()
         };
         if browser_opened {
-            eprintln!(
+            crate::console::eprintln_best_effort(&format!(
                 "Waiting up to 120s for automatic callback on {}",
                 redirect_uri
-            );
+            ));
         } else {
-            eprintln!(
-                "Couldn't open a browser on this machine. Use the QR code or manual URL above, then paste the callback URL here.\n"
+            crate::console::eprintln_best_effort(
+                "Couldn't open a browser on this machine. Use the QR code or manual URL above, then paste the callback URL here.\n",
             );
         }
 
@@ -491,22 +494,28 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
             .await
             {
                 Ok(Ok(code)) => {
-                    eprintln!("Received callback. Exchanging code for tokens...");
+                    crate::console::eprintln_best_effort(
+                        "Received callback. Exchanging code for tokens...",
+                    );
                     return exchange_claude_code(&verifier, &code, &redirect_uri).await;
                 }
                 Ok(Err(err)) => {
-                    eprintln!(
+                    crate::console::eprintln_best_effort(&format!(
                         "Automatic callback failed ({err}). Falling back to manual code paste."
-                    );
+                    ));
                 }
                 Err(_) => {
-                    eprintln!("Timed out waiting for callback. Falling back to manual code paste.");
+                    crate::console::eprintln_best_effort(
+                        "Timed out waiting for callback. Falling back to manual code paste.",
+                    );
                 }
             }
         }
 
-        eprintln!("Paste the authorization code (or callback URL) here:\n");
-        eprint!("> ");
+        crate::console::eprintln_best_effort(
+            "Paste the authorization code (or callback URL) here:\n",
+        );
+        crate::console::eprompt_best_effort("> ");
         std::io::stdout().flush()?;
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -514,7 +523,7 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
         if trimmed.is_empty() {
             anyhow::bail!("No authorization code entered.");
         }
-        eprintln!("Exchanging code for tokens...");
+        crate::console::eprintln_best_effort("Exchanging code for tokens...");
         let selected_redirect_uri = claude_redirect_uri_for_input(trimmed, &redirect_uri);
         return exchange_claude_code(&verifier, trimmed, &selected_redirect_uri).await;
     }
@@ -522,22 +531,24 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
     // Last-resort manual flow if localhost callback binding is unavailable.
     let auth_url = claude_auth_url(claude::REDIRECT_URI, &challenge, &verifier);
 
-    eprintln!("\nOpen this URL in your browser:\n");
-    eprintln!("{}\n", auth_url);
+    crate::console::eprintln_best_effort("\nOpen this URL in your browser:\n");
+    crate::console::eprintln_best_effort(&format!("{}\n", auth_url));
     if let Some(qr) = crate::login_qr::indented_section(
         &auth_url,
         "Scan this QR on another device if this machine has no browser:",
         "    ",
         crate::auth::browser_suppressed(no_browser),
     ) {
-        eprintln!("{qr}\n");
+        crate::console::eprintln_best_effort(&format!("{qr}\n"));
     }
-    eprintln!("Opening browser for Claude login...\n");
+    crate::console::eprintln_best_effort("Opening browser for Claude login...\n");
     if !crate::auth::browser_suppressed(no_browser) {
         let _ = open::that(&auth_url);
     }
-    eprintln!("After logging in, copy and paste the callback URL or code here:\n");
-    eprint!("> ");
+    crate::console::eprintln_best_effort(
+        "After logging in, copy and paste the callback URL or code here:\n",
+    );
+    crate::console::eprompt_best_effort("> ");
     std::io::stdout().flush()?;
 
     let mut input = String::new();
@@ -547,7 +558,7 @@ pub async fn login_claude(no_browser: bool) -> Result<OAuthTokens> {
         anyhow::bail!("No authorization code entered.");
     }
 
-    eprintln!("Exchanging code for tokens...");
+    crate::console::eprintln_best_effort("Exchanging code for tokens...");
     exchange_claude_code(&verifier, trimmed, claude::REDIRECT_URI).await
 }
 
@@ -847,15 +858,15 @@ pub async fn login_openai(no_browser: bool) -> Result<OAuthTokens> {
     let redirect_uri = openai::redirect_uri(port);
     let auth_url = openai_auth_url_with_prompt(&redirect_uri, &challenge, &state, Some("login"));
 
-    eprintln!("\nOpen this URL in your browser:\n");
-    eprintln!("{}\n", auth_url);
+    crate::console::eprintln_best_effort("\nOpen this URL in your browser:\n");
+    crate::console::eprintln_best_effort(&format!("{}\n", auth_url));
     if let Some(qr) = crate::login_qr::indented_section(
         &auth_url,
         "Scan this QR on another device if this machine has no browser:",
         "    ",
         crate::auth::browser_suppressed(no_browser),
     ) {
-        eprintln!("{qr}\n");
+        crate::console::eprintln_best_effort(&format!("{qr}\n"));
     }
 
     let callback_listener = bind_callback_listener(port).ok();
@@ -867,10 +878,10 @@ pub async fn login_openai(no_browser: bool) -> Result<OAuthTokens> {
 
     if browser_opened {
         if let Some(listener) = callback_listener {
-            eprintln!(
+            crate::console::eprintln_best_effort(&format!(
                 "Waiting up to 300s for automatic callback on {}",
                 redirect_uri
-            );
+            ));
             match tokio::time::timeout(
                 std::time::Duration::from_secs(300),
                 wait_for_callback_async_on_listener(listener, &state),
@@ -879,26 +890,30 @@ pub async fn login_openai(no_browser: bool) -> Result<OAuthTokens> {
             {
                 Ok(Ok(code)) => return exchange_openai_code(&code, &verifier, &redirect_uri).await,
                 Ok(Err(err)) => {
-                    eprintln!("Automatic callback failed ({err}). Falling back to manual paste.");
+                    crate::console::eprintln_best_effort(&format!(
+                        "Automatic callback failed ({err}). Falling back to manual paste."
+                    ));
                 }
                 Err(_) => {
-                    eprintln!("Timed out waiting for callback. Falling back to manual paste.");
+                    crate::console::eprintln_best_effort(
+                        "Timed out waiting for callback. Falling back to manual paste.",
+                    );
                 }
             }
         } else {
-            eprintln!(
+            crate::console::eprintln_best_effort(&format!(
                 "Local callback port {} is unavailable. Finish login in any browser, then paste the full callback URL here.\n",
                 port
-            );
+            ));
         }
     } else if !browser_opened {
-        eprintln!(
-            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n"
+        crate::console::eprintln_best_effort(
+            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n",
         );
     }
 
-    eprintln!("Paste the full callback URL (or query string) here:\n");
-    eprint!("> ");
+    crate::console::eprintln_best_effort("Paste the full callback URL (or query string) here:\n");
+    crate::console::eprompt_best_effort("> ");
     std::io::stdout().flush()?;
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
