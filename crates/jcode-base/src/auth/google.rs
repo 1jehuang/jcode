@@ -164,15 +164,18 @@ pub async fn login(tier: GmailAccessTier, no_browser: bool) -> Result<GoogleToke
 
     let auth_url = build_auth_url(&creds, tier, &redirect_uri, &challenge, &state);
 
-    eprintln!("\nOpening browser for Google login...\n");
-    eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
+    crate::console::eprintln_best_effort("\nOpening browser for Google login...\n");
+    crate::console::eprintln_best_effort(&format!(
+        "If the browser didn't open, visit:\n{}\n",
+        auth_url
+    ));
     if let Some(qr) = crate::login_qr::indented_section(
         &auth_url,
         "Scan this QR on another device if this machine has no browser:",
         "    ",
         crate::auth::browser_suppressed(no_browser),
     ) {
-        eprintln!("{qr}\n");
+        crate::console::eprintln_best_effort(&format!("{qr}\n"));
     }
 
     let browser_opened = if crate::auth::browser_suppressed(no_browser) {
@@ -182,10 +185,10 @@ pub async fn login(tier: GmailAccessTier, no_browser: bool) -> Result<GoogleToke
     };
 
     let code = if browser_opened {
-        eprintln!(
+        crate::console::eprintln_best_effort(&format!(
             "Waiting up to 300s for automatic callback on {}",
             redirect_uri
-        );
+        ));
         if let Some(listener) = listener {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(300),
@@ -195,36 +198,40 @@ pub async fn login(tier: GmailAccessTier, no_browser: bool) -> Result<GoogleToke
             {
                 Ok(Ok(code)) => code,
                 Ok(Err(err)) => {
-                    eprintln!("Automatic callback failed ({err}). Falling back to manual paste.");
+                    crate::console::eprintln_best_effort(&format!(
+                        "Automatic callback failed ({err}). Falling back to manual paste."
+                    ));
                     read_manual_callback_code(&state)?
                 }
                 Err(_) => {
-                    eprintln!("Timed out waiting for callback. Falling back to manual paste.");
+                    crate::console::eprintln_best_effort(
+                        "Timed out waiting for callback. Falling back to manual paste.",
+                    );
                     read_manual_callback_code(&state)?
                 }
             }
         } else {
-            eprintln!(
-                "Couldn't start a local callback listener. Finish login in any browser, then paste the full callback URL here.\n"
+            crate::console::eprintln_best_effort(
+                "Couldn't start a local callback listener. Finish login in any browser, then paste the full callback URL here.\n",
             );
             read_manual_callback_code(&state)?
         }
     } else {
-        eprintln!(
-            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n"
+        crate::console::eprintln_best_effort(
+            "Couldn't open a browser on this machine. Use the QR code above, then paste the full callback URL here.\n",
         );
         read_manual_callback_code(&state)?
     };
 
-    eprintln!("Exchanging code for tokens...");
+    crate::console::eprintln_best_effort("Exchanging code for tokens...");
     exchange_code(&creds, &verifier, &code, &redirect_uri, tier).await
 }
 
 fn read_manual_callback_code(expected_state: &str) -> Result<String> {
     use std::io::Write;
 
-    eprintln!("Paste the full callback URL (or query string) here:\n");
-    eprint!("> ");
+    crate::console::eprintln_best_effort("Paste the full callback URL (or query string) here:\n");
+    crate::console::eprompt_best_effort("> ");
     std::io::stdout().flush()?;
 
     let mut input = String::new();

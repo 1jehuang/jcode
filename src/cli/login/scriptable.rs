@@ -77,12 +77,12 @@ pub(super) async fn run_automatic_google_login(
         },
     )?;
     if !options.json {
-        eprintln!("\nGmail setup complete!");
+        crate::console::eprintln_best_effort("\nGmail setup complete!");
         if let Some(email) = tokens.email {
-            eprintln!("Account: {}", email);
+            crate::console::eprintln_best_effort(&format!("Account: {}", email));
         }
-        eprintln!("Access tier: {}", tokens.tier.label());
-        eprintln!("Tokens saved to {}", tokens_path.display());
+        crate::console::eprintln_best_effort(&format!("Access tier: {}", tokens.tier.label()));
+        crate::console::eprintln_best_effort(&format!("Tokens saved to {}", tokens_path.display()));
     }
     crate::telemetry::record_auth_success(provider_id, "oauth");
     Ok(LoginFlowOutcome::Completed)
@@ -369,14 +369,14 @@ pub(super) async fn complete_scriptable_claude_login(
         },
     )?;
     if !options.json {
-        eprintln!("Successfully logged in to Claude!");
-        eprintln!(
+        crate::console::eprintln_best_effort("Successfully logged in to Claude!");
+        crate::console::eprintln_best_effort(&format!(
             "Account '{}' stored at {}",
             account_label,
             auth::claude::jcode_path()?.display()
-        );
+        ));
         if let Some(email) = profile_email {
-            eprintln!("Profile email: {}", email);
+            crate::console::eprintln_best_effort(&format!("Profile email: {}", email));
         }
     }
     Ok(LoginFlowOutcome::Completed)
@@ -428,11 +428,11 @@ pub(super) async fn complete_scriptable_openai_login(
         },
     )?;
     if !options.json {
-        eprintln!(
+        crate::console::eprintln_best_effort(&format!(
             "Successfully logged in to OpenAI! Account '{}' saved to {}",
             account_label,
             credentials_path.display()
-        );
+        ));
     }
     Ok(LoginFlowOutcome::Completed)
 }
@@ -471,10 +471,13 @@ pub(super) async fn complete_scriptable_gemini_login(
         },
     )?;
     if !options.json {
-        eprintln!("Successfully logged in to Gemini!");
-        eprintln!("Tokens saved to {}", auth::gemini::tokens_path()?.display());
+        crate::console::eprintln_best_effort("Successfully logged in to Gemini!");
+        crate::console::eprintln_best_effort(&format!(
+            "Tokens saved to {}",
+            auth::gemini::tokens_path()?.display()
+        ));
         if let Some(email) = tokens.email.as_deref() {
-            eprintln!("Google account: {}", email);
+            crate::console::eprintln_best_effort(&format!("Google account: {}", email));
         }
     }
     Ok(LoginFlowOutcome::Completed)
@@ -521,16 +524,19 @@ pub(super) async fn complete_scriptable_antigravity_login(
         },
     )?;
     if !options.json {
-        eprintln!("Successfully logged in to Antigravity!");
-        eprintln!(
+        crate::console::eprintln_best_effort("Successfully logged in to Antigravity!");
+        crate::console::eprintln_best_effort(&format!(
             "Tokens saved to {}",
             auth::antigravity::tokens_path()?.display()
-        );
+        ));
         if let Some(email) = tokens.email.as_deref() {
-            eprintln!("Google account: {}", email);
+            crate::console::eprintln_best_effort(&format!("Google account: {}", email));
         }
         if let Some(project_id) = tokens.project_id.as_deref() {
-            eprintln!("Resolved Antigravity project: {}", project_id);
+            crate::console::eprintln_best_effort(&format!(
+                "Resolved Antigravity project: {}",
+                project_id
+            ));
         }
     }
     Ok(LoginFlowOutcome::Completed)
@@ -583,12 +589,15 @@ pub(super) async fn complete_scriptable_google_login(
         },
     )?;
     if !options.json {
-        eprintln!("Successfully logged in to Google/Gmail!");
+        crate::console::eprintln_best_effort("Successfully logged in to Google/Gmail!");
         if let Some(email) = tokens.email.as_deref() {
-            eprintln!("Account: {}", email);
+            crate::console::eprintln_best_effort(&format!("Account: {}", email));
         }
-        eprintln!("Access tier: {}", tokens.tier.label());
-        eprintln!("Tokens saved to {}", auth::google::tokens_path()?.display());
+        crate::console::eprintln_best_effort(&format!("Access tier: {}", tokens.tier.label()));
+        crate::console::eprintln_best_effort(&format!(
+            "Tokens saved to {}",
+            auth::google::tokens_path()?.display()
+        ));
     }
     Ok(LoginFlowOutcome::Completed)
 }
@@ -626,8 +635,14 @@ pub(super) async fn complete_scriptable_copilot_login(
         },
     )?;
     if !options.json {
-        eprintln!("✓ Authenticated as {} via GitHub Copilot", username);
-        eprintln!("Saved at {}", auth::copilot::saved_hosts_path().display());
+        crate::console::eprintln_best_effort(&format!(
+            "✓ Authenticated as {} via GitHub Copilot",
+            username
+        ));
+        crate::console::eprintln_best_effort(&format!(
+            "Saved at {}",
+            auth::copilot::saved_hosts_path().display()
+        ));
     }
     Ok(LoginFlowOutcome::Completed)
 }
@@ -890,15 +905,21 @@ pub(super) fn emit_scriptable_auth_prompt(
     } else {
         println!("{}", auth_url);
         if let Some(user_code) = user_code {
-            eprintln!("User code: {}", user_code);
+            crate::console::eprintln_best_effort(&format!("User code: {}", user_code));
         }
-        eprintln!("Auth URL printed to stdout.");
-        eprintln!("Complete this login later with `{}`.", resume_command);
-        eprintln!(
+        crate::console::eprintln_best_effort("Auth URL printed to stdout.");
+        crate::console::eprintln_best_effort(&format!(
+            "Complete this login later with `{}`.",
+            resume_command
+        ));
+        crate::console::eprintln_best_effort(&format!(
             "This pending login expires at {} ms since epoch.",
             expires_at_ms
-        );
-        eprintln!("Pending login state saved at {}", pending_path.display());
+        ));
+        crate::console::eprintln_best_effort(&format!(
+            "Pending login state saved at {}",
+            pending_path.display()
+        ));
     }
     Ok(())
 }
