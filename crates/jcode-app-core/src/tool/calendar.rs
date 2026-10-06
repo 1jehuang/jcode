@@ -653,4 +653,85 @@ mod tests {
         assert!(preview.starts_with("Confirmation required"), "{preview}");
         assert!(preview.contains("\"timeZone\""), "{preview}");
     }
+
+    /// Creates, updates, and deletes a throwaway event (no guests, no
+    /// emails), and checks Gmail still works with the multi-service login.
+    /// Run with:
+    /// `cargo test -p jcode-app-core --lib tool::calendar::tests::live_write_round_trip -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "writes a temporary event to the live Google Calendar"]
+    async fn live_write_round_trip() {
+        let ctx = || ToolContext {
+            session_id: "calendar-live".to_string(),
+            message_id: "message".to_string(),
+            tool_call_id: "call".to_string(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: super::super::ToolExecutionMode::Direct,
+        };
+        let tool = CalendarTool::new();
+        let created = tool
+            .execute(
+                json!({"action": "create", "summary": "jcode calendar test (auto-deleted)",
+                       "start": "2030-01-01T09:00", "reminder_minutes": []}),
+                ctx(),
+            )
+            .await
+            .unwrap()
+            .output;
+        println!("{created}");
+        assert!(created.starts_with("Event created."), "{created}");
+        assert!(created.contains("2030-01-01T09:00:00-08:00 -> 2030-01-01T09:30:00-08:00"));
+        let id = created
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("ID: "))
+            .unwrap()
+            .to_string();
+
+        let updated = tool
+            .execute(
+                json!({"action": "update", "event_id": id, "summary": "jcode calendar test (renamed)",
+                       "start": "2030-01-01T10:00", "end": "2030-01-01T11:00"}),
+                ctx(),
+            )
+            .await
+            .unwrap()
+            .output;
+        println!("{updated}");
+        assert!(
+            updated.contains("jcode calendar test (renamed)"),
+            "{updated}"
+        );
+        assert!(updated.contains("2030-01-01T10:00:00-08:00 -> 2030-01-01T11:00:00-08:00"));
+
+        let gated = tool
+            .execute(json!({"action": "delete", "event_id": id}), ctx())
+            .await
+            .unwrap()
+            .output;
+        assert!(gated.starts_with("Confirmation required"), "{gated}");
+
+        let deleted = tool
+            .execute(
+                json!({"action": "delete", "event_id": id, "confirmed": true}),
+                ctx(),
+            )
+            .await
+            .unwrap()
+            .output;
+        assert!(deleted.contains("deleted"), "{deleted}");
+        let gone = tool
+            .execute(json!({"action": "get", "event_id": id}), ctx())
+            .await
+            .map(|o| o.output)
+            .unwrap_or_else(|e| e.to_string());
+        assert!(gone.contains("cancelled") || gone.contains("404"), "{gone}");
+
+        // Gmail must still work with a token that now covers several services.
+        let gmail = crate::gmail::GmailClient::new();
+        assert!(gmail.is_configured());
+        let list = gmail.list_messages(None, None, 1).await.unwrap();
+        assert!(list.messages.is_some_and(|m| !m.is_empty()));
+    }
 }
