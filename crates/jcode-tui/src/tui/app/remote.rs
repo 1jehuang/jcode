@@ -373,7 +373,9 @@ async fn forward_pending_reasoning_effort(app: &mut App, remote: &mut RemoteConn
     match remote.set_reasoning_effort(&effort).await {
         Ok(()) => {
             // Optimistically track the requested effort so the widget/header
-            // reflect the picker choice; ReasoningEffortChanged confirms it.
+            // reflect the picker choice; ReasoningEffortChanged confirms it,
+            // or restores the saved value if the server rejects it.
+            app.remember_remote_effort_before_request();
             app.remote_reasoning_effort = Some(effort);
         }
         Err(error) => {
