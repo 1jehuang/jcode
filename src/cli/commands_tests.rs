@@ -284,7 +284,9 @@ impl Provider for OpenRouterSlotProvider {
         _system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        Err(anyhow::anyhow!("the provider label test never sends a request"))
+        Err(anyhow::anyhow!(
+            "the provider label test never sends a request"
+        ))
     }
 
     fn name(&self) -> &str {
