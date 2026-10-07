@@ -262,6 +262,21 @@ pub fn provider_model_to_select_after_auth_with_configured_default(
 /// them directly. Returns `None` when the provider has no curated order or no
 /// candidate is recognized, so callers keep their own fallback.
 pub fn preferred_model_for_provider(provider_id: &str, models: &[&str]) -> Option<String> {
+    if let Some(ranked) = ranked_flagship_for_provider(provider_id, models) {
+        return Some(ranked);
+    }
+    let provider_id = normalized_auth_provider_id(Some(provider_id))
+        .map(str::to_string)
+        .unwrap_or_else(|| provider_id.trim().to_ascii_lowercase());
+    crate::provider_catalog::newest_released_model_for_openai_compatible_profile(&provider_id)
+        .filter(|newest| models.contains(&newest.as_str()))
+}
+
+/// Curated-order part of [`preferred_model_for_provider`]: new-release
+/// promotion, then flagship rank. `None` for providers without a curated
+/// order or when nothing in `models` is recognized. Never consults catalogs,
+/// so catalog code can call it without recursing.
+pub fn ranked_flagship_for_provider(provider_id: &str, models: &[&str]) -> Option<String> {
     let provider_id = normalized_auth_provider_id(Some(provider_id))
         .map(str::to_string)
         .unwrap_or_else(|| provider_id.trim().to_ascii_lowercase());
@@ -293,8 +308,7 @@ pub fn preferred_model_for_provider(provider_id: &str, models: &[&str]) -> Optio
             .min_by_key(|route| preferred_model_rank(orders, &route.model))
             .map(|route| route.model.clone());
     }
-    crate::provider_catalog::newest_released_model_for_openai_compatible_profile(&provider_id)
-        .filter(|newest| models.contains(&newest.as_str()))
+    None
 }
 
 /// Pick the strongest available route across every authenticated provider.
@@ -2959,6 +2973,25 @@ mod tests {
             preferred_frontier_auth_provider(&openai_api_and_oauth),
             Some("openai"),
             "OAuth is preferred over an API key within one provider family"
+        );
+    }
+}
+
+#[cfg(test)]
+mod real_catalog_tests {
+    /// Snapshot of the real OpenRouter `/models` catalog (466 ids, Oct 2026).
+    /// Includes the hazards a synthetic list misses: `:batch` variants,
+    /// `~anthropic/claude-opus-latest` aliases, and newer non-Claude releases
+    /// (`mistralai/mistral-large-4-0`) that recency alone would pick.
+    const OPENROUTER_IDS: &str = include_str!("openrouter_catalog_snapshot.json");
+
+    #[test]
+    fn real_openrouter_catalog_ranks_to_claude_opus_flagship() {
+        let ids: Vec<String> = serde_json::from_str(OPENROUTER_IDS).expect("snapshot");
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(
+            super::ranked_flagship_for_provider("openrouter", &refs).as_deref(),
+            Some("anthropic/claude-opus-5.5")
         );
     }
 }

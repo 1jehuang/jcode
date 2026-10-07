@@ -136,6 +136,22 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
         return None;
     }
 
+    // Proxies with a curated flagship order (OpenRouter carries Claude/GPT
+    // under vendor prefixes) rank by quality first. Plain recency picks
+    // whatever shipped last; live, that put OpenRouter on
+    // `mistralai/mistral-large-4-0` over `anthropic/claude-opus-5.5`.
+    let chat_ids: Vec<&str> = cache
+        .models
+        .iter()
+        .map(|model| model.id.trim())
+        .filter(|id| !id.is_empty() && crate::provider::is_listable_model_name(id))
+        .collect();
+    if let Some(flagship) =
+        crate::auth::lifecycle::ranked_flagship_for_provider(profile_id, &chat_ids)
+    {
+        return Some(flagship);
+    }
+
     cache
         .models
         .into_iter()
