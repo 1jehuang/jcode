@@ -331,9 +331,9 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    // The onboarding simulator owns all key handling while active (and Cmd+5
-    // toggles it). Handle it first so no real onboarding action can leak through.
-    if app.handle_onboarding_sim_key(code, modifiers) {
+    // Cmd+5 toggles the onboarding rehearsal. Every other key goes to the real
+    // onboarding handlers, exactly as on a first run.
+    if app.handle_onboarding_sim_toggle_shortcut(code, modifiers) {
         return Ok(());
     }
 

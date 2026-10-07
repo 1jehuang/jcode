@@ -251,10 +251,24 @@ impl ExternalAuthAutoImportOutcome {
     }
 }
 
+/// Logins from other tools that jcode could import and has not been told to
+/// trust yet. This is what first-run onboarding offers.
 pub fn pending_external_auth_review_candidates() -> Result<Vec<ExternalAuthReviewCandidate>> {
+    Ok(detected_external_auth_review_candidates()?
+        .into_iter()
+        .filter(|candidate| !external_auth_review_candidate_trusted(candidate))
+        .collect())
+}
+
+/// Every importable login from another tool on this machine, whether or not
+/// jcode already trusts it. This is what a brand-new jcode install would find,
+/// so onboarding rehearsals use it to show the real first-run screen on a
+/// machine where jcode is already set up. Importing an already-trusted
+/// candidate is a no-op, so offering these is safe.
+pub fn detected_external_auth_review_candidates() -> Result<Vec<ExternalAuthReviewCandidate>> {
     let mut candidates = Vec::new();
 
-    for source in auth::external::unconsented_sources() {
+    for source in auth::external::detected_sources() {
         let provider_summary = auth::external::source_provider_labels(source).join(", ");
         if provider_summary.is_empty() {
             continue;
@@ -267,7 +281,7 @@ pub fn pending_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevie
         });
     }
 
-    if auth::codex::has_unconsented_legacy_credentials() {
+    if auth::codex::legacy_auth_source_exists() {
         candidates.push(ExternalAuthReviewCandidate {
             provider_summary: "OpenAI/Codex".to_string(),
             source_name: "Codex auth.json".to_string(),
@@ -276,7 +290,7 @@ pub fn pending_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevie
         });
     }
 
-    if let Some(source) = auth::claude::has_unconsented_external_auth()
+    if let Some(source) = auth::claude::preferred_external_auth_source()
         && matches!(source, auth::claude::ExternalClaudeAuthSource::ClaudeCode)
     {
         candidates.push(ExternalAuthReviewCandidate {
@@ -291,10 +305,9 @@ pub fn pending_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevie
     // CLAUDE_CODE_OAUTH_TOKEN env var), not in the JSON file. Offer them when
     // the JSON file was not already detected above, so macOS users (where the
     // file usually does not exist) can still import their Claude login.
-    if !auth::claude::native_source_allowed()
-        && !candidates
-            .iter()
-            .any(|candidate| matches!(candidate.action, ExternalAuthReviewAction::ClaudeCode))
+    if !candidates
+        .iter()
+        .any(|candidate| matches!(candidate.action, ExternalAuthReviewAction::ClaudeCode))
         && auth::claude::native_credentials_present()
     {
         candidates.push(ExternalAuthReviewCandidate {
@@ -305,7 +318,10 @@ pub fn pending_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevie
         });
     }
 
-    if auth::gemini::has_unconsented_cli_auth() {
+    if auth::gemini::gemini_cli_oauth_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+    {
         candidates.push(ExternalAuthReviewCandidate {
             provider_summary: "Gemini".to_string(),
             source_name: "Gemini CLI".to_string(),
@@ -314,7 +330,7 @@ pub fn pending_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevie
         });
     }
 
-    if let Some(source) = auth::copilot::has_unconsented_external_auth()
+    if let Some(source) = auth::copilot::preferred_external_auth_source()
         && !matches!(
             source,
             auth::copilot::ExternalCopilotAuthSource::OpenCodeAuth
@@ -329,7 +345,7 @@ pub fn pending_external_auth_review_candidates() -> Result<Vec<ExternalAuthRevie
         });
     }
 
-    if let Some(source) = auth::cursor::has_unconsented_external_auth() {
+    if let Some(source) = auth::cursor::preferred_external_auth_source() {
         candidates.push(ExternalAuthReviewCandidate {
             provider_summary: "Cursor".to_string(),
             source_name: source.display_name().to_string(),
@@ -411,7 +427,41 @@ fn prompt_to_review_external_auth_sources(
     parse_external_auth_review_selection(&input, candidates.len())
 }
 
-fn approve_external_auth_review_candidate(candidate: &ExternalAuthReviewCandidate) -> Result<()> {
+/// Whether jcode already trusts this candidate's source. Imports use this to
+/// stay idempotent: re-running onboarding (or importing again) must never undo
+/// or duplicate a decision the user already made.
+fn external_auth_review_candidate_trusted(candidate: &ExternalAuthReviewCandidate) -> bool {
+    use crate::config::Config;
+    match candidate.action {
+        ExternalAuthReviewAction::SharedExternal(source) => auth::external::source_allowed(source),
+        ExternalAuthReviewAction::CodexLegacy => auth::codex::legacy_auth_allowed(),
+        ExternalAuthReviewAction::ClaudeCode => Config::external_auth_source_allowed_for_path(
+            auth::claude::CLAUDE_CODE_AUTH_SOURCE_ID,
+            &candidate.path,
+        ),
+        ExternalAuthReviewAction::ClaudeCodeNative => auth::claude::native_source_allowed(),
+        ExternalAuthReviewAction::GeminiCli => Config::external_auth_source_allowed_for_path(
+            auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
+            &candidate.path,
+        ),
+        ExternalAuthReviewAction::Copilot(source) => {
+            Config::external_auth_source_allowed_for_path(source.source_id(), &candidate.path)
+        }
+        ExternalAuthReviewAction::Cursor(source) => {
+            Config::external_auth_source_allowed_for_path(source.source_id(), &candidate.path)
+        }
+    }
+}
+
+fn approve_external_auth_review_candidate(
+    candidate: &ExternalAuthReviewCandidate,
+    already_trusted: bool,
+) -> Result<()> {
+    if already_trusted {
+        // Nothing to record, and re-snapshotting native credentials would
+        // rewrite an account the user already has.
+        return Ok(());
+    }
     match candidate.action {
         ExternalAuthReviewAction::SharedExternal(source) => {
             auth::external::trust_external_auth_source(source)?
@@ -672,7 +722,8 @@ pub async fn run_external_auth_auto_import_candidates(
         let Some(candidate) = candidates.get(index) else {
             continue;
         };
-        approve_external_auth_review_candidate(candidate)?;
+        let already_trusted = external_auth_review_candidate_trusted(candidate);
+        approve_external_auth_review_candidate(candidate, already_trusted)?;
         match validate_external_auth_review_candidate(candidate).await {
             Ok(detail) => {
                 outcome.imported += 1;
@@ -685,7 +736,11 @@ pub async fn run_external_auth_auto_import_candidates(
                 ));
             }
             Err(err) => {
-                let _ = revoke_external_auth_review_candidate(candidate);
+                // Only undo trust this import added. Revoking a source the user
+                // trusted before would silently sign them out of it.
+                if !already_trusted {
+                    let _ = revoke_external_auth_review_candidate(candidate);
+                }
                 outcome.messages.push(format!(
                     "✕ {} (from {}): {}",
                     candidate.provider_summary, candidate.source_name, err
@@ -718,7 +773,9 @@ pub fn provider_connected_in_jcode(status: &auth::AuthStatus, provider_id: &str)
 /// Like [`run_external_auth_auto_import_candidates`], but never lets an
 /// imported source shadow a login Jcode already has. Connection state is
 /// re-read at import time, and any selected source that would touch an
-/// already connected provider is skipped and reported.
+/// already connected provider is left alone. Those count as usable (the user
+/// asked for that login and Jcode has it), so re-running onboarding on a set-up
+/// install succeeds without asking the user to sign in again.
 pub async fn run_external_auth_import_candidates_preserving_existing(
     candidates: &[ExternalAuthReviewCandidate],
     selected: &[usize],
@@ -726,7 +783,7 @@ pub async fn run_external_auth_import_candidates_preserving_existing(
     auth::AuthStatus::invalidate_cache();
     let status = auth::AuthStatus::check();
     let mut kept = Vec::new();
-    let mut skipped = Vec::new();
+    let mut already_connected = Vec::new();
     for &index in selected {
         let Some(candidate) = candidates.get(index) else {
             continue;
@@ -736,8 +793,8 @@ pub async fn run_external_auth_import_candidates_preserving_existing(
             .iter()
             .any(|id| provider_connected_in_jcode(&status, id))
         {
-            skipped.push(format!(
-                "✕ {} (from {}): already connected in jcode, kept the existing login",
+            already_connected.push(format!(
+                "✓ {} (from {}): already connected in jcode, kept the existing login",
                 candidate.provider_summary, candidate.source_name
             ));
         } else {
@@ -745,8 +802,98 @@ pub async fn run_external_auth_import_candidates_preserving_existing(
         }
     }
     let mut outcome = run_external_auth_auto_import_candidates(candidates, &kept).await?;
-    outcome.messages.extend(skipped);
+    outcome.imported += already_connected.len();
+    outcome.messages.extend(already_connected);
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod rerun_safety_tests {
+    use super::*;
+
+    struct TempHome {
+        _dir: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let prev = std::env::var_os("JCODE_HOME");
+            crate::env::set_var("JCODE_HOME", dir.path());
+            crate::config::invalidate_config_cache();
+            auth::AuthStatus::invalidate_cache();
+            Self { _dir: dir, prev }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::invalidate_config_cache();
+            auth::AuthStatus::invalidate_cache();
+        }
+    }
+
+    fn gemini_path() -> std::path::PathBuf {
+        let path = crate::storage::user_home_path(".gemini/oauth_creds.json").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path
+    }
+
+    fn gemini_trusted() -> bool {
+        crate::config::Config::external_auth_source_allowed_for_path(
+            auth::gemini::GEMINI_CLI_AUTH_SOURCE_ID,
+            &gemini_path(),
+        )
+    }
+
+    #[test]
+    fn detected_candidates_include_trusted_sources_but_pending_does_not() {
+        let _lock = crate::storage::lock_test_env();
+        let _home = TempHome::new();
+        std::fs::write(gemini_path(), b"{}").unwrap();
+
+        assert_eq!(pending_external_auth_review_candidates().unwrap().len(), 1);
+        auth::gemini::trust_cli_auth_for_future_use().unwrap();
+        assert!(pending_external_auth_review_candidates().unwrap().is_empty());
+        let detected = detected_external_auth_review_candidates().unwrap();
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].provider_summary(), "Gemini");
+    }
+
+    #[tokio::test]
+    async fn failed_reimport_keeps_trust_the_user_already_gave() {
+        let _lock = crate::storage::lock_test_env();
+        let _home = TempHome::new();
+        // Unreadable credentials make validation fail.
+        std::fs::write(gemini_path(), b"not json").unwrap();
+        auth::gemini::trust_cli_auth_for_future_use().unwrap();
+
+        let candidates = detected_external_auth_review_candidates().unwrap();
+        let outcome = run_external_auth_auto_import_candidates(&candidates, &[0])
+            .await
+            .unwrap();
+        assert_eq!(outcome.imported, 0);
+        assert!(gemini_trusted(), "re-import must not revoke existing trust");
+    }
+
+    #[tokio::test]
+    async fn failed_first_import_still_rolls_back_its_own_trust() {
+        let _lock = crate::storage::lock_test_env();
+        let _home = TempHome::new();
+        std::fs::write(gemini_path(), b"not json").unwrap();
+
+        let candidates = pending_external_auth_review_candidates().unwrap();
+        let outcome = run_external_auth_auto_import_candidates(&candidates, &[0])
+            .await
+            .unwrap();
+        assert_eq!(outcome.imported, 0);
+        assert!(!gemini_trusted());
+    }
 }
 
 #[cfg(test)]

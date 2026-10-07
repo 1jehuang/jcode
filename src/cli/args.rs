@@ -85,9 +85,8 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) no_selfdev: bool,
 
-    /// Start the onboarding simulator on launch (same as `/onboarding-sim`).
-    /// Steps through every first-run onboarding screen with synthetic data;
-    /// never touches real auth state.
+    /// Rehearse first-run onboarding on launch: the real flow, as if jcode
+    /// were new on this machine (same as `/onboarding-sim`).
     #[arg(long = "onboarding-sim")]
     pub(crate) onboarding_sim: bool,
 

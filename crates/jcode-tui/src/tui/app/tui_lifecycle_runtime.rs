@@ -577,19 +577,16 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
                     "off"
                 };
                 app.push_display_message(DisplayMessage::system(format!(
-                    "Onboarding simulator is {status}. Alt+5 resets and opens it; Cmd+5 toggles it; `/onboarding-sim on` / `off` also work. While active: Tab/→ next screen, Shift+Tab/← previous, h/l preview the highlight, Esc exits."
+                    "Onboarding rehearsal is {status}. Alt+5 starts it over; Cmd+5 toggles it; `/onboarding-sim on` / `off` also work. It runs the real first-run flow as if jcode were new on this machine. Esc skips onboarding, as it does for new users."
                 )));
             }
             "" | "on" => {
                 app.start_onboarding_simulator();
-                app.push_display_message(DisplayMessage::system(
-                    "Onboarding simulator started. Step screens with Tab/→, press Alt+5 to reset to the first screen, or Cmd+5 to toggle. On the import screen Up/Down move the checkbox cursor; h/l preview the highlight; Esc exits. Nothing real is logged in or imported.".to_string(),
-                ));
             }
             "off" => {
                 app.stop_onboarding_simulator();
                 app.push_display_message(DisplayMessage::system(
-                    "Onboarding simulator stopped.".to_string(),
+                    "Onboarding rehearsal stopped.".to_string(),
                 ));
             }
             _ => unreachable!("guarded by command matcher"),

@@ -2080,8 +2080,8 @@ pub(super) fn delete_input_to_end(app: &mut App) {
 
 pub(super) fn handle_super_key(app: &mut App, code: KeyCode) -> bool {
     match code {
-        // Cmd+5 toggles the onboarding simulator (a dev aid for walking through
-        // every first-run onboarding screen without touching real auth state).
+        // Cmd+5 toggles the onboarding rehearsal (the real first-run flow, run
+        // as if jcode were new on this machine).
         KeyCode::Char('5') => {
             app.toggle_onboarding_simulator();
             true
@@ -3036,7 +3036,7 @@ impl App {
             return Ok(());
         }
 
-        // Alt+5 always starts the onboarding simulator from a pristine first
+        // Alt+5 always starts the onboarding rehearsal from a pristine first
         // screen, even when another modal or a previous sim screen is active.
         if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
             return Ok(());
@@ -3048,10 +3048,9 @@ impl App {
             return Ok(());
         }
 
-        // The onboarding simulator owns all key handling while active so the
-        // real onboarding handlers and simulated modal overlays never fire (no
-        // real logins/imports or action selection).
-        if self.handle_onboarding_sim_key(code, modifiers) {
+        // Cmd+5 toggles the onboarding rehearsal. Every other key goes to the
+        // real onboarding handlers, exactly as on a first run.
+        if self.handle_onboarding_sim_toggle_shortcut(code, modifiers) {
             return Ok(());
         }
 

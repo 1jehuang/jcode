@@ -129,10 +129,19 @@ pub fn has_any_unconsented_external_auth() -> bool {
 }
 
 pub fn unconsented_sources() -> Vec<ExternalAuthSource> {
+    detected_sources()
+        .into_iter()
+        .filter(|source| !source_allowed(*source))
+        .collect()
+}
+
+/// Every shared auth file on this machine that holds a login jcode can use,
+/// whether or not jcode already trusts it.
+pub fn detected_sources() -> Vec<ExternalAuthSource> {
     SOURCES
         .into_iter()
         .filter(|source| source.path().map(|path| path.exists()).unwrap_or(false))
-        .filter(|source| !source_allowed(*source) && source_has_supported_auth(*source))
+        .filter(|source| source_has_supported_auth(*source))
         .collect()
 }
 
