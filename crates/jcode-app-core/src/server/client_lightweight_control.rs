@@ -58,6 +58,115 @@ pub(super) fn parse_swarm_spawn_mode(
     }
 }
 
+/// Extract the session_id from a Comm* request that carries one, so the
+/// lightweight control path can ensure swarm membership before dispatching.
+/// Returns None for requests that do not reference a swarm session.
+fn comm_request_session_id(request: &Request) -> Option<&str> {
+    match request {
+        Request::CommShare { session_id, .. }
+        | Request::CommRead { session_id, .. }
+        | Request::CommMessage { from_session: session_id, .. }
+        | Request::CommList { session_id, .. }
+        | Request::CommListChannels { session_id, .. }
+        | Request::CommListSwarms { session_id, .. }
+        | Request::CommSetSwarmLabel { session_id, .. }
+        | Request::CommChannelMembers { session_id, .. }
+        | Request::CommProposePlan { session_id, .. }
+        | Request::CommApprovePlan { session_id, .. }
+        | Request::CommRejectPlan { session_id, .. }
+        | Request::CommSeedGraph { session_id, .. }
+        | Request::CommExpandNode { session_id, .. }
+        | Request::CommCompleteNode { session_id, .. }
+        | Request::CommInjectGap { session_id, .. }
+        | Request::CommSpawn { session_id, .. }
+        | Request::CommListModels { session_id, .. }
+        | Request::CommStop { session_id, .. }
+        | Request::CommAssignRole { session_id, .. }
+        | Request::CommSummary { session_id, .. }
+        | Request::CommStatus { session_id, .. }
+        | Request::CommReport { session_id, .. }
+        | Request::CommPlanStatus { session_id, .. }
+        | Request::CommReadContext { session_id, .. }
+        | Request::CommResyncPlan { session_id, .. }
+        | Request::CommAssignTask { session_id, .. }
+        | Request::CommAssignNext { session_id, .. }
+        | Request::CommTaskControl { session_id, .. }
+        | Request::CommSubscribeChannel { session_id, .. }
+        | Request::CommUnsubscribeChannel { session_id, .. }
+        | Request::CommAwaitMembers { session_id, .. } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// Ensure a session referenced by a lightweight Comm* request has a
+/// SwarmMember entry. Headless `jcode run` sessions are in-process agents
+/// whose session_id was never registered on the server (no Subscribe ever
+/// happened), so every swarm lookup returns "Not in a swarm" (#1748).
+/// Auto-registering here makes the swarm tool work for any lightweight
+/// client without changing the transport or requiring a Subscribe frame.
+async fn ensure_lightweight_swarm_member(
+    session_id: &str,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) {
+    // Fast path: already registered (the normal TUI/attached case).
+    if swarm_members.read().await.contains_key(session_id) {
+        return;
+    }
+
+    let swarm_id = super::util::swarm_id_for_session(session_id);
+    let now = std::time::Instant::now();
+    let mut members = swarm_members.write().await;
+    // Re-check under the write lock: another request may have registered
+    // this session while we were waiting.
+    if members.contains_key(session_id) {
+        return;
+    }
+    members.insert(
+        session_id.to_string(),
+        SwarmMember {
+            session_id: session_id.to_string(),
+            event_tx: client_event_tx.clone(),
+            event_txs: HashMap::new(),
+            working_dir: None,
+            swarm_id: swarm_id.clone(),
+            swarm_enabled: true,
+            status: "ready".to_string(),
+            detail: None,
+            task_label: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".to_string(),
+            joined_at: now,
+            last_status_change: now,
+            is_headless: true,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+        },
+    );
+    drop(members);
+
+    if let Some(swarm_id) = swarm_id {
+        let mut swarms = swarms_by_id.write().await;
+        swarms
+            .entry(swarm_id)
+            .or_insert_with(HashSet::new)
+            .insert(session_id.to_string());
+    }
+
+    crate::logging::event_info(
+        "SWARM_LIFECYCLE",
+        vec![
+            ("phase", "lightweight_member_registered".to_string()),
+            ("session_id", session_id.to_string()),
+        ],
+    );
+}
+
 pub(super) struct LightweightControlContext<'a> {
     pub(super) sessions: &'a SessionAgents,
     pub(super) global_session_id: &'a Arc<RwLock<String>>,
@@ -137,6 +246,21 @@ pub(super) async fn handle_lightweight_control_request(
             }
         }
     });
+
+    // Auto-register the session referenced by a Comm* request as a swarm
+    // member. Headless `jcode run` agents are in-process and never Subscribe,
+    // so their session_id has no SwarmMember entry on the server and every
+    // swarm action fails with "Not in a swarm" (#1748). Registering here makes
+    // the swarm tool work for lightweight clients without a Subscribe frame.
+    if let Some(session_id) = comm_request_session_id(&request) {
+        ensure_lightweight_swarm_member(
+            session_id,
+            &client_event_tx,
+            swarm_members,
+            swarms_by_id,
+        )
+        .await;
+    }
 
     match request {
         // Scheduled delivery opens a one-shot connection and names the target
