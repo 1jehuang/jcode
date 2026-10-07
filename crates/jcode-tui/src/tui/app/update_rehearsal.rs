@@ -37,6 +37,14 @@ pub(super) fn is_update_rehearsal_key(code: KeyCode, modifiers: KeyModifiers) ->
     }
 }
 
+/// Self-dev means working on jcode itself: a canary session, or a client the
+/// subscribe metadata marks as self-dev (launched in self-dev mode or from a
+/// jcode checkout). The canary flag alone is not enough, because a client
+/// started from the repo is self-dev even though its session is not canary.
+fn rehearsal_allowed(canary_session: bool, client_selfdev: Option<bool>) -> bool {
+    canary_session || client_selfdev == Some(true)
+}
+
 pub(super) fn rehearsal_script_path(repo_dir: &Path) -> PathBuf {
     repo_dir.join(UPDATE_REHEARSAL_SCRIPT)
 }
@@ -52,7 +60,8 @@ pub(super) fn parse_rehearsal_args(trimmed: &str) -> Option<Vec<String>> {
 
 impl App {
     fn update_rehearsal_allowed(&self) -> bool {
-        self.is_selfdev_canary_session()
+        let (_, client_selfdev) = crate::tui::subscribe_metadata(None);
+        rehearsal_allowed(self.is_selfdev_canary_session(), client_selfdev)
     }
 
     /// Keybinding entry point. Outside self-dev the chord is left untouched so
@@ -201,6 +210,15 @@ mod tests {
     fn script_lives_in_repo_scripts_dir() {
         let path = rehearsal_script_path(Path::new("/repo"));
         assert_eq!(path, Path::new("/repo/scripts/update_rehearsal.py"));
+    }
+
+    #[test]
+    fn gate_accepts_repo_clients_without_canary_flag() {
+        // Regression: a client started from the jcode checkout reports
+        // self-dev via subscribe metadata but its session is not canary.
+        assert!(rehearsal_allowed(false, Some(true)));
+        assert!(rehearsal_allowed(true, None));
+        assert!(!rehearsal_allowed(false, None));
     }
 
     #[test]
