@@ -210,7 +210,7 @@ impl App {
     /// `maybe_show_setup_hints`, so `launch_count` never advances and the
     /// new-user heuristic above would otherwise treat every spawn as a first run.
     /// Such sessions should never auto-start the guided onboarding flow.
-    fn is_selfdev_canary_session(&self) -> bool {
+    pub(super) fn is_selfdev_canary_session(&self) -> bool {
         if self.is_remote {
             self.remote_is_canary.unwrap_or(self.session.is_canary)
         } else {

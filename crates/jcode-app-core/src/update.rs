@@ -206,20 +206,56 @@ fn auto_update_git_repo_skip_reason(path: &std::path::Path) -> Option<&'static s
     )
 }
 
+/// Env var naming a fake "latest release" endpoint used by the self-dev update
+/// rehearsal (`scripts/update_rehearsal.py`).
+pub const UPDATE_RELEASE_URL_OVERRIDE_ENV: &str = "JCODE_UPDATE_RELEASE_URL";
+
+/// Release-endpoint override for update rehearsals.
+///
+/// Only honored when `JCODE_HOME` points at a sandbox, so a stray environment
+/// variable can never redirect a real install to an arbitrary download.
+fn release_url_override() -> Option<String> {
+    release_url_override_with(
+        std::env::var(UPDATE_RELEASE_URL_OVERRIDE_ENV).ok(),
+        storage::running_with_sandboxed_home(),
+    )
+}
+
+fn release_url_override_with(value: Option<String>, sandboxed_home: bool) -> Option<String> {
+    let value = value?.trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    if !sandboxed_home {
+        crate::logging::warn(&format!(
+            "Ignoring {UPDATE_RELEASE_URL_OVERRIDE_ENV}: only honored with a sandboxed JCODE_HOME"
+        ));
+        return None;
+    }
+    Some(value)
+}
+
 pub fn fetch_latest_release_blocking() -> Result<GitHubRelease> {
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        GITHUB_REPO
-    );
+    let override_url = release_url_override();
+    let url = override_url.clone().unwrap_or_else(|| {
+        format!(
+            "https://api.github.com/repos/{}/releases/latest",
+            GITHUB_REPO
+        )
+    });
 
     let client = reqwest::blocking::Client::builder()
         .timeout(UPDATE_CHECK_TIMEOUT)
         .user_agent("jcode-updater")
         .build()?;
 
-    let response = github_api_request(&client, &url)
-        .send()
-        .context("Failed to fetch release info")?;
+    let request = if override_url.is_some() {
+        // Never send a GitHub token to a non-GitHub rehearsal endpoint.
+        client.get(&url)
+    } else {
+        github_api_request(&client, &url)
+    };
+    let response = request.send().context("Failed to fetch release info")?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("No releases found");

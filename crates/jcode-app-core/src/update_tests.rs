@@ -574,3 +574,15 @@ fn test_download_asset_with_resume_unknown_total_and_monotonic_progress() {
         "final progress must reach the full size"
     );
 }
+
+#[test]
+fn release_url_override_requires_sandboxed_home() {
+    let url = Some("http://127.0.0.1:9/release.json".to_string());
+    assert_eq!(
+        release_url_override_with(url.clone(), true).as_deref(),
+        Some("http://127.0.0.1:9/release.json")
+    );
+    assert_eq!(release_url_override_with(url, false), None);
+    assert_eq!(release_url_override_with(Some("  ".to_string()), true), None);
+    assert_eq!(release_url_override_with(None, true), None);
+}

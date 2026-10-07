@@ -327,6 +327,9 @@ async fn handle_remote_key_internal(
     if app.handle_update_sim_shortcut(code, modifiers) {
         return Ok(());
     }
+    if app.handle_update_rehearsal_shortcut(code, modifiers) {
+        return Ok(());
+    }
 
     // The onboarding simulator owns all key handling while active (and Cmd+5
     // toggles it). Handle it first so no real onboarding action can leak through.

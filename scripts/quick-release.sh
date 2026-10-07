@@ -304,7 +304,17 @@ export JCODE_RUNTIME_RELEASE_SEMVER="$VERSION_NUM"
 export JCODE_RUNTIME_RELEASE_GIT_HASH="$(git rev-parse --short HEAD)"
 export JCODE_RUNTIME_RELEASE_GIT_DATE="$(git log -1 --format=%ci)"
 export JCODE_RUNTIME_RELEASE_GIT_TAG="$VERSION"
-self_dir=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+self=\$0
+# The launcher and channel entries are symlinks to this wrapper; resolve them
+# so the payload is found next to the real file, not next to the symlink.
+while [ -L "\$self" ]; do
+    link=\$(readlink -- "\$self")
+    case \$link in
+        /*) self=\$link ;;
+        *) self=\$(dirname -- "\$self")/\$link ;;
+    esac
+done
+self_dir=\$(CDPATH= cd -- "\$(dirname -- "\$self")" && pwd)
 exec "\$self_dir/jcode-linux-x86_64.bin" "\$@"
 WRAPPER
     chmod +x "$DIST/jcode-linux-x86_64"

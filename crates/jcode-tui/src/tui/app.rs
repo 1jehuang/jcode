@@ -99,6 +99,7 @@ mod slash_command_parser;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
+mod update_rehearsal;
 mod update_sim;
 mod usage_reset;
 mod voice_input;
