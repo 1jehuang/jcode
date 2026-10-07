@@ -3,6 +3,22 @@
 use crate::*;
 
 #[test]
+fn create_session_system_prompt_roundtrip_and_legacy_default() {
+    let legacy = serde_json::json!({"req": "create_session"});
+    let decoded: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+    for prompt in ["Custom system instructions\nwith unicode: 世界", ""] {
+        let request = ApiRequest::CreateSession {
+            working_dir: None,
+            system_prompt: Some(prompt.into()),
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["system_prompt"], prompt);
+        assert_eq!(serde_json::from_value::<ApiRequest>(wire).unwrap(), request);
+    }
+}
+
+#[test]
 fn token_usage_preserves_cache_creation_and_accepts_legacy_frames() {
     let legacy = r#"{"v":1,"ev":"token_usage","session_id":"s1","input":10,"output":5,"cache_read_input":2}"#;
     let legacy_frame: ServerFrame = serde_json::from_str(legacy).unwrap();
@@ -168,7 +184,10 @@ fn request_roundtrip() {
         ApiRequest::SetRetentionPolicy {
             archive_after_days: Some(30),
         },
-        ApiRequest::CreateSession { working_dir: None },
+        ApiRequest::CreateSession {
+            working_dir: None,
+            system_prompt: None,
+        },
         ApiRequest::AttachSession {
             session_id: "s1".into(),
         },
@@ -336,10 +355,10 @@ fn enum_variant_fields(file: &str, enum_name: &str) -> Vec<(String, Vec<String>)
         };
         if rest.starts_with(' ') {
             // A field line inside the variant currently being collected.
-            if let Some((_, fields)) = out.last_mut() {
-                if let Some(name) = field_name(rest) {
-                    fields.push(name);
-                }
+            if let Some((_, fields)) = out.last_mut()
+                && let Some(name) = field_name(rest)
+            {
+                fields.push(name);
             }
             continue;
         }
@@ -570,4 +589,83 @@ fn text_framing_is_additive_and_accepts_unframed_legacy_deltas() {
             frame.event
         );
     }
+}
+
+#[test]
+fn session_tool_control_wire_shapes_and_defaults() {
+    use serde_json::json;
+    for tools in [
+        json!({}),
+        json!({"enabled":null}),
+        json!({"enabled":[]}),
+        json!({"enabled":["read"],"disabled":["bash"],"custom":[{"name":"lookup","description":"Look up","parameters":{"type":"object"}}]}),
+    ] {
+        let wire = json!({"v":1,"id":1,"req":"configure_tools","session_id":"s1","tools":tools});
+        let frame: ClientFrame = serde_json::from_value(wire).unwrap();
+        let ApiRequest::ConfigureTools { tools: config, .. } = &frame.request else {
+            panic!()
+        };
+        assert_eq!(
+            config.enabled,
+            tools
+                .get("enabled")
+                .filter(|v| !v.is_null())
+                .map(|v| serde_json::from_value(v.clone()).unwrap())
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientFrame>(serde_json::to_value(&frame).unwrap()).unwrap(),
+            frame
+        );
+    }
+    for wire in [
+        json!({"v":1,"id":2,"req":"list_tools","session_id":"s1"}),
+        json!({"v":1,"id":3,"req":"tool_result","session_id":"s1","call_id":"c1","output":"ok"}),
+        json!({"v":1,"id":4,"req":"tool_result","session_id":"s1","call_id":"c1","output":"","error":"failed"}),
+    ] {
+        let frame: ClientFrame = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+    }
+    for wire in [
+        json!({"v":1,"reply_to":2,"ev":"tools","session_id":"s1","tools":[{"name":"read","description":"Read file","parameters":{"type":"object"}}]}),
+        json!({"v":1,"ev":"tool_call","session_id":"s1","call_id":"c1","name":"lookup","input":{"key":1}}),
+    ] {
+        let frame: ServerFrame = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+    }
+    for parameters in [json!(null), json!([]), json!("object"), json!(42)] {
+        assert!(
+            serde_json::from_value::<SessionToolDefinition>(
+                json!({"name":"bad","description":"bad","parameters":parameters})
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(ToolConfiguration::default()).unwrap(),
+        json!({})
+    );
+}
+
+#[test]
+fn turn_stopped_schema_and_future_reason_compatibility() {
+    for reason in [
+        "interrupted",
+        "failure",
+        "crash",
+        "provider_guardrail",
+        "limit_reached",
+    ] {
+        let wire = serde_json::json!({"v":1,"ev":"turn_stopped","session_id":"s1","reason":reason,"message":"Explanation"});
+        let frame: ServerFrame = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+    }
+    let wire = serde_json::json!({"v":1,"ev":"turn_stopped","session_id":"s1","reason":"future_reason","message":"Explanation","provider_stop_reason":"refusal"});
+    let frame: ServerFrame = serde_json::from_value(wire).unwrap();
+    assert!(
+        matches!(frame.event, ApiEvent::TurnStopped { reason: TurnStopReason::Unknown, provider_stop_reason: Some(reason), .. } if reason == "refusal")
+    );
+    let done: ServerFrame =
+        serde_json::from_value(serde_json::json!({"v":1,"ev":"turn_done","session_id":"s1"}))
+            .unwrap();
+    assert!(matches!(done.event, ApiEvent::TurnDone { .. }));
 }

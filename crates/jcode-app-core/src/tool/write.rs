@@ -67,6 +67,7 @@ impl Tool for WriteTool {
         }
 
         // Check if file existed before and read old content for diff
+        let _lock = super::file_lock::lock(&path).await;
         let existed = path.exists();
         let old_content = if existed {
             tokio::fs::read_to_string(&path).await.ok()

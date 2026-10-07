@@ -1,5 +1,10 @@
 use super::*;
 use std::path::Path;
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 
 struct EnvVarGuard {
     key: &'static str,
@@ -862,11 +867,11 @@ fn jcode_search_index_keeps_late_turns_after_reaching_its_budget() {
 fn raw_search_excerpt_samples_suffix_of_one_long_message_without_splitting_utf8() {
     let prefix = "opening-message-needle";
     let suffix = "晚い-message-needle";
-    let raw: Box<serde_json::value::RawValue> = serde_json::from_str(&format!(
-        "{}",
-        serde_json::to_string(&format!("{prefix} {} {suffix}", "─".repeat(6_000)))
+    let raw: Box<serde_json::value::RawValue> = serde_json::from_str(
+        &serde_json::to_string(&format!("{prefix} {} {suffix}", "─".repeat(6_000)))
             .expect("serialize content")
-    ))
+            .to_string(),
+    )
     .expect("raw value");
 
     let excerpt =
@@ -1145,6 +1150,15 @@ fn benchmark_resume_loading_reports_timings() {
         session.save().expect("save benchmark session");
     }
 
+    // Parallel UI tests can leave a session-list cache entry for this same
+    // tempdir: `/sessions` overlay tests spawn a detached
+    // `load_sessions_grouped` that reads whatever JCODE_HOME is set to at the
+    // moment it runs, so while this test is still saving its 120 sessions a
+    // racing background load can cache a partial directory snapshot. Drop any
+    // such entry before the timed measurement so this benchmark always times a
+    // fresh load (and cannot observe a poisoned partial snapshot).
+    invalidate_session_list_cache();
+
     let load_start = std::time::Instant::now();
     let sessions = load_sessions().expect("load sessions");
     let load_elapsed = load_start.elapsed();
@@ -1161,6 +1175,94 @@ fn benchmark_resume_loading_reports_timings() {
         load_elapsed.as_millis(),
         group_elapsed.as_millis(),
         sessions.len()
+    );
+}
+
+#[test]
+fn invalidated_in_flight_load_does_not_repopulate_session_list_cache() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _limit = EnvVarGuard::set_str("JCODE_SESSION_PICKER_MAX_SESSIONS", "100");
+
+    std::fs::create_dir_all(temp.path().join("sessions")).expect("create sessions dir");
+
+    let save_session = |idx: usize| {
+        let mut session = Session::create_with_id(
+            format!("session_race_{idx:03}_1780000000{idx:03}"),
+            Some(format!("/tmp/session-race-{idx}")),
+            Some(format!("Race Session {idx}")),
+        );
+        session.append_stored_message(crate::session::StoredMessage {
+            id: format!("msg-{idx}"),
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::Text {
+                text: format!("race session {idx}"),
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+        session.save().expect("save race session");
+    };
+
+    save_session(0);
+    invalidate_session_list_cache();
+
+    let (publish_reached_tx, publish_reached_rx) = mpsc::channel();
+    let (release_publish_tx, release_publish_rx) = mpsc::channel();
+    let hook_used = Arc::new(AtomicBool::new(false));
+    let hook_used_for_hook = Arc::clone(&hook_used);
+    let loader_thread_id = Arc::new(OnceLock::new());
+    let loader_thread_id_for_hook = Arc::clone(&loader_thread_id);
+    set_before_session_list_cache_publish_hook(Some(Box::new(move || {
+        let is_target_loader = loader_thread_id_for_hook
+            .get()
+            .is_some_and(|thread_id| *thread_id == std::thread::current().id());
+        if is_target_loader
+            && hook_used_for_hook
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            publish_reached_tx.send(()).expect("signal publish reached");
+            release_publish_rx.recv().expect("wait for release");
+        }
+    })));
+
+    let loader_thread_id_for_loader = Arc::clone(&loader_thread_id);
+    let loader = std::thread::spawn(move || {
+        loader_thread_id_for_loader
+            .set(std::thread::current().id())
+            .expect("record loader thread");
+        // Keep the target load in flight even if a detached grouped load has
+        // already published an entry for this temporary home. The regression
+        // under test is publication after invalidation, not cache-hit ordering.
+        load_sessions_inner(true)
+    });
+    publish_reached_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("in-flight load reached cache publication");
+
+    for idx in 1..4 {
+        save_session(idx);
+    }
+    invalidate_session_list_cache();
+    release_publish_tx.send(()).expect("release in-flight load");
+
+    let first_load = loader
+        .join()
+        .expect("loader thread joins")
+        .expect("in-flight load succeeds");
+    assert_eq!(first_load.len(), 1, "in-flight load saw initial snapshot");
+
+    set_before_session_list_cache_publish_hook(None);
+    let second_load = load_sessions().expect("load after invalidation");
+    assert_eq!(
+        second_load.len(),
+        4,
+        "stale in-flight result must not repopulate the cache after invalidation"
     );
 }
 

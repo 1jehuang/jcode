@@ -68,6 +68,7 @@ pub fn anthropic_api_pricing_with_tier(
     }
 
     match base {
+        "claude-opus-5-5" => exact(4.0, 20.0, 0.20, "Anthropic API pricing"),
         "claude-fable-5-1" => exact(10.0, 50.0, 0.25, "Anthropic API pricing"),
         "claude-fable-5" => exact(10.0, 50.0, 1.0, "Anthropic API pricing"),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
@@ -182,6 +183,12 @@ pub fn openai_api_pricing_with_tier(
             "gpt-5.3-codex" => return exact(3.5, 28.0, Some(0.35), "OpenAI API priority pricing"),
             _ => {}
         },
+        Some("ultrafast") => {
+            // Verified 2026-10-05: https://developers.openai.com/api/docs/pricing?latest-pricing=ultrafast
+            if base == "gpt-6-astra" {
+                return exact(60.0, 300.0, Some(6.0), "OpenAI API ultrafast pricing");
+            }
+        }
         Some("flex") => match base {
             "gpt-6-astra" => return exact(5.0, 25.0, Some(0.5), "OpenAI API flex pricing"),
             "gpt-5.5" => return exact(2.5, 15.0, Some(0.25), "OpenAI API flex pricing"),
@@ -297,6 +304,16 @@ pub fn openrouter_pricing_from_token_prices(
 mod tests {
     use super::*;
     use crate::RouteBillingKind;
+
+    #[test]
+    fn opus_55_published_pricing_includes_discounted_cache_reads() {
+        for model in ["claude-opus-5-5", "claude-opus-5-5[1m]"] {
+            let pricing = anthropic_api_pricing(model).expect("Opus 5.5 pricing");
+            assert_eq!(pricing.input_price_per_mtok_micros, Some(4_000_000));
+            assert_eq!(pricing.output_price_per_mtok_micros, Some(20_000_000));
+            assert_eq!(pricing.cache_read_price_per_mtok_micros, Some(200_000));
+        }
+    }
 
     #[test]
     fn anthropic_api_pricing_long_context_uses_standard_rates() {
@@ -415,6 +432,7 @@ mod tests {
             (None, 10_000_000, 50_000_000, 1_000_000),
             (Some("flex"), 5_000_000, 25_000_000, 500_000),
             (Some("priority"), 20_000_000, 100_000_000, 2_000_000),
+            (Some("ultrafast"), 60_000_000, 300_000_000, 6_000_000),
         ] {
             let price = openai_api_pricing_with_tier("gpt-6-astra", tier).unwrap();
             assert_eq!(price.input_price_per_mtok_micros, Some(input));

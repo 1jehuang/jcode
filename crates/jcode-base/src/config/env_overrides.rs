@@ -39,6 +39,12 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_EFFORT_DECREASE_KEY") {
             self.keybindings.effort_decrease = v;
         }
+        if let Ok(v) = std::env::var("JCODE_SPEED_INCREASE_KEY") {
+            self.keybindings.speed_increase = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_SPEED_DECREASE_KEY") {
+            self.keybindings.speed_decrease = v;
+        }
         if let Ok(v) = std::env::var("JCODE_CENTERED_TOGGLE_KEY") {
             self.keybindings.centered_toggle = v;
         }
@@ -78,6 +84,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_DIAGRAM_PANE_TOGGLE_KEY") {
             self.keybindings.diagram_pane_toggle = v;
         }
+        if let Ok(v) = std::env::var("JCODE_DIAGRAM_PANE_VISIBILITY_TOGGLE_KEY") {
+            self.keybindings.diagram_pane_visibility_toggle = v;
+        }
         if let Ok(v) = std::env::var("JCODE_TYPING_SCROLL_LOCK_TOGGLE_KEY") {
             self.keybindings.typing_scroll_lock_toggle = v;
         }
@@ -89,6 +98,12 @@ impl Config {
         }
         if let Ok(v) = std::env::var("JCODE_NEW_TERMINAL_KEY") {
             self.keybindings.new_terminal = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_VOICE_INPUT_KEY") {
+            self.keybindings.voice_input = v;
+        }
+        if let Ok(v) = std::env::var("JCODE_DICTATION_RECORDER") {
+            self.dictation.recorder = v;
         }
 
         // Dictation
@@ -136,6 +151,11 @@ impl Config {
             && let Ok(parsed) = v.trim().parse::<usize>()
         {
             self.tools.mcp_tools_token_threshold = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_CODEMODE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.tools.codemode = parsed;
         }
 
         // ACP adapter
@@ -503,6 +523,15 @@ impl Config {
         hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
         hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");
         hook_env_override(&mut self.hooks.pre_tool, "JCODE_HOOK_PRE_TOOL");
+        hook_env_override(
+            &mut self.hooks.pre_tool_transform,
+            "JCODE_HOOK_PRE_TOOL_TRANSFORM",
+        );
+        if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.hooks.pre_tool_transform_timeout_ms = parsed;
+        }
         hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
         if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
@@ -544,6 +573,22 @@ impl Config {
             && !v.trim().is_empty()
         {
             self.websearch.searxng_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_PREFER_NATIVE")
+            && let Some(parsed) = parse_env_bool(&v)
+        {
+            self.websearch.prefer_native = parsed;
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_MAX_USES")
+            && let Ok(parsed) = v.trim().parse::<u32>()
+        {
+            self.websearch.native_max_uses = (parsed > 0).then_some(parsed);
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_ALLOWED_DOMAINS") {
+            self.websearch.native_allowed_domains = parse_env_list(&v);
+        }
+        if let Ok(v) = std::env::var("JCODE_WEBSEARCH_NATIVE_BLOCKED_DOMAINS") {
+            self.websearch.native_blocked_domains = parse_env_list(&v);
         }
 
         if let Ok(v) = std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES") {
@@ -737,6 +782,11 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_PREVENT_SLEEP_WHILE_STREAMING") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.power.prevent_sleep_while_streaming = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_BLOCK_LID_CLOSE") {
+            if let Some(parsed) = parse_env_bool(&v) {
+                self.power.block_lid_close = parsed;
             }
         }
 

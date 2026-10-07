@@ -97,7 +97,7 @@ cpal = { version = "0.15", optional = true }
 # heavier presentation deps (ratatui widgets, arboard clipboard) were dropped
 # from this foundation layer; they are unused here and live only in `jcode-tui`.
 crossterm = { version = "0.29", features = ["event-stream"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }  # Only PNG/JPEG (skip avif/rav1e, exr, gif, tiff, etc)
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "ico", "tiff"] }  # PNG/JPEG plus BMP/ICO/TIFF decoding so they can be re-encoded to PNG for providers (#1712). Skip avif/rav1e, exr, etc.
 
 # NOTE: PDF text extraction (jcode-pdf) lives in the upper jcode-app-core crate
 # (tool/read.rs), not here.
@@ -118,8 +118,10 @@ jcode-task-types = { path = "../jcode-task-types" }
 jcode-tool-core = { path = "../jcode-tool-core" }
 jcode-tool-types = { path = "../jcode-tool-types" }
 jcode-side-panel-types = { path = "../jcode-side-panel-types" }
+jcode-applet-types = { path = "../jcode-applet-types" }
 
-# Gzip decoding (used by provider import/helpers)
+# Gzip/deflate decoding (provider import helpers, browser extension unzip)
+flate2 = "1"
 tempfile = "3"
 qrcode = { version = "0.14.1", default-features = false }
 
@@ -148,7 +150,7 @@ embeddings = ["dep:jcode-embedding"]
 bedrock = ["jcode-provider-bedrock/aws-sdk"]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
@@ -160,3 +162,7 @@ global-hotkey = "0.7"
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
 tokio = { version = "1", features = ["test-util"] }
+
+[[example]]
+name = "voice_startup_profile"
+required-features = ["voice-capture"]

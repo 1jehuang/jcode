@@ -168,6 +168,18 @@ impl MemoryEntryEmbeddingExt for MemoryEntry {
     }
 }
 
+/// Per-project memory file for `project_dir`. Keyed by the absolute path, so a
+/// migrated session that keeps the same repo path keeps the same memories.
+pub fn project_memory_file(project_dir: &std::path::Path) -> Result<PathBuf> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    project_dir.hash(&mut hasher);
+    let project_hash = format!("{:016x}", hasher.finish());
+    let memory_dir = storage::jcode_dir()?.join("memory").join("projects");
+    Ok(memory_dir.join(format!("{}.json", project_hash)))
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoryManager {
     project_dir: Option<PathBuf>,
@@ -254,16 +266,7 @@ impl MemoryManager {
             None => return Ok(None),
         };
 
-        let project_hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            project_dir.hash(&mut hasher);
-            format!("{:016x}", hasher.finish())
-        };
-
-        let memory_dir = storage::jcode_dir()?.join("memory").join("projects");
-        Ok(Some(memory_dir.join(format!("{}.json", project_hash))))
+        project_memory_file(&project_dir).map(Some)
     }
 
     fn legacy_notes_path(&self) -> Result<Option<PathBuf>> {
@@ -1140,6 +1143,7 @@ impl MemoryManager {
             .into_iter()
             .filter(|entry| entry.active && !is_memory_injected(session_id, &entry.id))
             .collect();
+        let entries = prefilter_for_jev(entries, query);
         pipeline_update(|p| {
             p.search = StepStatus::Done;
             p.search_result = Some(StepResult {
@@ -1159,7 +1163,7 @@ impl MemoryManager {
                 return Ok(Vec::new());
             }
             let client = crate::jev::JevClient::new()?;
-            crate::memory_jev::select(&client, &query, entries, 5).await
+            crate::memory_jev::select(&client, query, entries, 5).await
         }
         .await;
         let relevant: Vec<MemoryEntry> = match result {
@@ -1532,6 +1536,27 @@ pub const EMBEDDING_MAX_HITS: usize = 10;
 
 /// Minimum per-retriever candidate pool size for hybrid fusion.
 const HYBRID_POOL_MIN: usize = 50;
+
+/// Most memories Jcode sends to Jev per automatic recall. Every 24 entries costs
+/// one Jev decision, so judging a whole store (thousands of memories) each turn
+/// exhausted the daily plan allowance within hours. Lexical relevance narrows
+/// the field first; Jev still judges every candidate that reaches the prompt.
+pub(crate) const MAX_JEV_RECALL_CANDIDATES: usize = 72;
+
+/// Keep the most lexically relevant memories for Jev judgement. Small stores
+/// pass through unchanged. Memories with no term overlap are dropped only when
+/// the store is larger than the candidate budget.
+fn prefilter_for_jev(entries: Vec<MemoryEntry>, query: &str) -> Vec<MemoryEntry> {
+    if entries.len() <= MAX_JEV_RECALL_CANDIDATES {
+        return entries;
+    }
+    let ranked = bm25_rank(&entries, query, MAX_JEV_RECALL_CANDIDATES);
+    let mut entries: Vec<Option<MemoryEntry>> = entries.into_iter().map(Some).collect();
+    ranked
+        .into_iter()
+        .filter_map(|(idx, _)| entries[idx].take())
+        .collect()
+}
 
 /// Rank memories by BM25 over their normalized search text.
 ///

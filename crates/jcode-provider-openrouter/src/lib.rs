@@ -41,7 +41,7 @@ pub fn known_providers() -> Vec<String> {
     KNOWN_PROVIDERS.iter().map(|p| (*p).to_string()).collect()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
     #[serde(default)]
@@ -51,6 +51,11 @@ pub struct ModelInfo {
     pub pricing: ModelPricing,
     #[serde(default)]
     pub created: Option<u64>,
+    /// Declared input modalities, e.g. `["text", "image"]`. Empty when the
+    /// catalog did not say, in which case callers keep their existing default
+    /// rather than inferring a capability the source never claimed.
+    #[serde(default)]
+    pub input: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

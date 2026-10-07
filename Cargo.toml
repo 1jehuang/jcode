@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.86.0"
+version = "0.92.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -43,6 +43,7 @@ members = [
     "crates/jcode-setup-hints",
     "crates/jcode-storage",
     "crates/jcode-side-panel-types",
+    "crates/jcode-applet-types",
     "crates/jcode-azure-auth",
     "crates/jcode-notify-email",
     "crates/jcode-provider-metadata",
@@ -60,7 +61,6 @@ members = [
     "crates/jcode-provider-cursor-runtime",
     "crates/jcode-provider-antigravity-runtime",
     "crates/jcode-provider-copilot-runtime",
-    "crates/jcode-provider-claude-cli-runtime",
     "crates/jcode-provider-openrouter-runtime",
     "crates/jcode-provider-anthropic-runtime",
     "crates/jcode-provider-openai-runtime",
@@ -73,6 +73,7 @@ members = [
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
     "crates/jcode-transport",
+    "crates/jcode-codemode",
     "crates/jcode-tool-core",
     "crates/jcode-tool-types",
     "crates/jcode-tui-account-picker",
@@ -196,7 +197,6 @@ jcode-provider-gemini-runtime = { path = "crates/jcode-provider-gemini-runtime" 
 jcode-provider-cursor-runtime = { path = "crates/jcode-provider-cursor-runtime" }
 jcode-provider-antigravity-runtime = { path = "crates/jcode-provider-antigravity-runtime" }
 jcode-provider-copilot-runtime = { path = "crates/jcode-provider-copilot-runtime" }
-jcode-provider-claude-cli-runtime = { path = "crates/jcode-provider-claude-cli-runtime" }
 jcode-provider-openrouter-runtime = { path = "crates/jcode-provider-openrouter-runtime" }
 jcode-provider-anthropic-runtime = { path = "crates/jcode-provider-anthropic-runtime" }
 jcode-provider-openai-runtime = { path = "crates/jcode-provider-openai-runtime" }

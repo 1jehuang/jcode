@@ -50,7 +50,7 @@ impl Tool for McpTool {
         self.tool_def.input_schema.clone()
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut input = if input.is_null() {
             Value::Object(serde_json::Map::new())
         } else {
@@ -68,6 +68,8 @@ impl Tool for McpTool {
         if !server_declares_intent && let Some(object) = input.as_object_mut() {
             object.remove("intent");
         }
+        // The escape hatch is jcode's, not the server's: read it, never forward it.
+        let accept_large_output = take_accept_large_output(&mut input);
         let manager = self.manager.read().await;
         let result = manager
             .call_tool(&self.server_name, &self.tool_def.name, input)
@@ -84,7 +86,15 @@ impl Tool for McpTool {
                     output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
                 }
                 ContentBlock::Resource { resource } => {
-                    if let Some(text) = resource.text {
+                    if let Some(rendered) = crate::applets::mount_mcp_resource(
+                        &ctx.session_id,
+                        &ctx.tool_call_id,
+                        &resource.uri,
+                        resource.mime_type.as_deref(),
+                        resource.text.as_deref(),
+                    ) {
+                        output_parts.push(rendered);
+                    } else if let Some(text) = resource.text {
                         output_parts.push(text);
                     } else if let Some(blob) = resource.blob {
                         output_parts.push(format!(
@@ -100,6 +110,11 @@ impl Tool for McpTool {
         }
 
         let output = output_parts.join("\n");
+        let output = if accept_large_output {
+            output
+        } else {
+            super::budget::fit_to_budget(&output, super::budget::MCP_RESULT_TOKEN_BUDGET)
+        };
         let title = format!("mcp:{}:{}", self.server_name, self.tool_def.name);
 
         if result.is_error {
@@ -110,8 +125,49 @@ impl Tool for McpTool {
     }
 }
 
+/// Remove jcode's `accept_large_output` flag from MCP arguments, returning
+/// whether the caller opted in. Accepts `true` or the string `"true"`.
+pub fn take_accept_large_output(input: &mut Value) -> bool {
+    let Some(object) = input.as_object_mut() else {
+        return false;
+    };
+    match object.remove(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY) {
+        Some(Value::Bool(accepted)) => accepted,
+        Some(Value::String(raw)) => raw.trim().eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+/// Longest tool name every supported provider accepts (OpenAI caps at 64,
+/// Anthropic at 128).
+const MAX_DISPATCH_NAME_LEN: usize = 64;
+
+/// Model-facing name for an MCP tool.
+///
+/// Providers require tool names to match `^[a-zA-Z0-9_-]{1,64}$` (OpenAI) or
+/// `{1,128}` (Anthropic). MCP servers are free to use dots, slashes, spaces,
+/// or other characters (e.g. YC's `hiring.create_job`), so every character
+/// outside `[A-Za-z0-9_]` becomes `_`. Hyphens are normalized too, preserving
+/// the historical spelling. Over-long names are truncated with a stable hash
+/// suffix so they stay unique.
 pub fn dispatch_name(server_name: &str, tool_name: &str) -> String {
-    format!("mcp__{}__{}", server_name, tool_name).replace('-', "_")
+    let raw = format!("mcp__{}__{}", server_name, tool_name);
+    let mut name: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.len() > MAX_DISPATCH_NAME_LEN {
+        let suffix = format!("_{:08x}", stable_dispatch_hash(server_name, tool_name));
+        name.truncate(MAX_DISPATCH_NAME_LEN - suffix.len());
+        name.push_str(&suffix);
+    }
+    name
 }
 
 /// Build deterministic registry keys for a complete MCP tool surface.
@@ -150,10 +206,15 @@ pub fn dispatch_names(tools: &[(String, McpToolDef)]) -> Vec<String> {
         }
 
         let suffix = format!("__{:08x}", stable_dispatch_hash(server, &tool.name));
-        let mut candidate = format!("{base}{suffix}");
+        let fit = |extra: &str| {
+            let mut head = base.clone();
+            head.truncate(MAX_DISPATCH_NAME_LEN.saturating_sub(extra.len()));
+            format!("{head}{extra}")
+        };
+        let mut candidate = fit(&suffix);
         let mut counter = 2u32;
         while !used.insert(candidate.clone()) {
-            candidate = format!("{base}{suffix}_{counter}");
+            candidate = fit(&format!("{suffix}_{counter}"));
             counter = counter.saturating_add(1);
         }
         names[index] = candidate;
@@ -244,6 +305,85 @@ mod tests {
             dispatch_name("hyphenated-server", "query-docs"),
             "mcp__hyphenated_server__query_docs"
         );
+    }
+
+    /// The strictest tool-name rule across providers: OpenAI/Gemini/OpenRouter
+    /// accept `^[a-zA-Z0-9_-]{1,64}$`, Anthropic the same set up to 128.
+    fn is_provider_safe(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    fn def(name: &str) -> McpToolDef {
+        McpToolDef {
+            name: name.to_string(),
+            description: None,
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn edge_case_mcp_names_are_provider_safe() {
+        assert_eq!(
+            dispatch_name("yc", "hiring.create_job"),
+            "mcp__yc__hiring_create_job"
+        );
+        let long = "x".repeat(200);
+        let cases: Vec<(&str, &str)> = vec![
+            ("yc", "hiring.create_job"),
+            ("yc", "company_documents"),
+            ("my server", "a/b:c"),
+            ("srv", "tool with spaces"),
+            ("srv", "ünïcode.tööl"),
+            ("srv", "emoji🚀tool"),
+            ("srv", "dots...and--dashes"),
+            ("srv", "$pecial@chars!#%"),
+            ("srv", ""),
+            ("", "tool"),
+            ("server.with.dots", "t"),
+            ("srv", &long),
+            (&long, "tool"),
+        ];
+        for (server, tool) in cases {
+            let name = dispatch_name(server, tool);
+            assert!(is_provider_safe(&name), "{server:?}/{tool:?} -> {name:?}");
+            assert_eq!(name, dispatch_name(server, tool), "stable");
+        }
+    }
+
+    #[test]
+    fn truncated_names_stay_distinct() {
+        let a = format!("{}a", "x".repeat(100));
+        let b = format!("{}b", "x".repeat(100));
+        assert_ne!(dispatch_name("s", &a), dispatch_name("s", &b));
+        let exact = "x".repeat(64 - "mcp__s__".len());
+        assert_eq!(dispatch_name("s", &exact).len(), 64);
+        assert!(
+            dispatch_name("s", &exact).ends_with('x'),
+            "no hash when it fits"
+        );
+    }
+
+    #[test]
+    fn sanitization_collisions_get_unique_safe_aliases() {
+        let long = "y".repeat(120);
+        let tools = vec![
+            ("yc".to_string(), def("hiring.status")),
+            ("yc".to_string(), def("hiring_status")),
+            ("yc".to_string(), def("hiring/status")),
+            ("yc".to_string(), def("hiring-status")),
+            ("yc".to_string(), def(&long)),
+            ("yc".to_string(), def(&long)),
+        ];
+        let names = dispatch_names(&tools);
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "{names:?}");
+        for name in &names {
+            assert!(is_provider_safe(name), "{name:?}");
+        }
     }
 
     #[test]

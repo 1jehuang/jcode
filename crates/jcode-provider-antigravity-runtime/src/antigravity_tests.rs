@@ -124,6 +124,7 @@ fn available_models_display_seeds_from_persisted_catalog() {
             }],
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
             default_model_id: Some("gemini-3-flash".to_string()),
+            endpoint: None,
         },
     )
     .expect("write persisted catalog");

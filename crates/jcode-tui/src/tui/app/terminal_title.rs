@@ -61,6 +61,21 @@ fn title_with_metrics(
 }
 
 impl App {
+    /// Tell herdr (when running in a herdr pane) whether this client is
+    /// working or idle and which session to resume. Tick-safe: unchanged
+    /// state is a cheap comparison and reports are sent off-thread.
+    pub(super) fn sync_herdr_agent_state(&self) {
+        if self.suppress_terminal_title_updates || !self.is_remote_client() {
+            return;
+        }
+        let state = if self.is_processing() {
+            crate::tui::herdr::AgentState::Working
+        } else {
+            crate::tui::herdr::AgentState::Idle
+        };
+        crate::tui::herdr::sync(state, self.active_client_session_id());
+    }
+
     pub(super) fn set_terminal_title_base(&self, session_id: &str, base: String) {
         let mut state = self.terminal_title.borrow_mut();
         if state.session_id != session_id {
@@ -100,11 +115,10 @@ impl App {
             state.last_work = work;
         }
         let title = title_with_metrics(&state.base, self.display_edit_line_counts, work, active);
-        if state.last_sent != title {
-            if crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title)).is_ok()
-            {
-                state.last_sent = title;
-            }
+        if state.last_sent != title
+            && crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title)).is_ok()
+        {
+            state.last_sent = title;
         }
     }
 

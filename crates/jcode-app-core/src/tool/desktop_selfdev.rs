@@ -37,17 +37,17 @@ impl Tool for DesktopSelfDevTool {
     }
 
     fn description(&self) -> &str {
-        "Develop Jcode Desktop from its checkout only. Status, paired host/UI build, private-socket rebuild/reload, tests, isolated Xvfb screenshot, or read-only preview catalog. Never builds/reloads the Jcode CLI or focuses a window. Reload acknowledgement is not build/reload completion."
+        "Build, reload, test, or screenshot Jcode Desktop from its checkout (not the CLI)."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({"type":"object", "required":["action"], "properties": {
             "intent": super::intent_schema_property(),
-            "action": {"type":"string", "enum":["status","build","reload","build-reload","test","screenshot","inspect"]},
-            "instance": {"type":"string", "enum":["main","no-sidebar"], "description":"Required when both Desktop instances exist. No arbitrary socket paths."},
+            "action": {"type":"string", "enum":["status","build","reload","build-reload","reload-bridge","test","screenshot","inspect"], "description":"reload-bridge restarts the harness API bridge onto this checkout's newest target/*/jcode-harness-api-bridge as a daemon task that survives this connection dropping. Never kill or restart the bridge by hand from bash: this session talks through it."},
+            "instance": {"type":"string", "enum":INSTANCES, "description":"Required if several Desktops run. single-panel hosts all --single-panel windows."},
             "command": {"type":"string", "description":"Optional test shell command, run with the Desktop repository as cwd. Default cargo test."},
-            "output": {"type":"string", "description":"Screenshot output relative to target/. Default desktop-selfdev.png. Uses a private Xvfb, never the live desktop."},
-            "timeout_seconds": {"type":"integer", "minimum":1, "maximum":600, "description":"Bounded command timeout, default 120 seconds. For longer jobs use bash/background in the Desktop checkout."}
+            "output": {"type":"string", "description":"Screenshot path under target/. Default desktop-selfdev.png. Uses private Xvfb."},
+            "timeout_seconds": {"type":"integer", "minimum":1, "maximum":600, "description":"Command timeout, default 120s. For longer jobs use bash in the Desktop checkout."}
         }})
     }
 
@@ -66,6 +66,13 @@ impl Tool for DesktopSelfDevTool {
             bail!("output is supported only for screenshot");
         }
         match input.action.as_str() {
+            #[cfg(unix)]
+            "reload-bridge" => {
+                let launch = super::bridge_reload::desktop_bridge_launch(&root)?;
+                return Ok(
+                    super::bridge_reload::spawn_bridge_reload(&ctx.session_id, launch).await,
+                );
+            }
             "status" | "reload" | "build-reload" | "inspect" | "build" => (),
             "test" | "screenshot" => {
                 let spec = command_spec(&root, &input, "debug", None)?;
@@ -199,21 +206,29 @@ fn reject_symlink_components(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Desktop hosts reachable through a fixed per-user socket name.
+const INSTANCES: &[&str] = &["main", "no-sidebar", "single-panel"];
+
+fn instance_socket_name(name: &str) -> &'static str {
+    match name {
+        "no-sidebar" => "jcode-desktop-no-sidebar.sock",
+        "single-panel" => "jcode-desktop-single-panel.sock",
+        _ => "jcode-desktop.sock",
+    }
+}
+
 fn select_instance(name: Option<&str>) -> Result<Option<PathBuf>> {
-    let names: &[&str] = match name {
-        None => &["main", "no-sidebar"],
-        Some("main") => &["main"],
-        Some("no-sidebar") => &["no-sidebar"],
-        Some(_) => bail!("instance must be main or no-sidebar"),
+    let names: Vec<&'static str> = match name {
+        None => INSTANCES.to_vec(),
+        Some(name) => match INSTANCES.iter().find(|known| **known == name) {
+            Some(known) => vec![*known],
+            None => bail!("instance must be one of: {}", INSTANCES.join(", ")),
+        },
     };
     let runtime = std::env::var_os("XDG_RUNTIME_DIR");
     let mut paths = Vec::new();
     for name in names {
-        let filename = if *name == "main" {
-            "jcode-desktop.sock"
-        } else {
-            "jcode-desktop-no-sidebar.sock"
-        };
+        let filename = instance_socket_name(name);
         let path = if let Some(runtime) = &runtime {
             PathBuf::from(runtime).join(filename)
         } else {
@@ -232,7 +247,7 @@ fn select_instance(name: Option<&str>) -> Result<Option<PathBuf>> {
         };
         let path = parent.join(path.file_name().context("Desktop socket has no filename")?);
         match std::fs::symlink_metadata(&path) {
-            Ok(_) => paths.push(path),
+            Ok(_) => paths.push((name, path)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             Err(e) => return Err(e.into()),
         }
@@ -240,13 +255,15 @@ fn select_instance(name: Option<&str>) -> Result<Option<PathBuf>> {
     choose_instance(paths)
 }
 
-fn choose_instance(mut paths: Vec<PathBuf>) -> Result<Option<PathBuf>> {
+fn choose_instance(mut paths: Vec<(&str, PathBuf)>) -> Result<Option<PathBuf>> {
     if paths.len() > 1 {
+        let found = paths.iter().map(|(name, _)| *name).collect::<Vec<_>>();
         bail!(
-            "Multiple Desktop instances exist. Specify instance: main or no-sidebar. No reload was sent."
+            "Multiple Desktop instances exist ({}). Specify instance. No reload was sent.",
+            found.join(", ")
         );
     }
-    Ok(paths.pop())
+    Ok(paths.pop().map(|(_, path)| path))
 }
 
 struct Host {
@@ -431,6 +448,12 @@ async fn run_command(root: &Path, spec: CommandSpec, timeout: u64) -> Result<Too
     let mut command = tokio::process::Command::new(&spec.program);
     command
         .args(&spec.args)
+        // The Desktop checkout's .cargo/config.toml supplies its own
+        // metadata-neutral rustc wrapper. An inherited workspace wrapper (for
+        // example from Jcode's dev_cargo.sh) would be hashed into Desktop's
+        // workspace crate metadata and split the hot-reload plugin ABI from
+        // the running host, so never pass one through.
+        .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

@@ -349,10 +349,25 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
 
         match Session::load(&session_id) {
             Ok(mut session) => {
-                session.mark_crashed(Some(format!(
-                    "Process {} exited unexpectedly (no shutdown signal captured)",
-                    pid
-                )));
+                // Idle-vs-interrupted disposition (upstream #988, extended to
+                // the PID detector): losing the process is only a crash when
+                // it interrupts unfinished work. A leftover streaming marker
+                // proves the session was mid-turn when its owner died
+                // (`StreamingGuard` clears the marker on every exit path —
+                // normal return, `?`, interrupt, panic — so only a killed
+                // process leaves one behind). No marker = idle = ordinary
+                // close, same as the disconnect path's idle rule. This stops
+                // daemon restarts stamping every owned idle session Crashed.
+                // Fail toward crash when the marker dir is unreadable: crash
+                // recovery is fail-noisy, never fail-silent.
+                if had_streaming_marker(&session_id) {
+                    session.mark_crashed(Some(format!(
+                        "Process {} exited unexpectedly (no shutdown signal captured)",
+                        pid
+                    )));
+                } else {
+                    session.mark_closed();
+                }
                 let _ = session.save();
                 let ts = session.last_active_at.unwrap_or(session.updated_at);
                 if ts <= cutoff {
@@ -376,6 +391,22 @@ fn find_crashed_via_pid_files() -> Option<Vec<(String, String)>> {
             .map(|(id, name, _)| (id, name))
             .collect(),
     )
+}
+
+/// True when a streaming marker file exists for this session — i.e. the
+/// session was mid-turn when its owner died. Any content counts (even a
+/// stale marker naming the dead owner): `StreamingGuard` removes the file
+/// on every orderly exit, so presence alone proves interruption. Missing
+/// marker dir or I/O error returns true (fail toward crash recovery, never
+/// silently close a session that may hold interrupted work).
+fn had_streaming_marker(session_id: &str) -> bool {
+    let Some(dir) = storage::streaming_pids_dir() else {
+        return true;
+    };
+    match std::fs::read_dir(&dir) {
+        Ok(_) => dir.join(session_id).exists(),
+        Err(_) => true,
+    }
 }
 
 /// Legacy fallback: scan the full sessions directory.
@@ -584,6 +615,14 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
         return Ok(imported_id);
     }
 
+    // A full generated id (`session_<name>_<millis>_<hex>`) can never match a
+    // short name or title, so the scan below (which parses every session file
+    // on disk) is pure overhead. With thousands of sessions that scan took
+    // ~15s and stalled reload handoffs for ids that only exist server-side.
+    if crate::id::is_generated_session_id(name_or_id) {
+        anyhow::bail!("No session found matching '{}'", name_or_id);
+    }
+
     // Otherwise, search for a session with matching short name or title.
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     if !sessions_dir.exists() {
@@ -654,6 +693,48 @@ mod batch_crash_tests {
         assert_eq!(info.session_ids.len(), 2);
         assert_eq!(info.display_names.len(), 2);
         assert_eq!(info.display_names[0], "fox");
+    }
+
+    #[test]
+    fn idle_dead_pid_without_streaming_marker_is_not_a_crash() {
+        // Upstream #988 extended to the PID detector: a dead owner PID with
+        // no leftover streaming marker means the session was idle — ordinary
+        // close, not crash. Daemon restarts must not stamp idle sessions.
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let dir = storage::streaming_pids_dir().expect("streaming dir");
+        std::fs::create_dir_all(&dir).expect("marker dir");
+        assert!(
+            !had_streaming_marker("session_idle_1"),
+            "no marker file means idle"
+        );
+
+        crate::env::remove_var("JCODE_HOME");
+    }
+
+    #[test]
+    fn leftover_streaming_marker_means_interrupted() {
+        // A marker file left behind (StreamingGuard clears it on every
+        // orderly exit) proves the owner died mid-turn — genuine crash.
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let dir = storage::streaming_pids_dir().expect("streaming dir");
+        std::fs::create_dir_all(&dir).expect("marker dir");
+        std::fs::write(dir.join("session_midturn_1"), "999999").expect("marker");
+        assert!(
+            had_streaming_marker("session_midturn_1"),
+            "leftover marker means interrupted"
+        );
+        assert!(
+            !had_streaming_marker("session_other_1"),
+            "other sessions unaffected"
+        );
+
+        crate::env::remove_var("JCODE_HOME");
     }
 
     #[test]

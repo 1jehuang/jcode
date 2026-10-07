@@ -60,6 +60,9 @@ struct ToolCallAccumulator {
     name: String,
     arguments: String,
     thought_signature: Option<String>,
+    started: bool,
+    emitted_id: String,
+    emitted_arguments: usize,
 }
 
 impl OpenRouterStream {
@@ -156,23 +159,45 @@ impl OpenRouterStream {
             return;
         }
 
-        // Some OpenAI-compatible providers synthesize a positional fallback when
-        // the model omits a call id. Since the position restarts every response,
-        // accepting it verbatim reuses ids across turns (for example `bash:0`).
-        if tc.id == format!("{}:{index}", tc.name) {
-            tc.id = jcode_core::id::new_id("toolu");
-        }
-
-        self.pending.push_back(StreamEvent::ToolUseStart {
-            id: tc.id,
-            name: tc.name,
+        Self::queue_tool_progress(&mut self.pending, index, &mut tc);
+        self.pending.push_back(StreamEvent::ToolUseEndFor {
+            id: tc.emitted_id.clone(),
         });
-        self.pending
-            .push_back(StreamEvent::ToolInputDelta(tc.arguments));
-        self.pending.push_back(StreamEvent::ToolUseEnd);
         if let Some(signature) = tc.thought_signature.filter(|value| !value.is_empty()) {
-            self.pending
-                .push_back(StreamEvent::ToolUseSignature(signature));
+            self.pending.push_back(StreamEvent::ToolUseSignatureFor {
+                id: tc.emitted_id,
+                signature,
+            });
+        }
+    }
+
+    fn queue_tool_progress(
+        pending: &mut VecDeque<StreamEvent>,
+        index: u64,
+        tc: &mut ToolCallAccumulator,
+    ) {
+        if !tc.started {
+            // Positional fallback IDs restart every response. Keep the raw ID
+            // in the accumulator for repeated-provider-ID comparisons.
+            let id = if tc.id == format!("{}:{index}", tc.name) {
+                jcode_core::id::new_id("toolu")
+            } else {
+                tc.id.clone()
+            };
+            tc.emitted_id = id.clone();
+            pending.push_back(StreamEvent::ToolUseStart {
+                id,
+                name: tc.name.clone(),
+            });
+            tc.started = true;
+        }
+        let delta = &tc.arguments[tc.emitted_arguments..];
+        if !delta.is_empty() {
+            pending.push_back(StreamEvent::ToolInputDeltaFor {
+                id: tc.emitted_id.clone(),
+                delta: delta.to_string(),
+            });
+            tc.emitted_arguments = tc.arguments.len();
         }
     }
 
@@ -229,6 +254,9 @@ impl OpenRouterStream {
 
         if let Some(signature) = thought_signature.filter(|value| !value.is_empty()) {
             tc.thought_signature = Some(signature.to_string());
+        }
+        if !tc.id.trim().is_empty() && !tc.name.trim().is_empty() {
+            Self::queue_tool_progress(&mut self.pending, index, tc);
         }
     }
 
@@ -387,15 +415,24 @@ impl OpenRouterStream {
                             for tc in tool_calls {
                                 let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0);
                                 let function = tc.get("function");
+                                // Compatible APIs may send a complete JSON value
+                                // instead of the usual string fragment. Preserve
+                                // it, including invalid null/array arguments, so
+                                // validation sees what the provider actually sent.
+                                let arguments =
+                                    function.and_then(|f| f.get("arguments")).map(|value| {
+                                        match value.as_str() {
+                                            Some(fragment) => std::borrow::Cow::Borrowed(fragment),
+                                            None => std::borrow::Cow::Owned(value.to_string()),
+                                        }
+                                    });
                                 self.apply_tool_call_delta(
                                     index,
                                     tc.get("id").and_then(|i| i.as_str()),
                                     function
                                         .and_then(|f| f.get("name"))
                                         .and_then(|n| n.as_str()),
-                                    function
-                                        .and_then(|f| f.get("arguments"))
-                                        .and_then(|a| a.as_str()),
+                                    arguments.as_deref(),
                                     tc.get("extra_content")
                                         .and_then(|value| value.get("google"))
                                         .and_then(|value| value.get("thought_signature"))
@@ -413,10 +450,9 @@ impl OpenRouterStream {
                         if !finish_reason.is_empty() {
                             self.finish_reason = Some(finish_reason.to_string());
                         }
-                        // Emit any pending tool calls.
-                        self.flush_tool_call_accumulators();
-
-                        // Don't emit MessageEnd here - wait for [DONE]
+                        // Some proxies emit a finish reason after every delta, even
+                        // while tool arguments are still streaming (#1326). Keep the
+                        // accumulators until [DONE] or EOF, just like MessageEnd.
                     }
                 }
             }
@@ -531,403 +567,5 @@ impl Stream for OpenRouterStream {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::StreamExt;
-
-    fn drain_text(stream: &mut OpenRouterStream) -> String {
-        let mut text = String::new();
-        while let Some(event) = stream.parse_next_event() {
-            match event {
-                StreamEvent::TextDelta(delta) => text.push_str(&delta),
-                StreamEvent::MessageEnd { .. } => break,
-                _ => {}
-            }
-        }
-        text
-    }
-
-    fn test_stream() -> OpenRouterStream {
-        OpenRouterStream::new(
-            futures::stream::empty(),
-            "test-model".to_string(),
-            Arc::new(std::sync::Mutex::new(None)),
-        )
-    }
-
-    #[test]
-    fn take_sse_event_splits_crlf_delimited_events() {
-        let mut buffer = "data: a\r\n\r\ndata: b\r\n\r\n".to_string();
-        assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: a"));
-        assert_eq!(take_sse_event(&mut buffer).as_deref(), Some("data: b"));
-        assert_eq!(take_sse_event(&mut buffer), None);
-    }
-
-    #[test]
-    fn parse_next_event_keeps_all_content_across_crlf_batched_events() {
-        let mut stream = test_stream();
-        stream.buffer = [
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}",
-            "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}",
-            "data: [DONE]",
-            "",
-        ]
-        .join("\r\n\r\n");
-
-        assert_eq!(drain_text(&mut stream), "hello world!");
-    }
-
-    #[test]
-    fn parse_next_event_keeps_all_data_lines_within_one_event() {
-        // Several data: lines inside one \n\n-delimited block must all be kept.
-        let mut stream = test_stream();
-        stream.buffer = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"foo\"}}]}\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"bar\"}}]}\n",
-            "data: [DONE]\n\n"
-        )
-        .to_string();
-
-        assert_eq!(drain_text(&mut stream), "foobar");
-    }
-
-    /// Issue #609: proxies that drop the event separator, split an object across
-    /// two events, or split a multi-byte character across TCP chunks must not
-    /// cause silent data loss.
-    #[test]
-    fn concatenated_json_in_one_event_keeps_both_deltas() {
-        let mut stream = test_stream();
-        stream.buffer = concat!(
-            r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#,
-            r#"{"choices":[{"delta":{"content":" world"}}]}"#,
-            "\n\ndata: [DONE]\n\n"
-        )
-        .to_string();
-
-        assert_eq!(drain_text(&mut stream), "hello world");
-    }
-
-    #[test]
-    fn concatenated_json_with_embedded_data_prefix_keeps_both_deltas() {
-        let mut stream = test_stream();
-        stream.buffer = concat!(
-            r#"data: {"choices":[{"delta":{"content":"hello"}}]}"#,
-            r#"data: {"choices":[{"delta":{"content":" world"}}]}"#,
-            "\n\ndata: [DONE]\n\n"
-        )
-        .to_string();
-
-        assert_eq!(drain_text(&mut stream), "hello world");
-    }
-
-    #[test]
-    fn object_split_across_two_events_is_rejoined() {
-        let mut stream = test_stream();
-        stream.buffer = concat!(
-            r#"data: {"choices":[{"delta":{"content":"Hello "#,
-            "\n\n",
-            r#"data: world"}}]}"#,
-            "\n\ndata: [DONE]\n\n"
-        )
-        .to_string();
-
-        assert_eq!(drain_text(&mut stream), "Hello world");
-    }
-
-    #[test]
-    fn tool_call_arguments_split_across_events_are_not_truncated() {
-        // The reported symptom was `arguments must be a JSON object, got null`.
-        let mut stream = test_stream();
-        stream.buffer = concat!(
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"write","arguments":"{\"path\":\"a.txt\""#,
-            "\n\n",
-            r#"data: ,\"content\":\"hi\"}"}}]}}]}"#,
-            "\n\ndata: [DONE]\n\n"
-        )
-        .to_string();
-
-        let mut args = String::new();
-        while let Some(event) = stream.parse_next_event() {
-            if let StreamEvent::ToolInputDelta(delta) = event {
-                args.push_str(&delta);
-            }
-        }
-        let parsed: Value =
-            serde_json::from_str(&args).expect("tool arguments should be complete JSON");
-        assert_eq!(parsed["path"], "a.txt");
-        assert_eq!(parsed["content"], "hi");
-    }
-
-    #[test]
-    fn multibyte_chars_split_across_tcp_chunks_survive_poll_next() {
-        // Drive real bytes through poll_next, splitting mid-character.
-        let payload =
-            "data: {\"choices\":[{\"delta\":{\"content\":\"读取文件\"}}]}\n\ndata: [DONE]\n\n";
-        let bytes = payload.as_bytes();
-        // Split at every offset to sweep the chunk-boundary state space.
-        for split in 0..bytes.len() {
-            let chunks: Vec<Result<Bytes, reqwest::Error>> = vec![
-                Ok(Bytes::copy_from_slice(&bytes[..split])),
-                Ok(Bytes::copy_from_slice(&bytes[split..])),
-            ];
-            let mut stream = OpenRouterStream::new(
-                futures::stream::iter(chunks),
-                "test-model".to_string(),
-                Arc::new(std::sync::Mutex::new(None)),
-            );
-            let text = futures::executor::block_on(async {
-                let mut text = String::new();
-                while let Some(Ok(event)) = stream.next().await {
-                    if let StreamEvent::TextDelta(delta) = event {
-                        text.push_str(&delta);
-                    }
-                }
-                text
-            });
-            assert_eq!(text, "读取文件", "lost content at split offset {split}");
-        }
-    }
-
-    #[test]
-    fn stream_ending_without_a_blank_line_still_flushes_the_last_event() {
-        let payload = "data: {\"choices\":[{\"delta\":{\"content\":\"tail\"}}]}";
-        let chunks: Vec<Result<Bytes, reqwest::Error>> =
-            vec![Ok(Bytes::copy_from_slice(payload.as_bytes()))];
-        let mut stream = OpenRouterStream::new(
-            futures::stream::iter(chunks),
-            "test-model".to_string(),
-            Arc::new(std::sync::Mutex::new(None)),
-        );
-        let text = futures::executor::block_on(async {
-            let mut text = String::new();
-            while let Some(Ok(event)) = stream.next().await {
-                if let StreamEvent::TextDelta(delta) = event {
-                    text.push_str(&delta);
-                }
-            }
-            text
-        });
-        assert_eq!(text, "tail");
-    }
-
-    #[test]
-    fn parse_next_event_ignores_malformed_json_chunks() {
-        let provider_pin = Arc::new(std::sync::Mutex::new(None));
-        let mut stream = OpenRouterStream::new(
-            futures::stream::empty(),
-            "test-model".to_string(),
-            provider_pin,
-        );
-        stream.buffer = "data: {not-json}
-
-"
-        .to_string();
-
-        let event = stream.parse_next_event();
-
-        assert!(event.is_none());
-        assert!(stream.pending.is_empty());
-        assert!(stream.tool_call_accumulators.is_empty());
-    }
-
-    #[test]
-    fn parse_next_event_accepts_reasoning_delta_alias() {
-        let provider_pin = Arc::new(std::sync::Mutex::new(None));
-        let mut stream = OpenRouterStream::new(
-            futures::stream::empty(),
-            "test-model".to_string(),
-            provider_pin,
-        );
-        stream.buffer =
-            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n\n".to_string();
-
-        let event = stream.parse_next_event();
-
-        assert!(matches!(event, Some(StreamEvent::ThinkingDelta(text)) if text == "thinking"));
-    }
-
-    #[test]
-    fn parse_next_event_propagates_finish_reason_to_message_end() {
-        let provider_pin = Arc::new(std::sync::Mutex::new(None));
-        let mut stream = OpenRouterStream::new(
-            futures::stream::empty(),
-            "test-model".to_string(),
-            provider_pin,
-        );
-        stream.buffer =
-            "data: {\"choices\":[{\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n".to_string();
-
-        let event = stream.parse_next_event();
-
-        assert!(matches!(
-            event,
-            Some(StreamEvent::MessageEnd { stop_reason: Some(reason) }) if reason == "length"
-        ));
-    }
-
-    #[test]
-    fn stream_eof_emits_message_end_with_finish_reason_without_done() {
-        let provider_pin = Arc::new(std::sync::Mutex::new(None));
-        let bytes = Bytes::from_static(
-            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"max_tokens\"}]}\n\n",
-        );
-        let mut stream = OpenRouterStream::new(
-            futures::stream::once(async move { Ok(bytes) }),
-            "test-model".to_string(),
-            provider_pin,
-        );
-
-        let event = futures::executor::block_on(stream.next());
-
-        assert!(matches!(
-            event,
-            Some(Ok(StreamEvent::MessageEnd { stop_reason: Some(reason) })) if reason == "max_tokens"
-        ));
-        assert!(futures::executor::block_on(stream.next()).is_none());
-    }
-
-    #[test]
-    fn parse_next_event_coalesces_repeated_tool_call_id_chunks() {
-        let provider_pin = Arc::new(std::sync::Mutex::new(None));
-        let mut stream =
-            OpenRouterStream::new(futures::stream::empty(), "glm-5".to_string(), provider_pin);
-
-        let chunk1 = serde_json::json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "bash", "arguments": ""}
-                    }]
-                }
-            }]
-        });
-        let chunk2 = serde_json::json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "id": "call_1",
-                        "function": {"arguments": "{\"command\""}
-                    }]
-                }
-            }]
-        });
-        let chunk3 = serde_json::json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "id": "call_1",
-                        "function": {"arguments": ":\"echo ok\"}"}
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }]
-        });
-        stream.buffer =
-            format!("data: {chunk1}\n\ndata: {chunk2}\n\ndata: {chunk3}\n\ndata: [DONE]\n\n");
-
-        let mut events = Vec::new();
-        for _ in 0..8 {
-            if let Some(event) = stream.parse_next_event() {
-                events.push(event);
-            } else {
-                break;
-            }
-        }
-
-        assert_eq!(events.len(), 4, "events: {events:?}");
-        assert!(matches!(
-            &events[0],
-            StreamEvent::ToolUseStart { id, name } if id == "call_1" && name == "bash"
-        ));
-        assert!(matches!(
-            &events[1],
-            StreamEvent::ToolInputDelta(args) if args == "{\"command\":\"echo ok\"}"
-        ));
-        assert!(matches!(events[2], StreamEvent::ToolUseEnd));
-        assert!(matches!(
-            &events[3],
-            StreamEvent::MessageEnd { stop_reason } if stop_reason.as_deref() == Some("tool_calls")
-        ));
-        assert!(stream.tool_call_accumulators.is_empty());
-    }
-
-    #[test]
-    fn vertex_sse_preserves_tool_call_thought_signature() {
-        let mut stream = test_stream();
-        let chunk = serde_json::json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "id": "call_vertex",
-                        "type": "function",
-                        "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"},
-                        "extra_content": {
-                            "google": {"thought_signature": "AY89a1...verbatim"}
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }]
-        });
-        stream.buffer = format!("data: {chunk}\n\ndata: [DONE]\n\n");
-
-        let mut events = Vec::new();
-        while let Some(event) = stream.parse_next_event() {
-            events.push(event);
-        }
-
-        assert!(
-            matches!(
-                &events[..],
-                [
-                    StreamEvent::ToolUseStart { id, name },
-                    StreamEvent::ToolInputDelta(arguments),
-                    StreamEvent::ToolUseEnd,
-                    StreamEvent::ToolUseSignature(signature),
-                    StreamEvent::MessageEnd { stop_reason: Some(reason) },
-                ] if id == "call_vertex"
-                    && name == "read"
-                    && arguments == "{\"path\":\"README.md\"}"
-                    && signature == "AY89a1...verbatim"
-                    && reason == "tool_calls"
-            ),
-            "events: {events:?}"
-        );
-    }
-
-    #[test]
-    fn positional_fallback_tool_call_ids_are_unique_across_responses() {
-        fn parse_id() -> String {
-            let mut stream = test_stream();
-            stream.apply_tool_call_delta(
-                0,
-                Some("bash:0"),
-                Some("bash"),
-                Some(r#"{"command":"echo ok"}"#),
-                None,
-            );
-            stream.flush_tool_call_accumulators();
-
-            match stream.pending.pop_front() {
-                Some(StreamEvent::ToolUseStart { id, name }) => {
-                    assert_eq!(name, "bash");
-                    assert!(id.starts_with("toolu_"), "unexpected fallback id: {id}");
-                    id
-                }
-                event => panic!("expected tool-use start, got {event:?}"),
-            }
-        }
-
-        let first_turn_id = parse_id();
-        let second_turn_id = parse_id();
-
-        assert_ne!(first_turn_id, second_turn_id);
-    }
-}
+#[path = "stream_tests.rs"]
+mod tests;

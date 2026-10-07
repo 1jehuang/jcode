@@ -19,6 +19,7 @@ pub struct RecentSessionMetadata {
     pub custom_title: Option<String>,
     pub todo_title: Option<String>,
     pub saved: bool,
+    pub save_label: Option<String>,
     pub updated_at_ms: i64,
     pub last_active_at_ms: Option<i64>,
 }
@@ -28,6 +29,12 @@ impl RecentSessionMetadata {
         self.custom_title
             .as_deref()
             .and_then(non_empty)
+            .or_else(|| {
+                // Bookmarks labelled before labels doubled as titles.
+                self.saved
+                    .then(|| self.save_label.as_deref().and_then(non_empty))
+                    .flatten()
+            })
             .or_else(|| self.todo_title.as_deref().and_then(non_empty))
             .or_else(|| self.generated_title.as_deref().and_then(non_empty))
     }
@@ -63,6 +70,7 @@ fn open() -> Result<Connection> {
         "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = connection.execute("ALTER TABLE recent_sessions ADD COLUMN save_label TEXT", []);
     Ok(connection)
 }
 
@@ -70,7 +78,7 @@ pub fn recent(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
     let connection = open()?;
     let mut statement = connection.prepare(
         "SELECT session_id, working_dir, generated_title, custom_title,
-                todo_title, saved, updated_at_ms, last_active_at_ms
+                todo_title, saved, updated_at_ms, last_active_at_ms, save_label
          FROM recent_sessions
          ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
          LIMIT ?1",
@@ -86,6 +94,7 @@ pub fn recent(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
                 saved: row.get(5)?,
                 updated_at_ms: row.get(6)?,
                 last_active_at_ms: row.get(7)?,
+                save_label: row.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -101,6 +110,7 @@ pub fn upsert_session(session: &Session) -> Result<()> {
         custom_title: session.custom_title.clone(),
         todo_title: crate::todo::load_session_title(&session.id),
         saved: session.saved,
+        save_label: session.save_label.clone(),
         updated_at_ms: session.updated_at.timestamp_millis(),
         last_active_at_ms: session.last_active_at.map(|time| time.timestamp_millis()),
     })
@@ -110,8 +120,8 @@ pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
     open()?.execute(
         "INSERT INTO recent_sessions (
              session_id, working_dir, generated_title, custom_title, todo_title,
-             saved, updated_at_ms, last_active_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             saved, updated_at_ms, last_active_at_ms, save_label
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(session_id) DO UPDATE SET
              working_dir = excluded.working_dir,
              generated_title = excluded.generated_title,
@@ -119,7 +129,8 @@ pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
              todo_title = excluded.todo_title,
              saved = excluded.saved,
              updated_at_ms = excluded.updated_at_ms,
-             last_active_at_ms = excluded.last_active_at_ms",
+             last_active_at_ms = excluded.last_active_at_ms,
+             save_label = excluded.save_label",
         params![
             entry.session_id,
             entry.working_dir,
@@ -129,6 +140,7 @@ pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
             entry.saved,
             entry.updated_at_ms,
             entry.last_active_at_ms,
+            entry.save_label,
         ],
     )?;
     Ok(())
@@ -167,11 +179,33 @@ mod tests {
             custom_title: None,
             todo_title: Some("Todo goal".into()),
             saved: false,
+            save_label: None,
             updated_at_ms: 1,
             last_active_at_ms: None,
         };
         assert_eq!(entry.display_title(), Some("Todo goal"));
         entry.custom_title = Some("Renamed".into());
         assert_eq!(entry.display_title(), Some("Renamed"));
+    }
+
+    #[test]
+    fn display_title_prefers_save_label_over_derived_titles() {
+        let mut entry = RecentSessionMetadata {
+            session_id: "session_test".into(),
+            working_dir: None,
+            generated_title: Some("Generated".into()),
+            custom_title: None,
+            todo_title: Some("Todo goal".into()),
+            saved: true,
+            save_label: Some("yc mcp".into()),
+            updated_at_ms: 1,
+            last_active_at_ms: None,
+        };
+        assert_eq!(entry.display_title(), Some("yc mcp"));
+        entry.custom_title = Some("Renamed".into());
+        assert_eq!(entry.display_title(), Some("Renamed"));
+        entry.custom_title = None;
+        entry.saved = false;
+        assert_eq!(entry.display_title(), Some("Todo goal"));
     }
 }

@@ -69,6 +69,12 @@ impl Tool for PatchTool {
 
         // Watch config.toml across the whole invocation so an edit that lands
         // on it is reported regardless of which patch produced it.
+        let _locks = super::file_lock::lock_all(
+            patches
+                .iter()
+                .map(|patch| ctx.resolve_path(Path::new(&patch.path))),
+        )
+        .await;
         let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
         let mut results = Vec::new();
 
@@ -223,7 +229,7 @@ async fn apply_patch_with_diff(
             let old_content = old.as_deref().unwrap_or("");
             tokio::fs::remove_file(path).await?;
             super::edit_stats::record(ctx, old_content, "", old.is_none()).await;
-            let diff = generate_diff(&old_content, "", 1);
+            let diff = generate_diff(old_content, "", 1);
             return Ok(("deleted".to_string(), diff));
         } else {
             return Err(anyhow::anyhow!("file does not exist"));

@@ -421,10 +421,23 @@ fn macos_notification_broker_app_path() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("JCODE_MACOS_NOTIFICATION_BROKER_APP") {
         return Some(path.into());
     }
-    dirs::home_dir().map(|home| {
-        home.join("Applications")
-            .join(MACOS_NOTIFICATION_BROKER_APP_NAME)
-    })
+    let home = dirs::home_dir()?;
+    // Current location: hidden beside the inbox so Spotlight and Launchpad do
+    // not list the faceless helper as a second "Jcode" app. Older CLIs
+    // published it in ~/Applications; keep using that copy until the next
+    // interactive launch migrates it.
+    let current = home
+        .join(".jcode")
+        .join("notifications")
+        .join("macos")
+        .join(MACOS_NOTIFICATION_BROKER_APP_NAME);
+    if current.is_dir() {
+        return Some(current);
+    }
+    let legacy = home
+        .join("Applications")
+        .join(MACOS_NOTIFICATION_BROKER_APP_NAME);
+    Some(if legacy.is_dir() { legacy } else { current })
 }
 
 /// The durable inbox consumed by the bundled macOS broker.

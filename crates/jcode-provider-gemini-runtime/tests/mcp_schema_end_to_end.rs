@@ -50,6 +50,7 @@ fn playwright_tool_definitions() -> Vec<ToolDefinition> {
             name: format!("mcp__playwright__{}", tool.name),
             description: tool.description.unwrap_or_default(),
             input_schema: tool.input_schema,
+            defer_loading: false,
         })
         .collect()
 }
@@ -197,3 +198,114 @@ fn recovery_triggers_on_the_error_string_the_runtime_really_builds() {
 /// endpoint as quoted in issue #754, including the backslash-escaped quotes
 /// that survive into the error string.
 const GEMINI_400_BODY: &str = r#"{"error":{"code":400,"message":"Invalid JSON payload received. Unknown name \"propertyNames\" at 'request.tools[0].function_declarations[32].parameters.properties[0].value': Cannot find field.","status":"INVALID_ARGUMENT"}}"#;
+
+/// Tool names MCP servers really ship. YC's server uses dotted names
+/// (`hiring.create_job`) which Anthropic rejected for the whole request with
+/// `tools.N.custom.name: String should match pattern '^[a-zA-Z0-9_-]{1,128}$'`.
+fn exotic_mcp_tool_definitions() -> Vec<ToolDefinition> {
+    let long = "very_long_tool_name_".repeat(8);
+    let raw: Vec<(&str, &str)> = vec![
+        ("yc", "hiring.create_job"),
+        ("yc", "hiring.status"),
+        ("yc", "hiring_status"),
+        ("yc", "company_documents"),
+        ("my server", "ns/tool:v2"),
+        ("srv", "tool with spaces"),
+        ("srv", "ünïcode.tööl"),
+        ("srv", "emoji🚀"),
+        ("srv", "$pecial@chars!"),
+        ("server.dotted", "query-docs"),
+        ("srv", long.as_str()),
+    ];
+    let catalog: Vec<(String, McpToolDef)> = raw
+        .into_iter()
+        .map(|(server, name)| {
+            (
+                server.to_string(),
+                McpToolDef {
+                    name: name.to_string(),
+                    description: Some(format!("{server}/{name}")),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                },
+            )
+        })
+        .collect();
+    let names = jcode_base::mcp::dispatch_names(&catalog);
+    catalog
+        .into_iter()
+        .zip(names)
+        .map(|((_, tool), name)| ToolDefinition {
+            name,
+            description: tool.description.unwrap_or_default(),
+            input_schema: tool.input_schema,
+            defer_loading: false,
+        })
+        .collect()
+}
+
+/// Strictest rule across providers (OpenAI/Gemini cap at 64, Anthropic 128).
+fn assert_provider_safe(provider: &str, name: &str) {
+    assert!(
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        "{provider} would reject tool name {name:?}"
+    );
+}
+
+fn wire_names(wire: &serde_json::Value, out: &mut Vec<String>) {
+    match wire {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(name)) = map.get("name") {
+                out.push(name.clone());
+            }
+            map.values().for_each(|v| wire_names(v, out));
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|v| wire_names(v, out)),
+        _ => {}
+    }
+}
+
+#[test]
+fn exotic_mcp_tool_names_are_accepted_by_every_provider() {
+    let defs = exotic_mcp_tool_definitions();
+    let unique: std::collections::HashSet<_> = defs.iter().map(|d| &d.name).collect();
+    assert_eq!(unique.len(), defs.len(), "aliases collided");
+
+    let mut wires: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "openai",
+            serde_json::to_value(jcode_provider_openai::request::build_tools(&defs)).unwrap(),
+        ),
+        (
+            "gemini",
+            serde_json::to_value(jcode_provider_gemini::build_tools(&defs)).unwrap(),
+        ),
+    ];
+    for oauth in [false, true] {
+        wires.push((
+            if oauth {
+                "anthropic-oauth"
+            } else {
+                "anthropic-api"
+            },
+            serde_json::to_value(jcode_provider_anthropic::format_tools(&defs, oauth, false))
+                .unwrap(),
+        ));
+    }
+
+    for (provider, wire) in wires {
+        let mut names = Vec::new();
+        wire_names(&wire, &mut names);
+        let tool_names: Vec<_> = names.iter().filter(|n| n.contains("mcp")).collect();
+        assert!(
+            tool_names.len() >= defs.len(),
+            "{provider} dropped MCP tools: {tool_names:?}"
+        );
+        for name in tool_names {
+            assert_provider_safe(provider, name);
+        }
+    }
+}

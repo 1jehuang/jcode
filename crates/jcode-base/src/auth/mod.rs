@@ -1,3 +1,4 @@
+pub mod account_pool;
 pub mod account_store;
 pub mod active_method;
 pub mod antigravity;
@@ -136,8 +137,8 @@ fn browser_unusable_here() -> bool {
 }
 
 /// True when the current process is a Rust test binary (`cargo test` /
-/// `cargo nextest`). Test binaries always run from `target/**/deps/`, a
-/// location no installed or self-dev jcode binary ever runs from.
+/// `cargo nextest`). Cargo places hashed test executables in `deps/` beneath
+/// its build directory, which can be relocated with `CARGO_TARGET_DIR`.
 ///
 /// Used to keep tests from opening real browser windows (OAuth login pages,
 /// files) on the developer's desktop: many login/onboarding flows are
@@ -152,12 +153,29 @@ pub fn running_in_test_harness() -> bool {
         }
         std::env::current_exe()
             .ok()
-            .map(|exe| {
-                let path = exe.to_string_lossy().replace('\\', "/");
-                path.contains("/target/") && path.contains("/deps/")
-            })
+            .map(|exe| is_test_harness_path(&exe.to_string_lossy()))
             .unwrap_or(false)
     })
+}
+
+fn is_test_harness_path(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    // Preserve detection for the default target tree, including custom runners.
+    if path.contains("/target/") && path.contains("/deps/") {
+        return true;
+    }
+    let mut components = path.rsplit('/');
+    let Some(filename) = components.next() else {
+        return false;
+    };
+    if components.next() != Some("deps") {
+        return false;
+    }
+    let stem = filename.strip_suffix(".exe").unwrap_or(filename);
+    let Some((name, hash)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !name.is_empty() && hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -402,6 +420,7 @@ impl AuthStatus {
             || self.gemini == AuthState::Available
             || self.cursor == AuthState::Available
             || self.grok_build == AuthState::Available
+            || self.openai_compatible_any == AuthState::Available
     }
 
     /// Emit a structured, non-secret snapshot of which providers currently have
@@ -609,11 +628,9 @@ impl AuthStatus {
             }
             crate::provider_catalog::LoginProviderTarget::GrokBuild => {
                 if self.grok_build == AuthState::Available {
-                    "Jcode-managed Grok Build backend; subscription login is verified over ACP at request time".to_string()
-                } else if grok_build::cli_available() {
-                    "subscription login not configured (backend managed by Jcode)".to_string()
+                    "Grok CLI subscription login (xAI OIDC, auto-refreshed)".to_string()
                 } else {
-                    "not configured (Jcode downloads the provider backend during login)".to_string()
+                    "not configured (run `jcode login --provider grok-build`)".to_string()
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
@@ -847,16 +864,13 @@ impl AuthStatus {
                     AuthCredentialSource::None
                 },
                 if state == AuthState::Available {
-                    "Grok Build subscription login managed through Jcode".to_string()
-                } else if grok_build::cli_available() {
-                    "Jcode-managed backend provisioned; subscription login not configured"
-                        .to_string()
+                    "Grok CLI OIDC session in $GROK_HOME/auth.json".to_string()
                 } else {
-                    "Jcode-managed Grok Build backend not provisioned".to_string()
+                    "Grok Build subscription login not configured".to_string()
                 },
                 AuthExpiryConfidence::Unknown,
-                AuthRefreshSupport::ExternalManaged,
-                AuthValidationMethod::CommandProbe,
+                AuthRefreshSupport::Automatic,
+                AuthValidationMethod::PresenceCheck,
             ),
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
                 // Prefer the active named config profile's credential location
@@ -1005,11 +1019,22 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         probe_cursor_status(&mut status, mode)
     });
     record_auth_probe_step(&mut timings, "grok_build", || {
-        status.grok_build = if grok_build::cli_available() && grok_build::has_cached_login() {
+        status.grok_build = if grok_build::has_cached_login() {
             AuthState::Available
         } else {
             AuthState::NotConfigured
         }
+    });
+    record_auth_probe_step(&mut timings, "openai_compatible", || {
+        let configured = crate::provider_catalog::openai_compatible_profiles()
+            .iter()
+            .copied()
+            .any(crate::provider_catalog::openai_compatible_profile_is_configured);
+        status.openai_compatible_any = if configured {
+            AuthState::Available
+        } else {
+            AuthState::NotConfigured
+        };
     });
     record_auth_probe_step(&mut timings, "google", || probe_google_status(&mut status));
 
@@ -1323,13 +1348,13 @@ fn assessment_for_key(
                 AuthCredentialSource::None
             },
             if state == AuthState::Available {
-                "Grok CLI cached login".to_string()
+                "Grok CLI OIDC session".to_string()
             } else {
-                "Grok CLI unavailable".to_string()
+                "Grok Build subscription login not configured".to_string()
             },
             AuthExpiryConfidence::Unknown,
-            AuthRefreshSupport::ExternalManaged,
-            AuthValidationMethod::CommandProbe,
+            AuthRefreshSupport::Automatic,
+            AuthValidationMethod::PresenceCheck,
         ),
         LoginProviderAuthStateKey::Google => {
             let (source, detail) = summarize_sources(vec![google_source()]);

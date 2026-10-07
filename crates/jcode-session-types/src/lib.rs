@@ -3,6 +3,13 @@ use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+mod title;
+mod transcription;
+pub use title::prompt_title;
+pub use transcription::{
+    TRANSCRIPTION_CLOSE, TRANSCRIPTION_OPEN, strip_transcription, wrap_transcription,
+};
+
 /// Identifies a session to resume, across the agent backends jcode can import
 /// from. This is pure data (only ids/paths) with no UI dependency; it lives in
 /// `jcode-session-types` so the foundation/import layer can match on it without
@@ -1099,4 +1106,19 @@ mod session_search_tests {
         assert!(fenced.starts_with("````text\n"));
         assert!(fenced.ends_with("\n````"));
     }
+}
+
+/// Why a turn stopped abnormally. Natural completion has no stop reason.
+/// Unknown future reasons remain decodable by older clients.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStopReason {
+    Interrupted,
+    Failure,
+    /// A caught runtime panic, not an inference from a lost connection.
+    Crash,
+    ProviderGuardrail,
+    LimitReached,
+    #[serde(other)]
+    Unknown,
 }

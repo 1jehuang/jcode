@@ -4,7 +4,11 @@ mod apply_patch;
 mod bash;
 mod batch;
 mod bg;
+#[cfg(unix)]
+pub(crate) mod bridge_reload;
 mod browser;
+mod calendar;
+mod codemode;
 mod communicate;
 mod compile_remote;
 #[cfg(target_os = "macos")]
@@ -19,7 +23,11 @@ mod edit;
 mod edit_stats;
 mod feedback;
 mod file_diff;
+pub(crate) mod file_lock;
 mod gmail;
+// The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
+pub mod applet;
+#[allow(dead_code)]
 mod goal;
 pub mod inflight;
 mod invalid;
@@ -27,11 +35,12 @@ mod jcode_docs;
 mod ls;
 pub mod mcp;
 mod memory;
-mod multiedit;
 mod open;
 mod panel;
 mod patch;
 mod read;
+mod replace;
+pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
 mod session_search;
@@ -108,6 +117,7 @@ impl Drop for SessionToolPolicyRegistration {
             .is_some_and(|policy| policy.owner == Some(self.owner))
         {
             policies.remove(&self.session_id);
+            sdk::remove_session(&self.session_id);
         }
     }
 }
@@ -163,11 +173,23 @@ pub(crate) fn clear_session_tool_policy(session_id: &str) {
 }
 
 fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
-    SESSION_TOOL_POLICIES
+    let mut policy = SESSION_TOOL_POLICIES
         .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|e| e.into_inner())
         .get(session_id)
-        .cloned()
+        .cloned();
+    if let Some(config) = sdk::config(session_id) {
+        let policy = policy.get_or_insert_with(SessionToolPolicy::default);
+        if let Some(enabled) = config.enabled {
+            policy.allowed_tools = Some(enabled.into_iter().collect());
+            policy.disabled_tools.clear();
+        }
+        policy.disabled_tools.extend(config.disabled);
+        if let Some(allowed) = policy.allowed_tools.as_mut() {
+            allowed.extend(config.custom.into_iter().map(|t| t.name));
+        }
+    }
+    policy
 }
 
 #[cfg(test)]
@@ -366,14 +388,11 @@ impl Registry {
                 side_panel::SidePanelTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "applet", applet::AppletTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "multiedit",
-                multiedit::MultiEditTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "patch", patch::PatchTool::new);
+            // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
+            // Both old names still resolve through `resolve_tool_name`.
+            Self::insert_tool_timed(&mut m, &mut timings, "replace", replace::ReplaceTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
@@ -434,6 +453,12 @@ impl Registry {
             // Initiative is temporarily unavailable. Keep its implementation and
             // saved data intact so it can be restored without a migration.
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "calendar",
+                calendar::CalendarTool::new,
+            );
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);
             Self::insert_tool_timed(
@@ -504,6 +529,15 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(compaction),
         );
+        // Codemode is opt-in (`[tools] codemode = true`). When off, the tool
+        // is never registered, so it costs nothing and never reaches a model.
+        if codemode::enabled() {
+            Self::insert_tool(
+                &mut tools_map,
+                "codemode",
+                codemode::CodemodeTool::new(registry.downgrade()),
+            );
+        }
         // Integration discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.
@@ -537,9 +571,6 @@ impl Registry {
         &self,
         allowed_tools: Option<&HashSet<String>>,
     ) -> Vec<ToolDefinition> {
-        if allowed_tools.is_none_or(|allowed| allowed.contains("compile_remote")) {
-            self.remote_compile_definition().await;
-        }
         let tools = self.tools.read().await;
         let mut defs: Vec<ToolDefinition> = tools
             .iter()
@@ -561,18 +592,24 @@ impl Registry {
         defs
     }
 
-    /// Subscription guidance is the one built-in definition that can change
-    /// after sign-in, sign-out, or entitlement refresh. Do not hold the registry
-    /// lock during the bounded account request.
-    pub(crate) async fn remote_compile_definition(&self) -> Option<ToolDefinition> {
-        let tool = self.tools.read().await.get("compile_remote").cloned()?;
-        compile_remote::refresh_access().await;
-        Some(tool.to_definition())
-    }
-
     pub async fn tool_names(&self) -> Vec<String> {
         let tools = self.tools.read().await;
         tools.keys().cloned().collect()
+    }
+
+    /// Tool definitions a session may call, honoring its registered allow and
+    /// deny policy. Per-server MCP tools are always listed individually and
+    /// the fixed `mcp_search`/`mcp_call` surface is omitted, because scripts
+    /// address MCP tools directly. Used by `codemode`.
+    pub(crate) async fn definitions_for_session(&self, session_id: &str) -> Vec<ToolDefinition> {
+        let policy = session_tool_policy(session_id);
+        let allowed = policy.as_ref().and_then(|p| p.allowed_tools.clone());
+        let mut defs = self.definitions(allowed.as_ref()).await;
+        if let Some(policy) = policy.as_ref() {
+            defs.retain(|def| !self.tool_is_disabled(&policy.disabled_tools, &def.name));
+        }
+        defs.retain(|def| !is_fixed_mcp_tool(&def.name));
+        defs
     }
 
     /// Enable test mode for memory tools (isolated storage)
@@ -815,6 +852,18 @@ impl Registry {
         )
     }
 
+    /// Resolve a model-supplied tool name for a session: strips a
+    /// `functions.` namespace and maps aliases, but leaves SDK custom tool
+    /// names untouched so they are never rewritten to a built-in.
+    pub(crate) fn resolve_tool_name_for_session<'a>(session_id: &str, name: &'a str) -> &'a str {
+        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
+        if sdk::custom(session_id, unqualified_name) {
+            unqualified_name
+        } else {
+            Self::resolve_tool_name(unqualified_name)
+        }
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         // Mark this call in-flight for the whole execution so the missing
@@ -823,13 +872,24 @@ impl Registry {
         // `tool::inflight`.
         let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
-        let resolved_name = Self::resolve_tool_name(name);
+        let resolved_name = Self::resolve_tool_name_for_session(&ctx.session_id, name);
+        let is_custom = sdk::custom(&ctx.session_id, resolved_name);
+        if is_custom && let Some(config) = sdk::config(&ctx.session_id) {
+            let disabled = config.disabled.into_iter().collect();
+            anyhow::ensure!(
+                !self.tool_is_disabled(&disabled, resolved_name),
+                "Tool '{}' is disabled",
+                resolved_name
+            );
+        }
         // Enforce product separation here too: batch/subcalls dispatch through
         // the registry without going through Agent::validate_tool_allowed.
-        if matches!(
-            resolved_name,
-            "selfdev" | "debug_socket" | "desktop_selfdev" | "jcode_docs"
-        ) {
+        if !is_custom
+            && matches!(
+                resolved_name,
+                "selfdev" | "debug_socket" | "desktop_selfdev" | "jcode_docs"
+            )
+        {
             let desktop = ctx
                 .working_dir
                 .as_deref()
@@ -850,7 +910,7 @@ impl Registry {
                 anyhow::bail!("Tool 'desktop_selfdev' requires a Jcode Desktop source checkout.");
             }
         }
-        if let Some(policy) = session_tool_policy(&ctx.session_id) {
+        if !is_custom && let Some(policy) = session_tool_policy(&ctx.session_id) {
             if let Some(allowed) = policy.allowed_tools.as_ref()
                 && !self.tool_is_allowed(allowed, resolved_name)
             {
@@ -860,34 +920,46 @@ impl Registry {
                 return Err(anyhow::anyhow!("Tool '{}' is disabled", resolved_name));
             }
         }
-        let tool = match tools.get(resolved_name) {
-            Some(tool) => tool.clone(),
-            None => {
-                // List available tools so the model can recover instead of
-                // spiraling through hallucinated names like "ToolSearch" (#104).
-                let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
-                available.sort_unstable();
-                let suggestions = Self::closest_tool_names(name, &available);
-                let mut msg = format!("Unknown tool: {name}.");
-                if !suggestions.is_empty() {
-                    msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+        let tool: Arc<dyn Tool> = if is_custom {
+            Arc::new(sdk::CallbackTool(resolved_name.into()))
+        } else {
+            match tools.get(resolved_name) {
+                Some(tool) => tool.clone(),
+                None => {
+                    // List available tools so the model can recover instead of
+                    // spiraling through hallucinated names like "ToolSearch" (#104).
+                    let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
+                    available.sort_unstable();
+                    let suggestions = Self::closest_tool_names(name, &available);
+                    let mut msg = format!("Unknown tool: {name}.");
+                    if !suggestions.is_empty() {
+                        msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+                    }
+                    msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
+                    return Err(anyhow::anyhow!(msg));
                 }
-                msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
-                return Err(anyhow::anyhow!(msg));
             }
         };
 
         // Drop the lock before executing
         drop(tools);
 
+        let working_dir = ctx
+            .working_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string());
+        let input = crate::hooks::transform_tool_input(
+            &ctx.session_id,
+            working_dir.as_deref(),
+            resolved_name,
+            input,
+        )
+        .await;
+
         // User-configured pre_tool gate: external policy hook that can block
         // this call (exit 2). Skipped entirely when not configured.
         if crate::hooks::hook_configured("pre_tool") {
             let input_json = input.to_string();
-            let working_dir = ctx
-                .working_dir
-                .as_ref()
-                .map(|dir| dir.display().to_string());
             let decision = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,
                 working_dir.as_deref(),
@@ -1160,6 +1232,17 @@ impl Registry {
             .any(|name| tool_name_is_disabled(disabled, name))
     }
 
+    /// Original `(server, tool)` for a registered MCP alias. Aliases are
+    /// sanitized for providers, so they cannot be split back reliably.
+    pub(crate) fn mcp_identity_for_alias(&self, alias: &str) -> Option<(String, String)> {
+        self.mcp_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .current
+            .get(alias)
+            .cloned()
+    }
+
     fn mcp_dispatch_is_allowed(
         &self,
         session: &str,
@@ -1410,7 +1493,12 @@ impl Registry {
             let registry = self.clone();
             tokio::spawn(async move {
                 let (successes, failures) = {
-                    let manager = mcp_manager.write().await;
+                    // `connect_all` mutates the manager's internal connection
+                    // maps but does not mutate the manager object itself. A
+                    // read guard lets MCP list and other management actions
+                    // inspect those maps while a slow initialize handshake is
+                    // in flight.
+                    let manager = mcp_manager.read().await;
                     manager.connect_all().await.unwrap_or((0, Vec::new()))
                 };
 

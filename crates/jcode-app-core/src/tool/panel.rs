@@ -35,7 +35,7 @@ impl Tool for PanelTool {
         "panel"
     }
     fn description(&self) -> &str {
-        "Open and manage desktop panels. Spawn creates a new panel each time from Markdown content or a linked Markdown/PDF file (PDF max 20 MiB, session PDF total max 32 MiB). Update, focus or close an existing same-session panel using its returned panel_id. TUI displays Markdown fallback for PDFs."
+        "Open and manage desktop panels from Markdown content or a Markdown/PDF file."
     }
     fn parameters_schema(&self) -> Value {
         json!({
@@ -43,11 +43,11 @@ impl Tool for PanelTool {
             "additionalProperties": false,
             "properties": {
                 "intent": super::intent_schema_property(),
-                "action": {"type":"string", "enum":["spawn","update","focus","close","list"], "default":"spawn", "description":"Defaults to spawn. Spawn/update require exactly one of content or file_path. Focus/close require panel_id. List needs no other arguments."},
-                "panel_id": {"type":"string", "description":"Existing same-session ID for update/focus/close. Do not supply for spawn, which always generates a new ID."},
+                "action": {"type":"string", "enum":["spawn","update","focus","close","list"], "default":"spawn", "description":"Default spawn. Spawn/update need content or file_path. Focus/close need panel_id."},
+                "panel_id": {"type":"string", "description":"Same-session panel ID for update/focus/close. Omit for spawn."},
                 "title": {"type":"string", "description":"Panel title for spawn/update."},
                 "content": {"type":"string", "description":"Markdown for spawn/update, mutually exclusive with file_path."},
-                "file_path": {"type":"string", "description":"Linked Markdown or PDF path for spawn/update, relative to working directory. Mutually exclusive with content."},
+                "file_path": {"type":"string", "description":"Markdown/PDF path for spawn/update, relative to cwd. Exclusive with content."},
                 "focus": {"type":"boolean", "description":"Focus after spawn/update. Defaults true for spawn and false for update."}
             }
         })

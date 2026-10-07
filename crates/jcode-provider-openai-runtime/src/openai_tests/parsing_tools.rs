@@ -134,8 +134,8 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
         &mut pending,
     )
     .expect("argument fragments must stream before completion");
-    assert!(matches!(event, StreamEvent::ToolInputDelta(ref delta)
-        if delta == r#"{"tool_calls":[{"tool":"read"}]"#));
+    assert!(matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta }
+        if id == "call_123" && delta == r#"{"tool_calls":[{"tool":"read"}]"#));
     assert!(pending.is_empty());
 
     let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[{\"tool\":\"read\"}]}"}"#;
@@ -148,8 +148,8 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
         &mut pending,
     )
     .expect("only the unstreamed suffix should be emitted");
-    assert!(matches!(event, StreamEvent::ToolInputDelta(ref delta) if delta == "}"));
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+    assert!(matches!(event, StreamEvent::ToolInputDeltaFor { ref id, ref delta } if id == "call_123" && delta == "}"));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_123"));
     assert!(pending.is_empty());
     assert!(streaming_tool_calls.is_empty());
     assert!(completed_tool_items.contains("fc_123"));
@@ -400,6 +400,7 @@ fn test_build_tools_sets_strict_true() {
             "required": ["command"],
             "properties": { "command": { "type": "string" } }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools.len(), 1);
@@ -428,6 +429,7 @@ fn test_build_tools_disables_strict_for_free_form_object_nodes() {
                 }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools.len(), 1);
@@ -460,6 +462,7 @@ fn test_build_tools_normalizes_object_schema_additional_properties() {
             },
             "required": ["path"]
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(
@@ -505,6 +508,7 @@ fn test_build_tools_rewrites_oneof_to_anyof_for_openai() {
                 }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert!(api_tools[0]["parameters"]["properties"]["tool_calls"]["items"]["oneOf"].is_null());
@@ -546,6 +550,7 @@ fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
                 "wake_at": { "type": "string" }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools[0]["strict"], serde_json::json!(true));
@@ -591,10 +596,13 @@ fn test_handle_openai_output_item_normalizes_null_arguments() {
         _ => panic!("expected ToolUseStart"),
     }
     match pending.pop_front() {
-        Some(StreamEvent::ToolInputDelta(delta)) => assert_eq!(delta, "{}"),
-        _ => panic!("expected ToolInputDelta"),
+        Some(StreamEvent::ToolInputDeltaFor { id, delta }) => {
+            assert_eq!(id, "call_1");
+            assert_eq!(delta, "{}");
+        }
+        _ => panic!("expected ToolInputDeltaFor"),
     }
-    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+    assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "call_1"));
 }
 
 #[test]
@@ -633,7 +641,7 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
             StreamEvent::ToolUseStart { name, .. } if name == "batch" => {
                 saw_tool = true;
             }
-            StreamEvent::ToolInputDelta(delta) => {
+            StreamEvent::ToolInputDeltaFor { delta, .. } => {
                 let args: Value = serde_json::from_str(&delta).expect("valid tool args");
                 let calls = args
                     .get("tool_calls")

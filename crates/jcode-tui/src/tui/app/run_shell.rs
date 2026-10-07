@@ -119,7 +119,7 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
 }
 
 fn is_slash_command_input(input: &str) -> bool {
-    input.trim_start().starts_with('/')
+    super::has_safe_slash_command_token(input)
 }
 
 /// Whether the floating command-suggestion palette may be on screen for the
@@ -468,6 +468,7 @@ impl StatusSpinnerRenderer {
         // Painting a frame is progress, including during long streaming turns.
         crate::logging::watchdog::beat("tui.draw");
         app.refresh_terminal_title_metrics();
+        app.sync_herdr_agent_state();
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -759,6 +760,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: Some(self.session.id.clone()),
         })
@@ -993,6 +995,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: if self.is_remote {
                 self.remote_session_id.clone()

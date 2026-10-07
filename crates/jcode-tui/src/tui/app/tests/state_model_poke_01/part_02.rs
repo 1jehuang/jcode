@@ -173,6 +173,42 @@ fn test_side_panel_uses_left_splitter_instead_of_rounded_box() {
 }
 
 #[test]
+fn test_side_panel_fullscreen_takes_full_width_and_keeps_input() {
+    let _lock = scroll_render_test_lock();
+
+    let mut app = create_test_app();
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
+        focused_page_id: Some("plan".to_string()),
+        pages: vec![crate::side_panel::SidePanelPage {
+            id: "plan".to_string(),
+            title: "Plan".to_string(),
+            file_path: "".to_string(),
+            format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
+            source: crate::side_panel::SidePanelPageSource::Managed,
+            content: "alpha\nbeta\ngamma".to_string(),
+            updated_at_ms: 1,
+        }],
+    };
+    app.side_panel_fullscreen = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let text = render_and_snap(&app, &mut terminal);
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout");
+    let diff_area = layout.diff_pane_area.expect("side panel area");
+    assert_eq!(diff_area.x, 0);
+    assert_eq!(diff_area.width, 80);
+    assert_eq!(diff_area, layout.messages_area);
+    assert!(layout.input_area.is_some());
+    assert!(text.contains("alpha"), "rendered text: {text}");
+    assert!(text.contains("hide"), "rendered text: {text}");
+}
+
+#[test]
 fn test_removed_pinned_diff_config_renders_inline_without_side_pane() {
     let _lock = scroll_render_test_lock();
 

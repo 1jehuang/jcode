@@ -624,10 +624,13 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
     app.remote_model_switch_in_flight = true;
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: Some("Anthropic".to_string()),
             error: None,
+            resolved_credential: None,
+            reasoning_effort: None,
         },
         &mut remote,
     );
@@ -668,10 +671,13 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: None,
             error: Some("switch failed".to_string()),
+            resolved_credential: None,
+            reasoning_effort: None,
         },
         &mut remote,
     );
@@ -1289,7 +1295,7 @@ fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
     app.remote_provider_name = Some("OpenAI".to_string());
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
-    app.update_context_limit_for_model("gpt-5.4");
+    app.update_context_limit_for_model("gpt-5.4", None);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
 
@@ -1307,11 +1313,46 @@ fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
 }
 
 #[test]
+fn test_remote_context_limit_survives_a_later_local_re_derivation() {
+    // The server resolves the window for a model chosen server-side and sends
+    // it on attach. The startup and model-switch paths then call
+    // update_context_limit_for_model with None, which for a model absent from
+    // the static catalog fell through to the client's inert provider and the
+    // generic 200_000 default, overwriting a correct 1M value. Measured on
+    // stealth/space-bunny-alpha@Stealth: the panel showed 200000 while the
+    // route carried 1000000.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_name = Some("OpenRouter".to_string());
+    app.remote_provider_model = Some("stealth/space-bunny-alpha@Stealth".to_string());
+
+    app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", Some(1_000_000));
+    assert_eq!(app.context_limit, 1_000_000, "server window must be adopted");
+
+    // A later local re-derivation must not undo it.
+    app.update_context_limit_for_model("stealth/space-bunny-alpha@Stealth", None);
+    assert_eq!(
+        app.context_limit, 1_000_000,
+        "a None call must not downgrade the window the server already reported"
+    );
+
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(data.context_limit, Some(1_000_000));
+
+    // The compaction budget has to move with it, or a 1M route keeps triggering
+    // compaction about five times too early.
+    let compaction = app.registry.compaction();
+    if let Ok(manager) = compaction.try_read() {
+        assert_eq!(manager.token_budget(), 1_000_000);
+    }
+}
+
+#[test]
 fn test_info_widget_remote_model_falls_back_to_model_provider_detection() {
     let mut app = create_test_app();
     app.is_remote = true;
     app.remote_provider_model = Some("gpt-5.4".to_string());
-    app.update_context_limit_for_model("gpt-5.4");
+    app.update_context_limit_for_model("gpt-5.4", None);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
 
@@ -1471,6 +1512,23 @@ fn test_info_widget_remote_openai_uses_explicit_route_when_credential_is_missing
 #[test]
 fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
     let _guard = crate::storage::lock_test_env();
+    // Restore on unwind, not only on the success path: a mid-test assertion
+    // panic used to leave these vars cleared, poisoning concurrently running
+    // auth tests that read the same process env (openrouter/named-profile
+    // state) and turning this test into a cross-suite flake source.
+    struct RestoreEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    crate::env::set_var(key, value);
+                } else {
+                    crate::env::remove_var(key);
+                }
+            }
+            crate::auth::AuthStatus::invalidate_cache();
+        }
+    }
     let tracked_env = [
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_OPENROUTER_ALLOW_NO_AUTH",
@@ -1482,11 +1540,13 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
         "JCODE_PROVIDER_PROFILE_ACTIVE",
         "JCODE_PROVIDER_PROFILE_NAME",
     ];
-    let saved_env = tracked_env
-        .iter()
-        .map(|&key| (key, std::env::var_os(key)))
-        .collect::<Vec<_>>();
-    for &key in &tracked_env {
+    let _restore = RestoreEnv(
+        tracked_env
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
+    );
+    for key in tracked_env {
         crate::env::remove_var(key);
     }
 
@@ -1594,15 +1654,6 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
         crate::tui::info_widget::AuthMethod::Unknown
     );
     assert!(data.usage_info.is_none());
-
-    for (key, value) in saved_env {
-        if let Some(value) = value {
-            crate::env::set_var(key, value);
-        } else {
-            crate::env::remove_var(key);
-        }
-    }
-    crate::auth::AuthStatus::invalidate_cache();
 }
 
 #[test]
@@ -2490,5 +2541,167 @@ fn test_credential_failure_breaker_resets_on_turn_success() {
     assert_eq!(
         app.consecutive_credential_failures, 0,
         "a successful turn must reset the credential-failure streak"
+    );
+}
+
+/// An OAuth -> API-key route switch must update the auth badge immediately,
+/// instead of keeping the previous route's server-resolved credential.
+#[test]
+fn test_remote_model_changed_updates_resolved_credential() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_remote = true;
+    app.remote_provider_name = Some("Claude".to_string());
+    app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
+            id: 0,
+            model: "claude-opus-5-5".to_string(),
+            provider_name: Some("Claude".to_string()),
+            error: None,
+            resolved_credential: Some(jcode_provider_core::ResolvedCredential::ApiKey),
+            reasoning_effort: None,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(
+        app.remote_resolved_credential,
+        Some(jcode_provider_core::ResolvedCredential::ApiKey)
+    );
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(
+        data.auth_method,
+        crate::tui::info_widget::AuthMethod::AnthropicApiKey
+    );
+}
+
+fn model_changed_event(
+    error: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> crate::protocol::ServerEvent {
+    crate::protocol::ServerEvent::ModelChanged {
+        context_window: None,
+        id: 0,
+        model: "gpt-5.6-terra".to_string(),
+        provider_name: Some("OpenAI".to_string()),
+        error: error.map(str::to_string),
+        resolved_credential: None,
+        reasoning_effort: reasoning_effort.map(str::to_string),
+    }
+}
+
+/// The panel's window and the compaction budget must not disagree. Every site that
+/// assigns `context_limit` directly used to update the panel while skipping the
+/// budget sync, so a correct panel could sit on a stale compaction trigger — about
+/// five times too early on a 1M route.
+#[test]
+fn test_setting_context_limit_also_syncs_the_compaction_budget() {
+    let mut app = create_test_app();
+
+    app.set_context_limit_and_sync_budget(1_000_000);
+
+    assert_eq!(app.context_limit, 1_000_000, "panel must show the new window");
+    let budget = app.registry.compaction().try_read().expect("compaction lock").token_budget();
+    assert_eq!(
+        budget, 1_000_000,
+        "compaction budget must follow the panel limit, or the session compacts early"
+    );
+}
+
+/// The server re-sends ModelChanged on resume so the client learns the resolved
+/// context window. Re-reporting the model the client already runs must adopt the
+/// window without announcing a phantom "Switched to model" line.
+#[test]
+fn test_remote_model_changed_for_same_model_adopts_window_silently() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.is_remote = true;
+    app.remote_provider_model = Some("gpt-5.6-terra".to_string());
+    let before = app.display_messages().len();
+
+    let crate::protocol::ServerEvent::ModelChanged {
+        id,
+        model,
+        provider_name,
+        error,
+        resolved_credential,
+        reasoning_effort,
+        ..
+    } = model_changed_event(None, None)
+    else {
+        unreachable!()
+    };
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ModelChanged {
+            id,
+            model,
+            provider_name,
+            context_window: Some(1_000_000),
+            error,
+            resolved_credential,
+            reasoning_effort,
+        },
+        &mut remote,
+    );
+
+    assert_eq!(app.context_limit, 1_000_000);
+    assert!(
+        !app.display_messages()[before..]
+            .iter()
+            .any(|msg| msg.content.contains("Switched to model")),
+        "a resume re-report of the same model must not announce a switch"
+    );
+
+    app.remote_provider_model = Some("other-model".to_string());
+    app.handle_server_event(model_changed_event(None, None), &mut remote);
+    assert!(
+        app.display_messages()[before..]
+            .iter()
+            .any(|msg| msg.content.contains("Switched to model: gpt-5.6-terra")),
+        "a real switch is still announced"
+    );
+}
+
+/// Issue #1504: the effort chip must follow the effort the server reports for
+/// the switched-to model: adopt a new level, clear on `None`, and leave the
+/// running model's effort untouched when the switch fails.
+#[test]
+fn test_remote_model_changed_updates_reasoning_effort() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.is_remote = true;
+
+    app.remote_reasoning_effort = Some("medium".to_string());
+    app.handle_server_event(model_changed_event(None, Some("high")), &mut remote);
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("high"));
+
+    app.handle_server_event(model_changed_event(None, None), &mut remote);
+    assert!(
+        app.remote_reasoning_effort.is_none(),
+        "a switch to a model without effort must clear the chip"
+    );
+
+    app.remote_reasoning_effort = Some("low".to_string());
+    app.handle_server_event(
+        model_changed_event(Some("switch failed"), None),
+        &mut remote,
+    );
+    assert_eq!(
+        app.remote_reasoning_effort.as_deref(),
+        Some("low"),
+        "a failed switch keeps the running model's effort"
     );
 }

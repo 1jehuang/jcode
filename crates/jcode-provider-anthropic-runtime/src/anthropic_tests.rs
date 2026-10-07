@@ -223,7 +223,7 @@ fn test_anthropic_reasoning_effort_request_parts() {
         provider.build_reasoning_request_parts("claude-sonnet-4-6", true);
 
     match thinking.expect("adaptive thinking should be enabled") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Claude 4.6 should use adaptive thinking"),
     }
     assert_eq!(
@@ -293,7 +293,7 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
     let (thinking, output_config, temperature) =
         provider.build_reasoning_request_parts_inner("claude-sonnet-4-6", true, true);
     match thinking.expect("show_thinking should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Sonnet 4.6 should use adaptive thinking"),
     }
     assert!(
@@ -361,7 +361,7 @@ fn test_anthropic_fable_defaults_to_high_effort() {
         "high",
     );
     match thinking.expect("Fable default effort should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Fable 5 should use adaptive thinking"),
     }
 
@@ -484,7 +484,7 @@ fn test_anthropic_opus_defaults_to_xhigh_effort() {
         "xhigh",
     );
     match thinking.expect("Opus default effort should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Opus 4.8 should use adaptive thinking"),
     }
 
@@ -871,7 +871,7 @@ async fn test_dangling_tool_use_repair() {
         // Missing tool_results for tool_123 and tool_456!
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     // Should have 3 messages:
     // 1. User: "Hello"
@@ -905,6 +905,166 @@ async fn test_dangling_tool_use_repair() {
     }
     assert!(found_ids.contains("tool_123"));
     assert!(found_ids.contains("tool_456"));
+}
+
+#[tokio::test]
+async fn test_orphaned_tool_result_is_rewritten_as_text() {
+    // Mirrors a real stuck session: the assistant called tool_a, the interrupt
+    // repair answered it, then a late result for a tool_use that is not in the
+    // transcript was persisted right after. Anthropic 400s on that orphan.
+    let provider = AnthropicProvider::new();
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let messages = vec![
+        msg(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "go".to_string(),
+                cache_control: None,
+            }],
+        ),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_a".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        ),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_a".to_string(),
+                content: "ok".to_string(),
+                is_error: None,
+            }],
+        ),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_ghost".to_string(),
+                content: "no leftovers".to_string(),
+                is_error: None,
+            }],
+        ),
+    ];
+
+    let formatted = provider.format_messages(&messages, false, &[]);
+    let last = formatted.last().unwrap();
+    assert_eq!(last.role, "user");
+    assert!(matches!(
+        &last.content[0],
+        ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tool_a"
+    ));
+    for block in &last.content {
+        if let ApiContentBlock::ToolResult { tool_use_id, .. } = block {
+            assert_ne!(tool_use_id, "tool_ghost");
+        }
+    }
+    assert!(last.content.iter().any(|b| matches!(
+        b,
+        ApiContentBlock::Text { text, .. } if text.contains("tool_ghost") && text.contains("no leftovers")
+    )));
+}
+
+/// Assert the formatted history alternates roles and that every tool_use is
+/// answered by a tool_result in the immediately following user message.
+fn assert_tool_uses_answered_in_next_message(formatted: &[ApiMessage]) {
+    for pair in formatted.windows(2) {
+        assert_ne!(pair[0].role, pair[1].role, "roles must alternate");
+    }
+    for (i, msg) in formatted.iter().enumerate() {
+        if msg.role != "assistant" {
+            continue;
+        }
+        for block in &msg.content {
+            let ApiContentBlock::ToolUse { id, .. } = block else {
+                continue;
+            };
+            let next = formatted
+                .get(i + 1)
+                .unwrap_or_else(|| panic!("tool_use {id} has no next message"));
+            assert_eq!(next.role, "user", "tool_use {id} not followed by user");
+            assert!(
+                next.content.iter().any(|b| matches!(
+                    b,
+                    ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+                )),
+                "tool_use {id} not answered in message {}",
+                i + 1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_displaced_tool_result_still_answers_tool_use_in_place() {
+    // The only result for tool_x arrives after another assistant turn. The
+    // dangling repair sees a result somewhere and skips it, and the orphan
+    // rewrite turns the late result into text, so tool_x would otherwise be
+    // left without a tool_result right after it (HTTP 400).
+    let provider = AnthropicProvider::new();
+    let msg = |role, content| Message {
+        role,
+        content,
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let text = |t: &str| ContentBlock::Text {
+        text: t.to_string(),
+        cache_control: None,
+    };
+    let messages = vec![
+        msg(Role::User, vec![text("go")]),
+        msg(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tool_x".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+        ),
+        msg(Role::User, vec![text("are you there?")]),
+        msg(Role::Assistant, vec![text("yes")]),
+        msg(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_x".to_string(),
+                content: "late output".to_string(),
+                is_error: None,
+            }],
+        ),
+    ];
+
+    let formatted = provider.format_messages(&messages, false, &[]);
+
+    let next = &formatted[2];
+    assert_eq!(formatted[1].role, "assistant");
+    assert_eq!(next.role, "user");
+    // The late result is now moved up to directly follow its call (real
+    // output, not a synthetic error), ahead of the interjected user text.
+    assert!(matches!(
+        &next.content[0],
+        ApiContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "tool_x"
+    ));
+    assert!(next.content.iter().any(|b| matches!(
+        b,
+        ApiContentBlock::Text { text, .. } if text == "are you there?"
+    )));
+    let dump = serde_json::to_string(&formatted).unwrap();
+    assert!(dump.contains("late output"), "{dump}");
+    assert!(
+        !dump.contains("Recovered orphaned tool output"),
+        "the result was paired, nothing should be rewritten: {dump}"
+    );
+
+    assert_tool_uses_answered_in_next_message(&formatted);
 }
 
 #[tokio::test]
@@ -945,7 +1105,7 @@ async fn test_no_repair_when_tool_results_present() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     // Should have exactly 3 messages (no synthetic ones added)
     assert_eq!(formatted.len(), 3);
@@ -1027,7 +1187,7 @@ async fn test_parallel_image_tool_results_stay_contiguous() {
         make_image_result("tool_c", "c.png"),
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     // assistant message + merged user tool_result message
     assert_eq!(formatted.len(), 2);
@@ -1568,7 +1728,7 @@ async fn test_sanitize_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     let sanitized_id = "chatcmpl-BF2xX_tool_call_0";
     for msg in &formatted {
@@ -1613,7 +1773,7 @@ async fn test_sanitize_dangling_tool_ids_with_dots() {
         },
     ];
 
-    let formatted = provider.format_messages(&messages, false);
+    let formatted = provider.format_messages(&messages, false, &[]);
 
     let sanitized_id = "call_with_dots";
     for msg in &formatted {
@@ -1872,6 +2032,13 @@ fn anthropic_fallback_honors_server_recommendation() {
         "claude-opus-4-8"
     );
 
+    let opus_55 = anthropic_recommended_model_from_error("please use opus 5.5. learn more")
+        .expect("decimal release recommendation should resolve");
+    assert_eq!(
+        AnthropicProvider::normalized_model_key(&opus_55),
+        "claude-opus-5-5"
+    );
+
     // A recommendation pointing at a retired model is ignored (falls through to
     // quality ranking).
     let retired_rec = "model x not available. please use mythos 1.";
@@ -2023,7 +2190,7 @@ fn ping_keepalive_emits_streaming_phase_event() {
 #[test]
 fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     // Benchmark campaigns pin `claude-opus-5` at `low` effort. Opus 5 also
-    // *defaults* to `low` (jcode's default model/effort pairing), and an
+    // *defaults* to `low`, and an
     // explicit `low` must survive normalization, must NOT be silently
     // promoted, and must land in `output_config.effort` on the request.
     assert!(AnthropicProvider::model_supports_output_effort(
@@ -2032,6 +2199,11 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     assert_eq!(
         AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5").as_deref(),
         Some("low"),
+    );
+    // Opus 5.5 is jcode's default Claude model and defaults to `medium`.
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5-5").as_deref(),
+        Some("medium"),
     );
     assert_eq!(
         AnthropicProvider::normalize_reasoning_effort("low").as_deref(),
@@ -2073,11 +2245,9 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
 /// `stop_reason: tool_use` with no tool call for the agent to run.
 #[test]
 fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
-    for block_type in [
-        "server_tool_use",
-        "web_search_tool_result",
-        "some_future_block",
-    ] {
+    // Server tool blocks (`server_tool_use`, `web_search_tool_result`) are
+    // captured for replay; see native_web_search_sse_tests.rs.
+    for block_type in ["some_future_block", "code_execution_tool_result_future"] {
         let mut state = SseStreamState::default();
         let event = SseEvent {
             event_type: "content_block_start".to_string(),
@@ -2217,5 +2387,75 @@ fn configured_swarm_root_effort_reads_real_config() {
             }
         }
         assert_eq!(provider.stored_reasoning_effort().as_deref(), Some(mode));
+    }
+}
+
+#[test]
+fn opus_55_request_json_supports_api_and_oauth_without_forced_tools() {
+    let provider = AnthropicProvider::new();
+    for model in ["claude-opus-5-5", "claude-fable-5-1"] {
+        for is_oauth in [false, true] {
+            for show_thinking in [false, true] {
+                for effort in [None, Some("none"), Some("low"), Some("xhigh"), Some("max")] {
+                    let (thinking, output_config, temperature) = provider
+                        .build_reasoning_request_parts_with_effort(
+                            model,
+                            is_oauth,
+                            show_thinking,
+                            effort,
+                        );
+                    let request = ApiRequest {
+                        model: model.to_string(),
+                        max_tokens: jcode_provider_core::anthropic::anthropic_max_output_tokens(
+                            model,
+                        ),
+                        system: None,
+                        messages: vec![],
+                        tools: None,
+                        metadata: None,
+                        thinking,
+                        output_config,
+                        temperature,
+                        service_tier: None,
+                        stream: true,
+                    };
+                    let value = serde_json::to_value(&request).unwrap();
+                    assert_eq!(value["thinking"]["type"], "adaptive");
+                    assert_eq!(value["thinking"]["display"], "summarized");
+                    assert_eq!(
+                        value["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+                        "drop_block"
+                    );
+                    assert_eq!(value["max_tokens"], 128_000);
+                    assert!(value.get("temperature").is_none());
+                    assert!(value.get("tool_choice").is_none());
+                    match effort {
+                        None => assert!(value.get("output_config").is_none()),
+                        Some("none") => assert_eq!(value["output_config"]["effort"], "low"),
+                        Some(effort) => assert_eq!(value["output_config"]["effort"], effort),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn opus_55_empty_signed_thinking_is_replayed_unchanged() {
+    let provider = AnthropicProvider::new();
+    for is_oauth in [false, true] {
+        let blocks = provider.format_content_blocks(
+            &[ContentBlock::AnthropicThinking {
+                thinking: String::new(),
+                signature: "model-and-prefix-bound-signature".to_string(),
+            }],
+            is_oauth,
+        );
+        assert_eq!(
+            serde_json::to_value(blocks).unwrap(),
+            serde_json::json!([{
+                "type": "thinking", "thinking": "", "signature": "model-and-prefix-bound-signature"
+            }])
+        );
     }
 }

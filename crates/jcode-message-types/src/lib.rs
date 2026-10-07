@@ -1,3 +1,5 @@
+pub mod provider_native;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     #[serde(default)]
@@ -23,9 +25,42 @@ pub struct ToolDefinition {
     /// ToolDefinition::description_token_estimate() when reviewing tool bloat.
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// Provider-native deferred loading. A deferred definition is sent in the
+    /// request's tool catalog but stays out of the cached system-prompt prefix;
+    /// it becomes callable only once a [`ContentBlock::ToolReference`] for it
+    /// appears in the conversation. Adding or removing deferred definitions
+    /// therefore never invalidates the provider prompt cache. Providers without
+    /// native support drop deferred definitions and reference blocks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defer_loading: bool,
 }
 
 impl ToolDefinition {
+    /// Construct an eagerly loaded definition.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: serde_json::Value,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema,
+            defer_loading: false,
+        }
+    }
+
+    /// Mark this definition as deferred (see [`ToolDefinition::defer_loading`]).
+    pub fn deferred(mut self) -> Self {
+        self.defer_loading = true;
+        self
+    }
+
+    /// Eager definitions only: what enters the cached prompt prefix.
+    pub fn eager(defs: &[ToolDefinition]) -> Vec<ToolDefinition> {
+        defs.iter().filter(|d| !d.defer_loading).cloned().collect()
+    }
+
     /// Serialized size of the full tool definition payload sent to providers.
     pub fn prompt_chars(&self) -> usize {
         serde_json::json!({
@@ -172,6 +207,28 @@ pub enum ContentBlock {
     /// compaction state across turns/saves when jcode explicitly triggers it.
     OpenAICompaction {
         encrypted_content: String,
+    },
+    /// Loads a deferred tool definition into the model's context at this
+    /// point in the conversation, without touching the cached prompt prefix.
+    ///
+    /// Carried in the user message holding the `ToolResult` it belongs to
+    /// (`tool_use_id`). Anthropic renders it as a `tool_reference` inside that
+    /// tool_result; OpenAI Responses renders an `additional_tools` input item.
+    /// Other providers ignore it.
+    ToolReference {
+        tool_use_id: String,
+        tool_name: String,
+    },
+    /// Provider-native (server-side) tool item, stored verbatim.
+    ///
+    /// Examples: Anthropic `server_tool_use` / `web_search_tool_result`
+    /// blocks, OpenAI Responses `web_search_call` items. These can carry
+    /// encrypted payloads that the provider requires back unmodified on later
+    /// turns, so jcode never rewrites `item`. Only the provider named by
+    /// `provider` replays it; others ignore it. See [`provider_native`].
+    ProviderNative {
+        provider: String,
+        item: serde_json::Value,
     },
 }
 
@@ -582,14 +639,17 @@ impl ToolCall {
 
     pub fn parse_streamed_input_to_object(input: &str) -> serde_json::Value {
         let trimmed = input.trim();
+        // No argument text at all is how providers stream a no-argument call.
         if trimmed.is_empty() {
             return serde_json::Value::Object(serde_json::Map::new());
         }
 
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(value) => Self::normalize_input_to_object(value),
-            Err(_) => serde_json::Value::Null,
-        }
+        // Keep explicit non-object arguments (`null`, numbers, arrays,
+        // strings) and unparseable JSON as-is. Coercing them to `{}` ran the
+        // tool with missing arguments and hid the malformed call from
+        // `validation_error`, so the model never got a schema correction and
+        // could repeat the same bad call indefinitely.
+        serde_json::from_str::<serde_json::Value>(trimmed).unwrap_or(serde_json::Value::Null)
     }
 
     pub fn validation_error(&self) -> Option<String> {
@@ -691,12 +751,18 @@ pub enum StreamEvent {
     ToolUseStart { id: String, name: String },
     /// Tool input delta (JSON fragment)
     ToolInputDelta(String),
+    /// Keyed JSON fragment, allowing parallel calls to stream independently.
+    ToolInputDeltaFor { id: String, delta: String },
     /// Tool use complete
     ToolUseEnd,
+    /// Completion of a specific parallel call.
+    ToolUseEndFor { id: String },
     /// Gemini 3 thought signature for the most recent tool call. Emitted right
     /// after the matching `ToolUseStart`/`ToolUseEnd` so the agent loop can
     /// persist it on the `ToolUse` block and replay it on later turns.
     ToolUseSignature(String),
+    /// Thought signature for a specific call, including interleaved calls.
+    ToolUseSignatureFor { id: String, signature: String },
     /// Tool result from provider (provider already executed the tool)
     ToolResult {
         tool_use_id: String,
@@ -772,6 +838,14 @@ pub enum StreamEvent {
         request_id: String,
         tool_name: String,
         input: serde_json::Value,
+    },
+    /// A complete provider-native (server-side) tool item, e.g. an Anthropic
+    /// `server_tool_use` or `web_search_tool_result` block. The provider has
+    /// already run the tool; consumers store it verbatim as
+    /// [`ContentBlock::ProviderNative`] for replay and render it for display.
+    ProviderNative {
+        provider: String,
+        item: serde_json::Value,
     },
 }
 
@@ -888,8 +962,8 @@ mod tests {
         };
 
         assert_eq!(
-            cache_relevant_message_hashes(&[sent.clone()]),
-            cache_relevant_message_hashes(&[persisted.clone()]),
+            cache_relevant_message_hashes(std::slice::from_ref(&sent)),
+            cache_relevant_message_hashes(std::slice::from_ref(&persisted)),
             "non-transmitted metadata must not change the cache-relevant hash"
         );
         assert_eq!(

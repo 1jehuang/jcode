@@ -105,11 +105,18 @@ async fn fetch_openai_usage_data() -> OpenAIUsageData {
 }
 
 async fn refresh_openai_usage(usage: Arc<RwLock<OpenAIUsageData>>) {
+    let generation = openai_usage_generation();
     let new_data = fetch_openai_usage_data().await;
-    *usage.write().await = new_data;
+    let mut cached = usage.write().await;
+    if generation == openai_usage_generation() {
+        *cached = new_data;
+    }
 }
 
 fn try_spawn_openai_refresh(usage: Arc<RwLock<OpenAIUsageData>>) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
     if OPENAI_REFRESH_IN_FLIGHT
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -117,7 +124,7 @@ fn try_spawn_openai_refresh(usage: Arc<RwLock<OpenAIUsageData>>) {
         return;
     }
 
-    tokio::spawn(async move {
+    runtime.spawn(async move {
         refresh_openai_usage(usage).await;
         OPENAI_REFRESH_IN_FLIGHT.store(false, Ordering::SeqCst);
     });
@@ -220,6 +227,7 @@ pub fn fetch_openai_usage_for_account_sync(
         anyhow::bail!("OpenAI usage refresh requires a Tokio runtime")
     }
 
+    let generation = openai_usage_generation();
     let report = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(fetch_openai_usage_for_account(
             openai_provider_display_name(label, email.as_deref(), 2, false),
@@ -228,7 +236,10 @@ pub fn fetch_openai_usage_for_account_sync(
         ))
     });
     let data = openai_usage_data_from_provider_report(&report);
-    store_openai_usage(cache_key, data.clone());
+    anyhow::ensure!(
+        generation == openai_usage_generation(),
+        "OpenAI usage changed during a banked reset. Retry the usage check."
+    );
     Ok(openai_snapshot_from_usage(label.to_string(), email, &data))
 }
 

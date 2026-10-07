@@ -438,7 +438,10 @@ fn model_picker_route_is_current(
             .unwrap_or(true)
 }
 
-const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-8"];
+const RECOMMENDED_MODELS: &[&str] = &[
+    jcode_provider_core::DEFAULT_OPENAI_MODEL,
+    jcode_provider_core::DEFAULT_CLAUDE_MODEL,
+];
 
 fn model_picker_recommendation_rank(name: &str) -> usize {
     RECOMMENDED_MODELS
@@ -662,7 +665,7 @@ impl App {
         if let Some(model) = snapshot.provider_model
             && self.remote_provider_model.as_deref() != Some(model.as_str())
         {
-            self.update_context_limit_for_model(&model);
+            self.update_context_limit_for_model(&model, None);
             self.remote_provider_model = Some(model);
             provider_meta_changed = true;
         }
@@ -3772,7 +3775,7 @@ impl App {
                                     self.status_detail = None;
                                     self.invalidate_model_picker_cache();
                                     let active_model = self.provider.model();
-                                    self.update_context_limit_for_model(&active_model);
+                                    self.update_context_limit_for_model(&active_model, None);
                                     self.session.provider_key = crate::provider::MultiProvider::session_provider_key_after_model_switch(
                                         &spec,
                                         self.provider.name(),
@@ -4433,39 +4436,39 @@ mod tests {
         };
 
         assert!(model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &openai_oauth_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &openai_api_key_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &copilot_route
         ));
         assert!(!model_picker_route_is_recommended(
-            "gpt-5.5",
+            jcode_provider_core::DEFAULT_OPENAI_MODEL,
             &unavailable_openai_oauth_route,
         ));
 
-        // Current policy (see jcode-provider-core): claude-opus-4-8 is the
-        // recommended Anthropic flagship; older Opus and OpenRouter/Copilot
-        // routes are not recommended.
+        // Recommendations follow the curated defaults (see jcode-provider-core):
+        // the default Claude flagship is recommended; older Opus and
+        // OpenRouter/Copilot routes are not.
         assert!(model_picker_route_is_recommended(
-            "claude-opus-4-8",
-            &claude_oauth_route,
-        ));
-        assert!(!model_picker_route_is_recommended(
-            "claude-opus-4-7",
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &claude_oauth_route,
         ));
         assert!(!model_picker_route_is_recommended(
             "claude-opus-4-8",
+            &claude_oauth_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &claude_openrouter_route,
         ));
         assert!(!model_picker_route_is_recommended(
-            "claude-opus-4-8",
+            jcode_provider_core::DEFAULT_CLAUDE_MODEL,
             &copilot_route,
         ));
 

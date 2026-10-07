@@ -1,0 +1,23 @@
+{
+  "version": "0.89.1",
+  "date": "2026-09-29",
+  "title": "Cursor provider fixes, Commits widget, and a dedicated diagram pane key",
+  "highlights": [
+    "The Cursor provider works again: jcode tools run over Cursor's native MCP bridge, fast/high/thinking model ids resolve correctly, /fast works, and reasoning models no longer stop mid-answer",
+    "A new Commits info widget shows recent commits with line counts and marks unpushed ones",
+    "The swarm dock lists each agent with its status, current activity, and todo progress"
+  ],
+  "improvements": [
+    "Alt+Shift+M shows or hides the diagram pane, and Alt+M now only cycles the side panel (split, fullscreen, hidden)",
+    "Info widgets put their headers, overflow counts, and legends on their borders",
+    "The foot terminal is detected as sixel-capable for Mermaid diagrams",
+    "The harness API can move a running tool to the background",
+    "agentgrep 0.1.7 keeps partial results when ripgrep hits unreadable files"
+  ],
+  "fixes": [
+    "Anthropic no longer rejects turns with parallel tool_search calls (400 'tool_use ids were found without tool_result blocks')",
+    "Images no longer render blank in Kitty inside Zellij",
+    "Test binaries in custom Cargo target directories never open real browser windows",
+    "Several flaky tests are now isolated from the developer's environment"
+  ]
+}

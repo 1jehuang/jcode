@@ -132,7 +132,15 @@ mod tests {
                 .is_err()
         );
         assert_eq!(stats().added, 200);
-        crate::tool::multiedit::MultiEditTool.execute(json!({"file_path":"f","edits":[{"old_string":"new","new_string":"changed","replace_all":true},{"old_string":"missing","new_string":"failed"}]}), ctx.clone()).await.unwrap();
+        assert!(
+            crate::tool::edit::EditTool
+                .execute(json!({"file_path":"f","edits":[{"old_string":"new","new_string":"changed","replace_all":true},{"old_string":"missing","new_string":"failed"}]}), ctx.clone())
+                .await
+                .is_err(),
+            "a failed edit in the batch must write nothing"
+        );
+        assert_eq!(stats().added, 200);
+        crate::tool::edit::EditTool.execute(json!({"file_path":"f","edits":[{"old_string":"new","new_string":"changed","replace_all":true}]}), ctx.clone()).await.unwrap();
         assert_eq!(
             stats(),
             SessionEditStats {

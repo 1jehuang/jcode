@@ -544,6 +544,22 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    if let ServerEvent::Done { id } = &event
+        && app.usage_reset.invalidate_requests.remove(id).is_some()
+    {
+        app.usage_reset.refresh_usage = true;
+        return true;
+    }
+
+    if let ServerEvent::Error { id, message, .. } = &event
+        && app.usage_reset.invalidate_requests.remove(id).is_some()
+    {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Reset result is unchanged, but the daemon usage cache could not be refreshed: {message}. Reconnect to refresh daemon state."
+        )));
+        return true;
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -705,8 +721,8 @@ pub(in crate::tui::app) fn handle_server_event(
             });
             eager_stream_redraw
         }
-        ServerEvent::ToolInput { delta } => {
-            remote.handle_tool_input(&delta);
+        ServerEvent::ToolInput { id, delta } => {
+            remote.handle_tool_input(id.as_deref(), &delta);
             false
         }
         ServerEvent::ToolExec { id, name } => {
@@ -714,7 +730,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // snapshots often arrive later. Keep collecting deltas while excluding tool
             // runtime from the elapsed TPS denominator.
             app.pause_streaming_tps(true);
-            let parsed_input = remote.get_current_tool_input();
+            let parsed_input = remote.get_tool_input(&id);
             let tool_call = ToolCall {
                 id: id.clone(),
                 name: name.clone(),
@@ -1073,6 +1089,13 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
             }
             app.schedule_queued_dispatch_after_interrupt();
+            // Esc redirect: the follow-up may live only in pending soft
+            // interrupts (not counted by has_queued_followups). Arm dispatch
+            // so recovery sends it as the next turn right away.
+            if app.remote_interrupt_ack_deadline.take().is_some() && app.has_pending_user_followup()
+            {
+                app.pending_queued_dispatch = true;
+            }
             app.push_display_message(DisplayMessage::system("Interrupted"));
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
@@ -1236,6 +1259,7 @@ pub(in crate::tui::app) fn handle_server_event(
             retry_after_secs,
             ..
         } => {
+            app.refresh_openai_usage_after_quota_error(&message);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -2283,6 +2307,9 @@ pub(in crate::tui::app) fn handle_server_event(
             model,
             provider_name,
             error,
+            resolved_credential,
+            reasoning_effort,
+            context_window,
             ..
         } => {
             app.remote_model_switch_in_flight = false;
@@ -2305,20 +2332,34 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
-                app.update_context_limit_for_model(&model);
+                // The server also re-sends ModelChanged on resume so the client
+                // learns the server-resolved context window. That is not a
+                // user-visible switch, so only announce an actual model change.
+                let model_actually_changed =
+                    app.remote_provider_model.as_deref() != Some(model.as_str());
+                app.update_context_limit_for_model(&model, context_window);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                // Always replace: a switch to a provider with no OAuth/API
+                // distinction must clear the previous route's credential too.
+                app.remote_resolved_credential = resolved_credential;
+                // Always replace: the server reports the effort the new model
+                // runs with (`None` = cleared), so the chip must not keep the
+                // previous model's level.
+                app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
-                if !app.auth_catalog_refresh_pending {
+                if model_actually_changed && !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model
                     )));
                 }
-                app.set_status_notice(format!("Model → {}", model));
+                if model_actually_changed {
+                    app.set_status_notice(format!("Model → {}", model));
+                }
             }
             false
         }
@@ -2422,7 +2463,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 )));
             } else {
                 app.remote_service_tier = service_tier.clone();
-                let enabled = service_tier.as_deref() == Some("priority");
+                let enabled = app_mod::service_tier_is_fast(service_tier.as_deref());
                 let label = service_tier
                     .as_deref()
                     .map(app_mod::service_tier_display_label)
@@ -2432,7 +2473,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app_mod::fast_mode_success_message(enabled, label, applies_next_request),
                 ));
                 app.set_status_notice(app_mod::fast_mode_status_notice(
-                    enabled,
+                    service_tier.as_deref(),
                     applies_next_request,
                 ));
             }

@@ -62,6 +62,35 @@ pub(in crate::tui::app) async fn reload_stale_remote_server_before_update(
     Ok(true)
 }
 
+/// Step the remote session's speed tier (Standard -> Fast -> Ultrafast).
+async fn apply_remote_speed_direction(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    direction: i8,
+) -> Result<()> {
+    use jcode_provider_core::service_tier::{speed_tier_ladder, step_speed_tier};
+    let (provider_name, provider_model) = app.remote_effort_identity();
+    let ladder = speed_tier_ladder(provider_name.as_deref(), provider_model.as_deref());
+    let Some((index, next, at_end)) =
+        step_speed_tier(&ladder, app.remote_service_tier.as_deref(), direction)
+    else {
+        app.set_status_notice("Speed tiers not available for this model");
+        return Ok(());
+    };
+    if at_end {
+        app.set_status_notice(app_mod::speed_tier_notice(
+            next,
+            index,
+            ladder.len(),
+            Some(direction),
+        ));
+        return Ok(());
+    }
+    app.set_status_notice(app_mod::speed_tier_notice(next, index, ladder.len(), None));
+    remote.set_service_tier(next).await?;
+    Ok(())
+}
+
 async fn apply_remote_effort_direction(
     app: &mut App,
     remote: &mut RemoteConnection,
@@ -485,6 +514,15 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app
+        .toggle_keys
+        .diagram_pane_visibility
+        .matches(code, modifiers)
+    {
+        app.toggle_diagram_pane();
+        return Ok(());
+    }
+
     if app.toggle_keys.side_panel.matches(code, modifiers) {
         app.toggle_side_panel();
         return Ok(());
@@ -538,6 +576,10 @@ async fn handle_remote_key_internal(
     if let Some(direction) = app.effort_switch_keys.direction_for(code, modifiers) {
         app.record_keybinding_fast(crate::tui::app::shortcut_hints::LearnableAction::EffortCycle);
         apply_remote_effort_direction(app, remote, direction).await?;
+        return Ok(());
+    }
+    if let Some(direction) = app.speed_switch_keys.direction_for(code, modifiers) {
+        apply_remote_speed_direction(app, remote, direction).await?;
         return Ok(());
     }
     if cfg!(target_os = "macos")
@@ -961,6 +1003,25 @@ async fn handle_remote_key_internal(
                 let prepared = input::take_prepared_input(app);
                 let trimmed = prepared.expanded.trim();
 
+                // Before the SSH gate: `/local` must work from a client attached
+                // to the cloud copy, because the return is coordinated locally.
+                if app_mod::commands_cloud::parse_cloud_command(trimmed).is_some() {
+                    let session_id = app_mod::commands::active_session_id(app);
+                    if crate::tui::is_ssh_remote()
+                        && matches!(
+                            app_mod::commands_cloud::parse_cloud_command(trimmed),
+                            Some(app_mod::commands_cloud::CloudCommand::Move { .. })
+                        )
+                    {
+                        app.push_display_message(DisplayMessage::error(
+                            "This session already runs on a remote host. Use /local to bring it back first.".to_string(),
+                        ));
+                        return Ok(());
+                    }
+                    app_mod::commands_cloud::handle_cloud_command(app, trimmed, &session_id);
+                    return Ok(());
+                }
+
                 if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
                     return Ok(());
                 }
@@ -1117,6 +1178,10 @@ async fn handle_remote_key_internal(
                     // catalog I/O; doing it here races startup and briefly
                     // replaces the session catalog with remote fallback rows.
                     app.open_model_picker();
+                    return Ok(());
+                }
+
+                if app.handle_usage_reset_command(trimmed) {
                     return Ok(());
                 }
 
@@ -1321,7 +1386,7 @@ async fn handle_remote_key_internal(
 
                 if matches!(trimmed, "/fast" | "/fast status") {
                     let current = app.remote_service_tier.as_deref();
-                    let enabled = current == Some("priority");
+                    let enabled = app_mod::service_tier_is_fast(current);
                     let current_label = current
                         .map(app_mod::service_tier_display_label)
                         .unwrap_or("Standard");
@@ -1346,10 +1411,11 @@ async fn handle_remote_key_internal(
                     let mode = mode.trim().to_ascii_lowercase();
                     let service_tier = match mode.as_str() {
                         "on" => "priority",
+                        "ultra" | "ultrafast" => "ultrafast",
                         "off" => "off",
                         "status" => {
                             let current = app.remote_service_tier.as_deref();
-                            let enabled = current == Some("priority");
+                            let enabled = app_mod::service_tier_is_fast(current);
                             let current_label = current
                                 .map(app_mod::service_tier_display_label)
                                 .unwrap_or("Standard");
@@ -1372,7 +1438,7 @@ async fn handle_remote_key_internal(
                         }
                         _ => {
                             app.push_display_message(DisplayMessage::error(
-                                "Usage: /fast [on|off|status|default ...]",
+                                "Usage: /fast [on|ultra|off|status|default ...]",
                             ));
                             return Ok(());
                         }
@@ -1889,6 +1955,9 @@ async fn handle_remote_key_internal(
                         )));
                         return Ok(());
                     }
+                    // The daemon's in-memory session owns later writes. Without
+                    // this it would persist `saved: false` on its next save.
+                    remote.set_session_saved(true, label.clone()).await?;
                     crate::tui::session_picker::invalidate_session_list_cache();
                     if app.memory_enabled
                         && let Err(err) = remote.trigger_memory_extraction().await
@@ -1925,6 +1994,7 @@ async fn handle_remote_key_internal(
                         )));
                         return Ok(());
                     }
+                    remote.set_session_saved(false, None).await?;
                     crate::tui::session_picker::invalidate_session_list_cache();
                     let name = app.session.display_name().to_string();
                     app.push_display_message(DisplayMessage::system(format!(
@@ -2014,6 +2084,7 @@ async fn handle_remote_key_internal(
 
                 if trimmed == "/commit"
                     || trimmed == "/merge"
+                    || trimmed == "/merge-remote-release"
                     || trimmed == "/commit-push"
                     || trimmed == "/commit-and-push"
                     || trimmed == "/fast-release"
@@ -2032,8 +2103,11 @@ async fn handle_remote_key_internal(
                     let is_remote_release = trimmed == "/remote-release";
                     let is_fast_macos_release = trimmed == "/fast-macos-release";
                     let is_merge = trimmed == "/merge";
+                    let is_merge_remote_release = trimmed == "/merge-remote-release";
                     let is_push = matches!(trimmed, "/commit-push" | "/commit-and-push");
-                    let prompt = if is_merge {
+                    let prompt = if is_merge_remote_release {
+                        app_mod::commands::build_merge_remote_release_prompt()
+                    } else if is_merge {
                         app_mod::commands::build_merge_prompt()
                     } else if is_triage {
                         app_mod::commands::build_triage_prompt(
@@ -2051,7 +2125,9 @@ async fn handle_remote_key_internal(
                         app_mod::commands::build_commit_prompt()
                     };
                     let launch_notice = |interrupted: bool| {
-                        if is_merge {
+                        if is_merge_remote_release {
+                            app_mod::commands::merge_remote_release_launch_notice(interrupted)
+                        } else if is_merge {
                             app_mod::commands::merge_launch_notice(interrupted)
                         } else if is_triage {
                             app_mod::commands::triage_launch_notice(interrupted)
@@ -2067,7 +2143,9 @@ async fn handle_remote_key_internal(
                             app_mod::commands::commit_launch_notice(interrupted)
                         }
                     };
-                    let cmd_label = if is_merge {
+                    let cmd_label = if is_merge_remote_release {
+                        "/merge-remote-release"
+                    } else if is_merge {
                         "/merge"
                     } else if is_triage {
                         "/triage"
@@ -2689,6 +2767,18 @@ async fn handle_remote_key_internal(
             {
                 app.inline_interactive_state = None;
                 input::clear_input_for_escape(app);
+            } else if app.is_processing && app.has_pending_user_followup() {
+                // The user typed a new prompt while this turn ran, then hit
+                // Esc: stop this turn and run the new prompt next. The server
+                // leaves an unsent soft interrupt queued on cancel, and the
+                // follow-up recovery path sends it as the next turn. Auto-poke
+                // stays on: this is a redirect, not "stop everything".
+                remote
+                    .cancel_with_reason("keyboard_escape_redirect")
+                    .await?;
+                app.remote_interrupt_ack_deadline =
+                    Some(Instant::now() + std::time::Duration::from_secs(3));
+                app.set_status_notice("Interrupting... sending your next prompt");
             } else if app.is_processing {
                 let disabled_auto_poke = app.auto_poke_incomplete_todos
                     || app

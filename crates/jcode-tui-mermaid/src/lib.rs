@@ -438,7 +438,9 @@ static MERMAID_SOURCE_BY_HASH: LazyLock<Mutex<HashMap<u64, String>>> =
 static MERMAID_INLINE_EXPAND_LEVEL: LazyLock<Mutex<HashMap<u64, u8>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static MERMAID_INLINE_EXPAND_EPOCH: AtomicU64 = AtomicU64::new(0);
-static MERMAID_INLINE_LEVEL_GEOMETRY: LazyLock<Mutex<HashMap<u64, [(u16, u16); 3]>>> =
+/// Placeholder `(rows, cols)` for each inline expand level.
+type InlineLevelGeometry = [(u16, u16); 3];
+static MERMAID_INLINE_LEVEL_GEOMETRY: LazyLock<Mutex<HashMap<u64, InlineLevelGeometry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn mermaid_source_for_hash(hash: u64) -> Option<String> {
@@ -485,6 +487,34 @@ pub fn next_distinct_mermaid_inline_level(hash: u64, current: u8) -> u8 {
     0
 }
 
+/// Step one distinct inline size in `direction` (positive = larger), stopping
+/// at Fit and Full instead of wrapping. Used by zoom gestures, where wrapping
+/// from Full back to Fit would feel like a jump. Stepping down lands on the
+/// smallest level with that geometry so returning to Fit clears expansion.
+pub fn step_distinct_mermaid_inline_level(hash: u64, current: u8, direction: i8) -> u8 {
+    let current = current.min(2);
+    let geometries = MERMAID_INLINE_LEVEL_GEOMETRY
+        .lock()
+        .ok()
+        .and_then(|all| all.get(&hash).copied());
+    let same = |a: u8, b: u8| geometries.is_some_and(|g| g[a as usize] == g[b as usize]);
+    let mut candidate = current;
+    loop {
+        candidate = match direction.signum() {
+            1 if candidate < 2 => candidate + 1,
+            -1 if candidate > 0 => candidate - 1,
+            _ => return current,
+        };
+        if !same(candidate, current) {
+            break;
+        }
+    }
+    while direction < 0 && candidate > 0 && same(candidate - 1, candidate) {
+        candidate -= 1;
+    }
+    candidate
+}
+
 pub fn register_inline_level_geometries(hash: u64, geometries: [(u16, u16); 3]) {
     if let Ok(mut all) = MERMAID_INLINE_LEVEL_GEOMETRY.lock() {
         all.insert(hash, geometries);
@@ -514,6 +544,23 @@ mod distinct_level_tests {
         let one = 0xd157_1ac9;
         register_inline_level_geometries(one, [(10, 20); 3]);
         assert_eq!(next_distinct_mermaid_inline_level(one, 0), 0);
+    }
+
+    #[test]
+    fn zoom_steps_skip_duplicates_and_stop_at_ends() {
+        let unknown = 0xd157_1aca;
+        assert_eq!(step_distinct_mermaid_inline_level(unknown, 0, 1), 1);
+        assert_eq!(step_distinct_mermaid_inline_level(unknown, 2, 1), 2);
+        assert_eq!(step_distinct_mermaid_inline_level(unknown, 0, -1), 0);
+
+        let two = 0xd157_1acb;
+        register_inline_level_geometries(two, [(10, 20), (10, 20), (30, 60)]);
+        assert_eq!(step_distinct_mermaid_inline_level(two, 0, 1), 2);
+        assert_eq!(step_distinct_mermaid_inline_level(two, 2, -1), 0);
+
+        let one = 0xd157_1acc;
+        register_inline_level_geometries(one, [(10, 20); 3]);
+        assert_eq!(step_distinct_mermaid_inline_level(one, 0, 1), 0);
     }
 }
 

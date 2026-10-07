@@ -1,9 +1,14 @@
+mod anchor;
 mod cache;
 mod message;
 mod prepared;
 mod swarm_collapse;
 mod wrapped_line_map;
 
+pub use anchor::{
+    Anchor, ContentPos, anchor_at_row, content_pos_at_row, message_row_ranges, resolve,
+    resolve_content_pos,
+};
 pub use cache::{
     MessageCacheContext, centered_wrap_width, get_cached_message_lines,
     left_pad_lines_for_centered_mode,

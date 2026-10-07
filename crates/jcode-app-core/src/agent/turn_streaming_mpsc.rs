@@ -1,3 +1,4 @@
+use super::response_recovery::MalformedToolCallInfo;
 use super::*;
 
 /// Largest byte index `<= index` that is a UTF-8 char boundary in `text`.
@@ -17,6 +18,35 @@ fn floor_char_boundary(text: &str, index: usize) -> usize {
 
 /// The wrapped-tool-call markers emitted by some models inside plain text.
 const WRAP_TOOL_MARKERS: [&str; 2] = ["to=functions.", "+#+#"];
+
+/// Report whatever usage a provider stream reported before it failed.
+///
+/// The normal `usage_report` is emitted after the stream completes. A stream
+/// that errors (or is retried after compaction) still consumed the tokens the
+/// provider already reported, so count them. `[input, output, cache_read,
+/// cache_creation]`; a no-op when nothing was reported.
+fn record_partial_stream_usage(
+    session_id: &str,
+    provider: &str,
+    model: &str,
+    [input, output, cache_read, cache_creation]: [Option<u64>; 4],
+) {
+    if input.is_none() && output.is_none() && cache_read.is_none() && cache_creation.is_none() {
+        return;
+    }
+    crate::telemetry::record_provider_usage(
+        Some(session_id),
+        provider,
+        model,
+        crate::telemetry::UsageSource::Agent,
+        crate::telemetry::ProviderUsage {
+            input_tokens: input.unwrap_or(0),
+            output_tokens: output.unwrap_or(0),
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
+        },
+    );
+}
 
 /// Find the first wrapped-tool-call marker in `accumulated`, scanning only the
 /// newly appended `delta` plus a short overlap from the previous tail (so a
@@ -75,11 +105,30 @@ fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, 
     )
 }
 
+/// Called only after automatic continuations have been exhausted.
+fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
+    let reason = stop_reason?;
+    if Agent::should_continue_after_stop_reason(reason)
+        || Agent::is_stranded_tool_use_stop(Some(reason))
+    {
+        Some(ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::LimitReached,
+            message: format!(
+                "The provider stopped with {reason} after automatic continuation attempts were exhausted. Output may be incomplete."
+            ),
+            provider_stop_reason: Some(reason.to_string()),
+        })
+    } else {
+        None
+    }
+}
+
 impl Agent {
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
+        self.ensure_session_lease()?;
         self.set_log_context();
         let usage_turn_id = self.model_usage_turn_id();
         // Mark this session as actively streaming for presence UIs (e.g. the
@@ -98,6 +147,7 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        let mut consecutive_malformed_tool_rounds = 0u32;
 
         loop {
             // Never open a new provider request after a cancel. Several paths
@@ -108,6 +158,12 @@ impl Agent {
             // the interrupt was ignored (issue #732, regression of #428).
             if self.is_graceful_shutdown() {
                 logging::info("Cancel observed at turn-loop head - not starting another request");
+                break;
+            }
+            if let Some(block) = self.session.migration_lease_block() {
+                logging::info(&format!(
+                    "Session migrated mid-turn - stopping local turn loop: {block}"
+                ));
                 break;
             }
             let repaired = self.repair_missing_tool_outputs();
@@ -129,6 +185,7 @@ impl Agent {
             if let Some(event) = compaction_event {
                 // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
+                self.kv_cache_monitor.reset();
                 self.locked_tools = None;
                 logging::info(&format!(
                     "Context compacted ({}{})",
@@ -213,6 +270,18 @@ impl Agent {
                 }
                 messages_with_memory.push(memory_msg);
             }
+            // Surface background plan-limit hits once so the user sees the
+            // upgrade prompt in the reply (see turn_loops for rationale).
+            if let Some(notice) = self
+                .memory_enabled
+                .then(crate::subscription_notice::take)
+                .flatten()
+            {
+                crate::subscription_notice::show_upgrade_card(&notice, &self.session.id);
+                let reminder = Message::user(&Self::plan_limit_reminder(&notice));
+                ephemeral_signature_messages.push(reminder.clone());
+                messages_with_memory.push(reminder);
+            }
 
             logging::info(&format!(
                 "API call starting: {} messages, {} tools",
@@ -238,12 +307,14 @@ impl Agent {
             let model_at_request_start = provider.model().to_string();
             let resume_session_id = self.provider_session_id.clone();
             self.last_status_detail = None;
-            let _ = event_tx.send(kv_cache_request_event(
+            let kv_request = kv_cache_request_event(
                 &cache_signature_messages,
                 &tools,
                 &split_prompt.static_part,
                 &ephemeral_signature_messages,
-            ));
+            );
+            self.begin_kv_cache_monitor_request(&kv_request, &model_at_request_start);
+            let _ = event_tx.send(kv_request);
             // These vectors are only needed to build the cache telemetry event.
             // Explicitly release their deeply cloned transcript strings before
             // waiting for the provider stream.
@@ -279,6 +350,11 @@ impl Agent {
                                             logging::warn(
                                                 "Context-limit compaction retry limit reached; giving up",
                                             );
+                                            let _ = event_tx.send(ServerEvent::TurnStopped {
+                                                reason: crate::protocol::TurnStopReason::LimitReached,
+                                                message: format!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES),
+                                                provider_stop_reason: None,
+                                            });
                                             return Err(anyhow::anyhow!(
                                                 "Context limit exceeded after {} compaction retries",
                                                 Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -345,8 +421,8 @@ impl Agent {
                 .checked_sub(std::time::Duration::from_secs(10))
                 .unwrap_or_else(Instant::now);
             let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let mut current_tool: Option<ToolCall> = None;
-            let mut current_tool_input = String::new();
+            let mut current_tool: Option<String> = None;
+            let mut streaming_tools: HashMap<String, (ToolCall, String)> = HashMap::new();
             let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
@@ -370,6 +446,12 @@ impl Agent {
             // to clients as a keepalive; throttles issue #451 keepalives.
             let mut hidden_activity_last = Instant::now();
             let mut openai_reasoning_items: Vec<ContentBlock> = Vec::new();
+            // Provider-executed tool items (e.g. native web search), stored
+            // verbatim at their position in the response for exact replay.
+            let mut provider_native_items =
+                jcode_message_types::provider_native::ProviderNativeItems::default();
+            let mut provider_native_tracker =
+                jcode_message_types::provider_native::ProviderNativeTracker::default();
             let mut openai_native_compaction: Option<(String, usize, Option<u64>)> = None;
             let mut tool_id_to_name: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
@@ -426,6 +508,17 @@ impl Agent {
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
+                        record_partial_stream_usage(
+                            &self.session.id,
+                            provider.name(),
+                            &model_at_request_start,
+                            [
+                                usage_input,
+                                usage_output,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            ],
+                        );
                         let err_str = e.to_string();
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             log_agent_provider_stream_lifecycle(
@@ -447,6 +540,14 @@ impl Agent {
                                 logging::warn(
                                     "Context-limit compaction retry limit reached; giving up",
                                 );
+                                let _ = event_tx.send(ServerEvent::TurnStopped {
+                                    reason: crate::protocol::TurnStopReason::LimitReached,
+                                    message: format!(
+                                        "Context limit exceeded after {} compaction retries",
+                                        Self::MAX_CONTEXT_LIMIT_RETRIES
+                                    ),
+                                    provider_stop_reason: None,
+                                });
                                 return Err(anyhow::anyhow!(
                                     "Context limit exceeded after {} compaction retries",
                                     Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -477,6 +578,11 @@ impl Agent {
                     }
                 };
 
+                let input_tool_id = match &event {
+                    StreamEvent::ToolInputDeltaFor { id, .. }
+                    | StreamEvent::ToolUseEndFor { id } => Some(id.clone()),
+                    _ => current_tool.clone(),
+                };
                 match event {
                     StreamEvent::ThinkingStart => {
                         // Reasoning tokens are counted in provider output usage even when
@@ -528,6 +634,73 @@ impl Agent {
                     StreamEvent::TextDone => {
                         let _ = event_tx.send(ServerEvent::TextDone);
                     }
+                    StreamEvent::ProviderNative { provider, item } => {
+                        if reasoning_open {
+                            reasoning_open = false;
+                            let _ = event_tx.send(ServerEvent::ReasoningDone {
+                                duration_secs: None,
+                            });
+                        }
+                        // Render as a regular tool row: start, input, exec, done.
+                        use jcode_message_types::provider_native::ProviderNativeToolEvent;
+                        let already_open =
+                            jcode_message_types::provider_native::provider_native_display(
+                                &provider, &item,
+                            )
+                            .is_some_and(|display| provider_native_tracker.is_started(&display.id));
+                        match provider_native_tracker.observe(&provider, &item) {
+                            Some(ProviderNativeToolEvent::Started { id, name, input }) => {
+                                let _ = event_tx.send(ServerEvent::ToolStart {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                });
+                                let _ = event_tx.send(ServerEvent::ToolInput {
+                                    id: Some(id.clone()),
+                                    delta: input.to_string(),
+                                });
+                                let _ = event_tx.send(ServerEvent::ToolExec { id, name });
+                            }
+                            Some(ProviderNativeToolEvent::Completed {
+                                id,
+                                name,
+                                input,
+                                output,
+                                is_error,
+                            }) => {
+                                if !already_open {
+                                    // Result without a start (e.g. OpenAI items
+                                    // arrive whole): open the row first.
+                                    let _ = event_tx.send(ServerEvent::ToolStart {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                    });
+                                    let _ = event_tx.send(ServerEvent::ToolInput {
+                                        id: Some(id.clone()),
+                                        delta: input.to_string(),
+                                    });
+                                    let _ = event_tx.send(ServerEvent::ToolExec {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                    });
+                                }
+                                let _ = event_tx.send(ServerEvent::ToolDone {
+                                    id,
+                                    name,
+                                    output,
+                                    error: is_error.then(|| "Provider tool error".to_string()),
+                                });
+                            }
+                            None => {}
+                        }
+                        if let Some(display) =
+                            jcode_message_types::provider_native::provider_native_display(
+                                &provider, &item,
+                            )
+                        {
+                            tool_id_to_name.insert(display.id, display.name);
+                        }
+                        provider_native_items.push(text_content.len(), provider, item);
+                    }
                     StreamEvent::TextDelta(text) => {
                         // Close any open reasoning region before real output so the
                         // answer renders as a normal paragraph rather than as reasoning.
@@ -575,6 +748,11 @@ impl Agent {
                         }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        if streaming_tools.contains_key(&id)
+                            || tool_calls.iter().any(|tool: &ToolCall| tool.id == id)
+                        {
+                            continue;
+                        }
                         if reasoning_open {
                             reasoning_open = false;
                             let _ = event_tx.send(ServerEvent::ReasoningDone {
@@ -586,23 +764,38 @@ impl Agent {
                             name: name.clone(),
                         });
                         tool_id_to_name.insert(id.clone(), name.clone());
-                        current_tool = Some(ToolCall {
-                            id,
-                            name,
-                            input: serde_json::Value::Null,
-                            intent: None,
-                            thought_signature: None,
+                        current_tool = Some(id.clone());
+                        streaming_tools.entry(id.clone()).or_insert_with(|| {
+                            (
+                                ToolCall {
+                                    id,
+                                    name,
+                                    input: serde_json::Value::Null,
+                                    intent: None,
+                                    thought_signature: None,
+                                },
+                                String::new(),
+                            )
                         });
-                        current_tool_input.clear();
                     }
-                    StreamEvent::ToolInputDelta(delta) => {
+                    StreamEvent::ToolInputDelta(delta)
+                    | StreamEvent::ToolInputDeltaFor { delta, .. } => {
                         let _ = event_tx.send(ServerEvent::ToolInput {
+                            id: input_tool_id.clone(),
                             delta: delta.clone(),
                         });
-                        current_tool_input.push_str(&delta);
+                        if let Some((_, input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.get_mut(id))
+                        {
+                            input.push_str(&delta);
+                        }
                     }
-                    StreamEvent::ToolUseEnd => {
-                        if let Some(mut tool) = current_tool.take() {
+                    StreamEvent::ToolUseEnd | StreamEvent::ToolUseEndFor { .. } => {
+                        if let Some((mut tool, current_tool_input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.remove(id))
+                        {
                             tool.input =
                                 ToolCall::parse_streamed_input_to_object(&current_tool_input);
                             tool.refresh_intent_from_input();
@@ -613,7 +806,20 @@ impl Agent {
                             });
 
                             tool_calls.push(tool);
-                            current_tool_input.clear();
+                            if current_tool == input_tool_id {
+                                current_tool = None;
+                            }
+                        }
+                    }
+                    StreamEvent::ToolUseSignatureFor { id, signature } => {
+                        if !signature.is_empty() {
+                            if let Some((tool, _)) = streaming_tools.get_mut(&id) {
+                                tool.thought_signature = Some(signature);
+                            } else if let Some(tool) =
+                                tool_calls.iter_mut().find(|tool| tool.id == id)
+                            {
+                                tool.thought_signature = Some(signature);
+                            }
                         }
                     }
                     StreamEvent::ToolUseSignature(signature) => {
@@ -764,7 +970,7 @@ impl Agent {
                         text_wrapped_detected = false;
                         tool_calls.clear();
                         current_tool = None;
-                        current_tool_input.clear();
+                        streaming_tools.clear();
                         tool_id_to_name.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
@@ -772,6 +978,8 @@ impl Agent {
                         reasoning_signature.clear();
                         reasoning_open = false;
                         openai_reasoning_items.clear();
+                        provider_native_items.clear();
+                        provider_native_tracker.clear();
                         openai_native_compaction = None;
                         saw_message_end = false;
                         stop_reason = None;
@@ -885,6 +1093,17 @@ impl Agent {
                         message,
                         retry_after_secs,
                     } => {
+                        record_partial_stream_usage(
+                            &self.session.id,
+                            provider.name(),
+                            &model_at_request_start,
+                            [
+                                usage_input,
+                                usage_output,
+                                usage_cache_read,
+                                usage_cache_creation,
+                            ],
+                        );
                         if self.try_auto_compact_after_context_limit(&message) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
@@ -905,6 +1124,14 @@ impl Agent {
                                 logging::warn(
                                     "Context-limit compaction retry limit reached; giving up",
                                 );
+                                let _ = event_tx.send(ServerEvent::TurnStopped {
+                                    reason: crate::protocol::TurnStopReason::LimitReached,
+                                    message: format!(
+                                        "Context limit exceeded after {} compaction retries",
+                                        Self::MAX_CONTEXT_LIMIT_RETRIES
+                                    ),
+                                    provider_stop_reason: None,
+                                });
                                 return Err(anyhow::anyhow!(
                                     "Context limit exceeded after {} compaction retries",
                                     Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -995,6 +1222,18 @@ impl Agent {
                     usage_cache_read,
                     usage_cache_creation,
                 );
+                crate::telemetry::record_provider_usage(
+                    Some(&self.session.id),
+                    provider.name(),
+                    &model_at_request_start,
+                    crate::telemetry::UsageSource::Agent,
+                    crate::telemetry::ProviderUsage {
+                        input_tokens: usage_input.unwrap_or(0),
+                        output_tokens: usage_output.unwrap_or(0),
+                        cache_read_input_tokens: usage_cache_read,
+                        cache_creation_input_tokens: usage_cache_creation,
+                    },
+                );
 
                 let input = usage_input.unwrap_or(0);
                 let output = usage_output.unwrap_or(0);
@@ -1019,6 +1258,13 @@ impl Agent {
                     cache_read_input: usage_cache_read,
                     cache_creation_input: usage_cache_creation,
                 });
+                if let Some(miss) = self.finish_kv_cache_monitor_request(
+                    usage_input.unwrap_or(0),
+                    usage_cache_read,
+                    usage_cache_creation,
+                ) {
+                    let _ = event_tx.send(miss);
+                }
             }
 
             // Store usage for debug queries
@@ -1054,7 +1300,10 @@ impl Agent {
                     id: 0,
                     model: model_after_stream,
                     provider_name: Some(provider_name),
+                    context_window: Some(self.provider.context_window() as u64),
                     error: None,
+                    resolved_credential: self.provider.active_resolved_credential(),
+                    reasoning_effort: self.provider.reasoning_effort(),
                 });
             }
 
@@ -1075,6 +1324,7 @@ impl Agent {
                 });
                 tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
                 let _ = event_tx.send(ServerEvent::ToolInput {
+                    id: Some(tc.id.clone()),
                     delta: tc.input.to_string(),
                 });
                 let _ = event_tx.send(ServerEvent::ToolExec {
@@ -1085,7 +1335,9 @@ impl Agent {
 
             // Add assistant message to history
             let mut content_blocks = Vec::new();
-            if !text_content.is_empty() {
+            if !provider_native_items.is_empty() {
+                content_blocks.extend(provider_native_items.interleave(&text_content));
+            } else if !text_content.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: text_content.clone(),
                     cache_control: None,
@@ -1207,6 +1459,12 @@ impl Agent {
                     &mut incomplete_continuations,
                 )? {
                     NoToolCallOutcome::Break => {
+                        if saw_message_end
+                            && !self.is_graceful_shutdown()
+                            && let Some(event) = incomplete_turn_stop(stop_reason.as_deref())
+                        {
+                            let _ = event_tx.send(event);
+                        }
                         // Surface silent guardrail/refusal stops: the provider
                         // ended the turn with no visible output (e.g. Anthropic
                         // stop_reason "refusal", or a reasoning-only response).
@@ -1289,6 +1547,8 @@ impl Agent {
 
             // Execute tools and add results
             let tool_count = tool_calls.len();
+            let mut malformed_calls: Vec<MalformedToolCallInfo> = Vec::new();
+            let mut executed_valid_call = false;
             let mut tool_results_dirty = false;
             for tool_index in 0..tool_count {
                 // === INJECTION POINT C (before): Check for urgent abort before each tool (except first) ===
@@ -1335,6 +1595,10 @@ impl Agent {
                     .unwrap_or_else(|| self.session.id.clone());
 
                 if let Some(error_msg) = tc.validation_error() {
+                    malformed_calls.push(MalformedToolCallInfo {
+                        name: tc.name.clone(),
+                        error: error_msg.clone(),
+                    });
                     logging::warn(&error_msg);
                     let _ = event_tx.send(ServerEvent::ToolDone {
                         id: tc.id.clone(),
@@ -1354,6 +1618,10 @@ impl Agent {
                     continue;
                 }
 
+                // A call that passed validation is genuinely valid even if
+                // the tool itself later fails: it resets the malformed-round
+                // bound in handle_malformed_tool_round below.
+                executed_valid_call = true;
                 self.validate_tool_allowed(&tc.name)?;
 
                 let is_native_tool = JCODE_NATIVE_TOOLS.contains(&tc.name.as_str());
@@ -1635,6 +1903,18 @@ impl Agent {
                 self.session.save()?;
             }
 
+            // Bounded recovery for repeated malformed tool calls (e.g. a
+            // model emitting null arguments): correct with the expected
+            // schema, then end the turn with an actionable error instead of
+            // retrying the same malformed round forever. Mirrors the blocking
+            // loop (turn_loops.rs) via the shared helper.
+            self.handle_malformed_tool_round(
+                &malformed_calls,
+                executed_valid_call,
+                &mut consecutive_malformed_tool_rounds,
+                &tools,
+            )?;
+
             // === INJECTION POINT D: All tools done, before next API call ===
             // This is the safest point for non-urgent injection since all tool_results
             // have been added and the conversation is in a valid state.
@@ -1652,114 +1932,5 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn tool_call(name: &str, input: serde_json::Value) -> ToolCall {
-        ToolCall {
-            id: "toolu_test".to_string(),
-            name: name.to_string(),
-            input,
-            intent: None,
-            thought_signature: None,
-        }
-    }
-
-    #[test]
-    fn reload_interrupted_bg_wait_is_non_error_and_resumable() {
-        let tc = tool_call(
-            "bg",
-            json!({"action": "wait", "task_id": "bg-123", "max_wait_seconds": 300}),
-        );
-
-        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
-
-        assert!(!is_error);
-        assert!(message.contains("Resume the wait"));
-        assert!(message.contains("\"task_id\":\"bg-123\""));
-    }
-
-    #[test]
-    fn reload_interrupted_non_wait_tool_remains_error() {
-        let tc = tool_call("bash", json!({"command": "sleep 10"}));
-
-        let (message, is_error) = reload_interrupted_tool_result(&tc, 1.2);
-
-        assert!(is_error);
-        assert!(message.contains("interrupted by server reload"));
-    }
-
-    /// Reference O(n) full scan, preserving the original precedence: the
-    /// `to=functions.` marker is checked before `+#+#`.
-    fn find_wrap_marker_full(text: &str) -> Option<usize> {
-        text.find("to=functions.").or_else(|| text.find("+#+#"))
-    }
-
-    /// Simulate streaming `full` in arbitrary deltas and assert the incremental
-    /// scan finds the first marker position, matching a full rescan each step.
-    fn assert_incremental_matches(full: &str, chunk: usize) {
-        let mut acc = String::new();
-        let mut incremental_hit: Option<usize> = None;
-        let bytes = full.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let mut end = (i + chunk).min(bytes.len());
-            while end < bytes.len() && !full.is_char_boundary(end) {
-                end += 1;
-            }
-            let delta = &full[i..end];
-            acc.push_str(delta);
-            if incremental_hit.is_none() {
-                incremental_hit = find_wrap_marker_incremental(&acc, delta.len());
-            }
-            i = end;
-        }
-        // The earliest of either marker in the full text.
-        let fn_pos = full.find("to=functions.");
-        let plus_pos = full.find("+#+#");
-        let expected = match (fn_pos, plus_pos) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        assert_eq!(
-            incremental_hit, expected,
-            "incremental scan mismatch for {full:?} chunk={chunk}"
-        );
-    }
-
-    #[test]
-    fn wrap_marker_incremental_detects_markers_across_chunk_sizes() {
-        let cases = [
-            "plain answer with no marker at all",
-            "answer then to=functions.foo({})",
-            "answer then +#+# wrapped",
-            "prefix +#+# and later to=functions.bar",
-            "unicode 🔄 résumé then to=functions.baz",
-            "",
-            "to=functions.first",
-            "+#+#",
-        ];
-        for case in cases {
-            for chunk in [1usize, 2, 3, 5, 7, 100] {
-                assert_incremental_matches(case, chunk);
-            }
-        }
-    }
-
-    #[test]
-    fn wrap_marker_incremental_finds_marker_straddling_delta_boundary() {
-        // Feed "to=functions." split right in the middle so the marker only
-        // exists once both halves are appended; the overlap window must catch it.
-        let mut acc = String::new();
-        acc.push_str("answer to=fun");
-        assert_eq!(
-            find_wrap_marker_incremental(&acc, "answer to=fun".len()),
-            None
-        );
-        acc.push_str("ctions.tool");
-        let hit = find_wrap_marker_incremental(&acc, "ctions.tool".len());
-        assert_eq!(hit, find_wrap_marker_full(&acc));
-        assert_eq!(hit, Some("answer ".len()));
-    }
-}
+#[path = "turn_streaming_mpsc_tests.rs"]
+mod tests;

@@ -318,11 +318,20 @@ pub fn curated_models() -> &'static [CuratedModel] {
     CURATED_MODELS
 }
 
+/// Default subscription model: the newest flagship in the curated catalog,
+/// ranked by the same policy as every other provider's post-login selection.
+/// Every curated entry is served by the jcode router, so adding a newer
+/// flagship to [`CURATED_MODELS`] moves the default without editing flags.
+/// `default_enabled` remains the fallback when nothing ranks.
 pub fn default_model() -> &'static CuratedModel {
-    CURATED_MODELS
-        .iter()
-        .find(|model| model.default_enabled)
-        .unwrap_or(&CURATED_MODELS[0])
+    static DEFAULT: std::sync::OnceLock<&'static CuratedModel> = std::sync::OnceLock::new();
+    DEFAULT.get_or_init(|| {
+        let ids: Vec<&str> = CURATED_MODELS.iter().map(|model| model.id).collect();
+        crate::auth::lifecycle::ranked_flagship_for_provider("claude", &ids)
+            .and_then(|best| CURATED_MODELS.iter().find(|model| model.id == best))
+            .or_else(|| CURATED_MODELS.iter().find(|model| model.default_enabled))
+            .unwrap_or(&CURATED_MODELS[0])
+    })
 }
 
 /// Normalize a model id for curated-catalog matching: strips any `@provider`
@@ -414,8 +423,8 @@ pub fn persist_account_credentials(
         anyhow::bail!("refusing to persist an empty jcode account API key");
     }
 
+    provider_catalog::save_named_api_key(JCODE_ENV_FILE, JCODE_API_KEY_ENV, api_key)?;
     for (key, value) in [
-        (JCODE_API_KEY_ENV, Some(api_key)),
         (JCODE_ACCOUNT_ID_ENV, nonempty(account_id)),
         (JCODE_ACCOUNT_EMAIL_ENV, nonempty(email)),
         (JCODE_TIER_ENV, nonempty(tier)),
@@ -601,8 +610,14 @@ mod tests {
     }
 
     #[test]
-    fn default_model_is_opus() {
-        assert_eq!(default_model().id, "claude-opus-4-8");
+    fn default_model_is_newest_curated_flagship() {
+        // The curated catalog holds Opus 4.8 and Opus 5; the default must be the
+        // newest flagship, not the legacy `default_enabled` entry (Opus 4.8).
+        let ids: Vec<&str> = CURATED_MODELS.iter().map(|model| model.id).collect();
+        let expected = crate::auth::lifecycle::ranked_flagship_for_provider("claude", &ids)
+            .expect("curated catalog has a ranked Claude flagship");
+        assert_eq!(default_model().id, expected);
+        assert_ne!(default_model().id, "claude-opus-4-8");
     }
 
     #[test]

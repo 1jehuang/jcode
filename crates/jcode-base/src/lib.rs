@@ -8,7 +8,8 @@
 //!
 //! `jcode-app-core` re-exports this crate via `pub use jcode_base::*`, so every
 //! existing `crate::<module>` path in the upper layers keeps resolving.
-
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 #![allow(
     unknown_lints,
     clippy::collapsible_match,
@@ -18,9 +19,11 @@
 )]
 
 pub mod account_login;
+pub mod applets;
 pub mod auth;
 pub mod background;
 pub mod browser;
+pub mod browser_detect;
 pub mod bus;
 pub mod cache_invalidation;
 pub mod cache_tracker;
@@ -37,15 +40,20 @@ pub mod embedding_backend;
 #[cfg(not(feature = "embeddings"))]
 pub mod embedding_stub;
 pub mod env;
+pub mod external_auth;
 pub mod gateway;
 pub mod generated_image;
 pub mod github;
 pub mod gmail;
 pub mod goal;
+pub mod google_calendar;
 pub mod hooks;
 pub mod id;
+pub mod image_normalize;
 pub mod import;
 pub mod jev;
+pub mod kv_cache_monitor;
+pub mod lid_override;
 pub mod live_tests;
 pub mod logging;
 pub mod login_qr;
@@ -89,12 +97,14 @@ pub mod stdin_detect;
 pub mod storage;
 pub mod subscription_api;
 pub mod subscription_catalog;
+pub mod subscription_notice;
 pub mod telegram;
 pub mod telemetry {
     pub use jcode_telemetry_core::*;
 }
 pub mod terminal_launch;
 pub mod todo;
+pub mod transcript_sample;
 pub mod transport;
 pub mod usage;
 pub mod util;

@@ -252,10 +252,10 @@ pub fn adapt_buffer_for_display(buf: &mut Buffer) {
 
 /// The same ordering for a foreground patched outside a full-frame redraw.
 pub fn adapt_foreground_for_display(color: Color, background: Color) -> Color {
-    if let Some(palette) = crate::palette::configured_palette() {
-        if let Some(chosen) = crate::palette::configured_native_color(&palette, color) {
-            return chosen;
-        }
+    if let Some(palette) = crate::palette::configured_palette()
+        && let Some(chosen) = crate::palette::configured_native_color(&palette, color)
+    {
+        return chosen;
     }
     adapt_foreground_for_theme(color, background)
 }
@@ -345,8 +345,9 @@ mod tests {
         }
     }
 
-    // The theme mode is a process-global; serialize tests that mutate it.
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // The theme mode and palette are process-global; the crate-level lock
+    // serializes every test that touches them.
+    use crate::STYLE_TEST_LOCK as TEST_LOCK;
 
     fn with_light_theme(f: impl FnOnce()) {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

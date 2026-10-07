@@ -156,10 +156,9 @@ fn count_legacy_messages(messages: &[Value]) -> SessionEditStats {
                             | "patch"
                             | "apply_patch"
                             | "batch"
-                    ) {
-                        if let Some(id) = block["id"].as_str() {
-                            calls.insert(id, (name, &block["input"]));
-                        }
+                    ) && let Some(id) = block["id"].as_str()
+                    {
+                        calls.insert(id, (name, &block["input"]));
                     }
                 }
                 Some("tool_result") if block["is_error"] != true => {
@@ -334,10 +333,10 @@ fn scan_queue() {
         });
         let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
         cache.pending.remove(&key);
-        if cache.entries.len() >= 512 {
-            if let Some(key) = cache.entries.keys().next().cloned() {
-                cache.entries.remove(&key);
-            }
+        if cache.entries.len() >= 512
+            && let Some(key) = cache.entries.keys().next().cloned()
+        {
+            cache.entries.remove(&key);
         }
         cache.entries.insert(key, (current, stats));
     }

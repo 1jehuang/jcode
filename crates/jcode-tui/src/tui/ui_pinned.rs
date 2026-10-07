@@ -8,9 +8,7 @@ mod layout_support;
 mod util_support;
 use crate::tui::mermaid;
 #[cfg(test)]
-use layout_support::{
-    clamp_side_panel_image_rows, estimate_side_panel_image_rows_with_font,
-};
+use layout_support::{clamp_side_panel_image_rows, estimate_side_panel_image_rows_with_font};
 use layout_support::{
     estimate_side_panel_image_layout, estimate_side_panel_image_layout_with_font,
     fit_image_area_with_font, plan_fit_image_render, scaled_image_rows,
@@ -582,8 +580,13 @@ pub(super) fn draw_side_panel_markdown(
     ));
     title_parts.push(Span::styled(
         format!(
-            " {} hide ",
-            crate::tui::keybind::side_panel_toggle_key_label()
+            " {} {} ",
+            crate::tui::keybind::side_panel_toggle_key_label(),
+            if app.side_panel_fullscreen() {
+                "hide"
+            } else {
+                "fullscreen"
+            }
         ),
         Style::default().fg(dim_color()),
     ));

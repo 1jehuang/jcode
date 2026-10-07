@@ -789,7 +789,9 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     session.model = Some("claude-opus-4-6".to_string());
     session.provider_key = Some("claude-api".to_string());
     session.route_api_method = Some("claude-api".to_string());
-    session.save().expect("persist coordinator session");
+    session
+        .save_prepared()
+        .expect("persist coordinator session");
 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
     // must not block and must read the persisted identity instead of defaults.
@@ -1204,4 +1206,23 @@ fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
     // With neither, the worker inherits the provider-wide effort.
     assert_eq!(resolve_swarm_spawn_effort(None, None), None);
     assert_eq!(resolve_swarm_spawn_effort(Some(""), Some("")), None);
+}
+
+#[test]
+fn per_call_auto_spawn_mode_defers_to_configured_mode() {
+    use super::resolve_swarm_spawn_mode;
+    use crate::config::SwarmSpawnMode::{Auto, Headless, Inline, Visible};
+
+    // A model passing `auto` must not override an inline config with a
+    // visible-terminal attempt (workers opened outside VS Code).
+    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Inline), Inline);
+    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Headless), Headless);
+    assert_eq!(resolve_swarm_spawn_mode(None, Inline), Inline);
+    // A configured `auto` keeps its visible-then-headless behavior.
+    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Auto), Auto);
+    assert_eq!(resolve_swarm_spawn_mode(None, Auto), Auto);
+    // Explicit concrete modes still win over config.
+    assert_eq!(resolve_swarm_spawn_mode(Some(Visible), Inline), Visible);
+    assert_eq!(resolve_swarm_spawn_mode(Some(Headless), Visible), Headless);
+    assert_eq!(resolve_swarm_spawn_mode(Some(Inline), Visible), Inline);
 }

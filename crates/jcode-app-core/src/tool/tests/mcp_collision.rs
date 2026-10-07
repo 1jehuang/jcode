@@ -310,3 +310,62 @@ async fn mcp_collision_refresh_preserves_offline_cache_and_legacy_allowlists() {
     registry.refresh_mcp_tools(Vec::new(), &[]).await;
     assert!(registry.tool_names().await.is_empty());
 }
+
+#[tokio::test]
+async fn sdk_custom_collision_alias_cannot_bypass_legacy_deny() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let manager = Arc::new(RwLock::new(crate::mcp::McpManager::with_config(
+        crate::mcp::McpConfig::default(),
+    )));
+    let catalog = collision_catalog();
+    let aliases = crate::mcp::dispatch_names(&catalog);
+    registry
+        .reconcile_mcp_tools(crate::mcp::create_mcp_tools_from_cached_many(
+            &catalog, manager,
+        ))
+        .await;
+    let legacy = crate::mcp::dispatch_name(&catalog[0].0, &catalog[0].1.name);
+    let agent = crate::agent::Agent::new(provider, registry.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    sdk::configure(
+        agent.session_id(),
+        "collision-owner",
+        crate::protocol::SessionToolConfig {
+            enabled: Some(vec!["batch".into()]),
+            disabled: vec![legacy],
+            custom: vec![crate::protocol::SessionToolDefinition {
+                name: aliases[0].clone(),
+                description: "SDK collision override".into(),
+                parameters: serde_json::json!({"type":"object"}),
+            }],
+        },
+        tx,
+    )
+    .unwrap();
+    assert!(
+        !agent
+            .tool_definitions_for_debug()
+            .await
+            .iter()
+            .any(|tool| tool.name == aliases[0])
+    );
+    assert!(
+        agent
+            .execute_tool(&aliases[0], serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("disabled")
+    );
+    let output = agent
+        .execute_tool(
+            "batch",
+            serde_json::json!({"tool_calls":[{"tool": aliases[0], "intent":"denied"}]}),
+        )
+        .await
+        .unwrap();
+    assert!(output.output.contains("disabled"));
+    assert!(rx.try_recv().is_err());
+}

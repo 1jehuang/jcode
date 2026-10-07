@@ -715,6 +715,162 @@ fn test_record_token_usage_aggregates_session_and_turn() {
 }
 
 #[test]
+fn usage_report_rejections_do_not_trip_the_process_breaker() {
+    assert!(payload_is_breaker_exempt(
+        &serde_json::json!({"event": "usage_report"})
+    ));
+    assert!(!payload_is_breaker_exempt(
+        &serde_json::json!({"event": "session_end"})
+    ));
+    assert!(!payload_is_breaker_exempt(&serde_json::json!({})));
+}
+
+#[test]
+fn usage_report_is_attributed_to_caller_session_not_global_slot() {
+    let _guard = lock_telemetry_test_state();
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+    // The global slot belongs to a different (most recently created) agent,
+    // as happens when a swarm worker is constructed in a shared server.
+    begin_session_with_mode("claude", "claude-opus-5", None, false);
+    let global_session = SESSION_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|state| state.session_id.clone())
+        .unwrap();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+
+    record_provider_usage(
+        Some("agent-session-a"),
+        "OpenAI",
+        "gpt-6-astra",
+        UsageSource::Agent,
+        ProviderUsage {
+            input_tokens: 1_000,
+            output_tokens: 200,
+            cache_read_input_tokens: Some(800),
+            cache_creation_input_tokens: None,
+        },
+    );
+
+    let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
+    let report = emitted
+        .iter()
+        .find(|payload| payload["event"] == "usage_report")
+        .expect("usage_report emitted");
+    assert_eq!(report["session_id"], "agent-session-a");
+    assert_ne!(report["session_id"], global_session.as_str());
+    assert_eq!(report["provider"], "OpenAI");
+    assert_eq!(report["model"], "gpt-6-astra");
+    assert_eq!(report["source"], "agent");
+    assert_eq!(report["input_tokens"], 1_000);
+    assert_eq!(report["output_tokens"], 200);
+    assert_eq!(report["cache_read_input_tokens"], 800);
+    assert_eq!(report["cache_creation_input_tokens"], 0);
+    assert_eq!(report["total_tokens"], 2_000);
+    assert_eq!(report["responses"], 1);
+    assert!(report.get("build_channel").is_some());
+    assert!(report.get("is_ci").is_some());
+    // No content-bearing fields.
+    for forbidden in ["prompt", "text", "content", "messages"] {
+        assert!(
+            report.get(forbidden).is_none(),
+            "{forbidden} must not be sent"
+        );
+    }
+
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+}
+
+#[test]
+fn usage_report_falls_back_to_global_session_and_skips_zero_usage() {
+    let _guard = lock_telemetry_test_state();
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+    begin_session_with_mode("openai", "gpt-5.6-luna", None, false);
+    let global_session = SESSION_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|state| state.session_id.clone())
+        .unwrap();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+
+    record_provider_usage(
+        None,
+        "openai",
+        "gpt-5.6-luna",
+        UsageSource::Compaction,
+        ProviderUsage::default(),
+    );
+    assert!(
+        TEST_EMITTED_PAYLOADS
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|payload| payload["event"] != "usage_report"),
+        "zero usage must not emit"
+    );
+
+    record_simple_completion_usage(
+        None,
+        "openai",
+        "gpt-5.6-luna",
+        UsageSource::Compaction,
+        jcode_provider_core::SimpleCompletionUsage {
+            input_tokens: Some(3_000),
+            output_tokens: Some(400),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        },
+    );
+    let emitted = TEST_EMITTED_PAYLOADS.lock().unwrap().clone();
+    let report = emitted
+        .iter()
+        .find(|payload| payload["event"] == "usage_report")
+        .expect("compaction usage_report emitted");
+    assert_eq!(report["session_id"], global_session.as_str());
+    assert_eq!(report["source"], "compaction");
+    assert_eq!(report["total_tokens"], 3_400);
+
+    if let Ok(mut session) = SESSION_STATE.lock() {
+        *session = None;
+    }
+}
+
+#[test]
+fn usage_report_respects_opt_out() {
+    let _guard = lock_telemetry_test_state();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    jcode_core::env::set_var("JCODE_NO_TELEMETRY", "1");
+    record_provider_usage(
+        Some("s"),
+        "openai",
+        "gpt-5.6-luna",
+        UsageSource::Sidecar,
+        ProviderUsage {
+            input_tokens: 10,
+            output_tokens: 10,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        },
+    );
+    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
+    assert!(
+        TEST_EMITTED_PAYLOADS
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|payload| payload["event"] != "usage_report")
+    );
+}
+
+#[test]
 fn test_record_todo_tool_and_gates_aggregate_session_and_turn() {
     let _guard = lock_telemetry_test_state();
     if let Ok(mut session) = SESSION_STATE.lock() {

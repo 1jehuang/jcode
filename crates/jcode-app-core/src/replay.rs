@@ -458,7 +458,10 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                 if !input_str.is_empty() && input_str != "null" {
                     out.push((
                         0,
-                        ReplayEvent::Server(ServerEvent::ToolInput { delta: input_str }),
+                        ReplayEvent::Server(ServerEvent::ToolInput {
+                            id: None,
+                            delta: input_str,
+                        }),
                     ));
                 }
 

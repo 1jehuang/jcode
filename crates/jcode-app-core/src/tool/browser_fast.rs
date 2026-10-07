@@ -104,9 +104,14 @@ fn redact_credentials(value: &mut Value) -> bool {
                 false
             }
         }
-        Value::Array(items) => items
-            .iter_mut()
-            .fold(false, |found, item| redact_credentials(item) || found),
+        Value::Array(items) => {
+            // Visit every item: redaction mutates in place, so do not short-circuit.
+            let mut found = false;
+            for item in items.iter_mut() {
+                found |= redact_credentials(item);
+            }
+            found
+        }
         Value::Object(items) => items.iter_mut().fold(false, |found, (key, item)| {
             let key = key.to_ascii_lowercase().replace('-', "_");
             if matches!(
@@ -720,7 +725,20 @@ pub(super) async fn run(
     }.await;
     let (status, reason) = match result {
         Ok(pair) => pair,
-        Err(error) => ("hand_back", format!("{error:#}")),
+        Err(error) => {
+            if let Some(quota) = crate::subscription_notice::from_error(&error) {
+                // A plan limit cannot be fixed by retrying. Tell the agent to
+                // relay the upgrade prompt to the user and use direct actions.
+                crate::subscription_notice::show_upgrade_card(quota, &ctx.session_id);
+                requested_help = Some("upgrade");
+                (
+                    "hand_back",
+                    format!("{quota} Tell the user this and continue with direct browser actions."),
+                )
+            } else {
+                ("hand_back", format!("{error:#}"))
+            }
+        }
     };
     if status == "hand_back"
         && let Some(last) = trace.last_mut()

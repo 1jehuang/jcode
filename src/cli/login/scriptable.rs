@@ -62,7 +62,8 @@ pub(super) async fn run_automatic_google_login(
     let tier = options
         .google_access_tier
         .unwrap_or(auth::google::GmailAccessTier::Full);
-    let tokens = auth::google::login(tier, options.no_browser).await?;
+    let services = default_google_services(options);
+    let tokens = auth::google::login(&services, tier, options.no_browser).await?;
     let credentials_path = auth::google::credentials_path()?;
     let tokens_path = auth::google::tokens_path()?;
 
@@ -77,11 +78,14 @@ pub(super) async fn run_automatic_google_login(
         },
     )?;
     if !options.json {
-        eprintln!("\nGmail setup complete!");
+        eprintln!("\nGoogle setup complete!");
         if let Some(email) = tokens.email {
             eprintln!("Account: {}", email);
         }
-        eprintln!("Access tier: {}", tokens.tier.label());
+        eprintln!(
+            "Services: {}",
+            auth::google::describe_services(&tokens.services, tokens.tier)
+        );
         eprintln!("Tokens saved to {}", tokens_path.display());
     }
     crate::telemetry::record_auth_success(provider_id, "oauth");
@@ -195,17 +199,25 @@ pub(super) async fn start_scriptable_login(
             let tier = options
                 .google_access_tier
                 .unwrap_or(auth::google::GmailAccessTier::Full);
+            let services = default_google_services(options);
             let (verifier, challenge) = auth::oauth::generate_pkce_public();
             let state = auth::oauth::generate_state_public();
             let redirect_uri = format!("http://127.0.0.1:{}", auth::google::DEFAULT_PORT);
-            let auth_url =
-                auth::google::build_auth_url(&creds, tier, &redirect_uri, &challenge, &state);
+            let auth_url = auth::google::build_auth_url(
+                &creds,
+                &services,
+                tier,
+                &redirect_uri,
+                &challenge,
+                &state,
+            );
             (
                 PendingScriptableLogin::Google {
                     verifier,
                     state,
                     redirect_uri,
                     tier,
+                    services: services.clone(),
                 },
                 auth_url,
                 "callback_url",
@@ -215,6 +227,7 @@ pub(super) async fn start_scriptable_login(
                     state: String::new(),
                     redirect_uri: String::new(),
                     tier,
+                    services,
                 }
                 .default_expires_at_ms(),
             )
@@ -547,6 +560,7 @@ pub(super) async fn complete_scriptable_google_login(
         state,
         redirect_uri,
         tier,
+        services,
     } = load_pending_login(&pending_path, "google")?
     else {
         anyhow::bail!("Pending Google login state is invalid.");
@@ -567,6 +581,7 @@ pub(super) async fn complete_scriptable_google_login(
         &callback_input,
         &state,
         &redirect_uri,
+        &services,
         tier,
     )
     .await?;
@@ -583,11 +598,14 @@ pub(super) async fn complete_scriptable_google_login(
         },
     )?;
     if !options.json {
-        eprintln!("Successfully logged in to Google/Gmail!");
+        eprintln!("Successfully logged in to Google!");
         if let Some(email) = tokens.email.as_deref() {
             eprintln!("Account: {}", email);
         }
-        eprintln!("Access tier: {}", tokens.tier.label());
+        eprintln!(
+            "Services: {}",
+            auth::google::describe_services(&tokens.services, tokens.tier)
+        );
         eprintln!("Tokens saved to {}", auth::google::tokens_path()?.display());
     }
     Ok(LoginFlowOutcome::Completed)
@@ -862,6 +880,8 @@ pub(super) fn resolve_auth_input(value: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+// Single caller; the fields map 1:1 onto the emitted prompt payload.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_scriptable_auth_prompt(
     provider: &str,
     auth_url: &str,

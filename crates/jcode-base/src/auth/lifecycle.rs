@@ -228,19 +228,128 @@ pub fn provider_model_to_select_after_auth_with_configured_default(
     let configured_model = configured_model
         .map(str::trim)
         .filter(|model| !model.is_empty());
-    if let Some(configured) = configured_model
+    // `config.provider.default_model` is persisted by the model picker as a
+    // full model spec that may carry an explicit provider/credential prefix
+    // (e.g. `claude-oauth:claude-sonnet-5`, issue: default model reverts to
+    // Opus after /login or /refresh-model-list). `route.model` is always the
+    // bare id, so compare against the prefix-stripped form or this branch
+    // never matches and silently falls through to the flagship-first
+    // fallback below.
+    let configured_bare = configured_model.map(|model| {
+        jcode_provider_core::selection::explicit_model_provider_prefix(model)
+            .map(|(_, _, bare)| bare)
+            .unwrap_or(model)
+    });
+    if let Some(configured) = configured_bare
         && routes.iter().any(|route| {
             route.available
                 && route.model == configured
                 && route_matches_activation(route, activation)
         })
+        && selected_model.map(str::trim) != Some(configured)
     {
-        if selected_model.map(str::trim) != Some(configured) {
-            return Some(configured.to_string());
-        }
+        return Some(configured.to_string());
     }
 
     provider_model_to_select_after_auth(activation, selected_model, routes)
+}
+
+/// Pick the strongest model among `models` for `provider_id`, using the same
+/// flagship-first order and new-release auto-promotion as post-login
+/// selection. Unlike [`provider_model_to_select_after_auth`] this does not
+/// filter by route identity, so clients that already scoped the candidates to
+/// one provider (Desktop's provider switcher, Copilot tier detection) can rank
+/// them directly. Returns `None` when the provider has no curated order or no
+/// candidate is recognized, so callers keep their own fallback.
+pub fn preferred_model_for_provider(provider_id: &str, models: &[&str]) -> Option<String> {
+    if let Some(ranked) = ranked_flagship_for_provider(provider_id, models) {
+        return Some(ranked);
+    }
+    let provider_id = normalized_auth_provider_id(Some(provider_id))
+        .map(str::to_string)
+        .unwrap_or_else(|| provider_id.trim().to_ascii_lowercase());
+    crate::provider_catalog::newest_released_model_for_openai_compatible_profile(&provider_id)
+        .filter(|newest| models.contains(&newest.as_str()))
+}
+
+/// Curated-order part of [`preferred_model_for_provider`]: new-release
+/// promotion, then flagship rank. `None` for providers without a curated
+/// order or when nothing in `models` is recognized. Never consults catalogs,
+/// so catalog code can call it without recursing.
+pub fn ranked_flagship_for_provider(provider_id: &str, models: &[&str]) -> Option<String> {
+    let provider_id = normalized_auth_provider_id(Some(provider_id))
+        .map(str::to_string)
+        .unwrap_or_else(|| provider_id.trim().to_ascii_lowercase());
+    let activation = AuthActivationResult {
+        provider_id: Some(provider_id.clone()),
+        ..Default::default()
+    };
+    let routes: Vec<ModelRoute> = models
+        .iter()
+        .map(|model| ModelRoute {
+            model: (*model).to_string(),
+            provider: String::new(),
+            api_method: provider_id.clone(),
+            available: true,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        })
+        .collect();
+    let route_refs: Vec<&ModelRoute> = routes.iter().collect();
+    if let Some(newer) = newest_frontier_release(&activation, &route_refs) {
+        return Some(newer);
+    }
+    let orders = provider_preferred_model_orders(&activation);
+    if !orders.is_empty() {
+        return routes
+            .iter()
+            .filter(|route| preferred_model_rank(orders, &route.model) != usize::MAX)
+            .min_by_key(|route| preferred_model_rank(orders, &route.model))
+            .map(|route| route.model.clone());
+    }
+    None
+}
+
+/// The model a fresh session starts on for one provider login, before any
+/// live catalog is fetched. `None` for providers Jcode cannot run (or that
+/// need a catalog to name a model, such as OpenRouter).
+pub fn default_model_for_provider(provider_id: &str) -> Option<&'static str> {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-api" | "anthropic" | "anthropic-api" => {
+            Some(jcode_provider_core::DEFAULT_CLAUDE_MODEL)
+        }
+        "openai" | "openai-api" | "codex" => Some(jcode_provider_core::DEFAULT_OPENAI_MODEL),
+        "copilot" => Some(crate::provider::copilot::DEFAULT_MODEL),
+        "gemini" => Some(crate::provider::gemini::DEFAULT_MODEL),
+        "antigravity" => Some(crate::provider::antigravity::DEFAULT_FALLBACK_MODEL),
+        "cursor" => Some(crate::provider::cursor::DEFAULT_MODEL),
+        _ => None,
+    }
+}
+
+/// Predict the provider and model a first session will use once onboarding
+/// finishes with these logins (already connected plus selected imports).
+/// Mirrors the strongest-route choice the runtime applies after an import
+/// ([`globally_preferred_default_route`]), so UIs can show the real identity
+/// instead of asking the user to choose. Ties keep the caller's order.
+/// Returns `(provider_id, model)`.
+pub fn onboarding_default_selection(provider_ids: &[&str]) -> Option<(String, String)> {
+    let routes: Vec<ModelRoute> = provider_ids
+        .iter()
+        .filter_map(|id| {
+            default_model_for_provider(id).map(|model| ModelRoute {
+                model: model.to_string(),
+                provider: id.trim().to_string(),
+                api_method: String::new(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+            })
+        })
+        .collect();
+    globally_preferred_default_route(&routes).map(|route| (route.provider, route.model))
 }
 
 /// Pick the strongest available route across every authenticated provider.
@@ -330,6 +439,11 @@ const ALL_GEMINI_MODELS: &[&str] = &[
     "gemini-1.5-flash",
 ];
 
+/// Curated flagship-first order for Grok (Grok Build subscription). Newer
+/// bare `grok-N.M` releases auto-promote via [`frontier_families`]; `code`/
+/// `fast` variants never do.
+const ALL_GROK_MODELS: &[&str] = &["grok-4.7", "grok-4.6", "grok-4.5", "grok-code-fast-1"];
+
 /// Flagship-first preference tiers used only to break ties when falling back to
 /// an arbitrary matching route after a login. Each inner slice is one curated
 /// family ordered best-first; earlier families outrank later ones. Returns an
@@ -349,10 +463,13 @@ fn provider_preferred_model_orders(
     match activation.provider_id.as_deref() {
         Some("claude") | Some("claude-api") => &[crate::provider::ALL_CLAUDE_MODELS],
         Some("openai") | Some("openai-api") => &[crate::provider::ALL_OPENAI_MODELS],
-        Some("copilot") | Some("cursor") => &[
+        // OpenRouter also proxies both families (`anthropic/claude-opus-5.5`,
+        // `openai/gpt-6-astra`); the vendor prefix is stripped before ranking.
+        Some("copilot") | Some("cursor") | Some("openrouter") => &[
             crate::provider::ALL_CLAUDE_MODELS,
             crate::provider::ALL_OPENAI_MODELS,
         ],
+        Some("grok-build") => &[ALL_GROK_MODELS],
         Some("bedrock") => &[ALL_BEDROCK_MODELS],
         // Azure hosts the OpenAI family.
         Some("azure-openai") => &[crate::provider::ALL_OPENAI_MODELS],
@@ -426,6 +543,14 @@ fn normalize_model_for_preference(model: &str) -> String {
     id = strip_bedrock_region_prefix(&id);
     if let Some(rest) = id.strip_prefix("anthropic.") {
         id = rest.to_string();
+    }
+
+    // Copilot and OpenRouter spell Claude releases with dots
+    // (`claude-opus-4.6`) while the curated catalog uses hyphens
+    // (`claude-opus-4-6`). Without this, dotted ids never match the curated
+    // order and Copilot/Desktop fall back to arbitrary catalog order.
+    if id.starts_with("claude-") {
+        id = id.replace('.', "-");
     }
 
     id
@@ -510,11 +635,16 @@ fn frontier_families(activation: &AuthActivationResult) -> &'static [FrontierFam
         prefix: "gemini",
         flagship_token: Some("pro"),
     };
+    const GROK: FrontierFamily = FrontierFamily {
+        prefix: "grok",
+        flagship_token: None,
+    };
     match activation.provider_id.as_deref() {
         Some("claude") | Some("claude-api") => &[CLAUDE, FABLE],
         Some("openai") | Some("openai-api") | Some("azure-openai") => &[GPT],
         // Copilot/Cursor proxy both families under canonical ids.
-        Some("copilot") | Some("cursor") => &[CLAUDE, FABLE, GPT],
+        Some("copilot") | Some("cursor") | Some("openrouter") => &[CLAUDE, FABLE, GPT],
+        Some("grok-build") => &[GROK],
         // Bedrock hosts Claude under `anthropic.claude-opus-...` (prefix stripped
         // by normalize), so the Claude family applies.
         Some("bedrock") => &[CLAUDE],
@@ -1249,6 +1379,33 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_default_selection_follows_global_preference() {
+        assert_eq!(onboarding_default_selection(&[]), None);
+        assert_eq!(onboarding_default_selection(&["openrouter"]), None);
+        assert_eq!(
+            onboarding_default_selection(&["gemini", "claude", "openai"]),
+            Some((
+                "openai".to_string(),
+                jcode_provider_core::DEFAULT_OPENAI_MODEL.to_string()
+            ))
+        );
+        assert_eq!(
+            onboarding_default_selection(&["gemini", "claude-api"]),
+            Some((
+                "claude-api".to_string(),
+                jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string()
+            ))
+        );
+        assert_eq!(
+            onboarding_default_selection(&["cursor", "gemini"]),
+            Some((
+                "cursor".to_string(),
+                crate::provider::cursor::DEFAULT_MODEL.to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn api_key_login_replaces_stale_process_env_with_saved_file_key() {
         // Issue #453: a server process that inherited a stale ANTHROPIC_API_KEY
         // must start using the key that /login just wrote to anthropic.env.
@@ -1949,6 +2106,43 @@ mod tests {
     }
 
     #[test]
+    fn post_auth_model_selection_preserves_provider_prefixed_configured_default() {
+        // Regression: config.provider.default_model is persisted by the model
+        // picker as a full spec with an explicit provider prefix (e.g.
+        // `claude-oauth:claude-sonnet-5`). Comparing that raw string against
+        // route.model (always bare) must not silently miss and fall through
+        // to the flagship-first pick (Opus) on every /login or
+        // /refresh-model-list.
+        let activation = AuthActivationResult {
+            provider_id: Some("claude".to_string()),
+            provider_label: Some("Anthropic".to_string()),
+            activated_model: None,
+            expected_runtime: None,
+            expected_catalog_namespace: None,
+        };
+        let routes = vec![
+            route(
+                jcode_provider_core::DEFAULT_CLAUDE_MODEL,
+                "Anthropic",
+                "claude-oauth",
+                true,
+            ),
+            route("claude-sonnet-5", "Anthropic", "claude-oauth", true),
+        ];
+
+        assert_eq!(
+            provider_model_to_select_after_auth_with_configured_default(
+                &activation,
+                Some("claude-oauth:claude-sonnet-5"),
+                Some(jcode_provider_core::DEFAULT_CLAUDE_MODEL),
+                &routes,
+            )
+            .as_deref(),
+            Some("claude-sonnet-5")
+        );
+    }
+
+    #[test]
     fn post_auth_model_selection_prefers_claude_oauth_flagship() {
         let activation = AuthActivationResult {
             provider_id: Some("claude".to_string()),
@@ -2134,6 +2328,7 @@ mod tests {
                     context_length: None,
                     pricing: Default::default(),
                     created: Some(1_700_000_000),
+                    ..Default::default()
                 },
                 jcode_provider_openrouter::ModelInfo {
                     id: "qwen-3-235b-a22b-instruct-2507".to_string(),
@@ -2141,6 +2336,7 @@ mod tests {
                     context_length: None,
                     pricing: Default::default(),
                     created: Some(1_800_000_000),
+                    ..Default::default()
                 },
             ],
             Some("https://api.cerebras.ai/v1"),
@@ -2458,6 +2654,8 @@ mod tests {
         "openai-api",
         "copilot",
         "cursor",
+        "openrouter",
+        "grok-build",
         "bedrock",
         "azure-openai",
         "gemini",
@@ -2607,6 +2805,27 @@ mod tests {
                 &["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-pro-preview"],
                 "gemini-3-pro-preview",
             ),
+            (
+                // OpenRouter lists Sonnet 4 (its old hardcoded default) first;
+                // vendor-prefixed dotted Claude ids must still rank.
+                "openrouter",
+                "openrouter",
+                "auto",
+                &[
+                    "anthropic/claude-sonnet-4",
+                    "anthropic/claude-haiku-4.5",
+                    "anthropic/claude-opus-4.8",
+                ],
+                "anthropic/claude-opus-4.8",
+            ),
+            (
+                // Grok Build: the code-specialized model must not win.
+                "grok-build",
+                "grok-build-acp",
+                "Grok Build",
+                &["grok-code-fast-1", "grok-4.5", "grok-4.6"],
+                "grok-4.6",
+            ),
         ];
 
         // Guard: the hand-written cases must cover every ranked provider, or the
@@ -2636,6 +2855,115 @@ mod tests {
                 models[0]
             );
         }
+    }
+
+    /// Copilot and Cursor proxy both families; the cross-family tie-break must prefer the
+    /// Claude flagship over the OpenAI flagship to mirror jcode's default model.
+    #[test]
+    fn preferred_model_for_provider_picks_newest_flagship_for_every_provider() {
+        // Each case is a realistic id style for that provider, listed oldest /
+        // cheapest first so plain catalog order would pick the wrong model.
+        let cases: &[(&str, &[&str], &str)] = &[
+            (
+                "copilot",
+                &[
+                    "claude-haiku-4.5",
+                    "claude-opus-4.6",
+                    "claude-opus-4.6-fast",
+                    "claude-opus-5.5",
+                ],
+                "claude-opus-5.5",
+            ),
+            (
+                "claude",
+                &[
+                    "claude-haiku-4-5-20251001",
+                    "claude-opus-4-6",
+                    "claude-opus-5-5",
+                ],
+                "claude-opus-5-5",
+            ),
+            (
+                "anthropic-api",
+                &["claude-haiku-4-5", "claude-opus-4-8", "claude-opus-5-5"],
+                "claude-opus-5-5",
+            ),
+            (
+                "openai",
+                &["gpt-5.4-mini", "gpt-5.5", "gpt-6-astra"],
+                "gpt-6-astra",
+            ),
+            (
+                "openrouter",
+                &[
+                    "anthropic/claude-sonnet-4",
+                    "anthropic/claude-opus-4.6",
+                    "anthropic/claude-opus-5.5",
+                    "openai/gpt-5.5",
+                ],
+                "anthropic/claude-opus-5.5",
+            ),
+            (
+                "bedrock",
+                &[
+                    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                    "us.anthropic.claude-opus-4-6-v1",
+                    "anthropic.claude-opus-5-20260101-v1:0",
+                ],
+                "anthropic.claude-opus-5-20260101-v1:0",
+            ),
+            (
+                "grok-build",
+                &["grok-code-fast-1", "grok-4.5", "grok-4.6", "grok-4.7"],
+                "grok-4.7",
+            ),
+            (
+                "gemini",
+                &[
+                    "gemini-2.5-flash",
+                    "gemini-2.5-pro",
+                    "gemini-3.1-pro-preview",
+                ],
+                "gemini-3.1-pro-preview",
+            ),
+        ];
+        for (provider, models, expected) in cases {
+            assert_eq!(
+                preferred_model_for_provider(provider, models).as_deref(),
+                Some(*expected),
+                "{provider} should default to its newest flagship"
+            );
+        }
+    }
+
+    #[test]
+    fn preferred_model_for_provider_auto_promotes_unlisted_releases() {
+        assert_eq!(
+            preferred_model_for_provider(
+                "openrouter",
+                &["anthropic/claude-opus-5.5", "anthropic/claude-opus-6"]
+            )
+            .as_deref(),
+            Some("anthropic/claude-opus-6")
+        );
+        assert_eq!(
+            preferred_model_for_provider("grok-build", &["grok-4.7", "grok-5"]).as_deref(),
+            Some("grok-5")
+        );
+        assert_eq!(
+            preferred_model_for_provider("grok-build", &["grok-4.7", "grok-code-fast-9"])
+                .as_deref(),
+            Some("grok-4.7"),
+            "specialized variants must not self-promote"
+        );
+    }
+
+    #[test]
+    fn preferred_model_for_provider_unknown_provider_defers_to_caller() {
+        assert_eq!(
+            preferred_model_for_provider("some-local-llm", &["a", "b"]),
+            None
+        );
     }
 
     /// Copilot proxies both families; the cross-family tie-break must prefer the
@@ -2713,6 +3041,25 @@ mod tests {
             preferred_frontier_auth_provider(&openai_api_and_oauth),
             Some("openai"),
             "OAuth is preferred over an API key within one provider family"
+        );
+    }
+}
+
+#[cfg(test)]
+mod real_catalog_tests {
+    /// Snapshot of the real OpenRouter `/models` catalog (466 ids, Oct 2026).
+    /// Includes the hazards a synthetic list misses: `:batch` variants,
+    /// `~anthropic/claude-opus-latest` aliases, and newer non-Claude releases
+    /// (`mistralai/mistral-large-4-0`) that recency alone would pick.
+    const OPENROUTER_IDS: &str = include_str!("openrouter_catalog_snapshot.json");
+
+    #[test]
+    fn real_openrouter_catalog_ranks_to_claude_opus_flagship() {
+        let ids: Vec<String> = serde_json::from_str(OPENROUTER_IDS).expect("snapshot");
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        assert_eq!(
+            super::ranked_flagship_for_provider("openrouter", &refs).as_deref(),
+            Some("anthropic/claude-opus-5.5")
         );
     }
 }

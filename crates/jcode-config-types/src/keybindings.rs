@@ -251,6 +251,18 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
         other: PlatformDefault::dev("alt+left"),
     },
     KeybindingDefault {
+        id: "speed_increase",
+        description: "Increase speed tier (Standard -> Fast -> Ultrafast)",
+        macos: PlatformDefault::dev("alt+up"),
+        other: PlatformDefault::dev("alt+up"),
+    },
+    KeybindingDefault {
+        id: "speed_decrease",
+        description: "Decrease speed tier (Ultrafast -> Fast -> Standard)",
+        macos: PlatformDefault::dev("alt+down"),
+        other: PlatformDefault::dev("alt+down"),
+    },
+    KeybindingDefault {
         id: "centered_toggle",
         description: "Toggle centered mode",
         macos: PlatformDefault::dev("alt+c"),
@@ -338,6 +350,14 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
         // taken by session recovery, so use Alt+R there.
         macos: PlatformDefault::dev("cmd+b"),
         other: PlatformDefault::dev("alt+r"),
+    },
+    KeybindingDefault {
+        id: "voice_input",
+        description: "Start or stop built-in voice input (Nari transcription)",
+        // Ctrl+Space is unused in jcode. Alt/Cmd+Space already route the next
+        // prompt to a new session.
+        macos: PlatformDefault::dev("ctrl+space"),
+        other: PlatformDefault::dev("ctrl+space"),
     },
 ];
 
