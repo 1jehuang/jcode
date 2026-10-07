@@ -691,6 +691,8 @@ pub(super) async fn handle_lightweight_control_request(
                 Some(event_history),
                 Some(event_counter),
                 Some(swarm_event_tx),
+                Some(swarm_plans),
+                Some(swarm_coordinators),
             )
             .await;
             let _ = client_event_tx.send(ServerEvent::CommReportResponse {
