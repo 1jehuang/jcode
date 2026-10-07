@@ -982,7 +982,7 @@ impl crate::tui::TuiState for App {
             ));
         }
         self.status_notice.as_ref().and_then(|(text, at)| {
-            if at.elapsed() <= Duration::from_secs(3) {
+            if at.elapsed() <= STATUS_NOTICE_TTL {
                 Some(text.clone())
             } else {
                 None
