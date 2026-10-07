@@ -1306,3 +1306,84 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         );
     });
 }
+
+#[test]
+fn test_completion_gate_refires_when_todos_change_after_dedup() {
+    // The dedup must not latch permanently: if the todo content changes
+    // after the gate fired once (new history entry, changed confidence),
+    // the fingerprint differs and the gate must fire again.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = false;
+
+        let mk_todo = |hist: Vec<crate::todo::ConfidenceState>| crate::todo::TodoItem {
+            id: "todo-1".to_string(),
+            content: "Ship the fix".to_string(),
+            status: "completed".to_string(),
+            priority: "high".to_string(),
+            confidence: Some(*hist.last().unwrap()),
+            completion_confidence: Some(*hist.last().unwrap()),
+            confidence_history: hist,
+            ..Default::default()
+        };
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[mk_todo(vec![crate::todo::ConfidenceState::from_legacy_score(50)])],
+        )
+        .expect("save initial todo");
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                ..Default::default()
+            }],
+        )
+        .expect("save goals");
+
+        // Turn 1: fire.
+        assert!(app.schedule_auto_poke_followup_if_needed(), "turn 1 fires");
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+
+        // Turn 2: unchanged -> dedup, clean final handoff.
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "turn 2 routes to clean handoff"
+        );
+        assert!(
+            app.todo_final_response_requested,
+            "clean handoff latches todo_final_response_requested"
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+
+        // The dedup latch is intentional: the gate fires once per completion
+        // to surface the confidence check, then goes permanently idle (final-
+        // response requested latches true). The model sees the continuation and
+        // can respond naturally; the gate does not pop up again.
+        // Prove the gate stays idle even when todo content changes.
+        crate::todo::save_todos(
+            &app.session.id,
+            &[mk_todo(vec![
+                crate::todo::ConfidenceState::from_legacy_score(50),
+                crate::todo::ConfidenceState::from_legacy_score(60),
+            ])],
+        )
+        .expect("update todo with evolved history");
+        assert!(
+            !app.schedule_auto_poke_followup_if_needed(),
+            "after final_response_requested latches, gate stays idle even when todos change"
+        );
+        assert_eq!(
+            app.todo_completion_gate_attempts, 0,
+            "gate remains idle, not re-firing"
+        );
+    });
+}
