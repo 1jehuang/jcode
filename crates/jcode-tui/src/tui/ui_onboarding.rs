@@ -143,7 +143,7 @@ fn import_summary_pills_line(
 ) -> Line<'static> {
     use crate::tui::ImportSummaryPill as Pill;
     let mut spans = Vec::new();
-    spans.extend(lozenge_pill_spans("Import", focused == Pill::Continue));
+    spans.extend(lozenge_pill_spans("Continue", focused == Pill::Continue));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
         "Import less",

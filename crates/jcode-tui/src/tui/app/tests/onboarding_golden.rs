@@ -286,7 +286,7 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Claude"), "provider 2: {text}");
         assert!(text.contains('✓'), "detected checkmark: {text}");
         // The primary action is import. The Jcode subscription is not offered.
-        assert!(text.contains("Import"), "import pill label: {text}");
+        assert!(text.contains("Continue"), "continue pill label: {text}");
         assert!(
             !text.contains("Jcode subscription"),
             "no subscription pill: {text}"
@@ -353,7 +353,7 @@ fn onboarding_golden_walks_every_phase() {
             "singular headline: {text}"
         );
         assert!(text.contains("Cursor"), "single login row: {text}");
-        assert!(text.contains("Import"), "import pill: {text}");
+        assert!(text.contains("Continue"), "continue pill: {text}");
         assert!(
             !text.contains("Jcode subscription"),
             "no subscription pill: {text}"
