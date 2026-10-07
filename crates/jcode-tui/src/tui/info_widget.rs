@@ -2025,7 +2025,7 @@ fn render_sections(
     if let Some(info) = &data.background_info
         && info.has_content()
     {
-        lines.extend(render_background_compact(info));
+        lines.extend(render_background_compact(info, inner.width as usize));
     }
 
     // Usage info (subscription limits)

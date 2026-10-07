@@ -67,8 +67,8 @@ pub(super) fn render_background_widget(data: &InfoWidgetData, inner: Rect) -> Fr
     framed
 }
 
-pub(super) fn render_background_compact(info: &BackgroundInfo) -> Vec<Line<'static>> {
-    render_background_lines(info, 40)
+pub(super) fn render_background_compact(info: &BackgroundInfo, width: usize) -> Vec<Line<'static>> {
+    render_background_lines(info, width)
 }
 
 fn swarm_member_label(member: &SwarmMemberStatus) -> String {

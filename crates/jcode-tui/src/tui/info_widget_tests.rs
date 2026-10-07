@@ -1496,7 +1496,7 @@ fn background_widget_handles_empty_and_large_task_lists() {
         running_tasks: vec!["stale".to_string()],
         ..Default::default()
     };
-    assert!(super::render_background_compact(&info).is_empty());
+    assert!(super::render_background_compact(&info, 40).is_empty());
 
     // Large task list: summary + 3 rows + overflow line, no panic at tiny width.
     let info = BackgroundInfo {
@@ -1600,7 +1600,7 @@ fn background_widget_renders_session_task_rows_with_progress() {
     assert_eq!(lines_text(framed.title.as_slice()), "⏳ \nBackground");
 
     // Compact (overview) form mirrors its computed height.
-    let compact = super::render_background_compact(&info);
+    let compact = super::render_background_compact(&info, 40);
     assert_eq!(compact.len(), 4);
 }
 
@@ -1662,7 +1662,7 @@ fn background_widget_and_compact_share_summary_format() {
 
     let framed = super::render_background_widget(&data, Rect::new(0, 0, 40, 1));
     let widget_text = lines_text(&framed.all_lines());
-    let compact = super::render_background_compact(&info);
+    let compact = super::render_background_compact(&info, 40);
 
     // The framed widget carries the summary on its top border and the compact
     // (Overview) form carries it inline on its first row: same summary text.
@@ -2221,4 +2221,58 @@ fn widget_gallery() {
         }
         println!();
     }
+}
+
+#[test]
+fn narrow_overview_background_row_keeps_progress_visible() {
+    use crate::tui::{BackgroundTaskRow, BackgroundTaskRowStatus};
+    use ratatui::{Terminal, backend::TestBackend};
+    let data = InfoWidgetData {
+        model: Some("claude-opus-5-5".into()),
+        background_info: Some(BackgroundInfo {
+            rows: vec![BackgroundTaskRow {
+                task_id: "t".into(),
+                label: "Live verification task".into(),
+                percent: Some(20.0),
+                status: BackgroundTaskRowStatus::Running,
+                completed_at: None,
+            }],
+            ..Default::default()
+        }),
+        usage_info: Some(UsageInfo {
+            provider: UsageProvider::Anthropic,
+            five_hour: 0.3,
+            seven_day: 0.5,
+            available: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (w, h) = (24u16, 9u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| {
+        super::render_all(
+            f,
+            &[super::WidgetPlacement {
+                kind: WidgetKind::Overview,
+                rect: Rect::new(0, 0, w, h),
+                side: super::Side::Right,
+            }],
+            &data,
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer().clone();
+    let mut out = String::new();
+    for y in 0..h {
+        for x in 0..w {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    assert!(out.contains("◌ Live"), "{out}");
+    assert!(
+        out.contains("20%"),
+        "progress must fit at overview width:\n{out}"
+    );
 }
