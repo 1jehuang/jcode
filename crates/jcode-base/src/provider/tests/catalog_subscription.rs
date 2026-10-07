@@ -101,10 +101,24 @@ fn test_openai_model_catalog_is_scoped_per_account() {
 #[test]
 fn test_openai_live_catalog_replaces_static_fallback_list() {
     let _guard = crate::storage::lock_test_env();
+    // known_openai_model_ids() also merges the configured API key's catalog;
+    // isolate from the developer's real OPENAI_API_KEY / openai.env.
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_key = std::env::var_os("OPENAI_API_KEY");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    crate::env::remove_var("OPENAI_API_KEY");
     crate::auth::codex::set_active_account_override(Some("work".to_string()));
 
     populate_account_models(vec!["gpt-5.4-live-only".to_string()]);
     let models = known_openai_model_ids();
+    match prev_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    if let Some(value) = prev_key {
+        crate::env::set_var("OPENAI_API_KEY", value);
+    }
 
     assert_eq!(
         models[..2],

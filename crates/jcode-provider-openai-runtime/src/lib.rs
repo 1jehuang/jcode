@@ -806,6 +806,7 @@ impl OpenAIProvider {
         };
 
         // Check for model override from environment
+        let catalog_scope = Self::catalog_scope_for(&credentials);
         let mut model = if browser_only {
             CHATGPT_WEB_MODEL.to_string()
         } else {
@@ -815,7 +816,7 @@ impl OpenAIProvider {
                 .to_string()
         };
         if !is_chatgpt_web_model(&model)
-            && !jcode_base::provider::known_openai_model_ids()
+            && !jcode_base::provider::known_openai_model_ids_for_scope(&catalog_scope)
                 .iter()
                 .any(|known| known == &model)
         {
@@ -869,7 +870,8 @@ impl OpenAIProvider {
             .openai_native_compaction_threshold_tokens
             .max(1000);
         let model_reasoning_efforts =
-            jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
+            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&catalog_scope)
+                .unwrap_or_default();
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
@@ -964,7 +966,10 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
-        let cached = jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
+        let cached = jcode_base::provider::cached_openai_reasoning_efforts_for_scope(
+            &self.catalog_scope(),
+        )
+        .unwrap_or_default();
         match self.model_reasoning_efforts.write() {
             Ok(mut efforts) => *efforts = cached,
             Err(poisoned) => *poisoned.into_inner() = cached,
@@ -1003,6 +1008,30 @@ impl OpenAIProvider {
 
     fn is_chatgpt_mode(credentials: &CodexCredentials) -> bool {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
+    }
+
+    /// Model-catalog scope for the credential this runtime will actually send.
+    /// ChatGPT/Codex OAuth and platform API keys expose different model lists,
+    /// so validation, availability, and refresh must all use the loaded
+    /// credential's own catalog instead of one shared per-account slot.
+    pub(crate) fn catalog_scope_for(credentials: &CodexCredentials) -> String {
+        jcode_base::provider::openai_catalog_scope_for_credential(
+            Self::is_chatgpt_mode(credentials),
+            &credentials.access_token,
+        )
+    }
+
+    pub(crate) fn catalog_scope(&self) -> String {
+        match self.credentials.try_read() {
+            Ok(credentials) => Self::catalog_scope_for(&credentials),
+            // Writers hold this lock only briefly (token refresh / mode swap).
+            // Fall back to the account scope rather than blocking.
+            Err(_) => jcode_base::provider::openai_catalog_scope_for_credential(true, ""),
+        }
+    }
+
+    async fn catalog_scope_async(&self) -> String {
+        Self::catalog_scope_for(&*self.credentials.read().await)
     }
 
     fn catalog_credential_identity(credentials: &CodexCredentials) -> String {
@@ -1371,7 +1400,8 @@ impl OpenAIProvider {
 
     async fn model_id(&self) -> String {
         let current = self.model.read().await.clone();
-        let availability = jcode_base::provider::model_availability_for_account(&current);
+        let scope = self.catalog_scope_async().await;
+        let availability = jcode_base::provider::model_availability_for_scope(&scope, &current);
 
         match availability.state {
             jcode_base::provider::AccountModelAvailabilityState::Unavailable => {
@@ -1381,7 +1411,8 @@ impl OpenAIProvider {
                         current, detail
                     ));
                 }
-                if let Some(fallback) = jcode_base::provider::get_best_available_openai_model()
+                if let Some(fallback) =
+                    jcode_base::provider::get_best_available_openai_model_for_scope(&scope)
                     && fallback != current
                 {
                     jcode_base::logging::info(&format!(
@@ -1400,8 +1431,8 @@ impl OpenAIProvider {
                 }
             }
             jcode_base::provider::AccountModelAvailabilityState::Unknown => {
-                if jcode_base::provider::should_refresh_openai_model_catalog()
-                    && jcode_base::provider::begin_openai_model_catalog_refresh()
+                if jcode_base::provider::should_refresh_openai_model_catalog_for_scope(&scope)
+                    && jcode_base::provider::begin_openai_model_catalog_refresh_for_scope(&scope)
                 {
                     let is_chatgpt_mode = {
                         let creds = self.credentials.read().await;

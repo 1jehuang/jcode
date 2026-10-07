@@ -761,8 +761,9 @@ impl Provider for OpenAIProvider {
                 CHATGPT_WEB_MODEL,
             );
         }
+        let scope = self.catalog_scope();
         if !is_chatgpt_web_model(model)
-            && !jcode_base::provider::known_openai_model_ids()
+            && !jcode_base::provider::known_openai_model_ids_for_scope(&scope)
                 .iter()
                 .any(|known| known == model)
         {
@@ -771,7 +772,7 @@ impl Provider for OpenAIProvider {
                 model,
             );
         }
-        let availability = jcode_base::provider::model_availability_for_account(model);
+        let availability = jcode_base::provider::model_availability_for_scope(&scope, model);
         if !is_chatgpt_web_model(model)
             && availability.state
                 == jcode_base::provider::AccountModelAvailabilityState::Unavailable
@@ -811,7 +812,7 @@ impl Provider for OpenAIProvider {
         if let Ok(mut current) = self.model.try_write() {
             let changed = current.as_str() != model;
             *current = model.to_string();
-            jcode_base::provider::clear_model_unavailable_for_account(model);
+            jcode_base::provider::clear_model_unavailable_for_scope(&self.catalog_scope(), model);
             drop(current);
             if changed {
                 self.clear_persistent_ws_try("manual OpenAI model change reset the response chain");
@@ -837,7 +838,8 @@ impl Provider for OpenAIProvider {
             return vec![CHATGPT_WEB_MODEL.to_string()];
         }
         let mut models =
-            jcode_base::provider::cached_openai_model_ids().unwrap_or_else(|| vec![self.model()]);
+            jcode_base::provider::cached_openai_model_ids_for_scope(&self.catalog_scope())
+                .unwrap_or_else(|| vec![self.model()]);
         if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
             models.insert(0, CHATGPT_WEB_MODEL.to_string());
         }
@@ -867,12 +869,13 @@ impl Provider for OpenAIProvider {
         // while the mode stays Auto; routing by mode would send that platform
         // key to the ChatGPT/Codex endpoint and get a 401.
         let account_label = jcode_base::auth::codex::active_account_label();
-        let (access_token, is_chatgpt_mode, credential_identity) = {
+        let (access_token, is_chatgpt_mode, credential_identity, scope) = {
             let creds = self.credentials.read().await;
             (
                 creds.access_token.clone(),
                 Self::is_chatgpt_mode(&creds),
                 Self::catalog_credential_identity(&creds),
+                Self::catalog_scope_for(&creds),
             )
         };
         let catalog = if is_chatgpt_mode {
@@ -930,12 +933,15 @@ impl Provider for OpenAIProvider {
             Err(poisoned) => *poisoned.into_inner() = catalog.reasoning_efforts.clone(),
         }
         self.revalidate_reasoning_effort();
-        jcode_base::provider::persist_openai_model_catalog(&catalog);
+        jcode_base::provider::persist_openai_model_catalog_for_scope(&scope, &catalog);
         if !catalog.context_limits.is_empty() {
             jcode_base::provider::populate_context_limits(catalog.context_limits);
         }
         if !catalog.available_models.is_empty() {
-            jcode_base::provider::populate_account_models(catalog.available_models);
+            jcode_base::provider::populate_account_models_for_scope(
+                &scope,
+                catalog.available_models,
+            );
         }
         Ok(())
     }
