@@ -1,3 +1,4 @@
+use super::openai_stream_cancellation::{after_authentication, while_consumer_open};
 use super::*;
 
 #[path = "openai_usage_recording.rs"]
@@ -11,7 +12,7 @@ use self::openai_rate_limit_format::format_rate_limit_error;
 mod openai_stream_timeout;
 pub(super) use self::openai_stream_timeout::reasoning_payload;
 use self::openai_stream_timeout::{
-    effective_https_idle_timeout, effective_ws_completion_timeout_secs,
+    effective_https_idle_timeout, effective_ws_completion_timeout_secs, send_websocket_frame,
 };
 
 pub(super) async fn openai_access_token(
@@ -102,7 +103,13 @@ pub(super) async fn stream_response(
     ));
     emit_status_detail(&tx, initial_status_detail).await;
     emit_connection_phase(&tx, ConnectionPhase::Authenticating).await;
+    if tx.is_closed() {
+        return Ok(());
+    }
     let access_token = openai_access_token(&credentials).await?;
+    if tx.is_closed() {
+        return Ok(());
+    }
     let creds = credentials.read().await;
     // Account switching can race token refresh. Never combine an old bearer
     // with a new account header or attribute that request to the new account.
@@ -134,13 +141,20 @@ pub(super) async fn stream_response(
     let connect_start = std::time::Instant::now();
     let idle_timeout = effective_https_idle_timeout(&request);
 
-    let response = jcode_provider_core::transport::send_with_initial_response_timeout(
-        builder.json(&request),
-        idle_timeout,
+    let response = while_consumer_open(
+        &tx,
+        jcode_provider_core::transport::send_with_initial_response_timeout(
+            builder.json(&request),
+            idle_timeout,
+        ),
     )
-    .await
-    .context("Failed to send request to OpenAI API")
-    .map_err(OpenAIStreamFailure::Other)?;
+    .await;
+    let Some(response) = response else {
+        return Ok(());
+    };
+    let response = response
+        .context("Failed to send request to OpenAI API")
+        .map_err(OpenAIStreamFailure::Other)?;
 
     let connect_ms = connect_start.elapsed().as_millis();
     jcode_base::logging::info(&format!(
@@ -168,7 +182,14 @@ pub(super) async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
 
-        let body = jcode_base::util::http_error_body(response, "HTTP error").await;
+        let Some(body) = while_consumer_open(
+            &tx,
+            jcode_base::util::http_error_body(response, "HTTP error"),
+        )
+        .await
+        else {
+            return Ok(());
+        };
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "https_http_error",
@@ -205,6 +226,9 @@ pub(super) async fn stream_response(
 
         // Check if we need to refresh token
         if should_refresh_token(status, &body) {
+            if tx.is_closed() {
+                return Ok(());
+            }
             // The server rejected our access token (401/403). Proactively
             // refresh it in place so the retry loop reconnects with a fresh
             // token instead of surfacing a raw "Token refresh needed" error.
@@ -271,7 +295,12 @@ pub(super) async fn stream_response(
     // (issue #434).
     use futures::StreamExt;
     loop {
-        let result = match tokio::time::timeout(idle_timeout, stream.next()).await {
+        let Some(next) =
+            while_consumer_open(&tx, tokio::time::timeout(idle_timeout, stream.next())).await
+        else {
+            return Ok(());
+        };
+        let result = match next {
             Ok(Some(result)) => result,
             Ok(None) => break, // stream ended normally
             Err(_) => {
@@ -422,8 +451,12 @@ pub(super) async fn try_persistent_ws_continuation(
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> PersistentWsResult {
     let mut guard = persistent_ws.lock().await;
+    // Keep exclusive ownership until completion. If this future is dropped,
+    // the in-flight socket is dropped while the shared slot is already empty,
+    // before the same mutex can be acquired by a waiting request.
+    let mut attempt_state = guard.take();
     let result = continue_persistent_ws_locked(
-        &mut guard,
+        &mut attempt_state,
         credentials,
         request,
         input,
@@ -438,7 +471,6 @@ pub(super) async fn try_persistent_ws_continuation(
         result,
         PersistentWsResult::Failed(_) | PersistentWsResult::TerminalError
     ) {
-        *guard = None;
         log_openai_stream_lifecycle(
             jcode_base::logging::LogLevel::Warn,
             "persistent_state_reset",
@@ -447,6 +479,8 @@ pub(super) async fn try_persistent_ws_continuation(
                 ("reason", "persistent_reuse_failed".to_string()),
             ],
         );
+    } else {
+        *guard = attempt_state;
     }
     result
 }
@@ -860,7 +894,14 @@ async fn continue_persistent_ws_locked(
         return PersistentWsResult::NotAvailable;
     }
     let mut usage_recorder = OAuthUsageRecorder::capture(&send_credentials, request);
-    if let Err(e) = state.ws_stream.send(WsMessage::Text(request_text)).await {
+    let ws_send_timeout = effective_https_idle_timeout(&continuation_request);
+    if let Err(e) = send_websocket_frame(
+        &mut state.ws_stream,
+        WsMessage::Text(request_text),
+        ws_send_timeout,
+    )
+    .await
+    {
         return PersistentWsResult::Failed(format!("send error: {}", e));
     }
     drop(send_credentials);
@@ -1061,7 +1102,15 @@ async fn continue_persistent_ws_locked(
                 }
             }
             Ok(WsMessage::Ping(payload)) => {
-                let _ = state.ws_stream.send(WsMessage::Pong(payload)).await;
+                if let Err(error) = send_websocket_frame(
+                    &mut state.ws_stream,
+                    WsMessage::Pong(payload),
+                    Duration::from_millis(WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS),
+                )
+                .await
+                {
+                    return PersistentWsResult::Failed(format!("pong send error: {error}"));
+                }
                 state.last_activity_at = Instant::now();
             }
             Ok(WsMessage::Close(_)) => {
@@ -1159,6 +1208,29 @@ pub(super) async fn stream_response_websocket_persistent(
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
     input_item_count: usize,
 ) -> Result<(), OpenAIStreamFailure> {
+    let request_credentials = Arc::clone(&credentials);
+    let result = after_authentication(&tx, openai_access_token(&credentials), |access_token| {
+        stream_response_websocket_authenticated(
+            request_credentials,
+            request,
+            tx.clone(),
+            persistent_ws,
+            input_item_count,
+            access_token,
+        )
+    })
+    .await?;
+    result.unwrap_or(Ok(()))
+}
+
+async fn stream_response_websocket_authenticated(
+    credentials: Arc<RwLock<CodexCredentials>>,
+    request: Value,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+    persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
+    input_item_count: usize,
+    access_token: String,
+) -> Result<(), OpenAIStreamFailure> {
     use jcode_message_types::ConnectionPhase;
     let request_model = request
         .get("model")
@@ -1178,7 +1250,6 @@ pub(super) async fn stream_response_websocket_persistent(
         ],
     );
 
-    let access_token = openai_access_token(&credentials).await?;
     let usage_snapshot = jcode_base::usage::get_openai_usage_sync();
     jcode_base::logging::info(&format!(
         "OpenAI limit diag: opening fresh persistent WS request usage=({})",
@@ -1293,10 +1364,14 @@ pub(super) async fn stream_response_websocket_persistent(
     })?;
     let request_send_started_at = Instant::now();
     emit_connection_phase(&tx, ConnectionPhase::SendingRequest).await;
-    ws_stream
-        .send(WsMessage::Text(request_text))
-        .await
-        .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(err)))?;
+    let ws_send_timeout = effective_https_idle_timeout(&request_event);
+    send_websocket_frame(
+        &mut ws_stream,
+        WsMessage::Text(request_text),
+        ws_send_timeout,
+    )
+    .await
+    .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(err)))?;
     emit_connection_phase(&tx, ConnectionPhase::WaitingForResponse).await;
     jcode_base::logging::info(&format!(
         "Fresh WS request sent in {}ms ({})",
@@ -1523,7 +1598,13 @@ pub(super) async fn stream_response_websocket_persistent(
                     }
                 }
                 WsMessage::Ping(payload) => {
-                    let _ = ws_stream.send(WsMessage::Pong(payload)).await;
+                    send_websocket_frame(
+                        &mut ws_stream,
+                        WsMessage::Pong(payload),
+                        Duration::from_millis(WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS),
+                    )
+                    .await
+                    .map_err(|err| OpenAIStreamFailure::Other(anyhow::anyhow!(err)))?;
                 }
                 WsMessage::Close(_) => {
                     if saw_response_completed {
