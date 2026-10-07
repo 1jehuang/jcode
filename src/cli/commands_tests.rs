@@ -1740,3 +1740,170 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
         ));
     }
 }
+
+// ─── recall tests ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_recall_git_state_not_git_repo() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let state = crate::cli::commands::recall::git_state(temp.path().to_str().unwrap());
+    assert!(state.branch.is_empty(), "non-git dir has no branch");
+    assert!(state.recent_commits.is_empty(), "non-git dir has no commits");
+    assert!(!state.has_uncommitted, "non-git dir has no uncommitted");
+}
+
+#[test]
+fn test_recall_git_state_is_git_repo() {
+    // Use the jcode repo itself as a real git repo.
+    let state = crate::cli::commands::recall::git_state("/home/emilio/src/jcode");
+    assert!(!state.branch.is_empty(), "git repo has a branch");
+    assert!(!state.recent_commits.is_empty(), "git repo has commits");
+    // has_uncommitted depends on whether we have staged changes; just check it's a bool.
+}
+
+#[test]
+fn test_recall_load_todos_not_found() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let result =
+        crate::cli::commands::recall::load_todos_for_session("nonexistent-session-id-000");
+    let todos = result.expect("load_todos_for_session must not error on missing file");
+    assert!(todos.is_empty(), "missing todo file yields empty list");
+}
+
+#[test]
+fn test_recall_load_todos_empty_array() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("temp dir");
+    // JCODE_HOME is the jcode home dir itself (e.g. ~/.jcode), not a parent.
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let todo_path = temp.path().join("todos").join("session_test_123.json");
+    std::fs::create_dir_all(todo_path.parent().unwrap()).expect("create todos dir");
+    std::fs::write(&todo_path, "[]").expect("write empty todos");
+
+    let todos = crate::cli::commands::recall::load_todos_for_session("test_123")
+        .expect("load_todos must not error on empty array");
+    assert!(todos.is_empty(), "empty todo array yields empty list");
+}
+
+#[test]
+fn test_recall_load_todos_with_open_and_completed() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let todo_path = temp.path().join("todos").join("test_456.json");
+    std::fs::create_dir_all(todo_path.parent().unwrap()).expect("create todos dir");
+    let todos_json = serde_json::json!([
+        {"id": "1", "content": "Do the thing", "priority": "high", "status": "in_progress"},
+        {"id": "2", "content": "Done already", "priority": "normal", "status": "completed"},
+        {"id": "3", "content": "Another pending", "priority": "low", "status": "pending"}
+    ]);
+    std::fs::write(&todo_path, serde_json::to_string(&todos_json).expect("serialize todos"))
+        .expect("write todos");
+
+    let todos = crate::cli::commands::recall::load_todos_for_session("test_456")
+        .expect("load_todos must not error");
+
+    assert_eq!(todos.len(), 2, "completed items are filtered out");
+    let ids: Vec<_> = todos.iter().map(|t| t.id.as_str()).collect();
+    assert!(ids.contains(&"1"), "open item 1 is present");
+    assert!(ids.contains(&"3"), "open item 3 is present");
+    assert!(!ids.contains(&"2"), "completed item 2 is absent");
+}
+
+#[test]
+fn test_recall_load_todos_priority_string_and_object() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let todo_path = temp.path().join("todos").join("test_priority.json");
+    std::fs::create_dir_all(todo_path.parent().unwrap()).expect("create todos dir");
+    // priority stored as a JSON object instead of a string.
+    let todos_json = serde_json::json!([
+        {
+            "id": "p1",
+            "content": "Has string priority",
+            "priority": "high",
+            "status": "in_progress"
+        },
+        {
+            "id": "p2",
+            "content": "Has object priority",
+            "priority": {"value": 99},
+            "status": "in_progress"
+        }
+    ]);
+    std::fs::write(&todo_path, serde_json::to_string(&todos_json).expect("serialize todos"))
+        .expect("write todos");
+
+    let todos = crate::cli::commands::recall::load_todos_for_session("test_priority")
+        .expect("load_todos must not error on object priority");
+
+    assert_eq!(todos.len(), 2);
+    assert_eq!(todos[0].priority, "high");
+    assert_eq!(todos[1].priority, r#"{"value":99}"#);
+}
+
+#[test]
+fn test_recall_load_memories_not_found() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    // Point at a dir with no memory file.
+    let memories = crate::cli::commands::recall::load_project_memories(temp.path().to_str().unwrap())
+        .expect("load_project_memories must not error on missing file");
+    assert!(memories.is_empty(), "missing memory file yields empty list");
+}
+
+#[test]
+fn test_recall_load_memories_with_entries() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME"]);
+    let temp = tempfile::tempdir().expect("temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    // project_memory_file computes the path as jcode_dir()/memory/projects/<hash>.json.
+    // We need to create the file at the exact path that project_memory_file would return
+    // for the temp dir, so we use the same hash computation.
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    temp.path().hash(&mut hasher);
+    let project_hash = format!("{:016x}", hasher.finish());
+    let mem_dir = temp.path().join("memory").join("projects");
+    std::fs::create_dir_all(&mem_dir).expect("create memory/projects dir");
+
+    let mem_file = mem_dir.join(format!("{}.json", project_hash));
+    let mem_store = serde_json::json!({
+        "memories": {
+            "mem_abc001": {
+                "id": "mem_abc001",
+                "category": "fact",
+                "content": "A remembered fact",
+                "created_at": "2026-01-01T00:00:00Z",
+                "tags": ["test"]
+            }
+        }
+    });
+    std::fs::write(&mem_file, serde_json::to_string(&mem_store).expect("serialize memories"))
+        .expect("write memories");
+
+    let memories = crate::cli::commands::recall::load_project_memories(temp.path().to_str().unwrap())
+        .expect("load_project_memories must not error");
+
+    assert_eq!(memories.len(), 1, "one memory entry loaded");
+    assert_eq!(memories[0].id, "mem_abc001");
+    assert_eq!(memories[0].content, "A remembered fact");
+    assert_eq!(memories[0].category, "fact");
+}

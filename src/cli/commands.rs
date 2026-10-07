@@ -12,13 +12,19 @@ use crate::{browser, gateway, memory, session, storage, tui};
 
 use super::{output::terminal_title, terminal::init_tui_runtime};
 
+mod decisions;
 mod digest;
+mod pr_guardian;
+mod recall;
 mod menubar;
 mod provider_setup;
 mod report_info;
 mod restart;
 
+pub(crate) use decisions::run_decisions_command;
 pub(crate) use digest::run_digest_command;
+pub(crate) use pr_guardian::run_pr_guardian;
+pub(crate) use recall::run_recall_command;
 pub(crate) use super::auth_test::run_post_login_validation;
 #[cfg(test)]
 pub(crate) use super::auth_test::{

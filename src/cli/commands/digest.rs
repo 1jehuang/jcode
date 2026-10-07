@@ -366,3 +366,95 @@ pub fn run_digest_command(since: &str, working_dir: Option<&str>, json: bool, no
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_since_accepts_supported_units() {
+        assert_eq!(parse_since("30m").unwrap(), Duration::minutes(30));
+        assert_eq!(parse_since("2h").unwrap(), Duration::hours(2));
+        assert_eq!(parse_since("1d").unwrap(), Duration::days(1));
+        assert_eq!(parse_since("3w").unwrap(), Duration::weeks(3));
+        // Bare number with no unit is rejected, not silently treated as
+        // minutes or seconds.
+        assert!(parse_since("5").is_err());
+        assert!(parse_since("0d").is_err());
+        assert!(parse_since("-1d").is_err());
+        assert!(parse_since("abc").is_err());
+        assert!(parse_since("1x").is_err());
+    }
+
+    #[test]
+    fn working_dir_filter_matches_subtree_only() {
+        // No filter: everything matches.
+        assert!(working_dir_matches(&Some("/a/b".into()), None));
+        assert!(working_dir_matches(&None, None));
+        // With a filter, sessions without a working_dir are excluded.
+        assert!(!working_dir_matches(&None, Some("/a")));
+        // Subtree matches, sibling does not.
+        assert!(working_dir_matches(&Some("/a/b/c".into()), Some("/a/b")));
+        assert!(!working_dir_matches(&Some("/a/bx".into()), Some("/a/b")));
+        assert!(!working_dir_matches(&Some("/other".into()), Some("/a/b")));
+    }
+
+    #[test]
+    fn first_text_returns_first_nonempty_text_block() {
+        let blocks = vec![
+            ContentBlock::Reasoning { text: "hidden".into() },
+            ContentBlock::Text { text: "  \n".into(), cache_control: None },
+            ContentBlock::Text { text: "  hello  ".into(), cache_control: None },
+        ];
+        assert_eq!(first_text(&blocks).as_deref(), Some("hello"));
+        assert_eq!(first_text(&[]), None);
+    }
+
+    #[test]
+    fn render_text_reports_empty_window() {
+        let report = DigestReport {
+            since: "1d".into(),
+            generated_at: "2026-10-07T00:00:00Z".into(),
+            days: vec![],
+            total_sessions: 0,
+            total_commits: 0,
+        };
+        let text = render_text(&report);
+        assert!(text.contains("No activity"));
+        assert!(text.contains("1d"));
+    }
+
+    #[test]
+    fn render_text_lists_sessions_and_commits_under_day_headers() {
+        let report = DigestReport {
+            since: "1d".into(),
+            generated_at: "2026-10-07T00:00:00Z".into(),
+            days: vec![DigestDay {
+                date: "2026-10-07".into(),
+                sessions: vec![DigestSession {
+                    id: "s1".into(),
+                    title: "Fix the thing".into(),
+                    working_dir: Some("/repo".into()),
+                    updated_at: "2026-10-07T01:00:00Z".into(),
+                    user_messages: 3,
+                    assistant_messages: 5,
+                    first_user_prompt: None,
+                }],
+                commits: vec![DigestCommit {
+                    hash: "abc1234567".into(),
+                    subject: "fix: the thing".into(),
+                    author: "tester".into(),
+                    timestamp: "2026-10-07T02:00:00Z".into(),
+                    repo: "demo".into(),
+                }],
+            }],
+            total_sessions: 1,
+            total_commits: 1,
+        };
+        let text = render_text(&report);
+        assert!(text.contains("== 2026-10-07 =="));
+        assert!(text.contains("Fix the thing"));
+        assert!(text.contains("(3u/5a msgs)"));
+        assert!(text.contains("[demo] abc1234567 fix: the thing"));
+    }
+}
