@@ -303,6 +303,19 @@ fn configured_standard_openrouter_profile_routes() -> Vec<ModelRoute> {
         .collect()
 }
 
+/// Strip an explicit Jcode subscription prefix (`jcode:` or
+/// `jcode-subscription:`) from a model spec.
+pub(crate) fn jcode_subscription_model_prefix(model: &str) -> Option<&str> {
+    let (prefix, rest) = model.split_once(':')?;
+    let prefix = prefix.trim();
+    if !(prefix.eq_ignore_ascii_case("jcode") || prefix.eq_ignore_ascii_case("jcode-subscription"))
+    {
+        return None;
+    }
+    let rest = rest.trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
 pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Result<()> {
     match provider.set_model(model) {
         Ok(()) => Ok(()),
@@ -2060,6 +2073,13 @@ impl Provider for MultiProvider {
             registry.set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
             self.set_active_provider(ActiveProvider::OpenRouter);
             return Ok(());
+        }
+
+        // `jcode:<model>` is the explicit spec for the Jcode subscription
+        // runtime. Without this it fell through to the active provider and
+        // `--model jcode:gpt-5.5` silently stayed on the previous model.
+        if let Some(target_model) = jcode_subscription_model_prefix(requested_model) {
+            return self.set_model_on_jcode_subscription(target_model);
         }
 
         if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)

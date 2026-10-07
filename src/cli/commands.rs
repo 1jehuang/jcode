@@ -2528,11 +2528,9 @@ pub async fn run_single_message_command(
     emit_json: bool,
     emit_ndjson: bool,
 ) -> Result<()> {
-    let provider = if emit_json || emit_ndjson {
-        super::provider_init::init_provider_quiet(choice, model).await?
-    } else {
-        super::provider_init::init_provider_for_validation(choice, model).await?
-    };
+    let provider =
+        super::provider_init::init_provider_for_run(choice, model, emit_json || emit_ndjson)
+            .await?;
     let registry = crate::tool::Registry::new(provider.clone()).await;
     // Load MCP servers from ~/.jcode/mcp.json so headless `jcode run` has the
     // same `mcp__*` tools as interactive/server sessions. This is non-blocking:

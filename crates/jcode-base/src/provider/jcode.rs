@@ -128,6 +128,7 @@ impl Provider for JcodeProvider {
 
     fn set_model(&self, model: &str) -> Result<()> {
         self.ensure_runtime_mode();
+        let model = super::jcode_subscription_model_prefix(model).unwrap_or(model);
         ensure_model_allowed_for_subscription(model)?;
         self.inner.set_model(&Self::runtime_model_spec(model))?;
         if let Ok(mut selected_model) = self.selected_model.write() {

@@ -1265,3 +1265,21 @@ fn profile_catalog_cache_needs_refresh_for_missing_cache() {
         );
     });
 }
+
+#[test]
+fn jcode_subscription_model_prefix_parses_explicit_specs() {
+    assert_eq!(
+        super::jcode_subscription_model_prefix("jcode:gpt-5.5"),
+        Some("gpt-5.5")
+    );
+    assert_eq!(
+        super::jcode_subscription_model_prefix("jcode-subscription: gpt-5.5 "),
+        Some("gpt-5.5")
+    );
+    assert_eq!(super::jcode_subscription_model_prefix("jcode:"), None);
+    assert_eq!(super::jcode_subscription_model_prefix("gpt-5.5"), None);
+    assert_eq!(
+        super::jcode_subscription_model_prefix("openai:gpt-5.5"),
+        None
+    );
+}

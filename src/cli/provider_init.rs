@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::io::{self, Write};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::auth;
 use crate::provider;
@@ -429,6 +429,46 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
 
 pub fn login_provider_choice_mappings() -> &'static [(ProviderChoice, LoginProviderDescriptor)] {
     PROVIDER_CHOICE_LOGIN_PROVIDERS
+}
+
+/// `JCODE_OPENROUTER_MODEL` as set by the user when the process started.
+///
+/// Provider init clears and rewrites the `JCODE_OPENROUTER_*` env slots for
+/// whichever runtime it activates, so by the time the OpenRouter runtime reads
+/// the variable a user-supplied value is already gone. Snapshot it first.
+static USER_OPENROUTER_MODEL: OnceLock<Option<String>> = OnceLock::new();
+
+/// Called once from `startup::run` before any provider init. Entry points
+/// that skip startup (unit tests, embedded flows) never consult the snapshot.
+pub fn capture_user_openrouter_model_env() {
+    let _ = USER_OPENROUTER_MODEL.set(
+        std::env::var("JCODE_OPENROUTER_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    );
+}
+
+fn user_openrouter_model_env() -> Option<&'static str> {
+    USER_OPENROUTER_MODEL.get()?.as_deref()
+}
+
+/// Model to use when the caller passed no `--model`: the user's
+/// `JCODE_OPENROUTER_MODEL`, but only for runtimes that variable targets
+/// (OpenRouter and OpenAI-compatible profiles).
+fn env_model_for_choice(choice: &ProviderChoice) -> Option<&'static str> {
+    env_model_for_choice_from(choice, user_openrouter_model_env())
+}
+
+fn env_model_for_choice_from<'a>(
+    choice: &ProviderChoice,
+    env_model: Option<&'a str>,
+) -> Option<&'a str> {
+    if matches!(choice, ProviderChoice::Openrouter) || profile_for_choice(choice).is_some() {
+        env_model
+    } else {
+        None
+    }
 }
 
 pub fn profile_for_choice(choice: &ProviderChoice) -> Option<OpenAiCompatibleProfile> {
@@ -1408,6 +1448,17 @@ pub async fn init_provider(
     init_provider_with_options(choice, model, true, true, false).await
 }
 
+/// Provider init for one-shot `jcode run`. Unlike interactive startup, a
+/// requested model that cannot be applied is an error: silently answering
+/// with a different model is worse than failing for a scripted run.
+pub async fn init_provider_for_run(
+    choice: &ProviderChoice,
+    model: Option<&str>,
+    allow_login_bootstrap: bool,
+) -> Result<Arc<dyn provider::Provider>> {
+    init_provider_with_model_policy(choice, model, false, allow_login_bootstrap, false, true).await
+}
+
 /// A daemon must expose account and sign-in APIs before credentials exist.
 /// Only auto-detection defers authentication; explicit provider errors remain fatal.
 pub async fn init_provider_for_serve(
@@ -1439,6 +1490,27 @@ async fn init_provider_with_options(
     allow_login_bootstrap: bool,
     allow_deferred_auth: bool,
 ) -> Result<Arc<dyn provider::Provider>> {
+    init_provider_with_model_policy(
+        choice,
+        model,
+        show_init_messages,
+        allow_login_bootstrap,
+        allow_deferred_auth,
+        false,
+    )
+    .await
+}
+
+/// `strict_model`: a requested model that cannot be applied is an error
+/// instead of a warning.
+async fn init_provider_with_model_policy(
+    choice: &ProviderChoice,
+    model: Option<&str>,
+    show_init_messages: bool,
+    allow_login_bootstrap: bool,
+    allow_deferred_auth: bool,
+    strict_model: bool,
+) -> Result<Arc<dyn provider::Provider>> {
     // Provider construction resolves concrete runtimes through the base
     // crate's external-runtime registry (composition-root pattern). The
     // binary's normal path registers them in `startup::run()`, but this
@@ -1447,6 +1519,8 @@ async fn init_provider_with_options(
     // otherwise Auto-init silently loses registry-backed runtimes (e.g. the
     // OpenRouter/OpenAI-compatible factory) and their model-picker routes.
     super::startup::register_external_provider_runtimes();
+
+    let model = model.or_else(|| env_model_for_choice(choice));
 
     if let Ok(profile_name) = std::env::var("JCODE_PROVIDER_PROFILE_NAME")
         && !profile_name.trim().is_empty()
@@ -1867,6 +1941,9 @@ async fn init_provider_with_options(
 
     if let Some(model_name) = model {
         if let Err(e) = provider.set_model(model_name) {
+            if strict_model {
+                anyhow::bail!("Failed to select model '{model_name}': {e}");
+            }
             init_notice(&format!(
                 "Warning: failed to set model '{}': {}",
                 model_name, e
