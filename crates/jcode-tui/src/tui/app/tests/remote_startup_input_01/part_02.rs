@@ -518,6 +518,10 @@ fn test_model_picker_remote_bedrock_model_has_bedrock_route_when_configured() {
 
 #[test]
 fn test_model_picker_preserves_recommendation_priority_order() {
+    let _env_guard = crate::storage::lock_test_env();
+    let _restore = EnvRestoreGuard::capture(["JCODE_HOME"]);
+    let home = tempfile::tempdir().unwrap();
+    crate::env::set_var("JCODE_HOME", home.path());
     let mut app = create_test_app();
     configure_test_remote_models_with_openai_recommendations(&mut app);
 
