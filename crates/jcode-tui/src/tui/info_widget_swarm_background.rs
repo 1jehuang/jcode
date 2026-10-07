@@ -45,8 +45,9 @@ pub(super) fn render_swarm_widget(data: &InfoWidgetData, inner: Rect) -> Framed 
     Framed::body(lines).title(title)
 }
 
-/// Border layout: `⏳ Background · 3 running` top-left, task rows in the body,
-/// `+N more` bottom-left.
+/// Border layout: `⏳ Background · 3 running` top-left, one compact row per
+/// task (status glyph, label, progress bar, percent) in the body, `+N more`
+/// bottom-left.
 pub(super) fn render_background_widget(data: &InfoWidgetData, inner: Rect) -> Framed {
     let Some(info) = &data.background_info else {
         return Framed::default();
@@ -54,7 +55,8 @@ pub(super) fn render_background_widget(data: &InfoWidgetData, inner: Rect) -> Fr
     let Some(summary) = background_summary(info) else {
         return Framed::default();
     };
-    let (rows, hidden) = background_task_rows(info, inner.width as usize, "• ");
+    let max_rows = (inner.height as usize).clamp(1, WIDGET_MAX_TASK_ROWS);
+    let (rows, hidden) = background_task_rows(info, inner.width as usize, "", max_rows);
     let mut framed = Framed::body(rows).title(Line::from(vec![
         Span::styled("⏳ ", Style::default().fg(rgb(180, 140, 255))),
         frame::label(summary),
@@ -157,7 +159,7 @@ fn render_background_lines(info: &BackgroundInfo, width: usize) -> Vec<Line<'sta
         Span::styled("⏳ ", Style::default().fg(rgb(180, 140, 255))),
         Span::styled(summary, Style::default().fg(rgb(160, 160, 170))),
     ])];
-    let (rows, hidden) = background_task_rows(info, width, "  • ");
+    let (rows, hidden) = background_task_rows(info, width, "  ", COMPACT_MAX_TASK_ROWS);
     lines.extend(rows);
     if hidden > 0 {
         lines.push(Line::from(vec![
@@ -171,42 +173,166 @@ fn render_background_lines(info: &BackgroundInfo, width: usize) -> Vec<Line<'sta
     lines
 }
 
-/// Up to three running-task rows plus how many were left out.
+/// Most task rows the standalone widget lists before `+N more`.
+const WIDGET_MAX_TASK_ROWS: usize = 6;
+
+/// Most task rows the compact (Overview) form lists before `+N more`.
+const COMPACT_MAX_TASK_ROWS: usize = 3;
+
+/// Task rows plus how many were left out. Prefers the session-scoped
+/// `rows` (which carry status and percent). Falls back to plain running task
+/// names when only the process-local manager knows about tasks.
 fn background_task_rows(
     info: &BackgroundInfo,
     width: usize,
-    bullet: &'static str,
+    indent: &'static str,
+    max_rows: usize,
 ) -> (Vec<Line<'static>>, usize) {
+    let row_width = width.saturating_sub(UnicodeWidthStr::width(indent)).max(12);
+    if !info.rows.is_empty() {
+        // Most recently active task first.
+        let total = info.rows.len();
+        let shown = total.min(max_rows);
+        let lines = info
+            .rows
+            .iter()
+            .rev()
+            .take(shown)
+            .map(|task| {
+                let mut line = background_task_row_line(task, row_width);
+                if !indent.is_empty() {
+                    line.spans.insert(0, Span::raw(indent));
+                }
+                line
+            })
+            .collect();
+        return (lines, total - shown);
+    }
+
     let mut lines = Vec::new();
-    let row_width = width
-        .saturating_sub(unicode_width::UnicodeWidthStr::width(bullet))
-        .max(12);
-    for (index, task) in info.running_tasks.iter().take(3).enumerate() {
+    let shown = info.running_tasks.len().min(max_rows);
+    for (index, task) in info.running_tasks.iter().take(shown).enumerate() {
         let detail = if index == 0 {
             info.progress_detail.as_deref()
         } else {
             None
         };
         let row_text = if let Some(detail) = detail {
-            truncate_smart(&format!("{} · {}", task, detail), row_width)
+            truncate_smart(
+                &format!("{} · {}", task, detail),
+                row_width.saturating_sub(2),
+            )
         } else {
-            truncate_smart(task, row_width)
+            truncate_smart(task, row_width.saturating_sub(2))
         };
         lines.push(Line::from(vec![
-            Span::styled(bullet, Style::default().fg(rgb(120, 120, 130))),
+            Span::raw(indent),
+            Span::styled("◌ ", Style::default().fg(rgb(180, 140, 255))),
             Span::styled(row_text, Style::default().fg(rgb(180, 180, 190))),
         ]));
     }
 
-    (lines, info.running_tasks.len().saturating_sub(3))
+    (lines, info.running_tasks.len().saturating_sub(shown))
+}
+
+/// One task row: `◌ cargo test  ━━╺─── 42%`. Completed tasks show `✓` with a
+/// full bar, failed tasks `×` with `failed`.
+pub(crate) fn background_task_row_line(
+    task: &crate::tui::BackgroundTaskRow,
+    width: usize,
+) -> Line<'static> {
+    use crate::tui::BackgroundTaskRowStatus as Status;
+    const BAR_WIDTH: usize = 6;
+    let dim = rgb(110, 110, 120);
+    let (icon, task_color, percent) = match task.status {
+        Status::Running => (
+            "◌",
+            rgb(180, 140, 255),
+            task.percent.unwrap_or(0.0).clamp(0.0, 100.0),
+        ),
+        Status::Completed => ("✓", Color::Green, 100.0),
+        Status::Failed => (
+            "×",
+            Color::Red,
+            task.percent.unwrap_or(0.0).clamp(0.0, 100.0),
+        ),
+    };
+    let status_label = if task.status == Status::Failed {
+        "failed".to_string()
+    } else {
+        format!("{}%", percent.round() as u8)
+    };
+    let filled = ((percent / 100.0) * BAR_WIDTH as f32).round() as usize;
+    let (active_bar, remaining_bar) = if task.status == Status::Failed {
+        (
+            "━".repeat(filled.min(BAR_WIDTH)),
+            "─".repeat(BAR_WIDTH.saturating_sub(filled)),
+        )
+    } else if filled >= BAR_WIDTH {
+        ("━".repeat(BAR_WIDTH), String::new())
+    } else {
+        (
+            format!("{}╺", "━".repeat(filled)),
+            "─".repeat(BAR_WIDTH.saturating_sub(filled + 1)),
+        )
+    };
+
+    // icon + space + label + two spaces + bar + space + status
+    let fixed_width = UnicodeWidthStr::width(
+        format!("◌   {}{} {}", active_bar, remaining_bar, status_label).as_str(),
+    );
+    let max_label_width = width.saturating_sub(fixed_width).max(1);
+    let label = truncate_task_label(&task.label, max_label_width);
+
+    Line::from(vec![
+        Span::styled(icon, Style::default().fg(task_color)),
+        Span::raw(" "),
+        Span::styled(label, Style::default().fg(rgb(190, 190, 200))),
+        Span::raw("  "),
+        Span::styled(active_bar, Style::default().fg(task_color)),
+        Span::styled(remaining_bar, Style::default().fg(dim)),
+        Span::styled(format!(" {}", status_label), Style::default().fg(dim)),
+    ])
+}
+
+fn truncate_task_label(label: &str, max_width: usize) -> String {
+    let label = label.replace(['\r', '\n'], " ");
+    if UnicodeWidthStr::width(label.as_str()) <= max_width {
+        return label;
+    }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+    let mut truncated = String::new();
+    let mut used = 0usize;
+    for ch in label.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w + 1 > max_width {
+            break;
+        }
+        used += w;
+        truncated.push(ch);
+    }
+    truncated.push('…');
+    truncated
 }
 
 fn background_summary(info: &BackgroundInfo) -> Option<String> {
-    if info.running_count == 0 {
+    if !info.has_content() {
         return None;
     }
-
-    Some(format!("Background · {} running", info.running_count))
+    let running = if info.rows.is_empty() {
+        info.running_count
+    } else {
+        info.rows
+            .iter()
+            .filter(|row| row.status == crate::tui::BackgroundTaskRowStatus::Running)
+            .count()
+    };
+    if running == 0 {
+        return Some("Background".to_string());
+    }
+    Some(format!("Background · {} running", running))
 }
 
 /// Most agents the dock lists before collapsing the rest into the footer.

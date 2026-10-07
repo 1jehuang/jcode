@@ -209,9 +209,9 @@ impl App {
     }
 
     fn retain_latest_background_tasks(&mut self) {
-        const MAX_PINNED_BACKGROUND_TASKS: usize = 2;
-        if self.background_task_rows.len() > MAX_PINNED_BACKGROUND_TASKS {
-            let stale = self.background_task_rows.len() - MAX_PINNED_BACKGROUND_TASKS;
+        const MAX_TRACKED_BACKGROUND_TASKS: usize = 8;
+        if self.background_task_rows.len() > MAX_TRACKED_BACKGROUND_TASKS {
+            let stale = self.background_task_rows.len() - MAX_TRACKED_BACKGROUND_TASKS;
             self.background_task_rows.drain(..stale);
         }
     }
@@ -313,7 +313,7 @@ impl App {
     }
 
     /// Successful tasks are useful as short-lived confirmation, but should not
-    /// permanently consume the pinned todo band's limited space. Failures stay
+    /// permanently consume the background widget's limited space. Failures stay
     /// until acted on, and running tasks always stay visible.
     pub(super) fn prune_irrelevant_background_tasks(&mut self) -> bool {
         const COMPLETED_TASK_VISIBILITY: std::time::Duration = std::time::Duration::from_secs(12);

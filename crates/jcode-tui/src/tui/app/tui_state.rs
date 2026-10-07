@@ -1524,13 +1524,15 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        // Gather background task info
+        // Gather background task info. Session-scoped rows come from task
+        // events (works when tasks run in the server process). The global
+        // manager only knows tasks spawned in this process.
         let background_info = {
-            // Get running background tasks count
             let bg_manager = crate::background::global();
             let (running_count, running_tasks, progress) = bg_manager.running_snapshot();
+            let rows = self.background_task_rows_ref().to_vec();
 
-            if running_count > 0 {
+            if running_count > 0 || !rows.is_empty() {
                 Some(crate::tui::info_widget::BackgroundInfo {
                     running_count,
                     running_tasks,
@@ -1540,6 +1542,7 @@ impl crate::tui::TuiState for App {
                         .and_then(|progress| progress.detail.clone()),
                     memory_agent_active: false,
                     memory_agent_turns: 0,
+                    rows,
                 })
             } else {
                 None

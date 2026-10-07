@@ -1512,14 +1512,96 @@ fn background_widget_handles_empty_and_large_task_lists() {
     let framed = super::render_background_widget(&data, Rect::new(0, 0, 40, 8));
     assert_eq!(
         framed.lines.len(),
-        3,
-        "3 task rows; summary and overflow on the border"
+        6,
+        "6 task rows; summary and overflow on the border"
     );
     let text = lines_text(&framed.all_lines());
     assert!(text.contains("200 running"), "got: {text}");
-    assert!(text.contains("+197 more"), "got: {text}");
+    assert!(text.contains("+194 more"), "got: {text}");
     // Zero-size rect must not panic (row width clamps to a minimum).
     let _ = super::render_background_widget(&data, Rect::new(0, 0, 0, 0));
+}
+
+#[test]
+fn background_widget_renders_session_task_rows_with_progress() {
+    use crate::tui::{BackgroundTaskRow, BackgroundTaskRowStatus};
+    let row = |id: &str, label: &str, percent: Option<f32>, status| BackgroundTaskRow {
+        task_id: id.to_string(),
+        label: label.to_string(),
+        percent,
+        status,
+        completed_at: None,
+    };
+    let info = BackgroundInfo {
+        rows: vec![
+            row(
+                "a",
+                "integration tests",
+                Some(30.0),
+                BackgroundTaskRowStatus::Failed,
+            ),
+            row(
+                "b",
+                "release build",
+                Some(100.0),
+                BackgroundTaskRowStatus::Completed,
+            ),
+            row(
+                "c",
+                "cargo test",
+                Some(50.0),
+                BackgroundTaskRowStatus::Running,
+            ),
+        ],
+        ..Default::default()
+    };
+    let data = InfoWidgetData {
+        background_info: Some(info.clone()),
+        ..Default::default()
+    };
+    assert!(data.has_data_for(WidgetKind::BackgroundTasks));
+
+    let framed = super::render_background_widget(&data, Rect::new(0, 0, 40, 8));
+    let rows: Vec<String> = framed
+        .lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            "◌ cargo test  ━━━╺── 50%",
+            "✓ release build  ━━━━━━ 100%",
+            "× integration tests  ━━──── failed",
+        ]
+    );
+    let title = lines_text(framed.title.as_slice());
+    assert!(title.contains("Background · 1 running"), "got: {title}");
+
+    // Height-limited: newest rows first, the rest collapse into the footer.
+    let framed = super::render_background_widget(&data, Rect::new(0, 0, 40, 1));
+    assert_eq!(framed.lines.len(), 1);
+    assert!(lines_text(&framed.all_lines()).contains("+2 more"));
+
+    // Only finished tasks: still renders, without a running count.
+    let finished = InfoWidgetData {
+        background_info: Some(BackgroundInfo {
+            rows: vec![row(
+                "b",
+                "release build",
+                None,
+                BackgroundTaskRowStatus::Completed,
+            )],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let framed = super::render_background_widget(&finished, Rect::new(0, 0, 40, 4));
+    assert_eq!(lines_text(framed.title.as_slice()), "⏳ \nBackground");
+
+    // Compact (overview) form mirrors its computed height.
+    let compact = super::render_background_compact(&info);
+    assert_eq!(compact.len(), 4);
 }
 
 #[test]
@@ -1536,6 +1618,7 @@ fn background_widget_and_compact_share_summary_format() {
         progress_detail: Some("[#####-------] 42% · Building (parsed)".to_string()),
         memory_agent_active: false,
         memory_agent_turns: 0,
+        rows: Vec::new(),
     };
     let data = InfoWidgetData {
         background_info: Some(info.clone()),
@@ -1551,17 +1634,16 @@ fn background_widget_and_compact_share_summary_format() {
     let title = lines_text(framed.title.as_slice());
     let compact_head = lines_text(&compact[..1]);
     assert_eq!(title, compact_head);
-    for line in [&widget_text, &lines_text(&compact)] {
-        assert!(line.contains("+1 more"), "got: {line}");
-    }
+    assert!(widget_text.contains("+3 more"), "got: {widget_text}");
+    assert!(lines_text(&compact).contains("+1 more"));
     assert!(widget_text.contains("Background"), "got: {widget_text}");
     assert!(widget_text.contains("4"), "got: {widget_text}");
     assert!(!widget_text.contains("mem:"), "got: {widget_text}");
     assert!(widget_text.contains("selfdev build"), "got: {widget_text}");
-    assert!(widget_text.contains("train.py"), "got: {widget_text}");
-    assert!(widget_text.contains("cargo test"), "got: {widget_text}");
-    assert!(widget_text.contains("+1 more"), "got: {widget_text}");
     assert!(widget_text.contains("[#####-------]"), "got: {widget_text}");
+    let compact_text = lines_text(&compact);
+    assert!(compact_text.contains("train.py"), "got: {compact_text}");
+    assert!(compact_text.contains("cargo test"), "got: {compact_text}");
 }
 
 #[test]

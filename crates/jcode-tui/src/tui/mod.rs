@@ -431,7 +431,7 @@ pub trait TuiState {
     fn pinned_todos_expanded(&self) -> bool {
         false
     }
-    /// Running and recently completed background tasks rendered beneath pinned todos.
+    /// Running and recently completed background tasks for the session.
     fn background_task_rows(&self) -> &[BackgroundTaskRow] {
         &[]
     }

@@ -306,6 +306,17 @@ pub struct BackgroundInfo {
     pub memory_agent_active: bool,
     /// Memory agent turn count
     pub memory_agent_turns: usize,
+    /// Session-scoped task rows (running, recently completed, failed) tracked
+    /// by the client from task events. Preferred over `running_tasks` because
+    /// it works when tasks run in the server process.
+    pub rows: Vec<crate::tui::BackgroundTaskRow>,
+}
+
+impl BackgroundInfo {
+    /// Whether there is anything worth rendering.
+    pub fn has_content(&self) -> bool {
+        self.running_count > 0 || !self.rows.is_empty()
+    }
 }
 
 /// Which provider the usage info is for
@@ -767,7 +778,7 @@ impl InfoWidgetData {
                 if self
                     .background_info
                     .as_ref()
-                    .map(|b| b.running_count > 0)
+                    .map(|b| b.has_content())
                     .unwrap_or(false)
                 {
                     sections += 1;
@@ -814,7 +825,7 @@ impl InfoWidgetData {
             WidgetKind::BackgroundTasks => self
                 .background_info
                 .as_ref()
-                .map(|b| b.running_count > 0)
+                .map(|b| b.has_content())
                 .unwrap_or(false),
             WidgetKind::Compaction => self.compaction_info.is_some(),
             WidgetKind::AmbientMode => false,
@@ -2000,7 +2011,7 @@ fn render_sections(
 
     // Background tasks info
     if let Some(info) = &data.background_info
-        && info.running_count > 0
+        && info.has_content()
     {
         lines.extend(render_background_compact(info));
     }
