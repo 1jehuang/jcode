@@ -1,8 +1,6 @@
 // Integration tests for the first-run onboarding flow control logic.
 
-use super::onboarding_flow::{
-    ExternalCli, ImportReview, OnboardingFlow, OnboardingPhase, SummaryPill,
-};
+use super::onboarding_flow::{ExternalCli, OnboardingFlow, OnboardingPhase};
 
 #[derive(Clone)]
 struct QualityFirstOpenAiProvider {
@@ -243,10 +241,10 @@ fn import_review_collects_checked_logins() {
         ExternalAuthReviewCandidate::fixture("Gemini", "Gemini CLI"),
     ])
     .unwrap();
-    // The default is the summary screen with Jcode subscription preselected.
+    // The default is the summary screen with Import preselected.
     assert!(!review.choosing);
-    assert!(!review.continue_focused);
-    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Subscription);
+    assert!(review.continue_focused);
+    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Continue);
     assert_eq!(review.total(), 3);
     // All candidates remain pre-checked when the user chooses an import action.
     assert_eq!(review.approved_indices(), vec![0, 1, 2]);
@@ -456,33 +454,6 @@ fn login_phase_enter_opens_login_picker() {
         // With a picker already open, Enter is no longer consumed by onboarding
         // so the picker can commit the selection.
         assert!(!app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-    });
-}
-
-#[test]
-fn subscription_choice_exposes_the_canonical_pricing_page() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        let mut review = ImportReview::new(vec![
-            crate::external_auth::ExternalAuthReviewCandidate::fixture("OpenAI", "Codex"),
-        ])
-        .unwrap();
-        review.focus_summary_pill(SummaryPill::Subscription);
-        app.onboarding_flow = Some(OnboardingFlow {
-            phase: OnboardingPhase::Login {
-                import: Some(review),
-            },
-        });
-
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-        assert_eq!(
-            app.status_notice(),
-            Some(format!(
-                "Open Jcode pricing: {}",
-                crate::subscription_catalog::JCODE_PRICING_URL
-            ))
-        );
-        assert!(app.pending_login.is_none());
     });
 }
 

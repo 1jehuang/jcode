@@ -1239,8 +1239,6 @@ pub struct LoginImportPrompt {
 pub enum ImportSummaryPill {
     /// Import everything we detected (default).
     Continue,
-    /// Sign in with a Jcode subscription instead of importing.
-    Subscription,
     /// Open the per-login checkbox list to import fewer logins.
     ImportLess,
     /// Open the telemetry settings sub-page.

@@ -263,8 +263,7 @@ fn onboarding_golden_walks_every_phase() {
 
     // 2. Login with detected imports: the default SUMMARY screen. It lists
     // everything we detected read-only and lands focus on a preselected
-    // import action, with a Jcode subscription alternative and secondary
-    // import/telemetry controls beside it.
+    // import action, with secondary import/telemetry controls beside it.
     {
         let review = ImportReview::new(vec![
             ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
@@ -286,22 +285,14 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Codex auth.json"), "source 1: {text}");
         assert!(text.contains("Claude"), "provider 2: {text}");
         assert!(text.contains('✓'), "detected checkmark: {text}");
-        // The primary actions explicitly offer import or a Jcode subscription.
+        // The primary action is import. The Jcode subscription is not offered.
         assert!(text.contains("Import"), "import pill label: {text}");
         assert!(
-            text.contains("Jcode subscription"),
-            "subscription pill label: {text}"
+            !text.contains("Jcode subscription"),
+            "no subscription pill: {text}"
         );
         assert!(text.contains("Import less"), "import-less pill: {text}");
         assert!(text.contains("Telemetry"), "telemetry pill label: {text}");
-        assert!(
-            text.contains("$10 to $20 inference, $20 to $40; then provider API prices"),
-            "subscription allowance and overage pricing: {text}"
-        );
-        assert!(
-            text.contains("Scales through Solo"),
-            "offer should apply through the Solo plan: {text}"
-        );
         assert!(
             text.contains('\u{25D6}') && text.contains('\u{25D7}'),
             "pill rounded end caps: {text}"
@@ -364,8 +355,8 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Cursor"), "single login row: {text}");
         assert!(text.contains("Import"), "import pill: {text}");
         assert!(
-            text.contains("Jcode subscription"),
-            "subscription pill: {text}"
+            !text.contains("Jcode subscription"),
+            "no subscription pill: {text}"
         );
     }
 
