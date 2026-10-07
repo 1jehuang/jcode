@@ -938,10 +938,7 @@ fn anthropic_model_cache_is_fresh(scope: &str) -> bool {
     ANTHROPIC_MODEL_CATALOG_SERVICE.is_fresh(scope)
 }
 
-fn runtime_model_unavailability(
-    scope: &str,
-    model: &str,
-) -> Option<RuntimeModelUnavailability> {
+fn runtime_model_unavailability(scope: &str, model: &str) -> Option<RuntimeModelUnavailability> {
     let model = normalize_model_id(model);
     if model.is_empty() {
         return None;

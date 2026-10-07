@@ -10,9 +10,9 @@ use super::{
     build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
     copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
     format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
-    known_openai_model_ids_for_scope, model_availability_for_account,
-    model_availability_for_scope, openrouter,
-    openrouter_catalog_model_id, provider_for_model, standard_openrouter_profile_configured,
+    known_openai_model_ids_for_scope, model_availability_for_account, model_availability_for_scope,
+    openrouter, openrouter_catalog_model_id, provider_for_model,
+    standard_openrouter_profile_configured,
 };
 
 /// Build the fast local route snapshot used by the TUI model picker while the
@@ -382,13 +382,11 @@ fn append_openai_routes(
 ) {
     let has_runtime = provider.openai_provider().is_some();
     let oauth_scope = super::openai_catalog_scope_for_credential(true, "");
-    let api_scope = crate::provider_catalog::load_api_key_from_env_or_config(
-        "OPENAI_API_KEY",
-        "openai.env",
-    )
-    .map(|key| key.trim().to_string())
-    .filter(|key| !key.is_empty())
-    .map(|key| super::openai_catalog_scope_for_credential(false, &key));
+    let api_scope =
+        crate::provider_catalog::load_api_key_from_env_or_config("OPENAI_API_KEY", "openai.env")
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .map(|key| super::openai_catalog_scope_for_credential(false, &key));
 
     let oauth_models = known_openai_model_ids_for_scope(&oauth_scope);
     let api_models = api_scope
@@ -440,7 +438,11 @@ fn append_openai_routes(
         // for them (the Codex backend rejects them for ChatGPT accounts).
         if jcode_provider_core::is_openai_api_only_pro_model(&model) {
             if openai_auth.openai_has_api_key {
-                routes.push(build_openai_api_key_route(&model, has_runtime, String::new()));
+                routes.push(build_openai_api_key_route(
+                    &model,
+                    has_runtime,
+                    String::new(),
+                ));
             } else {
                 routes.push(build_openai_api_key_route(
                     &model,
