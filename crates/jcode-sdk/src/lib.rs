@@ -144,6 +144,7 @@ mod errors;
 mod launch;
 mod ssh;
 mod structured;
+pub mod turn_retry;
 pub mod worktrees;
 
 #[cfg(test)]
@@ -178,6 +179,7 @@ pub use structured::{
     StructuredOutputError, StructuredOutputSchema, StructuredSchemaError, StructuredTurnResult,
     StructuredValidationIssue,
 };
+pub use turn_retry::{FailureKind, RetryDecision, RetryPolicy, TurnRetry, classify_failure};
 
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;
