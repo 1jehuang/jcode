@@ -448,6 +448,116 @@ fn test_completion_gate_dedup_suppresses_unchanged_todos() {
 }
 
 #[test]
+fn test_completion_gate_refires_after_todo_changes() {
+    // The dedup must not over-suppress: a todo change that keeps the
+    // confidence below threshold but alters the fingerprint (new history
+    // entry) must re-fire the gate within budget. Once the todos then stay
+    // unchanged, the dedup suppresses and the clean final handoff latches.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = false;
+
+        let mk_todo = |hist: Vec<crate::todo::ConfidenceState>| crate::todo::TodoItem {
+            id: "todo-1".to_string(),
+            content: "Ship the fix".to_string(),
+            status: "completed".to_string(),
+            priority: "high".to_string(),
+            confidence: Some(*hist.last().unwrap()),
+            completion_confidence: Some(*hist.last().unwrap()),
+            confidence_history: hist,
+            ..Default::default()
+        };
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[mk_todo(vec![crate::todo::ConfidenceState::from_legacy_score(50)])],
+        )
+        .expect("save low-confidence completed todo");
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(
+                    crate::todo::FeedbackLoopTraceability::Complete,
+                ),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing ownership assessment");
+
+        // Turn 1: gate fires, fingerprint latched.
+        assert!(app.schedule_auto_poke_followup_if_needed(), "turn 1 fires");
+        assert_eq!(app.todo_completion_gate_attempts, 1);
+        let fp1 = app.last_todo_completion_confidence_fingerprint.clone();
+        assert!(fp1.is_some());
+        app.pending_queued_dispatch = false;
+        app.queued_messages.clear();
+
+        // Turn 2: confidence still Speculative (below threshold) but the
+        // history gained an entry. Different fingerprint bytes, still needs
+        // validation: the gate must re-fire, not dedup.
+        crate::todo::save_todos(
+            &app.session.id,
+            &[mk_todo(vec![
+                crate::todo::ConfidenceState::from_legacy_score(50),
+                crate::todo::ConfidenceState::from_legacy_score(55),
+            ])],
+        )
+        .expect("append history entry, still below threshold");
+        let fired2 = app.schedule_auto_poke_followup_if_needed();
+        assert!(fired2, "changed fingerprint below threshold must re-fire");
+        assert_eq!(app.todo_completion_gate_attempts, 2, "budget advances");
+        let fp2 = app.last_todo_completion_confidence_fingerprint.clone();
+        assert_ne!(fp1, fp2, "fingerprint advanced to the new state");
+        app.pending_queued_dispatch = false;
+        app.queued_messages.clear();
+
+        // Turn 3: unchanged todos. Dedup suppresses, clean final handoff
+        // latches and resets the attempt budget.
+        let fired3 = app.schedule_auto_poke_followup_if_needed();
+        assert!(fired3, "unchanged todos route to the clean final handoff");
+        assert_eq!(app.todo_completion_gate_attempts, 0, "budget reset");
+        assert!(app.todo_final_response_requested, "handoff latched");
+
+        // Turn 4: fully idle, nothing queued, no new popup.
+        let displays_before = app.display_messages.len();
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(app.display_messages.len(), displays_before, "no new popup");
+
+        // Exactly two pokes total: turn 1 and turn 2. Turn 3 was the clean
+        // handoff message, turn 4 silent. The UI coalesces back-to-back
+        // identical system messages into one row with a [x2] suffix, so the
+        // transcript shows one "Double-checking" row annotated with the
+        // repeat count rather than two rows.
+        let display_texts: Vec<String> = app
+            .display_messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| m.content.clone())
+            .collect();
+        let poke_rows: Vec<&String> = display_texts
+            .iter()
+            .filter(|t| t.contains("Double-checking"))
+            .collect();
+        assert_eq!(
+            poke_rows.len(),
+            1,
+            "coalesced into a single repeated-message row"
+        );
+        assert!(
+            poke_rows[0].contains("[\u{d7}2]"),
+            "repeat suffix shows the second fire: {:?}",
+            poke_rows[0]
+        );
+    });
+}
+
+#[test]
 fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
