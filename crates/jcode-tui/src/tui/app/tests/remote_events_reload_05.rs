@@ -366,6 +366,88 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
 }
 
 #[test]
+fn test_completion_gate_dedup_suppresses_unchanged_todos() {
+    // Turn 1 fires the gate once. Turn 2 with unchanged todos must take the
+    // dedup branch: no new popup, clean fall-through, fingerprint logged.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = false; // prevent re-arming on each schedule call
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the fix".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(50)),
+                confidence_history: vec![crate::todo::ConfidenceState::from_legacy_score(50)],
+                ..Default::default()
+            }],
+        )
+        .expect("save low-confidence completed todo");
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing ownership assessment");
+
+        // Turn 1: gate fires, fingerprint recorded.
+        let fired1 = app.schedule_auto_poke_followup_if_needed();
+        assert!(fired1, "turn 1 should fire the gate");
+        let fp1 = app.last_todo_completion_confidence_fingerprint.clone();
+        assert!(fp1.is_some());
+
+        // Reset turn-end state the way a real turn cycle would.
+        app.pending_queued_dispatch = false;
+        app.queued_messages.clear();
+
+        // Turn 2: same todos, same confidence, same history. The dedup must
+        // suppress the poke and route to the clean final handoff instead:
+        // "All todos done" display + final-response continuation, not a repeat
+        // "Double-checking confidence" popup. The clean-finish resets
+        // todo_completion_gate_attempts to 0 for the next cycle.
+        let fired2 = app.schedule_auto_poke_followup_if_needed();
+        assert!(
+            fired2,
+            "dedup routes to the clean final handoff, which queues a continuation"
+        );
+        assert_eq!(
+            app.todo_completion_gate_attempts, 0,
+            "clean-finish resets attempts to 0 for the next cycle"
+        );
+        // The final screen shows the completion handoff, not a repeat poke.
+        let display_texts: Vec<String> = app
+            .display_messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| m.content.clone())
+            .collect();
+        assert!(
+            display_texts
+                .iter()
+                .any(|t| t.contains("All todos done")),
+            "expected clean handoff message, got: {display_texts:?}"
+        );
+        assert_eq!(
+            display_texts.iter().filter(|t| t.contains("Double-checking")).count(),
+            1,
+            "exactly one poke popup total, no repeat"
+        );
+    });
+}
+
+#[test]
 fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();

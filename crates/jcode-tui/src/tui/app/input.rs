@@ -1728,14 +1728,16 @@ impl App {
                 super::commands::format_todo_completion_confidence(confidence_summary);
             let needs_spike_challenge = confidence_summary.confidence_spike_detected
                 && !self.todo_confidence_spike_challenged;
-            let completion_confidence_fingerprint = serde_json::to_string(
-                &todos
-                    .iter()
-                    .filter(|t| t.status == "completed")
-                    .map(|t| (&t.id, &t.completion_confidence, &t.confidence_history))
-                    .collect::<Vec<_>>(),
-            )
-            .ok();
+            // Sort the fingerprint tuples by id before serializing so the JSON
+            // representation is deterministic: identical todos always produce
+            // identical fingerprints regardless of insertion order.
+            let mut fp_tuples: Vec<_> = todos
+                .iter()
+                .filter(|t| t.status == "completed")
+                .map(|t| (&t.id, &t.completion_confidence, &t.confidence_history))
+                .collect();
+            fp_tuples.sort_by_key(|(id, _, _)| *id);
+            let completion_confidence_fingerprint = serde_json::to_string(&fp_tuples).ok();
             let confidence_needs_followup =
                 confidence_summary.completion_confidence_needs_validation || needs_spike_challenge;
             if confidence_needs_followup
@@ -1758,6 +1760,13 @@ impl App {
                     "🔍 Double-checking confidence jumps..."
                 };
                 self.push_display_message(DisplayMessage::system(notice));
+                // Advance the fingerprint BEFORE the comparison check on the next
+                // call. The comparison returns false (fingerprints match) when
+                // todos are unchanged, so without this the dedup branch is
+                // unreachable on consecutive calls and the fingerprint never
+                // advances past the first call's value.
+                self.last_todo_completion_confidence_fingerprint =
+                    completion_confidence_fingerprint.clone();
                 // User-role content: reminder-only turns read as empty user
                 // messages and models answer instead of re-validating.
                 let summary = super::commands::build_todo_confidence_summary_message(&todos);
