@@ -206,6 +206,20 @@ resolution. The system supports:
 
 All agents can send DMs and subtree broadcasts.
 
+### Swarm labels and cross-swarm DMs
+
+Each swarm can carry a short, human-readable label (`set_swarm_label`), unique
+case-insensitively across swarms and persisted in
+`~/.jcode/state/swarm-labels.json`. `list_swarms` returns the live swarm
+directory: id, label, coordinator, member count, and which swarm is yours.
+
+Cross-swarm communication is DM-only. `dm` (or `message`) with
+`to_swarm=<label or id>` delivers to `to_session` inside that swarm, or to the
+swarm's coordinator when `to_session` is omitted. The recipient sees
+`Cross-swarm DM from <name> (swarm '<label>')` plus reply instructions.
+Broadcasts, channels, and shared context never cross swarm boundaries, so one
+swarm cannot flood another.
+
 All inter-agent communication is delivered as notifications (DMs, channel messages,
 broadcasts, plan updates, intent notices, and lifecycle events). Notifications are
 queued as soft interrupts and injected into running agents at safe points, so

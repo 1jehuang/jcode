@@ -47,6 +47,7 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 urlencoding = "2"        # URL encoding for web search
 uuid = { version = "1", features = ["v4", "v5"] }
+jcode-applet-types = { path = "../jcode-applet-types" }
 
 # Embeddings (local inference) live in jcode-base; this crate forwards the
 # `embeddings` feature to jcode-base rather than depending on jcode-embedding.
@@ -100,13 +101,14 @@ jcode-session-types = { path = "../jcode-session-types" }
 jcode-setup-hints = { path = "../jcode-setup-hints" }
 jcode-task-types = { path = "../jcode-task-types" }
 jcode-tool-core = { path = "../jcode-tool-core" }
+jcode-codemode = { path = "../jcode-codemode" }
 jcode-tool-types = { path = "../jcode-tool-types" }
 
 # Archive extraction (for auto-update)
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
-agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.1.6" }
+agentgrep = { git = "https://github.com/1jehuang/agentgrep.git", tag = "v0.1.7" }
 
 [features]
 default = ["pdf", "bedrock"]

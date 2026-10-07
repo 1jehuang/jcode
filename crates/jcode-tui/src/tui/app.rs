@@ -55,7 +55,9 @@ mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
 mod commands;
+mod commands_cloud;
 mod commands_colors;
+mod commands_desktop;
 mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
@@ -99,6 +101,7 @@ mod state_ui;
 mod state_ui_input_helpers;
 mod update_sim;
 mod usage_reset;
+mod voice_input;
 pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -560,10 +563,25 @@ pub struct RunResult {
     pub update_session: Option<String>,
     /// Session ID to restart (exec into current binary, no build)
     pub restart_session: Option<String>,
+    /// After `/cloud` or `/local`: exec into the session at its new location.
+    pub cloud_handoff: Option<CloudHandoff>,
     /// Exit code to use (for canary wrapper communication)
     pub exit_code: Option<i32>,
     /// The session ID that was active (for resume hints on exit)
     pub session_id: Option<String>,
+}
+
+/// Where to reattach after a machine move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloudHandoff {
+    /// Attach to the session on a cloud host over SSH.
+    Remote {
+        session_id: String,
+        host: String,
+        working_dir: Option<String>,
+    },
+    /// Resume the (returned) session locally.
+    Local { session_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -637,6 +655,28 @@ pub(super) struct HistoryScrollAnchor {
     /// to detect when a frame with the newly-loaded content has rendered (its
     /// total differs), so the anchor can be reconciled into `scroll_offset`.
     pub base_total: usize,
+}
+
+/// Resize anchor captured against the pre-resize geometry.
+///
+/// The stored `scroll_offset` is a wrapped line index, which only means
+/// something for the width that produced it. When a resize rewraps the
+/// transcript while the reader is paused in history, the reading position is
+/// captured in content coordinates instead, and the next frame resolves it
+/// against the new geometry so the same message stays under the reader
+/// (issue #1412, persistent half).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PendingResizeAnchor {
+    /// Where the reader was, in content coordinates. A message, or a row in a
+    /// section with no message boundaries (live streaming output, retained
+    /// reasoning, the header).
+    pub target: jcode_tui_messages::ContentPos,
+    /// Viewport width the anchor was captured at; the frame that resolves it
+    /// is laid out at a different one.
+    pub captured_width: u16,
+    /// Resolved row the screen was showing when the anchor was captured, used
+    /// to tell the stale published value from the post-resize one.
+    pub captured_scroll: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -860,6 +900,12 @@ pub struct App {
     /// viewport to the content the reader was looking at so the prepend does not
     /// visibly jump. Resolved into `scroll_offset` by the next render frame.
     pending_history_anchor: Option<HistoryScrollAnchor>,
+    /// Set when a resize rewraps the transcript while the reader is paused in
+    /// history. Holds the reading position in content coordinates (which
+    /// message, which row inside it) captured against the pre-resize geometry,
+    /// and is resolved against each new frame until the renderer reports that
+    /// it applied it. See `jcode_tui_messages::anchor`.
+    pending_resize_anchor: Option<PendingResizeAnchor>,
     input: String,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
     /// Per-input memo for `command_suggestions()`; see
@@ -925,6 +971,10 @@ pub struct App {
     // while the client was idle. Drives the starvation watchdog that recovers a
     // stranded auto-poke continuation instead of spinning forever.
     queued_followup_starved_since: Option<Instant>,
+    // Esc redirected the turn to a pending follow-up prompt. Remote servers
+    // send Done before Interrupted, so the follow-up waits for Interrupted
+    // (or this deadline) or the late Interrupted would clobber the new turn.
+    remote_interrupt_ack_deadline: Option<Instant>,
     // Reload reconnect is waiting for server history before deciding whether to continue.
     pending_reload_reconnect_status: Option<PendingReloadReconnectStatus>,
     // Current status
@@ -1078,6 +1128,8 @@ pub struct App {
     pending_background_client_reload: Option<(String, crate::bus::ClientMaintenanceAction)>,
     // Restart: if set, exec into current binary with this session ID (no build)
     restart_requested: Option<String>,
+    // `/cloud` or `/local` finished: reattach at the new location on quit.
+    cloud_handoff_requested: Option<CloudHandoff>,
     // Pasted content storage (displayed as placeholders, expanded on submit)
     pasted_contents: Vec<String>,
     // Pending pasted images (media_type, base64_data) attached to next message
@@ -1384,6 +1436,8 @@ pub struct App {
     last_client_focus_session_id: Option<String>,
     // Most recently focused side panel page, used to restore visibility when toggled off.
     last_side_panel_focus_id: Option<String>,
+    // Side panel takes over the whole transcript column (Alt+M cycle: split -> fullscreen -> hidden).
+    side_panel_fullscreen: bool,
     // User explicitly hid the side panel with the side-panel toggle key. While set, incoming snapshots may update
     // pages but must not reopen the panel by restoring focused_page_id.
     side_panel_user_hidden: bool,
@@ -1458,6 +1512,7 @@ pub struct App {
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching
     effort_switch_keys: super::keybind::EffortSwitchKeys,
+    speed_switch_keys: super::keybind::SpeedSwitchKeys,
     // Keybindings for scrolling
     scroll_keys: ScrollKeys,
     // Keybinding for centered-mode toggle
@@ -1472,6 +1527,12 @@ pub struct App {
     new_terminal_key: OptionalBinding,
     // Optional configured keybinding for opening the /resume session picker
     open_resume_key: OptionalBinding,
+    // Keybinding that starts/stops built-in voice input (Ctrl+Space default)
+    voice_input_key: OptionalBinding,
+    // Active built-in voice input (Nari streaming), if recording or finishing
+    voice_input: Option<voice_input::VoiceInput>,
+    // Last voice key press, to tell a held key's auto-repeat from a new press
+    voice_input_last_press: Option<Instant>,
     // Optional configured keybinding for accepting the post-error fallback offer
     fallback_switch_key: OptionalBinding,
     // Config reload generation the keybinding snapshot above was parsed at.
@@ -1494,6 +1555,7 @@ pub struct App {
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<(String, usize)>,
+    input_typing_undo: Option<(Instant, usize)>,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
     // restored when Down walks back past the newest entry
     history_draft: Option<(String, usize)>,
@@ -1632,23 +1694,14 @@ pub struct App {
     mouse_scroll_target: Option<MouseScrollTarget>,
     /// Remaining queued mouse-wheel lines. Positive = down, negative = up.
     mouse_scroll_queue: i16,
-    /// When the user overscrolls past the bottom of the transcript, an extra
-    /// status line is revealed below the input. This records the last time an
-    /// overscroll tick was received; the line dwells for a fixed window after
-    /// the last tick, then rebounds away. `None` means the line is hidden.
-    chat_overscroll_last: Option<Instant>,
-    /// Timestamp of the most recent downward chat scroll intent. Segments
-    /// wheel/key motion into "gestures": a pause longer than
-    /// `OVERSCROLL_GESTURE_GAP` starts a new gesture.
-    chat_scroll_down_last: Option<Instant>,
-    /// Whether the current downward scroll gesture began while the transcript
-    /// was already pinned to the bottom. Only such gestures reveal the elastic
-    /// overscroll line, so momentum from a scroll that merely carries the view
-    /// into the bottom does not trigger it.
-    chat_scroll_gesture_from_bottom: bool,
-    /// When to show the overscroll status line: off, always on, or the elastic
-    /// overscroll reveal (default). From `display.overscroll_status` config.
-    overscroll_status_mode: crate::config::OverscrollStatusMode,
+    /// Absolute paths edited by the agent's edit-style tool calls, derived
+    /// from `display_messages` and cached by `display_messages_version`.
+    agent_edited_cache: std::cell::RefCell<
+        Option<(
+            u64,
+            std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>,
+        )>,
+    >,
     /// Scroll offset for changelog overlay (None = not visible)
     changelog_scroll: Option<usize>,
     help_scroll: Option<usize>,

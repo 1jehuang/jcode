@@ -1,9 +1,12 @@
-use super::client_actions::{NotifySessionContext, handle_notify_session};
+use super::client_actions::{
+    NotifySessionContext, handle_applet_action, handle_close_applet, handle_notify_session,
+};
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
     handle_comm_unsubscribe_channel,
 };
+use super::client_comm_swarms::{handle_comm_list_swarms, handle_comm_set_swarm_label};
 use super::client_writer::write_direct_event;
 use super::comm_await::{CommAwaitMembersContext, handle_comm_await_members};
 use super::comm_control::{
@@ -177,6 +180,42 @@ pub(super) async fn handle_lightweight_control_request(
             )
             .await;
         }
+        Request::AppletAction {
+            id,
+            session_id,
+            instance,
+            action,
+            state,
+            source_key,
+        } => {
+            handle_applet_action(
+                id,
+                session_id,
+                instance,
+                action,
+                state,
+                source_key,
+                NotifySessionContext {
+                    sessions,
+                    soft_interrupt_queues,
+                    client_connections,
+                    swarm_members,
+                    swarms_by_id,
+                    event_history,
+                    event_counter,
+                    swarm_event_tx,
+                    client_event_tx: &client_event_tx,
+                },
+            )
+            .await;
+        }
+        Request::CloseApplet {
+            id,
+            session_id,
+            instance,
+        } => {
+            handle_close_applet(id, session_id, instance, &client_event_tx);
+        }
         Request::CommShare {
             id,
             session_id: req_session_id,
@@ -224,6 +263,7 @@ pub(super) async fn handle_lightweight_control_request(
             delivery,
             wake,
             tldr,
+            to_swarm,
         } => {
             handle_comm_message(
                 id,
@@ -234,6 +274,7 @@ pub(super) async fn handle_lightweight_control_request(
                 delivery,
                 wake,
                 tldr,
+                to_swarm,
                 &client_event_tx,
                 sessions,
                 soft_interrupt_queues,
@@ -260,6 +301,39 @@ pub(super) async fn handle_lightweight_control_request(
                 file_touch,
                 sessions,
                 client_connections,
+            )
+            .await;
+        }
+        Request::CommListSwarms {
+            id,
+            session_id: req_session_id,
+        } => {
+            handle_comm_list_swarms(
+                id,
+                req_session_id,
+                &client_event_tx,
+                swarm_members,
+                swarms_by_id,
+                swarm_coordinators,
+            )
+            .await;
+        }
+        Request::CommSetSwarmLabel {
+            id,
+            session_id: req_session_id,
+            label,
+        } => {
+            handle_comm_set_swarm_label(
+                id,
+                req_session_id,
+                label,
+                &client_event_tx,
+                swarm_members,
+                swarms_by_id,
+                swarm_coordinators,
+                event_history,
+                event_counter,
+                swarm_event_tx,
             )
             .await;
         }

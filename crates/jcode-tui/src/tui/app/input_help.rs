@@ -110,7 +110,7 @@ impl App {
                 "/effort\nShow current effort.\n\n/effort <level>\nSet effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep). Which levels apply depends on the model. The swarm rungs [Beta] turn on swarm orchestration (swarm: light fan-out, swarm-deep: deep task graph). Root reasoning is configurable via [agents] swarm_root_effort and swarm_deep_root_effort (both default to max).\n\nAlso: {effort_keys} to cycle."
             }
             "fast" => {
-                "/fast\nShow whether fast mode is enabled, plus the saved default.\n\n/fast on\nEnable fast mode (service_tier = priority) for the current session.\n\n/fast off\nDisable fast mode for the current session.\n\n/fast status\nShow current fast-mode status.\n\n/fast default on\nSave fast mode as the default on startup.\n\n/fast default off\nSave fast mode as the default off on startup.\n\n/fast default status\nShow the saved fast-mode default."
+                "/fast\nShow whether fast mode is enabled, plus the saved default.\n\n/fast on\nEnable fast mode (service_tier = priority) for the current session.\n\n/fast ultra\nEnable OpenAI Ultrafast (service_tier = ultrafast) on models that support it, such as GPT-6 Astra.\n\n/fast off\nDisable fast mode for the current session.\n\nAlt+Up / Alt+Down cycle Standard -> Fast -> Ultrafast (configure speed_increase / speed_decrease).\n\n/fast status\nShow current fast-mode status.\n\n/fast default on\nSave fast mode as the default on startup.\n\n/fast default off\nSave fast mode as the default off on startup.\n\n/fast default status\nShow the saved fast-mode default."
             }
             "memory" => "/memory [on|off|status]\nToggle memory features for this session.",
             "log" => {
@@ -122,6 +122,9 @@ impl App {
             "swarm" => "/swarm [on|off|status]\nToggle swarm features for this session.",
             "overnight" => {
                 "/overnight <hours>[h|m] [mission]\nStart one overnight coordinator with a target wake/report time. The coordinator prioritizes verifiable, low-risk work, maintains structured logs, updates review notes, and generates a review HTML page.\n\n/overnight status\nShow the latest overnight run status.\n\n/overnight log\nShow recent overnight events.\n\n/overnight review\nOpen the generated review page.\n\n/overnight cancel\nRequest cancellation after the current coordinator turn reaches a safe boundary."
+            }
+            "voice" => {
+                "/voice\nBuilt-in voice input, like Jcode Desktop. Run /voice or press Ctrl+Space to start recording, press again to send. On terminals that report key releases, hold Ctrl+Space and let go to send. Esc cancels.\n\nThe live transcript and a level meter show in the status line. The final text is sent to the agent wrapped in <transcription> tags, and anything already typed in the composer stays there.\n\nSetup:\n  Nari API key  NARI_API_KEY or ~/.config/jcode/nari.env\n  microphone    auto-detects pw-record, parecord, arecord, rec, or ffmpeg\n\nConfigure in ~/.jcode/config.toml:\n  [keybindings] voice_input = \"ctrl+space\"\n  [dictation]   recorder = \"<command printing raw s16le mono 16 kHz>\"\n                vocabulary = [\"names\", \"terms\"]"
             }
             "dictate" | "dictation" => {
                 "/dictate\nRun the configured external speech-to-text command and inject the transcript into jcode.\n\nConfigure [dictation] in ~/.jcode/config.toml:\n  command       shell command that prints transcript to stdout,\n                for example ~/.local/bin/my-whisper-script --grammar-target code\n  mode          insert|append|replace|send\n  key           optional hotkey (for example alt+;)\n  timeout_secs  max wait time"

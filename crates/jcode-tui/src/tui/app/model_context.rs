@@ -44,7 +44,7 @@ impl App {
         self.status_detail = None;
         self.invalidate_model_picker_cache();
         let active_model = self.provider.model();
-        self.update_context_limit_for_model(&active_model);
+        self.update_context_limit_for_model(&active_model, None);
         self.session.provider_key =
             crate::provider::MultiProvider::session_provider_key_after_model_switch(
                 model_request,
@@ -491,7 +491,7 @@ impl App {
                 self.status_detail = None;
                 self.invalidate_model_picker_cache();
                 let active_model = self.provider.model();
-                self.update_context_limit_for_model(&active_model);
+                self.update_context_limit_for_model(&active_model, None);
                 self.session.provider_key =
                     crate::provider::MultiProvider::session_provider_key_after_model_switch(
                         &spec,
@@ -627,15 +627,78 @@ impl App {
         }
     }
 
-    pub(super) fn update_context_limit_for_model(&mut self, model: &str) {
-        let limit = if self.is_remote {
-            crate::provider::context_limit_for_model_with_provider(
-                model,
-                self.remote_provider_name.as_deref(),
-            )
-            .unwrap_or(self.provider.context_window())
-        } else {
-            self.provider.context_window()
+    /// Step the speed tier (Standard -> Fast -> Ultrafast) for a local session.
+    pub(super) fn cycle_speed_tier(&mut self, direction: i8) {
+        let provider_name = self.provider.name().to_string();
+        let model = self.provider.model();
+        let ladder = jcode_provider_core::service_tier::speed_tier_ladder(
+            Some(&provider_name),
+            Some(&model),
+        );
+        let current = self.provider.service_tier();
+        let Some((index, next, at_end)) = jcode_provider_core::service_tier::step_speed_tier(
+            &ladder,
+            current.as_deref(),
+            direction,
+        ) else {
+            self.set_status_notice("Speed tiers not available for this model");
+            return;
+        };
+        if at_end {
+            self.set_status_notice(speed_tier_notice(
+                next,
+                index,
+                ladder.len(),
+                Some(direction),
+            ));
+            return;
+        }
+        match self.provider.set_service_tier(next) {
+            Ok(()) => {
+                let applied = self.provider.service_tier();
+                let applied =
+                    jcode_provider_core::service_tier::canonical_speed_tier(applied.as_deref());
+                let index = ladder.iter().position(|t| *t == applied).unwrap_or(index);
+                let mut notice = speed_tier_notice(applied, index, ladder.len(), None);
+                if self.is_processing {
+                    notice.push_str(" (next request)");
+                }
+                self.set_status_notice(notice);
+            }
+            Err(e) => self.set_status_notice(format!("Speed switch failed: {}", e)),
+        }
+    }
+
+    pub(super) fn update_context_limit_for_model(
+        &mut self,
+        model: &str,
+        server_context_window: Option<u64>,
+    ) {
+        // Prefer the window the server resolved. A remote client's own provider is
+        // an inert placeholder with no model catalog, and the static resolver has
+        // no entry for a model it does not recognise, so both answer the generic
+        // default. Measured: `stealth/space-bunny-alpha@Stealth` has a catalog
+        // entry with context_length 1000000, and the panel showed 200000 because
+        // the number never crossed the wire.
+        let limit = match server_context_window {
+            Some(window) => window as usize,
+            None if self.is_remote => {
+                // The static catalog resolves the models it knows, so keep using
+                // it. What must not happen is the final fallback: for a model
+                // chosen server-side it is not in the catalog, and the client's
+                // own provider is an inert placeholder whose context_window()
+                // is the generic 200_000 default. Substituting that over a value
+                // the server already reported correctly is how a 1M route went
+                // back to displaying 200000. The server is the source of truth
+                // for an unknown model, so leave the last reported value alone
+                // instead of overwriting it with the default.
+                crate::provider::context_limit_for_model_with_provider(
+                    model,
+                    self.remote_provider_name.as_deref(),
+                )
+                .unwrap_or(self.context_limit as usize)
+            }
+            None => self.provider.context_window(),
         };
         self.context_limit = limit as u64;
         self.context_warning_shown = false;
@@ -647,6 +710,22 @@ impl App {
                 manager.set_budget(limit);
             };
         }
+    }
+
+    /// Assign the panel's context window and keep the compaction budget in step
+    /// with it.
+    ///
+    /// Assigning `context_limit` directly updates the panel but skips the
+    /// budget sync, so the two can disagree: a correct panel with a stale
+    /// compaction trigger that fires about five times too early on a 1M route.
+    /// Every direct assignment should come through here.
+    pub(super) fn set_context_limit_and_sync_budget(&mut self, limit: usize) {
+        self.context_limit = limit as u64;
+        self.context_warning_shown = false;
+        let compaction = self.registry.compaction();
+        if let Ok(mut manager) = compaction.try_write() {
+            manager.set_budget(limit);
+        };
     }
 
     pub(super) fn effective_context_tokens_from_usage(
@@ -1231,6 +1310,15 @@ impl App {
             lines.push(String::new());
         }
 
+        // One width for every provider block so bars align across sections,
+        // not just within them.
+        let name_width = reports
+            .iter()
+            .flat_map(|provider| provider.limits.iter())
+            .map(|limit| limit.name.chars().count())
+            .max()
+            .unwrap_or(0);
+
         for (idx, provider) in reports.iter().enumerate() {
             if idx > 0 {
                 lines.push(String::new());
@@ -1259,10 +1347,11 @@ impl App {
                     .map(|value| format!(" · resets in {}", value))
                     .unwrap_or_default();
                 lines.push(format!(
-                    "  {}: {}{}",
+                    "  {:<width$}: {}{}",
                     limit.name,
                     crate::usage::format_usage_bar(limit.usage_percent, 14),
-                    reset
+                    reset,
+                    width = name_width
                 ));
             }
 
@@ -1607,7 +1696,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
 
     if matches!(trimmed, "/fast" | "/fast status") {
         let current = app.provider.service_tier();
-        let status = if current.as_deref() == Some("priority") {
+        let status = if service_tier_is_fast(current.as_deref()) {
             "on"
         } else {
             "off"
@@ -1635,10 +1724,11 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         let mode = mode.trim().to_ascii_lowercase();
         let target = match mode.as_str() {
             "on" => "priority",
+            "ultra" | "ultrafast" => "ultrafast",
             "off" => "off",
             "status" => {
                 let current = app.provider.service_tier();
-                let enabled = current.as_deref() == Some("priority");
+                let enabled = service_tier_is_fast(current.as_deref());
                 let current_label = current
                     .as_deref()
                     .map(service_tier_display_label)
@@ -1659,7 +1749,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
             }
             _ => {
                 app.push_display_message(DisplayMessage::error(
-                    "Usage: /fast [on|off|status|default ...]".to_string(),
+                    "Usage: /fast [on|ultra|off|status|default ...]".to_string(),
                 ));
                 return true;
             }
@@ -1668,7 +1758,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
         match app.provider.set_service_tier(target) {
             Ok(()) => {
                 let current = app.provider.service_tier();
-                let enabled = current.as_deref() == Some("priority");
+                let enabled = service_tier_is_fast(current.as_deref());
                 let label = current
                     .as_deref()
                     .map(service_tier_display_label)
@@ -1679,7 +1769,10 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                     label,
                     applies_next_request,
                 )));
-                app.set_status_notice(fast_mode_status_notice(enabled, applies_next_request));
+                app.set_status_notice(fast_mode_status_notice(
+                    current.as_deref(),
+                    applies_next_request,
+                ));
             }
             Err(e) => {
                 app.push_display_message(DisplayMessage::error(format!(
@@ -1821,126 +1914,6 @@ impl App {
     }
 }
 
-pub(super) fn is_refresh_model_list_command(trimmed: &str) -> bool {
-    trimmed == "/refresh-model-list"
-}
-
-pub(super) fn format_model_refresh_summary(
-    summary: &crate::provider::ModelCatalogRefreshSummary,
-) -> String {
-    let mut message = format!(
-        "Model List Refresh Complete\n\nModels: {} → {}  (+{} / -{})\nRoutes: {} → {}  (+{} / -{} / ~{})",
-        summary.model_count_before,
-        summary.model_count_after,
-        summary.models_added,
-        summary.models_removed,
-        summary.route_count_before,
-        summary.route_count_after,
-        summary.routes_added,
-        summary.routes_removed,
-        summary.routes_changed,
-    );
-    append_model_name_diff(&mut message, summary);
-    message
-}
-
-pub(super) fn append_model_name_diff(
-    message: &mut String,
-    summary: &crate::provider::ModelCatalogRefreshSummary,
-) {
-    if !summary.models_added_names.is_empty() {
-        message.push_str("\nAdded models: ");
-        message.push_str(&format_model_name_list(&summary.models_added_names, 12));
-    }
-    if !summary.models_removed_names.is_empty() {
-        message.push_str("\nRemoved models: ");
-        message.push_str(&format_model_name_list(&summary.models_removed_names, 12));
-    }
-}
-
-pub(super) fn format_model_name_list(models: &[String], limit: usize) -> String {
-    let shown = models
-        .iter()
-        .take(limit)
-        .map(|model| model.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    if models.len() > limit {
-        format!("{} … and {} more", shown, models.len() - limit)
-    } else {
-        shown
-    }
-}
-
-pub(super) fn no_models_available_message(is_remote: bool) -> String {
-    let mut lines = vec![
-        "No models are available right now.".to_string(),
-        String::new(),
-        "Next steps:".to_string(),
-        "  - Run /login to connect or refresh a provider".to_string(),
-        "  - Run /account to inspect or switch credentials".to_string(),
-        "  - If you just logged in, wait a moment and try /model again".to_string(),
-    ];
-
-    if is_remote {
-        lines.push(
-            "  - If this is a remote session, reconnect if the server model list looks stale"
-                .to_string(),
-        );
-    }
-
-    lines.join("\n")
-}
-
-pub(super) fn model_switch_failure_message(error: &str, is_remote: bool) -> String {
-    let mut lines = vec![
-        format!("Failed to switch model: {}", error),
-        String::new(),
-        "Next steps:".to_string(),
-        "  - Use /model to choose another available route".to_string(),
-        "  - Run /login to add or refresh credentials".to_string(),
-        "  - Run /account to inspect or switch accounts".to_string(),
-    ];
-
-    if is_remote {
-        lines.push(
-            "  - If this is a remote session and the list looks stale, reconnect and try again"
-                .to_string(),
-        );
-    }
-
-    lines.join("\n")
-}
-
-pub(super) fn unavailable_model_route_message(
-    model: &str,
-    provider: &str,
-    detail: &str,
-    is_remote: bool,
-) -> String {
-    let reason = if detail.trim().is_empty() {
-        "This route is not currently available.".to_string()
-    } else {
-        format!("This route is not currently available: {}", detail.trim())
-    };
-
-    let mut lines = vec![
-        format!("Cannot use {} via {} right now.", model, provider),
-        String::new(),
-        reason,
-        String::new(),
-        "Next steps:".to_string(),
-        "  - Pick another available row in /model".to_string(),
-        "  - Run /login to add or refresh credentials".to_string(),
-        "  - Run /account to inspect or switch accounts".to_string(),
-    ];
-
-    if is_remote {
-        lines.push(
-            "  - If this is a remote session, wait a moment or reconnect if the catalog looks stale"
-                .to_string(),
-        );
-    }
-
-    lines.join("\n")
-}
+#[path = "model_context_messages.rs"]
+mod messages;
+pub(super) use messages::*;

@@ -1,8 +1,6 @@
 // Integration tests for the first-run onboarding flow control logic.
 
-use super::onboarding_flow::{
-    ExternalCli, ImportReview, OnboardingFlow, OnboardingPhase, SummaryPill,
-};
+use super::onboarding_flow::{ExternalCli, OnboardingFlow, OnboardingPhase};
 
 #[derive(Clone)]
 struct QualityFirstOpenAiProvider {
@@ -243,10 +241,10 @@ fn import_review_collects_checked_logins() {
         ExternalAuthReviewCandidate::fixture("Gemini", "Gemini CLI"),
     ])
     .unwrap();
-    // The default is the summary screen with Jcode subscription preselected.
+    // The default is the summary screen with Import preselected.
     assert!(!review.choosing);
-    assert!(!review.continue_focused);
-    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Subscription);
+    assert!(review.continue_focused);
+    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Continue);
     assert_eq!(review.total(), 3);
     // All candidates remain pre-checked when the user chooses an import action.
     assert_eq!(review.approved_indices(), vec![0, 1, 2]);
@@ -460,33 +458,6 @@ fn login_phase_enter_opens_login_picker() {
 }
 
 #[test]
-fn subscription_choice_exposes_the_canonical_pricing_page() {
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        let mut review = ImportReview::new(vec![
-            crate::external_auth::ExternalAuthReviewCandidate::fixture("OpenAI", "Codex"),
-        ])
-        .unwrap();
-        review.focus_summary_pill(SummaryPill::Subscription);
-        app.onboarding_flow = Some(OnboardingFlow {
-            phase: OnboardingPhase::Login {
-                import: Some(review),
-            },
-        });
-
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-        assert_eq!(
-            app.status_notice(),
-            Some(format!(
-                "Open Jcode pricing: {}",
-                crate::subscription_catalog::JCODE_PRICING_URL
-            ))
-        );
-        assert!(app.pending_login.is_none());
-    });
-}
-
-#[test]
 fn pending_login_entry_is_not_intercepted_by_onboarding_login_phase() {
     // Regression for the OpenRouter (and any API-key provider) login loop:
     // after selecting a provider during onboarding, the Login phase stays
@@ -575,8 +546,10 @@ fn openrouter_key_typed_through_full_key_path_does_not_reopen_picker() {
         assert!(app.input.is_empty(), "input buffer should clear after submit");
 
         // Crucially: the key must actually be *persisted*, not just "not loop".
-        // It is written to $JCODE_HOME/config/jcode/openrouter.env and exported
-        // to OPENROUTER_API_KEY so the provider can authenticate.
+        // It is written to $JCODE_HOME/config/jcode/openrouter.env, which is
+        // where the provider resolves it from at request time. It must not be
+        // copied into the process env, where it would shadow later edits of the
+        // file and leak into child processes (#1386).
         let env_file = crate::storage::app_config_dir().unwrap().join("openrouter.env");
         let contents = std::fs::read_to_string(&env_file)
             .unwrap_or_else(|e| panic!("openrouter.env should exist at {env_file:?}: {e}"));
@@ -585,9 +558,17 @@ fn openrouter_key_typed_through_full_key_path_does_not_reopen_picker() {
             "saved env file must contain the typed key, got:\n{contents}"
         );
         assert_eq!(
-            std::env::var("OPENROUTER_API_KEY").ok().as_deref(),
+            crate::provider_catalog::load_api_key_from_env_or_config(
+                "OPENROUTER_API_KEY",
+                "openrouter.env"
+            )
+            .as_deref(),
             Some(key),
-            "key must be exported to the process env for immediate use"
+            "the saved key must be immediately resolvable for authentication"
+        );
+        assert!(
+            std::env::var_os("OPENROUTER_API_KEY").is_none(),
+            "the key must not be copied into the process env (#1386)"
         );
     });
 }
@@ -1678,144 +1659,4 @@ fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
     }));
 }
 
-#[test]
-fn telemetry_pill_opens_settings_page_and_commits_choice() {
-    use crate::external_auth::ExternalAuthReviewCandidate;
-    use crate::tui::app::onboarding_flow::{ImportReview, TelemetryLevel};
-
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        app.onboarding_flow = None;
-        app.begin_onboarding_flow_at_login();
-        let review =
-            ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
-                .unwrap();
-        if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Login {
-                import: Some(review),
-            };
-        }
-
-        // Right twice: Subscription -> Import less -> Telemetry settings.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-
-        // The page opens defaulted to "Send everything".
-        match app.onboarding_phase() {
-            Some(OnboardingPhase::Login {
-                import: Some(review),
-            }) => assert_eq!(review.telemetry, Some(TelemetryLevel::Everything)),
-            other => panic!("expected telemetry page open, got {other:?}"),
-        }
-        // The import countdown is paused while the page is open, so the screen
-        // cannot commit the import out from under the user.
-        assert!(!app.onboarding_flow.as_ref().unwrap().decision_timed_out());
-
-        // Enter commits "Send everything": usage on, content sharing on.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-        assert!(crate::telemetry::is_enabled());
-        assert!(crate::telemetry::content_sharing_enabled());
-        // We are back on the summary screen with the import still pending.
-        match app.onboarding_phase() {
-            Some(OnboardingPhase::Login {
-                import: Some(review),
-            }) => {
-                assert!(review.telemetry.is_none());
-                assert!(!review.choosing);
-            }
-            other => panic!("expected import summary, got {other:?}"),
-        }
-        assert!(app.onboarding_import_in_progress.is_none());
-    });
-}
-
-#[test]
-fn telemetry_page_send_nothing_disables_telemetry_and_esc_goes_back() {
-    use crate::external_auth::ExternalAuthReviewCandidate;
-    use crate::tui::app::onboarding_flow::ImportReview;
-
-    with_temp_jcode_home(|| {
-        let mut app = create_test_app();
-        app.onboarding_flow = None;
-        app.begin_onboarding_flow_at_login();
-        let review =
-            ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
-                .unwrap();
-        if let Some(flow) = app.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Login {
-                import: Some(review),
-            };
-        }
-
-        // t is the direct shortcut onto the telemetry page; Esc returns without
-        // changing anything and keeps onboarding active.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Esc));
-        assert!(matches!(
-            app.onboarding_phase(),
-            Some(OnboardingPhase::Login { import: Some(_) })
-        ));
-        assert!(crate::telemetry::is_enabled());
-
-        // Reopen, walk down to "Send nothing", commit.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
-        assert!(!crate::telemetry::is_enabled());
-        assert!(!crate::telemetry::content_sharing_enabled());
-    });
-}
-
-#[test]
-fn start_choice_prefetches_recent_project_so_enter_does_not_block() {
-    let mut app = onboarding_test_app();
-    assert!(
-        app.onboarding_recent_project_prefetch.is_none(),
-        "no prefetch before the start choice is shown"
-    );
-
-    app.onboarding_open_start_choice();
-
-    let slot = app
-        .onboarding_recent_project_prefetch
-        .clone()
-        .expect("opening the start choice should warm the recent-project lookup");
-
-    // Wait briefly for the background scan; the action must not depend on it.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if slot.lock().expect("prefetch slot").is_some() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(
-        slot.lock().expect("prefetch slot").is_some(),
-        "prefetch should resolve in the background"
-    );
-
-    // Opening the choice twice must not spawn a second scan.
-    app.onboarding_open_start_choice();
-    assert!(
-        std::sync::Arc::ptr_eq(
-            &slot,
-            app.onboarding_recent_project_prefetch
-                .as_ref()
-                .expect("prefetch retained")
-        ),
-        "the warm prefetch should be reused"
-    );
-
-    // The resolved path is still the repository the session runs in.
-    assert_eq!(
-        app.onboarding_recent_project_path(),
-        crate::import::repo_ranking::resolve_git_root(std::path::Path::new(
-            app.session
-                .working_dir
-                .as_deref()
-                .expect("test session working dir")
-        ))
-    );
-}
+include!("onboarding_flow_telemetry.rs");

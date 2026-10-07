@@ -110,7 +110,7 @@ pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &
     // re-execing the bogus " (deleted)" path, which does not exist -> the server
     // exits without a replacement and strands every connected client. Strip the
     // marker so we compare against (and can re-exec) the real on-disk path.
-    let current_exe = std::env::current_exe().ok().map(strip_deleted_suffix);
+    let current_exe = running_server_binary();
 
     // Identity/mtime comparisons must look through release wrapper scripts to
     // the payload that actually runs (see `build::resolve_binary_payload`):
@@ -285,6 +285,62 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
         return PathBuf::from(stripped);
     }
     path
+}
+
+/// The real file this process was started from.
+///
+/// On macOS `current_exe()` returns the path the process was launched by,
+/// symlinks included. The shared server is started through a channel link
+/// (`builds/stable/jcode`), and installing a new build repoints that link. From
+/// then on `current_exe()` resolves to the *new* binary, so every reload check
+/// concluded the server already ran the newest build and `jcode server reload`
+/// was skipped forever. Resolve the path once, at first use (server startup),
+/// before any later install can move the link.
+pub(crate) fn running_server_binary() -> Option<PathBuf> {
+    static RUNNING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    RUNNING
+        .get_or_init(|| std::env::current_exe().ok().map(resolve_launch_path))
+        .clone()
+}
+
+/// Follow channel symlinks in a launch path to the file it points at now.
+fn resolve_launch_path(exe: PathBuf) -> PathBuf {
+    let exe = strip_deleted_suffix(exe);
+    std::fs::canonicalize(&exe).unwrap_or(exe)
+}
+
+#[cfg(all(test, unix))]
+mod running_server_binary_tests {
+    /// The server is started through a channel link; installing a new build
+    /// repoints the link. The pinned path must stay on the binary the server
+    /// was started from, so the new build counts as newer and reload runs.
+    #[test]
+    fn launch_path_pinned_before_the_channel_link_moves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join("versions/old/jcode");
+        let new = dir.path().join("versions/new/jcode");
+        for binary in [&old, &new] {
+            std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            std::fs::write(binary, b"bin").unwrap();
+        }
+        let link = dir.path().join("stable/jcode");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+
+        // Server start: what running_server_binary pins.
+        let pinned = super::resolve_launch_path(link.clone());
+        // An install repoints the channel.
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&new, &link).unwrap();
+
+        assert_eq!(pinned, std::fs::canonicalize(&old).unwrap());
+        // Re-resolving the launch path now (the old behavior) lands on the new
+        // build, which is why reload thought nothing was newer.
+        assert_eq!(
+            super::resolve_launch_path(link),
+            std::fs::canonicalize(&new).unwrap()
+        );
+    }
 }
 
 pub(crate) fn git_common_dir_for(path: &Path) -> Option<PathBuf> {
@@ -465,7 +521,7 @@ pub(crate) fn server_has_newer_binary() -> bool {
     // running payload compared two different files with unrelated mtimes, which
     // could report a phantom update forever and wedge clients into an infinite
     // reload loop right after `/update`.
-    let current_exe = std::env::current_exe().ok().map(strip_deleted_suffix);
+    let current_exe = running_server_binary();
     let current_canonical = current_exe
         .as_ref()
         .map(|path| build::resolve_binary_payload(path));

@@ -768,7 +768,12 @@ fn test_handle_server_event_notification_background_task_scope_uses_failed_row()
         app.background_task_rows_ref()[0].status,
         crate::tui::BackgroundTaskRowStatus::Failed
     );
-    assert!(text.contains("× bg bash"), "missing compact failed row:\n{text}");
+    let widget_rows = crate::tui::TuiState::info_widget_data(&app)
+        .background_info
+        .expect("failed task should feed the background widget")
+        .rows;
+    assert_eq!(widget_rows.len(), 1);
+    assert_eq!(widget_rows[0].label, "bash");
     assert!(
         !text.contains("Background task failed") && !text.contains("[stderr] line one"),
         "unexpected expanded background task card:\n{text}"

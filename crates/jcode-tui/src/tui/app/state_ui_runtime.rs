@@ -355,14 +355,27 @@ impl App {
         self.mcp_server_names.clone()
     }
 
+    /// Wrapped row index where each user prompt starts, from the frame the
+    /// renderer last drew.
+    ///
+    /// Prompt-jump used to read a separately maintained copy of these starts,
+    /// but that copy was written from exactly this vector every frame, so it is
+    /// the same data kept twice.
+    fn prompt_row_starts(&self) -> Vec<usize> {
+        crate::tui::ui::last_chat_frame()
+            .map(|frame| frame.wrapped_user_prompt_starts.clone())
+            .unwrap_or_default()
+    }
+
     /// Scroll to the previous user prompt (scroll up - earlier in conversation)
     pub fn scroll_to_prev_prompt(&mut self) {
-        let positions = ui::last_user_prompt_positions();
+        let positions = self.prompt_row_starts();
         if positions.is_empty() {
             return;
         }
-        // An explicit jump should win over a still-settling history prepend.
+        // An explicit jump should win over a still-settling anchor.
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         let current = self.scroll_offset;
 
@@ -402,11 +415,12 @@ impl App {
 
     /// Scroll to the next user prompt (scroll down - later in conversation)
     pub fn scroll_to_next_prompt(&mut self) {
-        let positions = ui::last_user_prompt_positions();
+        let positions = self.prompt_row_starts();
         if positions.is_empty() || !self.auto_scroll_paused {
             return;
         }
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         let current = self.scroll_offset;
 
@@ -427,13 +441,14 @@ impl App {
     /// positioning the prompt at the top of the viewport.
     pub(super) fn scroll_to_recent_prompt_rank(&mut self, rank: usize) {
         let rank = rank.max(1);
-        let positions = ui::last_user_prompt_positions();
+        let positions = self.prompt_row_starts();
         let max_scroll = ui::last_max_scroll();
 
         if positions.is_empty() {
             return;
         }
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         // positions are in document order (top to bottom), we want most-recent first
         let target_idx = positions.len().saturating_sub(rank);

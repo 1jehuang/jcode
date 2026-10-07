@@ -442,6 +442,34 @@ pub struct EffortSwitchKeys {
     pub decrease: KeyBinding,
 }
 
+/// Speed-tier cycle keys (Standard -> Fast -> Ultrafast). Either side may be
+/// unbound by setting it to `none`.
+#[derive(Clone, Debug, Default)]
+pub struct SpeedSwitchKeys {
+    pub increase: Option<KeyBinding>,
+    pub decrease: Option<KeyBinding>,
+}
+
+impl SpeedSwitchKeys {
+    pub fn direction_for(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<i8> {
+        if self
+            .increase
+            .as_ref()
+            .is_some_and(|binding| binding.matches(code, modifiers))
+        {
+            return Some(1);
+        }
+        if self
+            .decrease
+            .as_ref()
+            .is_some_and(|binding| binding.matches(code, modifiers))
+        {
+            return Some(-1);
+        }
+        None
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CenteredToggleKeys {
     /// The toggle binding, or `None` when the user disabled it (e.g. `none`).

@@ -379,12 +379,14 @@ fn send_model_changed_result(
         String,
         String,
         Option<jcode_provider_core::ResolvedCredential>,
+        Option<String>,
     )>,
     fallback_model: String,
+    agent: &Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
-        Ok((updated, provider_name, resolved_credential)) => {
+        Ok((updated, provider_name, resolved_credential, reasoning_effort)) => {
             crate::telemetry::record_model_switch();
             crate::logging::event_info(
                 "server_model_changed",
@@ -398,8 +400,10 @@ fn send_model_changed_result(
                 id,
                 model: updated,
                 provider_name: Some(provider_name),
+                context_window: Some(agent.provider_context_window() as u64),
                 error: None,
                 resolved_credential,
+                reasoning_effort,
             });
         }
         Err(error) => {
@@ -415,8 +419,10 @@ fn send_model_changed_result(
                 id,
                 model: fallback_model,
                 provider_name: None,
+                context_window: Some(agent.provider_context_window() as u64),
                 error: Some(error.to_string()),
                 resolved_credential: None,
+                reasoning_effort: None,
             });
         }
     }
@@ -434,8 +440,10 @@ fn apply_cycle_model(
             id,
             model: agent.provider_model(),
             provider_name: None,
+            context_window: Some(agent.provider_context_window() as u64),
             error: Some("Model switching is not available for this provider.".to_string()),
             resolved_credential: None,
+            reasoning_effort: None,
         });
         return;
     }
@@ -469,10 +477,11 @@ fn apply_cycle_model(
                 agent.provider_model(),
                 agent.provider_name(),
                 agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
             )
         })
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 pub(super) async fn handle_cycle_model(
@@ -576,10 +585,11 @@ fn apply_set_model(
                 agent.provider_model(),
                 agent.provider_name(),
                 agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
             )
         })
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 fn apply_set_route(
@@ -611,10 +621,11 @@ fn apply_set_route(
                 agent.provider_model(),
                 agent.provider_name(),
                 agent.active_resolved_credential(),
+                agent.provider_reasoning_effort(),
             )
         })
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 pub(super) async fn handle_set_model(

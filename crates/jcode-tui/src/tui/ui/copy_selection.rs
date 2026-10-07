@@ -53,6 +53,92 @@ pub(super) fn copy_selection_text_from_raw_lines(
     copy_selection_text_from_raw_lines_base(snapshot, start, end)
 }
 
+/// Full copy text for a selection: semantic math substitution first, then the
+/// raw logical-line path, then the wrapped display-line fallback (used when a
+/// selection starts on chrome such as the session header that has no raw map).
+pub(super) fn copy_selection_text_any(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    if let Some(text) = copy_selection_text_with_math_targets(snapshot, start, end) {
+        return Some(text);
+    }
+    copy_segment_text(snapshot, start, end)
+}
+
+fn copy_segment_text(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    copy_selection_text_from_raw_lines_base(snapshot, start, end)
+        .or_else(|| copy_selection_text_from_wrapped_lines(snapshot, start, end))
+}
+
+/// Display-line copy path. Mirrors the raw path but slices wrapped lines and
+/// honors per-line copy offsets that skip gutter chrome.
+pub(super) fn copy_selection_text_from_wrapped_lines(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    let mut out = String::new();
+    for abs_line in start.abs_line..=end.abs_line {
+        if abs_line > start.abs_line {
+            out.push('\n');
+        }
+        let text = snapshot.wrapped_plain_line(abs_line)?;
+        let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
+        let start_col = if abs_line == start.abs_line {
+            clamp_display_col(text, start.column).max(copy_start)
+        } else {
+            copy_start
+        };
+        let end_col = if abs_line == end.abs_line {
+            clamp_display_col(text, end.column).max(copy_start)
+        } else {
+            line_display_width(text)
+        };
+        if end_col < start_col {
+            continue;
+        }
+        out.push_str(&semantic_slice(text, start_col, end_col));
+    }
+    Some(out)
+}
+
+/// Slice `text` between display columns, replacing any fully or partially
+/// selected inline-math span with its `$source$` LaTeX form.
+fn semantic_slice(text: &str, start_col: usize, end_col: usize) -> std::borrow::Cow<'_, str> {
+    let Some(spans) = jcode_tui_markdown::inline_math_spans_for_plain_line(text) else {
+        return std::borrow::Cow::Borrowed(display_col_slice(text, start_col, end_col));
+    };
+    let mut out = String::new();
+    let mut col = start_col;
+    let mut replaced = false;
+    for span in spans.iter() {
+        if span.end_col <= start_col || span.start_col >= end_col {
+            continue;
+        }
+        if span.start_col > col {
+            out.push_str(display_col_slice(text, col, span.start_col));
+        }
+        out.push('$');
+        out.push_str(&span.source);
+        out.push('$');
+        replaced = true;
+        col = span.end_col.max(col);
+    }
+    if !replaced {
+        return std::borrow::Cow::Borrowed(display_col_slice(text, start_col, end_col));
+    }
+    if col < end_col {
+        out.push_str(display_col_slice(text, col, end_col));
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn copy_selection_text_from_raw_lines_base(
     snapshot: &CopyViewportSnapshot,
     start: crate::tui::CopySelectionPoint,
@@ -84,7 +170,7 @@ fn copy_selection_text_from_raw_lines_base(
             if raw_line == start.raw_line + 1 {
                 out.reserve(text.len().saturating_mul(selected_lines.min(8)));
             }
-            out.push_str(text);
+            out.push_str(&semantic_slice(text, 0, line_display_width(text)));
             continue;
         }
         let line_width = line_display_width(text);
@@ -103,11 +189,11 @@ fn copy_selection_text_from_raw_lines_base(
             continue;
         }
 
-        let slice = display_col_slice(text, start_col, end_col);
+        let slice = semantic_slice(text, start_col, end_col);
         if raw_line == start.raw_line {
             out.reserve(slice.len().saturating_mul(selected_lines.min(8)));
         }
-        out.push_str(slice);
+        out.push_str(&slice);
     }
 
     Some(out)
@@ -158,9 +244,7 @@ fn copy_selection_text_with_math_targets(
                 abs_line: last_line,
                 column: last_col,
             };
-            parts.push(copy_selection_text_from_raw_lines_base(
-                snapshot, cursor, normal_end,
-            )?);
+            parts.push(copy_segment_text(snapshot, cursor, normal_end)?);
         }
         parts.push(target.content.clone());
         cursor = crate::tui::CopySelectionPoint {
@@ -173,9 +257,7 @@ fn copy_selection_text_with_math_targets(
     if (cursor.abs_line, cursor.column) <= (end.abs_line, end.column)
         && cursor.abs_line < snapshot.wrapped_plain_line_count()
     {
-        parts.push(copy_selection_text_from_raw_lines_base(
-            snapshot, cursor, end,
-        )?);
+        parts.push(copy_segment_text(snapshot, cursor, end)?);
     }
     Some(parts.join("\n"))
 }
@@ -213,7 +295,9 @@ pub(super) fn copy_selection_metrics_from_raw_lines(
         lines += 1;
         let text = snapshot.raw_plain_line(raw_line)?;
         if raw_line != start.raw_line && raw_line != end.raw_line {
-            chars += text.chars().count();
+            chars += semantic_slice(text, 0, line_display_width(text))
+                .chars()
+                .count();
             continue;
         }
         let line_width = line_display_width(text);
@@ -230,7 +314,7 @@ pub(super) fn copy_selection_metrics_from_raw_lines(
         if end_col < start_col {
             continue;
         }
-        chars += display_col_slice(text, start_col, end_col).chars().count();
+        chars += semantic_slice(text, start_col, end_col).chars().count();
     }
 
     Some((chars, lines.max(1)))
@@ -346,6 +430,30 @@ mod tests {
             copy_selection_metrics_from_raw_lines(&snapshot, point(0, 0), point(4, 5)),
             Some((copied.chars().count(), copied.split('\n').count()))
         );
+    }
+
+    #[test]
+    fn selection_over_unicode_inline_math_copies_latex_source() {
+        let rendered =
+            jcode_tui_markdown::render_markdown(r"Identity $e^{i\pi_{7}} + 1 = 0$ holds");
+        let line = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|text| text.starts_with("Identity"))
+            .expect("prose line");
+        let width = line_display_width(&line);
+        assert_eq!(
+            semantic_slice(&line, 0, width),
+            r"Identity $e^{i\pi_{7}} + 1 = 0$ holds"
+        );
+        // A partial drag that only touches the formula still copies all of it.
+        assert_eq!(semantic_slice(&line, 10, 12), r"$e^{i\pi_{7}} + 1 = 0$");
+        assert_eq!(semantic_slice(&line, 0, 8), "Identity");
     }
 
     #[test]

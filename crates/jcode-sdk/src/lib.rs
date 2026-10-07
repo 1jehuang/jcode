@@ -124,6 +124,18 @@
 //! remote shell is required. Dropping the final client clone kills and reaps its
 //! SSH child, not the remote shared daemon. `connect_timeout` bounds startup and
 //! hello independently of the ordinary request timeout.
+//!
+//! # Web search
+//!
+//! The built-in `websearch` tool uses the provider's server-side search where
+//! supported (Anthropic first-party API, OpenAI API or ChatGPT login on
+//! non-codex models) and local scraping otherwise. Provider searches arrive as
+//! ordinary `ToolStart`/`ToolInputDelta`/`ToolExec`/`ToolDone` events named
+//! `web_search`, with no `ToolCall` to answer, and appear in history. The
+//! session tool policy governs them like any tool. A custom tool named
+//! `websearch` is always called through your application and never replaced by
+//! provider search. Set `JCODE_WEBSEARCH_PREFER_NATIVE=0` to always search
+//! locally.
 
 mod auth;
 mod client;
@@ -132,6 +144,7 @@ mod errors;
 mod launch;
 mod ssh;
 mod structured;
+pub mod turn_retry;
 pub mod worktrees;
 
 #[cfg(test)]
@@ -149,6 +162,7 @@ pub use client::{
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};
+pub use jcode_applet_types as applet;
 pub use jcode_harness_api::{
     SessionEditStats, enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
@@ -165,6 +179,7 @@ pub use structured::{
     StructuredOutputError, StructuredOutputSchema, StructuredSchemaError, StructuredTurnResult,
     StructuredValidationIssue,
 };
+pub use turn_retry::{FailureKind, RetryDecision, RetryPolicy, TurnRetry, classify_failure};
 
 /// The protocol types, re-exported so a client needs one dependency, not two.
 pub use jcode_harness_api as api;

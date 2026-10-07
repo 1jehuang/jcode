@@ -220,6 +220,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(help_entry("/config", "Show active configuration"));
     lines.push(help_entry("/config init", "Create default config file"));
     lines.push(help_entry("/config edit", "Open config in $EDITOR"));
+    lines.push(help_entry(
+        "/voice",
+        "Voice input: speak, then send (Ctrl+Space)",
+    ));
     lines.push(help_entry("/dictate", "Run configured external dictation"));
     lines.push(help_entry(
         "/git [status]",
@@ -490,7 +494,11 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(Line::from(""));
     lines.push(key_entry(
         &crate::tui::keybind::side_panel_toggle_key_label(),
-        "Toggle side panel (or diagram pane if empty)",
+        "Cycle side panel: split, fullscreen, hidden",
+    ));
+    lines.push(key_entry(
+        &crate::tui::keybind::diagram_pane_visibility_key_label(),
+        "Show/hide diagram pane",
     ));
     lines.push(key_entry(&alt("T"), "Toggle diagram position (side/top)"));
     lines.push(key_entry(

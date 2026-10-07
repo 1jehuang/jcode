@@ -153,6 +153,22 @@ impl Drop for ActiveTurnGuard {
     }
 }
 
+/// Whether any turn is currently registered as running for `session_id`.
+///
+/// A cancel that arrives while the session is idle has nothing to stop, but
+/// the "no local task" path still fires the signal and only clears it on a
+/// 500ms timer, because it cannot tell an idle session from one whose turn is
+/// owned by another connection. Any message sent inside that window is aborted
+/// the instant it starts, which looks to the user like a message that vanished
+/// with no reply. The registry already knows whether a turn exists, so ask it
+/// rather than guessing.
+pub fn has_active_turn(session_id: &str) -> bool {
+    ACTIVE_TURNS
+        .lock()
+        .ok()
+        .is_some_and(|map| map.get(session_id).is_some_and(|turns| !turns.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,20 +292,4 @@ mod tests {
         assert!(registered[0].same_instance(&survivor_signal));
         assert!(active_turn_signals(old_id).is_empty());
     }
-}
-
-/// Whether any turn is currently registered as running for `session_id`.
-///
-/// A cancel that arrives while the session is idle has nothing to stop, but
-/// the "no local task" path still fires the signal and only clears it on a
-/// 500ms timer, because it cannot tell an idle session from one whose turn is
-/// owned by another connection. Any message sent inside that window is aborted
-/// the instant it starts, which looks to the user like a message that vanished
-/// with no reply. The registry already knows whether a turn exists, so ask it
-/// rather than guessing.
-pub fn has_active_turn(session_id: &str) -> bool {
-    ACTIVE_TURNS
-        .lock()
-        .ok()
-        .is_some_and(|map| map.get(session_id).is_some_and(|turns| !turns.is_empty()))
 }

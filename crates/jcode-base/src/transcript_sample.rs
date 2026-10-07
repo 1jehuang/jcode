@@ -42,9 +42,9 @@ const MAX_OUTPUT: usize = 1_500;
 /// Recent files considered per harness. Bounded so onboarding stays fast on
 /// large histories.
 const SCAN_FILES: usize = 40;
-/// Only the largest few recent files are parsed. Size is a cheap proxy for
-/// length, and parsing decides.
-const PARSE_FILES: usize = 10;
+/// Only the largest few recent files per harness are parsed. Size is a cheap
+/// proxy for length, and parsing decides.
+const PARSE_FILES: usize = 6;
 const MAX_FILE_BYTES: u64 = 24 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,12 +79,28 @@ struct Parsed {
 /// The longest recent transcript from any harness on this machine, including
 /// Jcode's own sessions. Nothing is written or sent.
 pub fn recent_external_transcript() -> Option<TranscriptSample> {
-    let home = crate::storage::user_home_path("").ok()?;
-    recent_external_transcript_in(&home)
+    recent_external_transcripts(1).into_iter().next()
 }
 
 pub fn recent_external_transcript_in(home: &Path) -> Option<TranscriptSample> {
-    let mut candidates: Vec<(u64, std::time::SystemTime, Format, std::path::PathBuf)> = Vec::new();
+    recent_external_transcripts_in(home, 1).into_iter().next()
+}
+
+/// Up to `limit` of the longest recent transcripts across every harness on
+/// this machine, longest first. Each harness with a real conversation gets a
+/// slot before any harness gets a second, so a showcase spans the user's
+/// tools rather than repeating one. Nothing is written or sent.
+pub fn recent_external_transcripts(limit: usize) -> Vec<TranscriptSample> {
+    crate::storage::user_home_path("")
+        .map(|home| recent_external_transcripts_in(&home, limit))
+        .unwrap_or_default()
+}
+
+pub fn recent_external_transcripts_in(home: &Path, limit: usize) -> Vec<TranscriptSample> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut parsed: Vec<(Parsed, std::time::SystemTime, Format)> = Vec::new();
     for (format, dir, extension) in [
         (Format::ClaudeCode, home.join(".claude/projects"), "jsonl"),
         (Format::Codex, home.join(".codex/sessions"), "jsonl"),
@@ -92,6 +108,7 @@ pub fn recent_external_transcript_in(home: &Path) -> Option<TranscriptSample> {
         (Format::Pi, home.join(".pi/agent/sessions"), "jsonl"),
         (Format::Jcode, home.join(".jcode/sessions"), "json"),
     ] {
+        let mut candidates: Vec<(u64, std::time::SystemTime, std::path::PathBuf)> = Vec::new();
         for path in collect_recent_files_recursive(&dir, extension, SCAN_FILES) {
             if format == Format::Cursor && !is_top_level_cursor_transcript(&path) {
                 continue;
@@ -109,29 +126,47 @@ pub fn recent_external_transcript_in(home: &Path) -> Option<TranscriptSample> {
                 continue;
             }
             let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-            candidates.push((meta.len(), modified, format, path));
+            candidates.push((meta.len(), modified, path));
+        }
+        // Largest first per harness, so a huge Jcode history cannot crowd
+        // every other tool out before parsing.
+        candidates.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        parsed.extend(candidates.into_iter().take(PARSE_FILES).filter_map(
+            |(_, modified, path)| {
+                let session = match format {
+                    Format::ClaudeCode => claude_turns(&path),
+                    Format::Codex => codex_turns(&path),
+                    Format::Cursor => cursor_turns(&path),
+                    Format::Pi => pi_turns(&path),
+                    Format::Jcode => jcode_turns(&path),
+                }?;
+                (session.turns.len() >= MIN_TURNS && session.users >= MIN_USER_TURNS)
+                    .then_some((session, modified, format))
+            },
+        ));
+    }
+    // Longest first. The replay is capped, the ranking is not.
+    parsed.sort_by(|a, b| b.0.total.cmp(&a.0.total).then(b.1.cmp(&a.1)));
+    let mut picked = Vec::with_capacity(limit);
+    let mut rest = Vec::new();
+    let mut seen = Vec::new();
+    for (session, _, format) in parsed {
+        let sample = TranscriptSample {
+            source: format.label(),
+            turns: session.turns,
+        };
+        if seen.contains(&format) {
+            rest.push(sample);
+        } else {
+            seen.push(format);
+            picked.push(sample);
         }
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    candidates
-        .into_iter()
-        .take(PARSE_FILES)
-        .filter_map(|(_, modified, format, path)| {
-            let parsed = match format {
-                Format::ClaudeCode => claude_turns(&path),
-                Format::Codex => codex_turns(&path),
-                Format::Cursor => cursor_turns(&path),
-                Format::Pi => pi_turns(&path),
-                Format::Jcode => jcode_turns(&path),
-            }?;
-            (parsed.turns.len() >= MIN_TURNS && parsed.users >= MIN_USER_TURNS)
-                .then_some((parsed, modified, format))
-        })
-        .max_by(|a, b| a.0.total.cmp(&b.0.total).then(a.1.cmp(&b.1)))
-        .map(|(parsed, _, format)| TranscriptSample {
-            source: format.label(),
-            turns: parsed.turns,
-        })
+    // The overall longest always leads. Other harnesses follow before any
+    // harness repeats, then the remaining longest fill the showcase.
+    picked.extend(rest);
+    picked.truncate(limit);
+    picked
 }
 
 /// Cursor nests subagent runs under `subagents/`. Only whole sessions replay.
@@ -164,6 +199,7 @@ fn is_synthetic(text: &str) -> bool {
         || text.starts_with("Caveat:")
         || text.starts_with("# AGENTS.md")
         || text.starts_with("[Request interrupted")
+        || text.starts_with("[Attached image")
 }
 
 impl Parsed {
@@ -257,6 +293,32 @@ fn anthropic_blocks(
         Some(serde_json::Value::Array(blocks)) => blocks,
         _ => return,
     };
+    // Jcode persists a message's text before its reasoning trace even though
+    // the model thought first. Move each reasoning block ahead of the text
+    // blocks directly before it (never past a tool call) so replays think
+    // before they answer.
+    let is_reasoning = |block: &serde_json::Value| {
+        matches!(
+            block.get("type").and_then(|kind| kind.as_str()),
+            Some("thinking" | "reasoning" | "reasoning_trace")
+        )
+    };
+    let is_text = |block: &serde_json::Value| {
+        block.get("type").and_then(|kind| kind.as_str()) == Some("text")
+    };
+    let mut ordered: Vec<&serde_json::Value> = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        if is_reasoning(block) {
+            let at = ordered
+                .iter()
+                .rposition(|previous| !is_text(previous))
+                .map_or(0, |index| index + 1);
+            ordered.insert(at, block);
+        } else {
+            ordered.push(block);
+        }
+    }
+    let blocks = ordered;
     let str_field = |block: &serde_json::Value, key: &str| {
         block
             .get(key)
@@ -723,6 +785,30 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_stored_after_text_replays_before_it() {
+        let mut parsed = Parsed::new();
+        let mut pending = Pending::default();
+        let content = serde_json::json!([
+            {"type":"text","text":"answer"},
+            {"type":"reasoning_trace","text":"thought"},
+            {"type":"tool_use","id":"t","name":"read","input":{}},
+            {"type":"text","text":"after"},
+            {"type":"thinking","thinking":"late"}
+        ]);
+        anthropic_blocks(&mut parsed, &mut pending, false, Some(&content));
+        let kinds: Vec<_> = parsed
+            .turns
+            .iter()
+            .map(|turn| match turn {
+                SampleTurn::Reasoning(text) | SampleTurn::Assistant(text) => text.as_str(),
+                SampleTurn::Tool { .. } => "tool",
+                SampleTurn::User(_) => "user",
+            })
+            .collect();
+        assert_eq!(kinds, ["thought", "answer", "tool", "late", "after"]);
+    }
+
+    #[test]
     fn jcode_sessions_replay_and_skip_debug_children_and_context() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join(".jcode/sessions");
@@ -784,6 +870,42 @@ mod tests {
         assert_eq!(sample.source, "Jcode");
         // The replay is capped, the ranking is not.
         assert_eq!(sample.turns.len(), MAX_TURNS);
+    }
+
+    #[test]
+    fn showcase_spans_harnesses_before_repeating_one() {
+        let home = tempfile::tempdir().unwrap();
+        let sessions = home.path().join(".jcode/sessions");
+        jcode_session(&sessions, "session_long", 30, serde_json::json!({}));
+        jcode_session(&sessions, "session_mid", 20, serde_json::json!({}));
+        let mut lines = Vec::new();
+        for n in 0..4 {
+            lines.push(codex_line(
+                serde_json::json!({"type":"message","role":"user","content":format!("codex {n}")}),
+            ));
+            lines.push(codex_line(
+                serde_json::json!({"type":"message","role":"assistant","content":"ok"}),
+            ));
+            lines.push(codex_line(
+                serde_json::json!({"type":"message","role":"assistant","content":"more"}),
+            ));
+        }
+        write(&home.path().join(".codex/sessions/short.jsonl"), &lines);
+
+        let sources = |limit| {
+            recent_external_transcripts_in(home.path(), limit)
+                .into_iter()
+                .map(|sample| sample.source)
+                .collect::<Vec<_>>()
+        };
+        // The longest leads, a shorter Codex session beats a second Jcode one.
+        assert_eq!(sources(3), ["Jcode", "Codex", "Jcode"]);
+        assert_eq!(sources(2), ["Jcode", "Codex"]);
+        assert!(sources(0).is_empty());
+        assert_eq!(
+            recent_external_transcript_in(home.path()).map(|sample| sample.source),
+            Some("Jcode")
+        );
     }
 
     #[test]

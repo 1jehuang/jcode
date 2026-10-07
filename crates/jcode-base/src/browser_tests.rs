@@ -297,13 +297,15 @@ fn write_executable(path: &std::path::Path, script: &str) {
 async fn hanging_browser_cli_times_out_instead_of_blocking_forever() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bin = temp.path().join("browser");
-    // Stands in for a CLI waiting on a bridge that will never answer.
-    write_executable(&bin, "#!/bin/sh\nsleep 600\n");
+    // Stands in for a CLI waiting on a bridge that will never answer. `exec` keeps it one
+    // process: kill_on_drop kills only the direct child, so a forked sleep outlived the test.
+    write_executable(&bin, "#!/bin/sh\nexec sleep 600\n");
 
     let started = std::time::Instant::now();
-    let result = run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_millis(300))
-        .await
-        .expect("capped call should not error");
+    let result =
+        run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_millis(300), None)
+            .await
+            .expect("capped call should not error");
     let elapsed = started.elapsed();
 
     assert!(result.is_none(), "a hanging CLI must report a timeout");
@@ -320,7 +322,7 @@ async fn responsive_browser_cli_still_returns_its_output() {
     let bin = temp.path().join("browser");
     write_executable(&bin, "#!/bin/sh\necho pong\n");
 
-    let output = run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_secs(5))
+    let output = run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_secs(5), None)
         .await
         .expect("capped call should not error")
         .expect("a responsive CLI must not report a timeout");
@@ -493,4 +495,155 @@ fn extract_zip_unpacks_deflate_and_rejects_traversal() {
     let evil = build_zip(&[("../escape.txt", b"x")]);
     assert!(extract_zip(&evil, &temp.path().join("sub")).is_err());
     assert!(!temp.path().join("escape.txt").exists());
+}
+
+#[test]
+fn session_daemon_name_includes_the_target_browser() {
+    use super::browser_session::session_name_for;
+    assert_eq!(session_name_for("session_fox_1", None), "session_fox_1");
+    assert_eq!(
+        session_name_for("session_fox_1", Some("chrome")),
+        "session_fox_1-chrome"
+    );
+    assert_ne!(
+        session_name_for("s", Some("chrome")),
+        session_name_for("s", Some("firefox"))
+    );
+}
+
+#[test]
+fn extra_native_host_dirs_come_from_a_path_list() {
+    assert!(extra_native_messaging_dirs(None).is_empty());
+    let joined =
+        std::env::join_paths(["/a/NativeMessagingHosts", "/b/NativeMessagingHosts"]).unwrap();
+    assert_eq!(
+        extra_native_messaging_dirs(Some(&joined)),
+        vec![
+            PathBuf::from("/a/NativeMessagingHosts"),
+            PathBuf::from("/b/NativeMessagingHosts")
+        ]
+    );
+}
+
+/// Each browser's native host takes its own port (#1720); jcode must tell the
+/// bridge CLI which browser's host to use.
+#[cfg(unix)]
+#[tokio::test]
+async fn bridge_cli_is_pointed_at_the_target_browsers_host() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("FAB_BROWSER");
+    crate::env::remove_var("FAB_BROWSER");
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bin = temp.path().join("browser");
+    write_executable(&bin, "#!/bin/sh\necho \"target=$FAB_BROWSER\"\n");
+
+    let run = |kind| {
+        let bin = bin.clone();
+        async move {
+            let out =
+                run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_secs(5), kind)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+    };
+    assert_eq!(run(Some(BrowserKind::Chrome)).await, "target=chrome");
+    assert_eq!(run(Some(BrowserKind::Firefox)).await, "target=firefox");
+    assert_eq!(run(None).await, "target=");
+
+    // A user-chosen FAB_BROWSER (e.g. a fork jcode does not know) wins.
+    crate::env::set_var("FAB_BROWSER", "helium");
+    assert_eq!(run(Some(BrowserKind::Chrome)).await, "target=helium");
+    match prev {
+        Some(v) => crate::env::set_var("FAB_BROWSER", v),
+        None => crate::env::remove_var("FAB_BROWSER"),
+    }
+}
+
+#[test]
+fn bridge_updates_only_to_strictly_newer_releases() {
+    use super::browser_update::is_newer_release;
+    assert!(is_newer_release(Some("v0.10.0"), "v0.10.1"));
+    assert!(is_newer_release(Some("v0.9.9"), "v0.10.0"));
+    assert!(!is_newer_release(Some("v0.10.1"), "v0.10.1"));
+    assert!(!is_newer_release(Some("v0.10.1"), "v0.10.0"));
+    // Installs from before jcode recorded a version update once.
+    assert!(is_newer_release(None, "v0.10.1"));
+    assert!(is_newer_release(Some("garbage"), "v0.10.1"));
+    // A malformed latest tag never triggers a download.
+    assert!(!is_newer_release(None, "nightly"));
+}
+
+#[test]
+fn bridge_update_check_is_throttled() {
+    use super::browser_update::check_due;
+    let now = std::time::SystemTime::now();
+    let hour = std::time::Duration::from_secs(60 * 60);
+    assert!(check_due(None, now));
+    assert!(!check_due(Some(now - hour), now));
+    assert!(check_due(Some(now - 7 * hour), now));
+    // A clock that moved backwards must not block checks forever.
+    assert!(check_due(Some(now + hour), now));
+}
+
+#[test]
+fn bridge_update_is_skipped_until_the_bridge_is_installed() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let temp = tempfile::TempDir::new().expect("create temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // No network call happens: first-time installs stay an explicit setup.
+    let update = rt
+        .block_on(update_bridge_if_newer(BrowserKind::Firefox, true))
+        .unwrap();
+    assert_eq!(update, BridgeUpdate::Skipped);
+    assert_eq!(installed_bridge_version(), None);
+    match prev_home {
+        Some(v) => crate::env::set_var("JCODE_HOME", v),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+}
+
+/// After an update only hosts still running the replaced binary are stopped;
+/// a host the reloaded extension already started from the new file survives.
+#[cfg(target_os = "linux")]
+#[test]
+fn update_stops_only_hosts_running_the_replaced_binary() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let host = temp.path().join("firefox-agent-bridge-host");
+    let sleep = std::path::Path::new("/bin/sleep");
+    std::fs::copy(sleep, &host).expect("copy sleep");
+    let mut old = std::process::Command::new(&host)
+        .arg("30")
+        .spawn()
+        .expect("old host");
+    // Replace the binary the way the updater does (rename over it).
+    let staged = temp.path().join(".staged");
+    std::fs::copy(sleep, &staged).expect("stage");
+    std::fs::rename(&staged, &host).expect("replace");
+    let mut new = std::process::Command::new(&host)
+        .arg("30")
+        .spawn()
+        .expect("new host");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    super::browser_update::stop_hosts_running(&host);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let old_exited = old.try_wait().expect("poll old").is_some();
+    let new_running = new.try_wait().expect("poll new").is_none();
+    let _ = new.kill();
+    let _ = new.wait();
+    let _ = old.kill();
+    let _ = old.wait();
+    assert!(
+        old_exited,
+        "host running the replaced binary must be stopped"
+    );
+    assert!(new_running, "host running the new binary must be kept");
 }

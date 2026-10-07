@@ -1,6 +1,6 @@
 //! Claude session-limit resets, using the same contract as Claude Code's
-//! `/limit-reset` command. The offer is read from the usage endpoint at the
-//! five-hour wall and claimed against the account's organization. Reading is
+//! `/limit-reset` command. The offer is read from the usage endpoint and
+//! claimed against the account's organization at the five-hour wall. Reading is
 //! side-effect free. Claiming requires an explicit confirmation and spends the
 //! account's reset for the week.
 
@@ -26,7 +26,6 @@ struct StatusBlock {
     eligible: bool,
     #[serde(default)]
     arm: Option<String>,
-    #[serde(default)]
     available: bool,
     #[serde(default)]
     next_available_at: Option<String>,
@@ -112,16 +111,32 @@ async fn get_json(client: &reqwest::Client, url: &str, token: &str) -> Result<se
         .context("Unrecognized Claude usage response")
 }
 
-/// Read-only offer lookup for the usage report. Only meaningful at the wall.
+/// Read-only offer lookup, including before the five-hour wall. A missing or
+/// malformed availability field is unknown, never a confirmed zero balance.
 pub(super) async fn fetch_limit_reset_offer(
     access_token: &str,
     account_label: Option<&str>,
-) -> Option<AnthropicLimitResetOffer> {
-    let client = reset_client().ok()?;
-    let value = get_json(&client, &format!("{API_BASE}{STATUS_PATH}"), access_token)
-        .await
-        .ok()?;
-    offer_from_status(&value, account_label)
+) -> (Option<AnthropicLimitResetOffer>, bool) {
+    let Ok(client) = reset_client() else {
+        return (None, false);
+    };
+    let Ok(value) = get_json(&client, &format!("{API_BASE}{STATUS_PATH}"), access_token).await
+    else {
+        return (None, false);
+    };
+    (
+        offer_from_status(&value, account_label),
+        explicitly_ineligible(&value),
+    )
+}
+
+// Only an explicit server denial is ineligible. Missing fields and failures
+// remain unknown and must not be displayed as a confirmed empty balance.
+fn explicitly_ineligible(value: &serde_json::Value) -> bool {
+    value
+        .pointer("/juniper_tide/eligible")
+        .and_then(|v| v.as_bool())
+        == Some(false)
 }
 
 /// A confirmation pins the login, organization and token, so switching the

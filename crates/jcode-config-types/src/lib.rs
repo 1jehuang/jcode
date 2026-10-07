@@ -158,30 +158,6 @@ mod diff_display_mode_tests {
     }
 }
 
-/// When to show the overscroll status line (model/provider/context info below
-/// the input).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OverscrollStatusMode {
-    /// Never show the status line.
-    Off,
-    /// Always show the status line below the input (default).
-    #[default]
-    On,
-    /// Elastic reveal: show it briefly when scrolling past the bottom.
-    Overscroll,
-}
-
-impl OverscrollStatusMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::On => "on",
-            Self::Overscroll => "overscroll",
-        }
-    }
-}
-
 /// How to display mermaid diagrams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1042,6 +1018,10 @@ pub struct KeybindingsConfig {
     pub effort_increase: String,
     /// Effort decrease key (default: "cmd+left" on macOS, "alt+left" elsewhere)
     pub effort_decrease: String,
+    /// Speed tier increase key, Standard -> Fast -> Ultrafast (default: "alt+up")
+    pub speed_increase: String,
+    /// Speed tier decrease key, Ultrafast -> Fast -> Standard (default: "alt+down")
+    pub speed_decrease: String,
     /// Centered mode toggle key (default: "alt+c")
     pub centered_toggle: String,
     /// Scroll to previous prompt key (default: "ctrl+[")
@@ -1070,6 +1050,8 @@ pub struct KeybindingsConfig {
     pub copy_selection_toggle: String,
     /// Toggle the diagram pane position (default: "alt+t")
     pub diagram_pane_toggle: String,
+    /// Show/hide the pinned diagram pane (default: "alt+shift+m")
+    pub diagram_pane_visibility_toggle: String,
     /// Toggle typing scroll lock (default: "alt+s")
     pub typing_scroll_lock_toggle: String,
     /// Cycle inline diff display mode (default: "alt+g")
@@ -1090,6 +1072,9 @@ pub struct KeybindingsConfig {
     /// Open the `/resume` session picker (default: "cmd+b" on macOS, "alt+r"
     /// elsewhere). Set "" to disable.
     pub open_resume: String,
+    /// Start/stop built-in voice input (default: "ctrl+space"). Speech streams
+    /// to Nari and the transcript is sent as a prompt. Set "" to disable.
+    pub voice_input: String,
     /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
     /// Ctrl+Enter performs the alternate action.
     pub session_picker_enter: SessionPickerResumeAction,
@@ -1114,6 +1099,8 @@ impl Default for KeybindingsConfig {
             fallback_switch: get("fallback_switch", "ctrl+y"),
             effort_increase: get("effort_increase", "alt+right"),
             effort_decrease: get("effort_decrease", "alt+left"),
+            speed_increase: get("speed_increase", "alt+up"),
+            speed_decrease: get("speed_decrease", "alt+down"),
             centered_toggle: get("centered_toggle", "alt+c"),
             scroll_prompt_up: get("scroll_prompt_up", "ctrl+["),
             scroll_prompt_down: get("scroll_prompt_down", "ctrl+]"),
@@ -1128,6 +1115,7 @@ impl Default for KeybindingsConfig {
             side_panel_toggle: get("side_panel_toggle", "alt+m"),
             copy_selection_toggle: get("copy_selection_toggle", "alt+y"),
             diagram_pane_toggle: get("diagram_pane_toggle", "alt+t"),
+            diagram_pane_visibility_toggle: get("diagram_pane_visibility_toggle", "alt+shift+m"),
             typing_scroll_lock_toggle: get("typing_scroll_lock_toggle", "alt+s"),
             diff_mode_cycle: get("diff_mode_cycle", "alt+g"),
             info_widget_toggle: get("info_widget_toggle", "alt+i"),
@@ -1142,6 +1130,7 @@ impl Default for KeybindingsConfig {
                     "alt+r"
                 },
             ),
+            voice_input: get("voice_input", "ctrl+space"),
             session_picker_enter: SessionPickerResumeAction::CurrentTerminal,
         }
     }
@@ -1229,6 +1218,12 @@ pub enum WebSearchEngine {
     /// `JCODE_SEARXNG_URL` env var) to point at a SearXNG instance. Useful on
     /// hosts where DuckDuckGo/Bing block the request via TLS fingerprinting.
     Searxng,
+    /// Provider-native server-side search (Anthropic `web_search`, OpenAI
+    /// Responses `web_search`). Search runs on the model provider's side, so it
+    /// works on hosts where scraping is blocked and needs no extra API key.
+    /// When the active provider/model does not support it, the local
+    /// `websearch` tool is used with `fallback_engines` instead.
+    Native,
 }
 
 impl WebSearchEngine {
@@ -1237,6 +1232,7 @@ impl WebSearchEngine {
             Self::Duckduckgo => "duckduckgo",
             Self::Bing => "bing",
             Self::Searxng => "searxng",
+            Self::Native => "native",
         }
     }
 
@@ -1245,8 +1241,14 @@ impl WebSearchEngine {
             "duckduckgo" | "ddg" => Some(Self::Duckduckgo),
             "bing" => Some(Self::Bing),
             "searxng" | "searx" => Some(Self::Searxng),
+            "native" | "provider" => Some(Self::Native),
             _ => None,
         }
+    }
+
+    /// True for engines the local `websearch` tool can run itself.
+    pub fn is_local(self) -> bool {
+        !matches!(self, Self::Native)
     }
 }
 
@@ -1270,6 +1272,26 @@ pub struct WebSearchConfig {
     pub searxng_url: Option<String>,
     /// Environment variable containing the SearXNG base URL.
     pub searxng_url_env: String,
+    /// Prefer the model provider's own server-side search whenever the active
+    /// provider/model supports it (Anthropic first-party API, OpenAI
+    /// Responses). The local `websearch` tool is then replaced by the hosted
+    /// one. Providers without native search keep the local tool and `engine`.
+    /// Default true. `engine = "native"` also turns this on.
+    pub prefer_native: bool,
+    /// Maximum provider-native searches per request.
+    /// Anthropic bills roughly $10 per 1,000 searches on API keys, so this caps
+    /// spend. Anthropic only; OpenAI has no per-request cap.
+    pub native_max_uses: Option<u32>,
+    /// Restrict provider-native search to these domains. Mutually exclusive
+    /// with `native_blocked_domains` (Anthropic rejects both).
+    pub native_allowed_domains: Vec<String>,
+    /// Never return results from these domains (Anthropic only).
+    pub native_blocked_domains: Vec<String>,
+    /// Anthropic server tool version, e.g. "web_search_20250305" (default) or
+    /// "web_search_20260209". Newer versions are sent with
+    /// `allowed_callers = ["direct"]` so models without programmatic tool
+    /// calling are not rejected.
+    pub native_anthropic_tool_version: String,
 }
 
 impl Default for WebSearchConfig {
@@ -1282,7 +1304,24 @@ impl Default for WebSearchConfig {
             bing_market: "en-US".to_string(),
             searxng_url: None,
             searxng_url_env: "JCODE_SEARXNG_URL".to_string(),
+            prefer_native: true,
+            native_max_uses: Some(DEFAULT_NATIVE_WEB_SEARCH_MAX_USES),
+            native_allowed_domains: Vec::new(),
+            native_blocked_domains: Vec::new(),
+            native_anthropic_tool_version: DEFAULT_ANTHROPIC_WEB_SEARCH_TOOL.to_string(),
         }
+    }
+}
+
+/// Default cap on provider-native searches per request.
+pub const DEFAULT_NATIVE_WEB_SEARCH_MAX_USES: u32 = 5;
+/// Default Anthropic web search server tool version.
+pub const DEFAULT_ANTHROPIC_WEB_SEARCH_TOOL: &str = "web_search_20250305";
+
+impl WebSearchConfig {
+    /// True when provider-native search should be used where available.
+    pub fn native_enabled(&self) -> bool {
+        self.prefer_native || self.engine == WebSearchEngine::Native
     }
 }
 
@@ -1595,12 +1634,22 @@ pub struct PowerConfig {
     /// Honored by the shared `jcode serve` daemon. The `JCODE_DISABLE_POWER_INHIBIT`
     /// environment variable forces this off regardless of the config value.
     pub prevent_sleep_while_streaming: bool,
+
+    /// Also keep working when the lid closes on macOS and Windows while a
+    /// session is streaming. Linux always blocks lid-close suspend as part of
+    /// `prevent_sleep_while_streaming`. On Windows jcode temporarily sets the
+    /// active power plan's lid close action to "Do nothing". On macOS it runs
+    /// `sudo -n pmset -a disablesleep 1`, which requires a passwordless sudoers
+    /// rule and is skipped otherwise. Original settings are journaled and
+    /// restored when work finishes, including after a crash. Default: true.
+    pub block_lid_close: bool,
 }
 
 impl Default for PowerConfig {
     fn default() -> Self {
         Self {
             prevent_sleep_while_streaming: true,
+            block_lid_close: true,
         }
     }
 }

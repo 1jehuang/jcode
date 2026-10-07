@@ -10,8 +10,9 @@ use super::{
     build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
     copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
     format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
-    known_openai_model_ids, model_availability_for_account, openrouter,
-    openrouter_catalog_model_id, provider_for_model, standard_openrouter_profile_configured,
+    known_openai_model_ids_for_scope, model_availability_for_account, model_availability_for_scope,
+    openrouter, openrouter_catalog_model_id, provider_for_model,
+    standard_openrouter_profile_configured,
 };
 
 /// Build the fast local route snapshot used by the TUI model picker while the
@@ -368,15 +369,64 @@ pub(super) fn append_anthropic_routes(
 }
 
 /// OpenAI models via OAuth and/or API key, with per-account availability.
+///
+/// The ChatGPT/Codex OAuth catalog and the platform API-key catalog list
+/// different models, so each route is offered only for models in its own
+/// credential's catalog and judged against that catalog's availability. Using
+/// one shared list advertised API-only models under OAuth (and vice versa),
+/// and the switch then failed against the other credential's catalog.
 fn append_openai_routes(
     provider: &MultiProvider,
     routes: &mut Vec<ModelRoute>,
     openai_auth: &crate::auth::AuthStatus,
 ) {
-    let openai_models = if let Some(openai) = provider.openai_provider() {
-        openai.available_models_for_switching()
+    let has_runtime = provider.openai_provider().is_some();
+    let oauth_scope = super::openai_catalog_scope_for_credential(true, "");
+    let api_scope =
+        crate::provider_catalog::load_api_key_from_env_or_config("OPENAI_API_KEY", "openai.env")
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .map(|key| super::openai_catalog_scope_for_credential(false, &key));
+
+    let oauth_models = known_openai_model_ids_for_scope(&oauth_scope);
+    let api_models = api_scope
+        .as_deref()
+        .filter(|_| openai_auth.openai_has_api_key)
+        .map(|scope| {
+            known_openai_model_ids_for_scope(scope)
+                .into_iter()
+                .filter(|model| is_listable_model_name(model))
+                .collect::<Vec<_>>()
+        });
+    let mut openai_models = if openai_auth.openai_has_oauth || api_models.is_none() {
+        oauth_models.clone()
     } else {
-        known_openai_model_ids()
+        Vec::new()
+    };
+    for model in api_models.iter().flatten() {
+        if !openai_models.contains(model) {
+            openai_models.push(model.clone());
+        }
+    }
+
+    let route_availability = |scope: &str, model: &str| -> (bool, String) {
+        if !has_runtime {
+            return (false, "no credentials".to_string());
+        }
+        let availability = model_availability_for_scope(scope, model);
+        match availability.state {
+            AccountModelAvailabilityState::Available => (true, String::new()),
+            AccountModelAvailabilityState::Unavailable => (
+                false,
+                format_account_model_availability_detail(&availability)
+                    .unwrap_or_else(|| "not available".to_string()),
+            ),
+            AccountModelAvailabilityState::Unknown => {
+                let detail = format_account_model_availability_detail(&availability)
+                    .unwrap_or_else(|| "availability unknown".to_string());
+                (true, detail)
+            }
+        }
     };
 
     for model in openai_models {
@@ -384,31 +434,13 @@ fn append_openai_routes(
             routes.push(build_chatgpt_web_route());
             continue;
         }
-        let availability = model_availability_for_account(&model);
-        let (available, detail) = if provider.openai_provider().is_none() {
-            (false, "no credentials".to_string())
-        } else {
-            match availability.state {
-                AccountModelAvailabilityState::Available => (true, String::new()),
-                AccountModelAvailabilityState::Unavailable => (
-                    false,
-                    format_account_model_availability_detail(&availability)
-                        .unwrap_or_else(|| "not available".to_string()),
-                ),
-                AccountModelAvailabilityState::Unknown => {
-                    let detail = format_account_model_availability_detail(&availability)
-                        .unwrap_or_else(|| "availability unknown".to_string());
-                    (true, detail)
-                }
-            }
-        };
         // GPT Pro models are platform-API-only: never offer an OAuth route
         // for them (the Codex backend rejects them for ChatGPT accounts).
         if jcode_provider_core::is_openai_api_only_pro_model(&model) {
             if openai_auth.openai_has_api_key {
                 routes.push(build_openai_api_key_route(
                     &model,
-                    provider.openai_provider().is_some(),
+                    has_runtime,
                     String::new(),
                 ));
             } else {
@@ -420,17 +452,19 @@ fn append_openai_routes(
             }
             continue;
         }
-        if openai_auth.openai_has_oauth {
-            routes.push(build_openai_oauth_route(&model, available, detail.clone()));
+        let in_oauth = oauth_models.contains(&model);
+        if openai_auth.openai_has_oauth && in_oauth {
+            let (available, detail) = route_availability(&oauth_scope, &model);
+            routes.push(build_openai_oauth_route(&model, available, detail));
         }
-        if openai_auth.openai_has_api_key {
-            routes.push(build_openai_api_key_route(
-                &model,
-                provider.openai_provider().is_some(),
-                String::new(),
-            ));
+        if let (Some(api_scope), Some(api_models)) = (api_scope.as_deref(), api_models.as_ref())
+            && api_models.contains(&model)
+        {
+            let (available, detail) = route_availability(api_scope, &model);
+            routes.push(build_openai_api_key_route(&model, available, detail));
         }
         if !openai_auth.openai_has_oauth && !openai_auth.openai_has_api_key {
+            let (_, detail) = route_availability(&oauth_scope, &model);
             routes.push(build_openai_oauth_route(&model, false, detail));
         }
     }
@@ -1312,6 +1346,7 @@ mod tests {
                         context_length: None,
                         pricing: jcode_provider_openrouter::ModelPricing::default(),
                         created: None,
+                        ..Default::default()
                     })
                     .collect(),
             };
@@ -1645,6 +1680,7 @@ mod tests {
                     context_length: None,
                     pricing: jcode_provider_openrouter::ModelPricing::default(),
                     created: None,
+                    ..Default::default()
                 })
                 .collect(),
         };

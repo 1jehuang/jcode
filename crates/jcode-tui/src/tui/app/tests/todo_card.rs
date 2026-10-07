@@ -407,7 +407,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
 }
 
 #[test]
-fn background_task_rows_render_without_todos_or_transcript_cards() {
+fn background_tasks_render_in_widget_data_not_the_pinned_band() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let mut app = create_test_app();
@@ -419,66 +419,55 @@ fn background_task_rows_render_without_todos_or_transcript_cards() {
         Some(42.0),
     );
     app.finish_background_task(
-        "done".to_string(),
-        "release build".to_string(),
-        crate::tui::BackgroundTaskRowStatus::Completed,
-    );
-    app.finish_background_task(
         "failed".to_string(),
         "integration tests".to_string(),
         crate::tui::BackgroundTaskRowStatus::Failed,
     );
 
+    let info = crate::tui::TuiState::info_widget_data(&app)
+        .background_info
+        .expect("session task rows should feed the background widget");
+    assert_eq!(
+        info.rows
+            .iter()
+            .map(|row| row.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["running", "failed"]
+    );
+
     let backend = ratatui::backend::TestBackend::new(80, 20);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let rendered = render_and_snap(&app, &mut terminal);
-
     assert!(
-        rendered.contains("✓ bg release build  ━━━━━━ 100%"),
-        "missing completed task row:\n{rendered}"
+        !rendered.contains(" bg cargo test") && !rendered.contains(" bg integration tests"),
+        "background tasks must not render in the pinned todo band:\n{rendered}"
     );
-    assert!(
-        rendered.contains("× bg integration tests  ────── failed"),
-        "missing failed task row:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("◌ bg cargo test"),
-        "only the two most recent task rows should render:\n{rendered}"
-    );
-    assert!(!rendered.contains("Background tasks"));
     assert!(!rendered.contains("Background task started"));
     assert!(!rendered.contains("Background task progress"));
     assert!(!rendered.contains("Background task completed"));
 }
 
 #[test]
-fn background_task_rows_retain_the_two_most_recently_active_tasks() {
+fn background_task_rows_retain_the_most_recently_active_tasks() {
     let mut app = create_test_app();
-    app.upsert_running_background_task("first".to_string(), "first task".to_string(), None);
-    app.upsert_running_background_task("second".to_string(), "second task".to_string(), None);
-    app.upsert_running_background_task(
-        "first".to_string(),
-        "first task updated".to_string(),
-        Some(50.0),
-    );
-    app.upsert_running_background_task("third".to_string(), "third task".to_string(), None);
+    for i in 0..10 {
+        app.upsert_running_background_task(format!("t{i}"), format!("task {i}"), None);
+    }
+    app.upsert_running_background_task("t0".to_string(), "task 0 again".to_string(), Some(50.0));
 
-    assert_eq!(
-        app.background_task_rows_ref()
-            .iter()
-            .map(|row| row.task_id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["first", "third"]
-    );
+    let ids = app
+        .background_task_rows_ref()
+        .iter()
+        .map(|row| row.task_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 8);
+    assert_eq!(ids.last(), Some(&"t0"));
+    assert!(!ids.contains(&"t1") && !ids.contains(&"t2"));
 }
 
 #[test]
 fn indeterminate_background_update_preserves_last_known_percent() {
-    let _env_lock = crate::storage::lock_test_env();
-    let _render_lock = crate::tui::ui::render_state_test_lock();
     let mut app = create_test_app();
-    app.session.short_name = Some("test".to_string());
-    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
     app.upsert_running_background_task(
         "build".to_string(),
         "cargo build".to_string(),
@@ -496,14 +485,6 @@ fn indeterminate_background_update_preserves_last_known_percent() {
         .expect("background row should remain present");
     assert_eq!(row.percent, Some(42.0));
     assert_eq!(row.label, "Compiling jcode");
-
-    let backend = ratatui::backend::TestBackend::new(80, 20);
-    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
-    let rendered = render_and_snap(&app, &mut terminal);
-    assert!(
-        rendered.contains("Compiling jcode") && rendered.contains("42%"),
-        "phase-only update reset or hid the visible percentage:\n{rendered}"
-    );
 }
 
 #[test]
@@ -533,7 +514,8 @@ fn completed_background_tasks_clear_after_they_stop_being_relevant() {
             .iter()
             .map(|row| row.task_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["running"]
+        vec!["failed", "running"],
+        "completed tasks expire, failed tasks stay until acted on"
     );
     assert!(!app.prune_irrelevant_background_tasks());
 }

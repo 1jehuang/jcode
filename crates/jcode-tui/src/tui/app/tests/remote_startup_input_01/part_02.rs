@@ -105,10 +105,11 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     assert!(last.content.contains("cerebras-fast"));
     assert!(last.content.contains("cerebras-large"));
     assert!(last.content.contains("cerebras-reasoning"));
-    assert!(!app
-        .display_messages
-        .iter()
-        .any(|message| message.role == "background_task"));
+    assert!(
+        !app.display_messages
+            .iter()
+            .any(|message| message.role == "background_task")
+    );
     assert!(app.background_task_rows_ref().iter().any(|row| {
         row.task_id == "refresh-model-list"
             && row.status == crate::tui::BackgroundTaskRowStatus::Completed
@@ -297,11 +298,13 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            context_window: None,
             id: 91,
             model: "gpt-5.6-sol".to_string(),
             provider_name: Some("OpenAI".to_string()),
             error: None,
             resolved_credential: None,
+            reasoning_effort: None,
         },
         &mut remote,
     );
@@ -526,125 +529,64 @@ fn test_model_picker_preserves_recommendation_priority_order() {
         .expect("model picker should be open");
 
     let model_names: Vec<&str> = picker.entries.iter().map(|m| m.name.as_str()).collect();
+    let openai_default = jcode_provider_core::DEFAULT_OPENAI_MODEL;
+    let claude_default = jcode_provider_core::DEFAULT_CLAUDE_MODEL;
+    let position = |prefix: &str, api_method: Option<&str>| {
+        picker
+            .entries
+            .iter()
+            .position(|model| {
+                (model.name == prefix || model.name.starts_with(&format!("{prefix} (")))
+                    && api_method.is_none_or(|method| {
+                        model
+                            .active_option()
+                            .is_some_and(|route| route.api_method == method)
+                    })
+            })
+            .unwrap_or_else(|| panic!("{prefix} {api_method:?} missing from {model_names:?}"))
+    };
 
-    let gpt55 = picker
-        .entries
-        .iter()
-        .position(|model| {
-            model.name == "gpt-5.5 (high)"
-                && model
-                    .active_option()
-                    .map(|route| route.api_method == "openai-oauth" && route.provider == "OpenAI")
-                    .unwrap_or(false)
-        })
-        .expect("gpt-5.5 should be present");
-    let gpt54 = picker
-        .entries
-        .iter()
-        .position(|model| model.name.starts_with("gpt-5.4 "))
-        .expect("gpt-5.4 should be present");
-    let gpt54_pro = picker
-        .entries
-        .iter()
-        .position(|model| model.name.starts_with("gpt-5.4-pro "))
-        .expect("gpt-5.4-pro should be present");
-    let claude_oauth = picker
-        .entries
-        .iter()
-        .position(|model| {
-            model.name == "claude-opus-4-8 (high)"
-                && model
-                    .active_option()
-                    .map(|route| route.api_method == "claude-oauth")
-                    .unwrap_or(false)
-        })
-        .expect("claude-opus-4-8 oauth should be present");
-    let claude_api = picker
-        .entries
-        .iter()
-        .position(|model| {
-            model.name == "claude-opus-4-8 (high)"
-                && model
-                    .active_option()
-                    .map(|route| route.api_method == "claude-api")
-                    .unwrap_or(false)
-        })
-        .expect("claude-opus-4-8 api key should be present");
-    let spark = picker
-        .entries
-        .iter()
-        .position(|model| model.name.starts_with("gpt-5.3-codex-spark "))
-        .expect("gpt-5.3-codex-spark should be present");
-    let codex = picker
-        .entries
-        .iter()
-        .position(|model| model.name.starts_with("gpt-5.3-codex "))
-        .expect("gpt-5.3-codex should be present");
+    let openai_rec = position(openai_default, Some("openai-oauth"));
+    let claude_oauth = position(claude_default, Some("claude-oauth"));
+    let claude_api = position(claude_default, Some("claude-api"));
+    let stale_gpt = position("gpt-5.5", None);
+    let stale_opus = position("claude-opus-4-8", None);
+    let gpt54 = position("gpt-5.4", None);
+    let codex = position("gpt-5.3-codex", None);
 
     assert!(
-        gpt55 < claude_oauth,
-        "gpt-5.5 should rank ahead of claude-opus-4-8, got {:?}",
-        model_names
+        openai_rec < claude_oauth,
+        "OpenAI default should rank ahead of Claude default, got {model_names:?}"
     );
-    assert!(
-        claude_oauth < gpt54,
-        "claude-opus-4-8 should rank ahead of unrecommended gpt-5.4, got {:?}",
-        model_names
-    );
-    assert!(
-        claude_api < gpt54_pro,
-        "claude-opus-4-8 api key should rank ahead of unrecommended gpt-5.4-pro, got {:?}",
-        model_names
-    );
-    assert!(
-        picker.entries[gpt55].recommended,
-        "gpt-5.5 high over OpenAI OAuth should be recommended"
-    );
-    assert!(
-        picker.entries[claude_oauth].recommended,
-        "claude-opus-4-8 oauth should be recommended"
-    );
-    assert!(
-        picker.entries[claude_api].recommended,
-        "claude-opus-4-8 api key should be recommended"
-    );
-    assert!(
-        !picker.entries[gpt54].recommended,
-        "gpt-5.4 should not be recommended"
-    );
-    assert!(
-        !picker.entries[gpt54_pro].recommended,
-        "gpt-5.4-pro should not be recommended"
-    );
-    assert!(
-        !picker.entries[spark].recommended,
-        "gpt-5.3-codex-spark should not be recommended"
-    );
-    assert!(
-        !picker.entries[codex].recommended,
-        "gpt-5.3-codex should not be recommended"
-    );
-    let recommended_routes: Vec<_> = picker
+    for (index, label) in [
+        (stale_gpt, "gpt-5.5"),
+        (stale_opus, "claude-opus-4-8"),
+        (gpt54, "gpt-5.4"),
+        (codex, "gpt-5.3-codex"),
+    ] {
+        assert!(
+            claude_oauth < index && claude_api < index,
+            "current defaults should rank ahead of {label}, got {model_names:?}"
+        );
+        assert!(
+            !picker.entries[index].recommended,
+            "{label} is no longer a default and should not be recommended"
+        );
+    }
+    for index in [openai_rec, claude_oauth, claude_api] {
+        assert!(
+            picker.entries[index].recommended,
+            "{} should be recommended",
+            picker.entries[index].name
+        );
+    }
+    let recommended = picker
         .entries
         .iter()
         .filter(|entry| entry.recommended)
-        .map(|entry| {
-            let route = entry.active_option().expect("recommended entry has route");
-            (
-                entry.name.as_str(),
-                route.provider.as_str(),
-                route.api_method.as_str(),
-            )
-        })
-        .collect();
+        .count();
     assert_eq!(
-        recommended_routes,
-        vec![
-            ("gpt-5.5 (high)", "OpenAI", "openai-oauth"),
-            ("claude-opus-4-8 (high)", "Anthropic", "claude-api"),
-            ("claude-opus-4-8 (high)", "Anthropic", "claude-oauth"),
-        ],
-        "only the exact requested routes should be recommended; got {:?}",
-        recommended_routes
+        recommended, 3,
+        "only the default routes should be recommended, got {model_names:?}"
     );
 }

@@ -165,7 +165,6 @@ const FULL_FRAME_REDRAW_REASONS: &[&str] = &[
     "learn_hint",
     "mouse_scroll_animation",
     "copy_autoscroll",
-    "chat_overscroll",
     "notification",
     "rate_limit_countdown",
     "remote_startup",
@@ -409,19 +408,6 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         };
     }
 
-    // The elastic overscroll line shows a live `(overscroll x.x)` countdown that
-    // depletes over ~1.5s. Without a dedicated branch it falls through to the
-    // 250ms idle cadence and ticks in coarse, steppy jumps. Drive it at the
-    // smooth animation cadence so the countdown reads as continuous. A line
-    // pinned on by config has no countdown (`remaining` is None) and must not
-    // pin the redraw loop at animation cadence forever.
-    if state.chat_overscroll_remaining().is_some() {
-        return match policy.tier {
-            crate::perf::PerformanceTier::Minimal => fast_interval,
-            _ => animation_interval,
-        };
-    }
-
     // A held drag scrolls a line per tick: pace the tick, not the fps.
     if state.copy_selection_edge_autoscroll_active() {
         return REDRAW_COPY_AUTOSCROLL;
@@ -594,8 +580,6 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
         && state.streaming_text().is_empty()
         && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
-        // Only the elastic countdown needs ticks; a config-pinned line is static.
-        && state.chat_overscroll_remaining().is_none()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
         && !cache_cold_countdown_redraw_active(state)
@@ -665,9 +649,6 @@ fn live_activity_redraw_reason(state: &dyn TuiState) -> Option<&'static str> {
     if state.copy_selection_edge_autoscroll_active() {
         return Some("copy_autoscroll");
     }
-    if state.chat_overscroll_remaining().is_some() {
-        return Some("chat_overscroll");
-    }
     if state.has_notification() {
         return Some("notification");
     }
@@ -705,7 +686,6 @@ mod tests {
             "learn_hint",
             "mouse_scroll_animation",
             "copy_autoscroll",
-            "chat_overscroll",
             "notification",
             "rate_limit_countdown",
             "remote_startup",

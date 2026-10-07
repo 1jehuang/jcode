@@ -188,8 +188,59 @@ fn openai_account_scope_from_label(label: Option<String>) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
+/// Catalog scope for the ChatGPT/Codex OAuth route of the active account.
+/// Kept as the bare account label for compatibility with existing on-disk
+/// snapshots.
 fn current_openai_account_scope() -> String {
     openai_account_scope_from_label(auth::codex::active_account_label())
+}
+
+const OPENAI_API_KEY_SCOPE_PREFIX: &str = "api-key::";
+
+/// Catalog scope for an OpenAI credential.
+///
+/// The ChatGPT/Codex OAuth catalog (`backend-api/codex/models`) and the
+/// platform API-key catalog (`/v1/models`) list different models for the same
+/// person, so they must never share a scope. Sharing one let whichever refresh
+/// landed last overwrite the other, and switching to a model that only one
+/// route offers failed with "Unsupported OpenAI model" until the other route
+/// refreshed again. API keys are fingerprinted so changing keys cannot reuse
+/// another key's availability; the key itself never becomes a cache key.
+pub fn openai_catalog_scope_for_credential(is_chatgpt_mode: bool, access_token: &str) -> String {
+    if is_chatgpt_mode {
+        current_openai_account_scope()
+    } else {
+        openai_api_key_catalog_scope(access_token)
+    }
+}
+
+fn openai_api_key_catalog_scope(api_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(api_key.trim().as_bytes()));
+    format!("{OPENAI_API_KEY_SCOPE_PREFIX}{}", &digest[..16])
+}
+
+fn is_openai_api_key_catalog_scope(scope: &str) -> bool {
+    scope.starts_with(OPENAI_API_KEY_SCOPE_PREFIX)
+}
+
+/// Scope of the configured platform API key, if any.
+fn configured_openai_api_key_catalog_scope() -> Option<String> {
+    crate::provider_catalog::load_api_key_from_env_or_config("OPENAI_API_KEY", "openai.env")
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .map(|key| openai_api_key_catalog_scope(&key))
+}
+
+/// The `openai-api` OpenAI-compatible profile lists the same platform
+/// `/v1/models` for the same key. Use it to seed the API-key scope before the
+/// native runtime has fetched its own snapshot, so a model the picker offered
+/// from that listing is not rejected against the static fallback list.
+fn openai_api_profile_cached_model_ids() -> Option<Vec<String>> {
+    let resolved = crate::provider_catalog::resolve_openai_compatible_profile(
+        crate::provider_catalog::OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
+    );
+    super::cached_live_models_for_openai_compatible_profile(&resolved).map(|(models, _)| models)
 }
 
 fn current_claude_account_scope() -> String {
@@ -444,16 +495,30 @@ pub fn cached_anthropic_model_ids_for_scope(scope: &str) -> Option<Vec<String>> 
 }
 
 pub fn cached_openai_model_ids() -> Option<Vec<String>> {
-    let scope = current_openai_account_scope();
-    live_catalog_model_ids(&OPENAI_MODEL_CATALOG_SERVICE, &scope)
-        .or_else(|| load_openai_catalog_from_disk(&scope))
+    cached_openai_model_ids_for_scope(&current_openai_account_scope())
+}
+
+pub fn cached_openai_model_ids_for_scope(scope: &str) -> Option<Vec<String>> {
+    live_catalog_model_ids(&OPENAI_MODEL_CATALOG_SERVICE, scope)
+        .or_else(|| load_openai_catalog_from_disk(scope))
+        .or_else(|| {
+            is_openai_api_key_catalog_scope(scope)
+                .then(openai_api_profile_cached_model_ids)
+                .flatten()
+        })
 }
 
 /// Return model-specific OpenAI reasoning capabilities for the active account
 /// from its scoped disk snapshot. Live refreshes update provider-local state
 /// directly; this keeps startup exact before the first refresh completes.
 pub fn cached_openai_reasoning_efforts() -> Option<HashMap<String, Vec<String>>> {
-    let scope = current_openai_account_scope();
+    cached_openai_reasoning_efforts_for_scope(&current_openai_account_scope())
+}
+
+pub fn cached_openai_reasoning_efforts_for_scope(
+    scope: &str,
+) -> Option<HashMap<String, Vec<String>>> {
+    let scope = scope.to_string();
     let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
     let efforts = store.scopes.get(&scope)?.reasoning_efforts.clone();
     (!efforts.is_empty()).then_some(efforts)
@@ -470,9 +535,13 @@ pub fn reset_model_catalog_services_for_tests() {
 }
 
 pub fn persist_openai_model_catalog(catalog: &OpenAIModelCatalog) {
+    persist_openai_model_catalog_for_scope(&current_openai_account_scope(), catalog);
+}
+
+pub fn persist_openai_model_catalog_for_scope(scope: &str, catalog: &OpenAIModelCatalog) {
     persist_scoped_model_catalog(
         OPENAI_MODEL_CATALOG_CACHE_FILE,
-        &current_openai_account_scope(),
+        scope,
         &catalog.available_models,
         &catalog.context_limits,
         &catalog.reasoning_efforts,
@@ -588,7 +657,7 @@ pub fn populate_anthropic_models(slugs: Vec<String>) {
     populate_anthropic_models_for_scope(&current_anthropic_catalog_scope(), slugs);
 }
 
-fn populate_account_models_for_scope(scope: &str, slugs: Vec<String>) {
+pub fn populate_account_models_for_scope(scope: &str, slugs: Vec<String>) {
     if !slugs.is_empty() {
         let mut normalized = HashSet::new();
         for slug in slugs {
@@ -742,8 +811,39 @@ pub fn openai_platform_api_key_configured() -> bool {
         .unwrap_or(false)
 }
 
+/// Every OpenAI model reachable through any configured credential: the union of
+/// the ChatGPT/Codex OAuth catalog and the platform API-key catalog. Used where
+/// no specific credential is selected yet (route listing, runtime-less
+/// validation). A runtime validating its own credential should use
+/// [`known_openai_model_ids_for_scope`].
 pub fn known_openai_model_ids() -> Vec<String> {
-    let mut models = cached_openai_model_ids().unwrap_or_else(openai_static_model_ids);
+    let oauth = cached_openai_model_ids();
+    let api = configured_openai_api_key_catalog_scope()
+        .and_then(|scope| cached_openai_model_ids_for_scope(&scope));
+    let models = match (oauth, api) {
+        (None, None) => openai_static_model_ids(),
+        (oauth, api) => {
+            let mut models = oauth.unwrap_or_default();
+            for model in api.unwrap_or_default() {
+                if !models.contains(&model) {
+                    models.push(model);
+                }
+            }
+            models
+        }
+    };
+    finish_known_openai_model_ids(models)
+}
+
+/// OpenAI models valid for one credential's catalog scope (see
+/// [`openai_catalog_scope_for_credential`]).
+pub fn known_openai_model_ids_for_scope(scope: &str) -> Vec<String> {
+    finish_known_openai_model_ids(
+        cached_openai_model_ids_for_scope(scope).unwrap_or_else(openai_static_model_ids),
+    )
+}
+
+fn finish_known_openai_model_ids(mut models: Vec<String>) -> Vec<String> {
     if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
         models.push(CHATGPT_WEB_MODEL.to_string());
     }
@@ -768,23 +868,22 @@ fn note_openai_model_catalog_refresh_attempt_for_scope(scope: &str) {
     OPENAI_MODEL_CATALOG_SERVICE.note_attempt(scope);
 }
 
-fn openai_model_catalog_refresh_throttled() -> bool {
-    let scope = current_openai_account_scope();
-    OPENAI_MODEL_CATALOG_SERVICE.refresh_throttled(&scope)
-}
-
 fn anthropic_model_catalog_refresh_throttled(scope: &str) -> bool {
     ANTHROPIC_MODEL_CATALOG_SERVICE.refresh_throttled(scope)
 }
 
 pub fn should_refresh_openai_model_catalog() -> bool {
-    if account_model_cache_is_fresh() {
+    should_refresh_openai_model_catalog_for_scope(&current_openai_account_scope())
+}
+
+pub fn should_refresh_openai_model_catalog_for_scope(scope: &str) -> bool {
+    if OPENAI_MODEL_CATALOG_SERVICE.is_fresh(scope) {
         return false;
     }
-    if openai_model_catalog_refresh_throttled() {
+    if OPENAI_MODEL_CATALOG_SERVICE.refresh_throttled(scope) {
         return false;
     }
-    OPENAI_MODEL_CATALOG_SERVICE.should_refresh(&current_openai_account_scope())
+    OPENAI_MODEL_CATALOG_SERVICE.should_refresh(scope)
 }
 
 pub fn should_refresh_anthropic_model_catalog() -> bool {
@@ -804,8 +903,11 @@ pub fn should_refresh_anthropic_model_catalog_for_scope(scope: &str) -> bool {
 }
 
 pub fn begin_openai_model_catalog_refresh() -> bool {
-    let scope = current_openai_account_scope();
-    OPENAI_MODEL_CATALOG_SERVICE.begin_refresh(&scope)
+    begin_openai_model_catalog_refresh_for_scope(&current_openai_account_scope())
+}
+
+pub fn begin_openai_model_catalog_refresh_for_scope(scope: &str) -> bool {
+    OPENAI_MODEL_CATALOG_SERVICE.begin_refresh(scope)
 }
 
 pub fn begin_anthropic_model_catalog_refresh() -> Option<String> {
@@ -824,7 +926,7 @@ pub fn finish_openai_model_catalog_refresh() {
     OPENAI_MODEL_CATALOG_SERVICE.finish_refresh(&current_openai_account_scope());
 }
 
-fn finish_openai_model_catalog_refresh_for_scope(scope: &str) {
+pub fn finish_openai_model_catalog_refresh_for_scope(scope: &str) {
     OPENAI_MODEL_CATALOG_SERVICE.finish_refresh(scope);
 }
 
@@ -832,40 +934,31 @@ pub fn finish_anthropic_model_catalog_refresh_for_scope(scope: &str) {
     ANTHROPIC_MODEL_CATALOG_SERVICE.finish_refresh(scope);
 }
 
-fn account_model_cache_is_fresh() -> bool {
-    let scope = current_openai_account_scope();
-    OPENAI_MODEL_CATALOG_SERVICE.is_fresh(&scope)
-}
-
 fn anthropic_model_cache_is_fresh(scope: &str) -> bool {
     ANTHROPIC_MODEL_CATALOG_SERVICE.is_fresh(scope)
 }
 
-fn runtime_model_unavailability(model: &str) -> Option<RuntimeModelUnavailability> {
-    let scope = current_openai_account_scope();
+fn runtime_model_unavailability(scope: &str, model: &str) -> Option<RuntimeModelUnavailability> {
     let model = normalize_model_id(model);
     if model.is_empty() {
         return None;
     }
-    OPENAI_MODEL_CATALOG_SERVICE.runtime_model_unavailability(&scope, &model)
+    OPENAI_MODEL_CATALOG_SERVICE.runtime_model_unavailability(scope, &model)
 }
 
-fn account_snapshot_model_available(model: &str) -> Option<bool> {
-    if !account_model_cache_is_fresh() {
+fn account_snapshot_model_available(scope: &str, model: &str) -> Option<bool> {
+    if !OPENAI_MODEL_CATALOG_SERVICE.is_fresh(scope) {
         return None;
     }
     let key = normalize_model_id(model);
     if key.is_empty() {
         return None;
     }
-
-    let scope = current_openai_account_scope();
-    OPENAI_MODEL_CATALOG_SERVICE.contains_model(&scope, &key)
+    OPENAI_MODEL_CATALOG_SERVICE.contains_model(scope, &key)
 }
 
-fn account_models_observed_at() -> Option<SystemTime> {
-    let scope = current_openai_account_scope();
-    OPENAI_MODEL_CATALOG_SERVICE.observed_at(&scope)
+fn account_models_observed_at(scope: &str) -> Option<SystemTime> {
+    OPENAI_MODEL_CATALOG_SERVICE.observed_at(scope)
 }
 
 /// Refresh the OpenAI model catalog in the background.
@@ -882,7 +975,7 @@ pub fn refresh_openai_model_catalog_in_background(
     is_chatgpt_mode: bool,
     context: &'static str,
 ) {
-    let scope = current_openai_account_scope();
+    let scope = openai_catalog_scope_for_credential(is_chatgpt_mode, &access_token);
     if access_token.trim().is_empty() {
         finish_openai_model_catalog_refresh_for_scope(&scope);
         return;
@@ -911,7 +1004,7 @@ pub fn refresh_openai_model_catalog_in_background(
                     catalog.available_models.len(),
                     catalog.context_limits.len()
                 ));
-                persist_openai_model_catalog(&catalog);
+                persist_openai_model_catalog_for_scope(&scope, &catalog);
                 if !catalog.context_limits.is_empty() {
                     populate_context_limits(catalog.context_limits.clone());
                 }
@@ -944,21 +1037,27 @@ pub fn refresh_openai_model_catalog_in_background(
 }
 
 pub fn record_model_unavailable_for_account(model: &str, reason: &str) {
-    let scope = current_openai_account_scope();
+    record_model_unavailable_for_scope(&current_openai_account_scope(), model, reason);
+}
+
+pub fn record_model_unavailable_for_scope(scope: &str, model: &str, reason: &str) {
     let model = normalize_model_id(model);
     if model.is_empty() {
         return;
     }
-    OPENAI_MODEL_CATALOG_SERVICE.record_runtime_model_unavailable(&scope, &model, reason);
+    OPENAI_MODEL_CATALOG_SERVICE.record_runtime_model_unavailable(scope, &model, reason);
 }
 
 pub fn clear_model_unavailable_for_account(model: &str) {
-    let scope = current_openai_account_scope();
+    clear_model_unavailable_for_scope(&current_openai_account_scope(), model);
+}
+
+pub fn clear_model_unavailable_for_scope(scope: &str, model: &str) {
     let model = normalize_model_id(model);
     if model.is_empty() {
         return;
     }
-    OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(&scope, &model);
+    OPENAI_MODEL_CATALOG_SERVICE.clear_runtime_model_unavailable(scope, &model);
 }
 
 fn runtime_provider_unavailability(provider: &str) -> Option<RuntimeProviderUnavailability> {
@@ -1066,6 +1165,12 @@ pub fn is_model_available_for_account(model: &str) -> Option<bool> {
 }
 
 pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
+    model_availability_for_scope(&current_openai_account_scope(), model)
+}
+
+/// Availability of `model` within one credential's catalog scope (see
+/// [`openai_catalog_scope_for_credential`]).
+pub fn model_availability_for_scope(scope: &str, model: &str) -> AccountModelAvailability {
     if model.trim() == CHATGPT_WEB_MODEL {
         return AccountModelAvailability {
             state: AccountModelAvailabilityState::Unknown,
@@ -1075,7 +1180,7 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
         };
     }
 
-    if let Some(runtime) = runtime_model_unavailability(model) {
+    if let Some(runtime) = runtime_model_unavailability(scope, model) {
         return AccountModelAvailability {
             state: AccountModelAvailabilityState::Unavailable,
             reason: Some(runtime.reason),
@@ -1110,33 +1215,33 @@ pub fn model_availability_for_account(model: &str) -> AccountModelAvailability {
         };
     }
 
-    if !account_model_cache_is_fresh() {
+    if !OPENAI_MODEL_CATALOG_SERVICE.is_fresh(scope) {
         return AccountModelAvailability {
             state: AccountModelAvailabilityState::Unknown,
             reason: Some("availability snapshot is stale".to_string()),
             source: "account-snapshot",
-            observed_at: account_models_observed_at(),
+            observed_at: account_models_observed_at(scope),
         };
     }
 
-    match account_snapshot_model_available(model) {
+    match account_snapshot_model_available(scope, model) {
         Some(true) => AccountModelAvailability {
             state: AccountModelAvailabilityState::Available,
             reason: None,
             source: "account-snapshot",
-            observed_at: account_models_observed_at(),
+            observed_at: account_models_observed_at(scope),
         },
         Some(false) => AccountModelAvailability {
             state: AccountModelAvailabilityState::Unavailable,
             reason: Some("not available for your account".to_string()),
             source: "account-snapshot",
-            observed_at: account_models_observed_at(),
+            observed_at: account_models_observed_at(scope),
         },
         None => AccountModelAvailability {
             state: AccountModelAvailabilityState::Unknown,
             reason: Some("no availability snapshot yet".to_string()),
             source: "account-snapshot",
-            observed_at: account_models_observed_at(),
+            observed_at: account_models_observed_at(scope),
         },
     }
 }
@@ -1162,15 +1267,18 @@ const OPENAI_MODEL_PREFERENCE: &[&str] = &[
 /// Get the best available OpenAI model, falling back through the preference list.
 /// Returns None if the dynamic model list hasn't been fetched yet.
 pub fn get_best_available_openai_model() -> Option<String> {
-    if !account_model_cache_is_fresh() {
+    get_best_available_openai_model_for_scope(&current_openai_account_scope())
+}
+
+pub fn get_best_available_openai_model_for_scope(scope: &str) -> Option<String> {
+    if !OPENAI_MODEL_CATALOG_SERVICE.is_fresh(scope) {
         return None;
     }
-    let scope = current_openai_account_scope();
-    let models = OPENAI_MODEL_CATALOG_SERVICE.model_ids(&scope)?;
+    let models = OPENAI_MODEL_CATALOG_SERVICE.model_ids(scope)?;
 
     for preferred in OPENAI_MODEL_PREFERENCE {
         if models.iter().any(|model| model == *preferred)
-            && runtime_model_unavailability(preferred).is_none()
+            && runtime_model_unavailability(scope, preferred).is_none()
         {
             return Some(preferred.to_string());
         }
@@ -1178,7 +1286,7 @@ pub fn get_best_available_openai_model() -> Option<String> {
 
     models
         .into_iter()
-        .find(|model| runtime_model_unavailability(model).is_none())
+        .find(|model| runtime_model_unavailability(scope, model).is_none())
 }
 
 /// Return the context window size in tokens for a given model, if known.

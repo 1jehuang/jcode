@@ -1,3 +1,64 @@
+/// The server resolves the real window and reports it here. A remote client
+/// cannot derive it itself: its provider is an inert placeholder with no model
+/// catalog, and the static resolver has no entry for a model it does not
+/// recognise, so without this field the panel shows the generic default.
+#[test]
+fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
+    let event = ServerEvent::ModelChanged {
+        id: 7,
+        model: "auto/included".to_string(),
+        provider_name: Some("OmniRouteV2".to_string()),
+        context_window: Some(1_310_720),
+        error: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+    };
+    let json = encode_event(&event);
+    assert!(
+        json.contains("\"context_window\":1310720"),
+        "window must reach the wire: {json}"
+    );
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::ModelChanged {
+        context_window, ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(context_window, Some(1_310_720));
+    Ok(())
+}
+
+/// An older server omits the field. It must not appear on the wire, and the
+/// client must read it as unknown rather than as a number, so a missing value can
+/// never be mistaken for a real one.
+#[test]
+fn test_model_changed_without_context_window_stays_absent() -> Result<()> {
+    let event = ServerEvent::ModelChanged {
+        id: 3,
+        model: "m".to_string(),
+        provider_name: None,
+        context_window: None,
+        error: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+    };
+    let json = encode_event(&event);
+    assert!(
+        !json.contains("context_window"),
+        "unknown window must be omitted, not sent as null: {json}"
+    );
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::ModelChanged {
+        context_window, ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(context_window, None);
+    Ok(())
+}
+
 #[test]
 fn test_request_roundtrip() -> Result<()> {
     let req = Request::Message {
@@ -508,6 +569,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         autojudge_enabled: None,
         compaction_mode: jcode_config_types::CompactionMode::Reactive,
         activity: None,
+        applets: Default::default(),
         side_panel: jcode_side_panel_types::SidePanelSnapshot {
             focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
