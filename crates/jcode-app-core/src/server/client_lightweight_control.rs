@@ -136,6 +136,16 @@ async fn ensure_lightweight_swarm_member(
     // gets replaced"). When the member is removed (comm stop / daemon
     // shutdown), dropping the last sender closes the channel and the drain
     // task exits naturally.
+    //
+    // KNOWN LIMITATION (design follow-up): the drain task keeps the channel
+    // open after the headless caller exits, so the member stays "ready". In
+    // a shared swarm (JCODE_SWARM_ID), a later root's spawn may defer to
+    // the exited coordinator. The proper fix requires a session-exit hook
+    // (mark/remove the auto-registered member when the in-process `jcode run`
+    // session reaches its terminal state) — connection close is NOT a valid
+    // proxy (it only proves one request finished, not that the session
+    // exited). Tracked as a follow-up; the single-caller case (the primary
+    // use case: headless run + swarm spawn) works correctly.
     let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     tokio::spawn(async move {
         while member_event_rx.recv().await.is_some() {
