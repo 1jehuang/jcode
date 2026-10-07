@@ -53,6 +53,61 @@ pub(super) fn copy_selection_text_from_raw_lines(
     copy_selection_text_from_raw_lines_base(snapshot, start, end)
 }
 
+/// Full copy text for a selection: semantic math substitution first, then the
+/// raw logical-line path, then the wrapped display-line fallback (used when a
+/// selection starts on chrome such as the session header that has no raw map).
+pub(super) fn copy_selection_text_any(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    if let Some(text) = copy_selection_text_with_math_targets(snapshot, start, end) {
+        return Some(text);
+    }
+    copy_segment_text(snapshot, start, end)
+}
+
+fn copy_segment_text(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    copy_selection_text_from_raw_lines_base(snapshot, start, end)
+        .or_else(|| copy_selection_text_from_wrapped_lines(snapshot, start, end))
+}
+
+/// Display-line copy path. Mirrors the raw path but slices wrapped lines and
+/// honors per-line copy offsets that skip gutter chrome.
+pub(super) fn copy_selection_text_from_wrapped_lines(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<String> {
+    let mut out = String::new();
+    for abs_line in start.abs_line..=end.abs_line {
+        if abs_line > start.abs_line {
+            out.push('\n');
+        }
+        let text = snapshot.wrapped_plain_line(abs_line)?;
+        let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
+        let start_col = if abs_line == start.abs_line {
+            clamp_display_col(text, start.column).max(copy_start)
+        } else {
+            copy_start
+        };
+        let end_col = if abs_line == end.abs_line {
+            clamp_display_col(text, end.column).max(copy_start)
+        } else {
+            line_display_width(text)
+        };
+        if end_col < start_col {
+            continue;
+        }
+        out.push_str(&semantic_slice(text, start_col, end_col));
+    }
+    Some(out)
+}
+
 /// Slice `text` between display columns, replacing any fully or partially
 /// selected inline-math span with its `$source$` LaTeX form.
 fn semantic_slice(text: &str, start_col: usize, end_col: usize) -> std::borrow::Cow<'_, str> {
@@ -189,9 +244,7 @@ fn copy_selection_text_with_math_targets(
                 abs_line: last_line,
                 column: last_col,
             };
-            parts.push(copy_selection_text_from_raw_lines_base(
-                snapshot, cursor, normal_end,
-            )?);
+            parts.push(copy_segment_text(snapshot, cursor, normal_end)?);
         }
         parts.push(target.content.clone());
         cursor = crate::tui::CopySelectionPoint {
@@ -204,9 +257,7 @@ fn copy_selection_text_with_math_targets(
     if (cursor.abs_line, cursor.column) <= (end.abs_line, end.column)
         && cursor.abs_line < snapshot.wrapped_plain_line_count()
     {
-        parts.push(copy_selection_text_from_raw_lines_base(
-            snapshot, cursor, end,
-        )?);
+        parts.push(copy_segment_text(snapshot, cursor, end)?);
     }
     Some(parts.join("\n"))
 }
