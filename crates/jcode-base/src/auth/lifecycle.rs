@@ -311,6 +311,47 @@ pub fn ranked_flagship_for_provider(provider_id: &str, models: &[&str]) -> Optio
     None
 }
 
+/// The model a fresh session starts on for one provider login, before any
+/// live catalog is fetched. `None` for providers Jcode cannot run (or that
+/// need a catalog to name a model, such as OpenRouter).
+pub fn default_model_for_provider(provider_id: &str) -> Option<&'static str> {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-api" | "anthropic" | "anthropic-api" => {
+            Some(jcode_provider_core::DEFAULT_CLAUDE_MODEL)
+        }
+        "openai" | "openai-api" | "codex" => Some(jcode_provider_core::DEFAULT_OPENAI_MODEL),
+        "copilot" => Some(crate::provider::copilot::DEFAULT_MODEL),
+        "gemini" => Some(crate::provider::gemini::DEFAULT_MODEL),
+        "antigravity" => Some(crate::provider::antigravity::DEFAULT_FALLBACK_MODEL),
+        "cursor" => Some(crate::provider::cursor::DEFAULT_MODEL),
+        _ => None,
+    }
+}
+
+/// Predict the provider and model a first session will use once onboarding
+/// finishes with these logins (already connected plus selected imports).
+/// Mirrors the strongest-route choice the runtime applies after an import
+/// ([`globally_preferred_default_route`]), so UIs can show the real identity
+/// instead of asking the user to choose. Ties keep the caller's order.
+/// Returns `(provider_id, model)`.
+pub fn onboarding_default_selection(provider_ids: &[&str]) -> Option<(String, String)> {
+    let routes: Vec<ModelRoute> = provider_ids
+        .iter()
+        .filter_map(|id| {
+            default_model_for_provider(id).map(|model| ModelRoute {
+                model: model.to_string(),
+                provider: id.trim().to_string(),
+                api_method: String::new(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+            })
+        })
+        .collect();
+    globally_preferred_default_route(&routes).map(|route| (route.provider, route.model))
+}
+
 /// Pick the strongest available route across every authenticated provider.
 ///
 /// This is intentionally separate from [`provider_model_to_select_after_auth`],
@@ -1335,6 +1376,33 @@ mod tests {
             usage: None,
             cheapness: None,
         }
+    }
+
+    #[test]
+    fn onboarding_default_selection_follows_global_preference() {
+        assert_eq!(onboarding_default_selection(&[]), None);
+        assert_eq!(onboarding_default_selection(&["openrouter"]), None);
+        assert_eq!(
+            onboarding_default_selection(&["gemini", "claude", "openai"]),
+            Some((
+                "openai".to_string(),
+                jcode_provider_core::DEFAULT_OPENAI_MODEL.to_string()
+            ))
+        );
+        assert_eq!(
+            onboarding_default_selection(&["gemini", "claude-api"]),
+            Some((
+                "claude-api".to_string(),
+                jcode_provider_core::DEFAULT_CLAUDE_MODEL.to_string()
+            ))
+        );
+        assert_eq!(
+            onboarding_default_selection(&["cursor", "gemini"]),
+            Some((
+                "cursor".to_string(),
+                crate::provider::cursor::DEFAULT_MODEL.to_string()
+            ))
+        );
     }
 
     #[test]
