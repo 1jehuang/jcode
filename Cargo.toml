@@ -129,6 +129,7 @@ path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
 
 [dependencies]
+jcode-message-types = { path = "crates/jcode-message-types" }
 # Memory allocator (reduces fragmentation for long-running server)
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
 

@@ -335,6 +335,25 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Session(SessionCommand),
 
+    /// Summarize authored work over a time window (sessions + git commits)
+    Digest {
+        /// Time window, e.g. 2h, 1d, 3d, 1w (default: 1d)
+        #[arg(long, default_value = "1d")]
+        since: String,
+
+        /// Only include sessions whose working_dir is under this path
+        #[arg(long)]
+        working_dir: Option<String>,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+
+        /// Skip the git commit scan (sessions only)
+        #[arg(long)]
+        no_git: bool,
+    },
+
     /// Ambient mode management
     #[command(subcommand)]
     Ambient(AmbientCommand),

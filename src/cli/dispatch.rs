@@ -442,6 +442,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 json,
             } => commands::run_session_rename_command(&session, name.as_deref(), clear, json)?,
         },
+        Some(Command::Digest {
+            since,
+            working_dir,
+            json,
+            no_git,
+        }) => {
+            commands::run_digest_command(&since, working_dir.as_deref(), json, no_git)?;
+        }
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;
         }
