@@ -53,6 +53,37 @@ pub(super) fn copy_selection_text_from_raw_lines(
     copy_selection_text_from_raw_lines_base(snapshot, start, end)
 }
 
+/// Slice `text` between display columns, replacing any fully or partially
+/// selected inline-math span with its `$source$` LaTeX form.
+fn semantic_slice(text: &str, start_col: usize, end_col: usize) -> std::borrow::Cow<'_, str> {
+    let Some(spans) = jcode_tui_markdown::inline_math_spans_for_plain_line(text) else {
+        return std::borrow::Cow::Borrowed(display_col_slice(text, start_col, end_col));
+    };
+    let mut out = String::new();
+    let mut col = start_col;
+    let mut replaced = false;
+    for span in spans.iter() {
+        if span.end_col <= start_col || span.start_col >= end_col {
+            continue;
+        }
+        if span.start_col > col {
+            out.push_str(display_col_slice(text, col, span.start_col));
+        }
+        out.push('$');
+        out.push_str(&span.source);
+        out.push('$');
+        replaced = true;
+        col = span.end_col.max(col);
+    }
+    if !replaced {
+        return std::borrow::Cow::Borrowed(display_col_slice(text, start_col, end_col));
+    }
+    if col < end_col {
+        out.push_str(display_col_slice(text, col, end_col));
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn copy_selection_text_from_raw_lines_base(
     snapshot: &CopyViewportSnapshot,
     start: crate::tui::CopySelectionPoint,
@@ -84,7 +115,7 @@ fn copy_selection_text_from_raw_lines_base(
             if raw_line == start.raw_line + 1 {
                 out.reserve(text.len().saturating_mul(selected_lines.min(8)));
             }
-            out.push_str(text);
+            out.push_str(&semantic_slice(text, 0, line_display_width(text)));
             continue;
         }
         let line_width = line_display_width(text);
@@ -103,11 +134,11 @@ fn copy_selection_text_from_raw_lines_base(
             continue;
         }
 
-        let slice = display_col_slice(text, start_col, end_col);
+        let slice = semantic_slice(text, start_col, end_col);
         if raw_line == start.raw_line {
             out.reserve(slice.len().saturating_mul(selected_lines.min(8)));
         }
-        out.push_str(slice);
+        out.push_str(&slice);
     }
 
     Some(out)
@@ -213,7 +244,9 @@ pub(super) fn copy_selection_metrics_from_raw_lines(
         lines += 1;
         let text = snapshot.raw_plain_line(raw_line)?;
         if raw_line != start.raw_line && raw_line != end.raw_line {
-            chars += text.chars().count();
+            chars += semantic_slice(text, 0, line_display_width(text))
+                .chars()
+                .count();
             continue;
         }
         let line_width = line_display_width(text);
@@ -230,7 +263,7 @@ pub(super) fn copy_selection_metrics_from_raw_lines(
         if end_col < start_col {
             continue;
         }
-        chars += display_col_slice(text, start_col, end_col).chars().count();
+        chars += semantic_slice(text, start_col, end_col).chars().count();
     }
 
     Some((chars, lines.max(1)))
@@ -346,6 +379,30 @@ mod tests {
             copy_selection_metrics_from_raw_lines(&snapshot, point(0, 0), point(4, 5)),
             Some((copied.chars().count(), copied.split('\n').count()))
         );
+    }
+
+    #[test]
+    fn selection_over_unicode_inline_math_copies_latex_source() {
+        let rendered =
+            jcode_tui_markdown::render_markdown(r"Identity $e^{i\pi_{7}} + 1 = 0$ holds");
+        let line = rendered
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|text| text.starts_with("Identity"))
+            .expect("prose line");
+        let width = line_display_width(&line);
+        assert_eq!(
+            semantic_slice(&line, 0, width),
+            r"Identity $e^{i\pi_{7}} + 1 = 0$ holds"
+        );
+        // A partial drag that only touches the formula still copies all of it.
+        assert_eq!(semantic_slice(&line, 10, 12), r"$e^{i\pi_{7}} + 1 = 0$");
+        assert_eq!(semantic_slice(&line, 0, 8), "Identity");
     }
 
     #[test]
