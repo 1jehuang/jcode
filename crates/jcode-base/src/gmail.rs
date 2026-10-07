@@ -538,8 +538,15 @@ impl GmailClient {
         in_reply_to: Option<&str>,
         thread_id: Option<&str>,
     ) -> Result<Draft> {
-        self.create_draft_with_attachments(to, subject, body, in_reply_to, thread_id, &[])
-            .await
+        self.create_draft_with_attachments(
+            &Recipients::to(to),
+            subject,
+            body,
+            in_reply_to,
+            thread_id,
+            &[],
+        )
+        .await
     }
 
     /// Create a draft, optionally with file attachments. When `attachments` is
@@ -548,7 +555,7 @@ impl GmailClient {
     /// base64-encoded.
     pub async fn create_draft_with_attachments(
         &self,
-        to: &str,
+        recipients: &Recipients<'_>,
         subject: &str,
         body: &str,
         in_reply_to: Option<&str>,
@@ -557,7 +564,7 @@ impl GmailClient {
     ) -> Result<Draft> {
         let url = format!("{}/drafts", GMAIL_API_BASE);
 
-        let raw = build_raw_mime(to, subject, body, in_reply_to, attachments)?;
+        let raw = build_raw_mime(recipients, subject, body, in_reply_to, attachments)?;
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes());
 
         let mut message = json!({ "raw": encoded });
@@ -609,7 +616,7 @@ impl GmailClient {
     pub async fn update_draft(
         &self,
         draft_id: &str,
-        to: &str,
+        recipients: &Recipients<'_>,
         subject: &str,
         body: &str,
         in_reply_to: Option<&str>,
@@ -617,7 +624,7 @@ impl GmailClient {
         attachments: &[std::path::PathBuf],
     ) -> Result<Draft> {
         let url = format!("{}/drafts/{}", GMAIL_API_BASE, draft_id);
-        let raw = build_raw_mime(to, subject, body, in_reply_to, attachments)?;
+        let raw = build_raw_mime(recipients, subject, body, in_reply_to, attachments)?;
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes());
         let mut message = json!({ "raw": encoded });
         if let Some(tid) = thread_id {
@@ -645,8 +652,15 @@ impl GmailClient {
         in_reply_to: Option<&str>,
         thread_id: Option<&str>,
     ) -> Result<Message> {
-        self.send_message_with_attachments(to, subject, body, in_reply_to, thread_id, &[])
-            .await
+        self.send_message_with_attachments(
+            &Recipients::to(to),
+            subject,
+            body,
+            in_reply_to,
+            thread_id,
+            &[],
+        )
+        .await
     }
 
     /// Send a message, optionally with file attachments. When `attachments` is
@@ -655,7 +669,7 @@ impl GmailClient {
     /// base64-encoded.
     pub async fn send_message_with_attachments(
         &self,
-        to: &str,
+        recipients: &Recipients<'_>,
         subject: &str,
         body: &str,
         in_reply_to: Option<&str>,
@@ -664,7 +678,7 @@ impl GmailClient {
     ) -> Result<Message> {
         let url = format!("{}/messages/send", GMAIL_API_BASE);
 
-        let raw = build_raw_mime(to, subject, body, in_reply_to, attachments)?;
+        let raw = build_raw_mime(recipients, subject, body, in_reply_to, attachments)?;
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes());
 
         let mut message = json!({ "raw": encoded });
@@ -701,16 +715,57 @@ impl GmailClient {
     }
 }
 
+/// Recipient headers for an outgoing message or draft. Each field is a
+/// comma-separated address list as it should appear in the header.
+///
+/// Gmail reads the `Bcc` header from the raw message to decide delivery and
+/// strips it from the copies other recipients receive, while keeping it on
+/// the sender's own copy (and on drafts), so writing it into the MIME is the
+/// supported way to Bcc through the API.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Recipients<'a> {
+    pub to: &'a str,
+    pub cc: Option<&'a str>,
+    pub bcc: Option<&'a str>,
+}
+
+impl<'a> Recipients<'a> {
+    pub fn to(to: &'a str) -> Self {
+        Self {
+            to,
+            cc: None,
+            bcc: None,
+        }
+    }
+
+    /// Render the address headers, skipping empty Cc/Bcc lists.
+    fn header_lines(&self) -> Result<String> {
+        let mut out = String::new();
+        for (name, value) in [("To", Some(self.to)), ("Cc", self.cc), ("Bcc", self.bcc)] {
+            let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+            // A raw CR/LF would let a value inject arbitrary extra headers.
+            if value.contains(['\r', '\n']) {
+                anyhow::bail!("{} header must not contain line breaks", name);
+            }
+            out.push_str(&format!("{}: {}\r\n", name, value));
+        }
+        Ok(out)
+    }
+}
+
 /// Build a raw RFC 5322 message, optionally `multipart/mixed` with file
 /// attachments. Returns the full message including headers, suitable for
 /// base64url-encoding into the Gmail API `raw` field.
 fn build_raw_mime(
-    to: &str,
+    recipients: &Recipients<'_>,
     subject: &str,
     body: &str,
     in_reply_to: Option<&str>,
     attachments: &[std::path::PathBuf],
 ) -> Result<String> {
+    let address_headers = recipients.header_lines()?;
     let subject = encode_header_value(subject);
     let mut reply_headers = String::new();
     if let Some(reply_to) = in_reply_to {
@@ -729,8 +784,8 @@ fn build_raw_mime(
 
     if attachments.is_empty() {
         return Ok(format!(
-            "To: {}\r\nSubject: {}\r\n{}MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{}",
-            to, subject, reply_headers, body
+            "{}Subject: {}\r\n{}MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{}",
+            address_headers, subject, reply_headers, body
         ));
     }
 
@@ -739,8 +794,8 @@ fn build_raw_mime(
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
     let mut raw = format!(
-        "To: {}\r\nSubject: {}\r\n{}MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"{}\"\r\n\r\n",
-        to, subject, reply_headers, boundary
+        "{}Subject: {}\r\n{}MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"{}\"\r\n\r\n",
+        address_headers, subject, reply_headers, boundary
     );
 
     // Body part.
@@ -1097,6 +1152,20 @@ pub struct DraftFull {
     pub message: Option<Message>,
 }
 
+/// "To: ...\nCc: ...\nBcc: ..." lines for whichever recipient headers are
+/// present. Bcc only appears on the sender's own copy and on drafts.
+pub fn format_recipient_lines(msg: &Message, indent: &str) -> String {
+    ["To", "Cc", "Bcc"]
+        .iter()
+        .filter_map(|name| {
+            msg.header(name)
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| format!("{}{}: {}", indent, name, v))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn format_message_summary(msg: &Message) -> String {
     let from = msg.from().unwrap_or("(unknown)");
     let subject = msg.subject().unwrap_or("(no subject)");
@@ -1108,9 +1177,15 @@ pub fn format_message_summary(msg: &Message) -> String {
         .map(|l| l.join(", "))
         .unwrap_or_default();
 
+    let recipients = format_recipient_lines(msg, "");
+    let recipients = if recipients.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", recipients)
+    };
     format!(
-        "From: {}\nSubject: {}\nDate: {}\nLabels: {}\nSnippet: {}\nID: {}",
-        from, subject, date, labels, snippet, msg.id
+        "From: {}\n{}Subject: {}\nDate: {}\nLabels: {}\nSnippet: {}\nID: {}",
+        from, recipients, subject, date, labels, snippet, msg.id
     )
 }
 
@@ -1363,7 +1438,7 @@ mod mime_tests {
     #[test]
     fn reply_headers_use_angle_bracketed_message_id() {
         let raw = build_raw_mime(
-            "a@b.c",
+            &Recipients::to("a@b.c"),
             "Re: hi",
             "body",
             Some("CAOU+8LMfxVaPMmigYAtdJK0z0Y@mail.gmail.com"),
@@ -1373,7 +1448,14 @@ mod mime_tests {
         assert!(raw.contains("In-Reply-To: <CAOU+8LMfxVaPMmigYAtdJK0z0Y@mail.gmail.com>"));
         assert!(raw.contains("References: <CAOU+8LMfxVaPMmigYAtdJK0z0Y@mail.gmail.com>"));
         // Already-bracketed IDs are not double wrapped.
-        let raw2 = build_raw_mime("a@b.c", "Re: hi", "body", Some("<x@y.z>"), &[]).unwrap();
+        let raw2 = build_raw_mime(
+            &Recipients::to("a@b.c"),
+            "Re: hi",
+            "body",
+            Some("<x@y.z>"),
+            &[],
+        )
+        .unwrap();
         assert!(raw2.contains("In-Reply-To: <x@y.z>"));
         assert!(!raw2.contains("<<"));
     }
@@ -1381,7 +1463,7 @@ mod mime_tests {
     #[test]
     fn utf8_subject_in_raw_mime_is_ascii_only() {
         let raw = build_raw_mime(
-            "a@b.c",
+            &Recipients::to("a@b.c"),
             "caf\u{e9} \u{2014} r\u{e9}sum\u{e9}",
             "body",
             None,
@@ -1390,5 +1472,66 @@ mod mime_tests {
         .unwrap();
         let subject_line = raw.lines().find(|l| l.starts_with("Subject:")).unwrap();
         assert!(subject_line.is_ascii(), "subject header leaked raw UTF-8");
+    }
+
+    #[test]
+    fn cc_and_bcc_headers_are_written_when_present() {
+        let recipients = Recipients {
+            to: "david@hey.com",
+            cc: Some("cc@x.y"),
+            bcc: Some("bflora@ycombinator.com, other@x.y"),
+        };
+        let raw = build_raw_mime(&recipients, "Re: intro", "body", None, &[]).unwrap();
+        let headers = raw.split("\r\n\r\n").next().unwrap();
+        assert!(headers.contains("To: david@hey.com\r\n"));
+        assert!(headers.contains("Cc: cc@x.y\r\n"));
+        assert!(headers.contains("Bcc: bflora@ycombinator.com, other@x.y\r\n"));
+
+        // Multipart messages carry the same address headers.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "hi").unwrap();
+        let raw = build_raw_mime(&recipients, "s", "b", None, &[file]).unwrap();
+        let headers = raw.split("\r\n\r\n").next().unwrap();
+        assert!(headers.contains("Bcc: bflora@ycombinator.com, other@x.y\r\n"));
+    }
+
+    #[test]
+    fn empty_cc_and_bcc_are_omitted() {
+        let recipients = Recipients {
+            to: "a@b.c",
+            cc: Some("  "),
+            bcc: None,
+        };
+        let raw = build_raw_mime(&recipients, "s", "b", None, &[]).unwrap();
+        assert!(!raw.contains("Cc:"));
+        assert!(!raw.contains("Bcc:"));
+    }
+
+    #[test]
+    fn recipient_header_injection_is_rejected() {
+        let recipients = Recipients {
+            to: "a@b.c",
+            cc: None,
+            bcc: Some("x@y.z\r\nX-Evil: 1"),
+        };
+        assert!(build_raw_mime(&recipients, "s", "b", None, &[]).is_err());
+    }
+
+    #[test]
+    fn summary_lists_recipient_headers() {
+        let msg: Message = serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "payload": {"headers": [
+                {"name": "From", "value": "me@x.y"},
+                {"name": "To", "value": "david@hey.com"},
+                {"name": "Bcc", "value": "bflora@ycombinator.com"}
+            ]}
+        }))
+        .unwrap();
+        let summary = format_message_summary(&msg);
+        assert!(summary.contains("To: david@hey.com"));
+        assert!(summary.contains("Bcc: bflora@ycombinator.com"));
+        assert!(!summary.contains("Cc: \n"));
     }
 }
