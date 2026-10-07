@@ -32,6 +32,7 @@ use crate::protocol::{Request, ServerEvent};
 use crate::provider::Provider;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
@@ -106,7 +107,7 @@ fn comm_request_session_id(request: &Request) -> Option<&str> {
 /// client without changing the transport or requiring a Subscribe frame.
 async fn ensure_lightweight_swarm_member(
     session_id: &str,
-    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    working_dir: Option<&str>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
 ) {
@@ -115,8 +116,34 @@ async fn ensure_lightweight_swarm_member(
         return;
     }
 
+    // Recover the working directory for swarm grouping. In priority order:
+    // 1. An explicit working_dir in the request (e.g. CommSpawn carries one)
+    // 2. The session's persisted startup stub (saved when the session was created,
+    //    even if the session agent is not on this server — the stub has the
+    //    immutable identity metadata including working_dir)
+    // 3. None (the daemon's directory will be used as fallback by spawn)
+    let working_dir = working_dir
+        .map(PathBuf::from)
+        .or_else(|| {
+            crate::session::Session::load_startup_stub(session_id)
+                .ok()
+                .and_then(|session| session.working_dir.map(PathBuf::from))
+        });
+
     let swarm_id = super::util::swarm_id_for_session(session_id);
     let now = std::time::Instant::now();
+
+    // Create a dedicated event channel for the member. This channel is NOT the
+    // request's reply channel: lightweight connections are one-shot (the reply
+    // channel closes when the connection drops), but the SwarmMember must
+    // outlive any individual request. Using the request's channel would leave
+    // the server's event handler waiting forever after the connection closes
+    // (the member's sender clone keeps the channel open even after the local
+    // sender is dropped). A standalone channel avoids that: when the member is
+    // eventually removed (e.g. by `comm stop` or daemon shutdown), dropping
+    // this sender closes the channel naturally.
+    let (member_event_tx, _member_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+
     let mut members = swarm_members.write().await;
     // Re-check under the write lock: another request may have registered
     // this session while we were waiting.
@@ -127,9 +154,9 @@ async fn ensure_lightweight_swarm_member(
         session_id.to_string(),
         SwarmMember {
             session_id: session_id.to_string(),
-            event_tx: client_event_tx.clone(),
+            event_tx: member_event_tx,
             event_txs: HashMap::new(),
-            working_dir: None,
+            working_dir: working_dir.clone(),
             swarm_id: swarm_id.clone(),
             swarm_enabled: true,
             status: "ready".to_string(),
@@ -163,6 +190,10 @@ async fn ensure_lightweight_swarm_member(
         vec![
             ("phase", "lightweight_member_registered".to_string()),
             ("session_id", session_id.to_string()),
+            (
+                "working_dir_recovered",
+                working_dir.is_some().to_string(),
+            ),
         ],
     );
 }
@@ -253,9 +284,16 @@ pub(super) async fn handle_lightweight_control_request(
     // swarm action fails with "Not in a swarm" (#1748). Registering here makes
     // the swarm tool work for lightweight clients without a Subscribe frame.
     if let Some(session_id) = comm_request_session_id(&request) {
+        // Recover the working directory from the request when it carries one
+        // (CommSpawn), so swarm grouping matches the caller's project rather
+        // than the daemon's directory.
+        let request_working_dir = match &request {
+            Request::CommSpawn { working_dir, .. } => working_dir.as_deref(),
+            _ => None,
+        };
         ensure_lightweight_swarm_member(
             session_id,
-            &client_event_tx,
+            request_working_dir,
             swarm_members,
             swarms_by_id,
         )
