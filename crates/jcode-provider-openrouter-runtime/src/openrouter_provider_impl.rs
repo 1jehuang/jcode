@@ -643,7 +643,8 @@ impl Provider for OpenRouterProvider {
             return Ok(());
         }
 
-        let _ = self.fetch_models().await?;
+        let models = self.fetch_models().await?;
+        self.promote_placeholder_default_model(&models);
         if self.supports_provider_features {
             // Also prefetch endpoints for the current model so preferred_provider() works immediately.
             let model = self.model();
@@ -659,6 +660,7 @@ impl Provider for OpenRouterProvider {
         let before_routes = self.model_routes();
 
         let refreshed_models = self.refresh_models().await?;
+        self.promote_placeholder_default_model(&refreshed_models);
 
         if self.supports_provider_features {
             let mut targets = Vec::new();

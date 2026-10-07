@@ -63,8 +63,20 @@ const DEFAULT_API_KEY_NAME: &str = "OPENROUTER_API_KEY";
 const DEFAULT_ENV_FILE: &str = "openrouter.env";
 const OPENROUTER_TRANSPORT_STATE_ENV: &str = "JCODE_OPENROUTER_TRANSPORT_STATE";
 
-/// Default model (Claude Sonnet via OpenRouter)
+/// Default model (Claude Sonnet via OpenRouter). Placeholder only: once the
+/// live catalog loads, [`OpenRouterProvider::promote_placeholder_default_model`]
+/// replaces it with the newest flagship OpenRouter serves.
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+
+/// Which model should replace the placeholder default, if any. Pure so it can
+/// be tested without a network catalog.
+fn select_promoted_default(current: &str, catalog: &[&str]) -> Option<String> {
+    if current != DEFAULT_MODEL {
+        return None;
+    }
+    jcode_base::auth::lifecycle::preferred_model_for_provider("openrouter", catalog)
+        .filter(|best| best != DEFAULT_MODEL)
+}
 
 /// Soft refresh TTL for the model catalog.
 ///
@@ -2608,6 +2620,32 @@ impl OpenRouterProvider {
         load_api_key_from_env_or_config(&key_name, &env_file)
     }
 
+    /// Replace the stale built-in placeholder (`DEFAULT_MODEL`) with the newest
+    /// flagship the live OpenRouter catalog serves, using the same ranking as
+    /// post-login selection. Only real OpenRouter is affected: custom
+    /// OpenAI-compatible endpoints and profiles keep their own defaults, and a
+    /// model the user, env or session already chose is never touched.
+    pub(crate) fn promote_placeholder_default_model(&self, catalog: &[ModelInfo]) {
+        if !self.supports_provider_features
+            || self.profile_id.is_some()
+            || std::env::var_os("JCODE_OPENROUTER_MODEL").is_some()
+        {
+            return;
+        }
+        let ids: Vec<&str> = catalog.iter().map(|model| model.id.as_str()).collect();
+        let Some(best) = select_promoted_default(&self.model_snapshot(), &ids) else {
+            return;
+        };
+        if let Ok(mut current) = self.model.try_write()
+            && current.as_str() == DEFAULT_MODEL
+        {
+            jcode_base::logging::info(&format!(
+                "OpenRouter default model {DEFAULT_MODEL} -> {best} (newest flagship in live catalog)"
+            ));
+            *current = best;
+        }
+    }
+
     /// Fetch available models from OpenRouter API (with disk caching)
     pub async fn fetch_models(&self) -> Result<Vec<ModelInfo>> {
         if !self.supports_model_catalog {
@@ -2914,3 +2952,42 @@ mod issue_1056_tests;
 #[cfg(test)]
 #[path = "profile_catalog_backoff_tests.rs"]
 mod profile_catalog_backoff_tests;
+
+#[cfg(test)]
+mod placeholder_default_tests {
+    use super::*;
+
+    #[test]
+    fn placeholder_default_promotes_to_newest_flagship() {
+        let catalog = [
+            "anthropic/claude-sonnet-4",
+            "anthropic/claude-haiku-4.5",
+            "anthropic/claude-opus-4.6",
+            "anthropic/claude-opus-5.5",
+            "openai/gpt-5.5",
+            "deepseek/deepseek-v4-pro",
+        ];
+        assert_eq!(
+            select_promoted_default(DEFAULT_MODEL, &catalog).as_deref(),
+            Some("anthropic/claude-opus-5.5")
+        );
+    }
+
+    #[test]
+    fn placeholder_default_never_overrides_a_chosen_model() {
+        let catalog = ["anthropic/claude-sonnet-4", "anthropic/claude-opus-5.5"];
+        assert_eq!(
+            select_promoted_default("deepseek/deepseek-v4-pro", &catalog),
+            None
+        );
+    }
+
+    #[test]
+    fn placeholder_default_stays_when_catalog_has_nothing_better() {
+        assert_eq!(
+            select_promoted_default(DEFAULT_MODEL, &["deepseek/deepseek-v4-pro"]),
+            None
+        );
+        assert_eq!(select_promoted_default(DEFAULT_MODEL, &[]), None);
+    }
+}

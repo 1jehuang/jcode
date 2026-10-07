@@ -21,7 +21,16 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
+/// Last-resort default when the catalog has no recognizable flagship.
 pub const DEFAULT_MODEL: &str = "grok-4.6";
+
+/// Newest flagship in the Grok Build catalog, ranked by the same policy as
+/// post-login selection, so adding a newer model to `GROK_BUILD_MODELS` moves
+/// the default without touching this crate.
+pub fn default_model() -> String {
+    jcode_base::auth::lifecycle::preferred_model_for_provider("grok-build", GROK_BUILD_MODELS)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
 const ROUTE_PREFIX: &str = "grok-build:";
 /// Stable route api_method (kept for saved sessions and `/model` routing).
 pub const ROUTE_API_METHOD: &str = "grok-build-acp";
@@ -33,7 +42,7 @@ pub struct GrokBuildProvider {
 
 impl GrokBuildProvider {
     pub fn new() -> Self {
-        Self::with_model(DEFAULT_MODEL)
+        Self::with_model(&default_model())
     }
 
     pub fn with_model(model: &str) -> Self {
@@ -269,7 +278,7 @@ mod tests {
     #[test]
     fn model_selection_strips_route_prefix_and_rejects_empty() {
         let provider = GrokBuildProvider::new();
-        assert_eq!(provider.model(), DEFAULT_MODEL);
+        assert_eq!(provider.model(), default_model());
         provider.set_model("grok-build:grok-4.5").unwrap();
         assert_eq!(provider.model(), "grok-4.5");
         provider.set_model("grok-code-fast-1").unwrap();
