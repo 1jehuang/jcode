@@ -906,6 +906,18 @@ impl InfoWidgetData {
                     .unwrap_or(false);
                 if managing { 3 } else { kind.priority() }
             }
+            WidgetKind::BackgroundTasks => {
+                // This widget is the only place task progress shows, so a
+                // running or failed task must outrank passive stat widgets.
+                let actionable = self.background_info.as_ref().is_some_and(|info| {
+                    info.running_count > 0
+                        || info
+                            .rows
+                            .iter()
+                            .any(|row| row.status != crate::tui::BackgroundTaskRowStatus::Completed)
+                });
+                if actionable { 4 } else { kind.priority() }
+            }
             _ => kind.priority(),
         }
     }

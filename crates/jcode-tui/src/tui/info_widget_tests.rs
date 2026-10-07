@@ -1605,6 +1605,41 @@ fn background_widget_renders_session_task_rows_with_progress() {
 }
 
 #[test]
+fn running_background_task_outranks_passive_stat_widgets() {
+    use crate::tui::{BackgroundTaskRow, BackgroundTaskRowStatus};
+    let row = |status| BackgroundTaskRow {
+        task_id: "t".to_string(),
+        label: "cargo test".to_string(),
+        percent: Some(10.0),
+        status,
+        completed_at: None,
+    };
+    let with = |status| InfoWidgetData {
+        background_info: Some(BackgroundInfo {
+            rows: vec![row(status)],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for status in [
+        BackgroundTaskRowStatus::Running,
+        BackgroundTaskRowStatus::Failed,
+    ] {
+        let data = with(status);
+        let bg = data.effective_priority(WidgetKind::BackgroundTasks);
+        assert!(bg < data.effective_priority(WidgetKind::KvCache));
+        assert!(bg < data.effective_priority(WidgetKind::ModelInfo));
+        assert!(bg < data.effective_priority(WidgetKind::UsageLimits));
+        assert!(bg > data.effective_priority(WidgetKind::Todos));
+    }
+    let done = with(BackgroundTaskRowStatus::Completed);
+    assert_eq!(
+        done.effective_priority(WidgetKind::BackgroundTasks),
+        WidgetKind::BackgroundTasks.priority()
+    );
+}
+
+#[test]
 fn background_widget_and_compact_share_summary_format() {
     let info = BackgroundInfo {
         running_count: 4,
