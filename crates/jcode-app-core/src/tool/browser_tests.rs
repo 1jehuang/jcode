@@ -1,6 +1,10 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 
+#[cfg(unix)]
+#[path = "browser_session_tests.rs"]
+mod browser_session_tests;
+
 #[test]
 fn press_script_uses_selector_when_present() {
     let script = build_press_script(Some("Enter"), Some("#email")).unwrap();
