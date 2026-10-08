@@ -227,6 +227,98 @@ fn socket_override_is_reported_as_custom() {
     }
 }
 
+/// Spellings that resolve to the shared socket must not be treated as custom.
+///
+/// Comparing path spellings called a relative override or a symlinked parent
+/// "custom", so `run` would start a *temporary* server on the shared socket:
+/// other clients connect to it and then lose their server when the run exits
+/// (review of #1768, finding 1). The daemon lock has to agree, or two daemons
+/// could bind one socket under two spellings.
+#[cfg(unix)]
+#[test]
+fn shared_socket_aliases_are_not_custom() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    let prev_socket = std::env::var_os("JCODE_SOCKET");
+    let prev_cwd = std::env::current_dir().ok();
+
+    // The runtime dir itself must be canonical: on macOS a tempdir lives under
+    // /var -> /private/var, and the comparison resolves both sides anyway, but
+    // keeping the baseline canonical makes the assertions below about *aliases*
+    // rather than about the fixture.
+    let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
+    crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
+    let shared = runtime_dir.join("jcode.sock");
+
+    // Alias 1: relative spelling, resolved against the current directory.
+    std::env::set_current_dir(&runtime_dir).expect("cd into runtime dir");
+    crate::env::set_var("JCODE_SOCKET", "jcode.sock");
+    assert!(
+        !super::socket_path_is_custom(),
+        "a relative spelling of the shared socket must not be custom"
+    );
+    assert_eq!(
+        daemon_lock_path_for(std::path::Path::new("jcode.sock")),
+        runtime_dir.join("jcode-daemon.lock"),
+        "a relative spelling must contend for the shared daemon lock"
+    );
+
+    // Alias 2: a `..` segment that cancels out.
+    let dotted = runtime_dir.join("sub/../jcode.sock");
+    std::fs::create_dir_all(runtime_dir.join("sub")).expect("create sub dir");
+    crate::env::set_var("JCODE_SOCKET", &dotted);
+    assert!(
+        !super::socket_path_is_custom(),
+        "a path with a cancelling .. segment must not be custom"
+    );
+
+    // Alias 3: symlinked parent directory pointing at the runtime dir.
+    let link_parent = temp.path().join("link");
+    std::os::unix::fs::symlink(&runtime_dir, &link_parent).expect("symlink runtime dir");
+    let via_link = link_parent.join("jcode.sock");
+    crate::env::set_var("JCODE_SOCKET", &via_link);
+    assert!(
+        !super::socket_path_is_custom(),
+        "the shared socket reached through a symlinked parent must not be custom"
+    );
+    assert_eq!(
+        daemon_lock_path_for(&via_link),
+        runtime_dir.join("jcode-daemon.lock"),
+        "a symlinked parent must contend for the shared daemon lock"
+    );
+    assert!(super::is_shared_socket(&via_link));
+
+    // A genuinely different socket is still custom, and two spellings of it
+    // share one lock.
+    let isolated = runtime_dir.join("run-isolated.sock");
+    crate::env::set_var("JCODE_SOCKET", &isolated);
+    assert!(super::socket_path_is_custom());
+    assert_eq!(
+        daemon_lock_path_for(&link_parent.join("run-isolated.sock")),
+        daemon_lock_path_for(&isolated),
+        "two spellings of one custom socket must share a lock"
+    );
+    assert_ne!(
+        daemon_lock_path_for(&isolated),
+        daemon_lock_path_for(&shared)
+    );
+
+    if let Some(prev_cwd) = prev_cwd {
+        let _ = std::env::set_current_dir(prev_cwd);
+    }
+    if let Some(prev_socket) = prev_socket {
+        crate::env::set_var("JCODE_SOCKET", prev_socket);
+    } else {
+        crate::env::remove_var("JCODE_SOCKET");
+    }
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
 /// A custom `--socket` must get its own daemon lock. With a single
 /// runtime-dir-wide lock, a second server could never start, which is why
 /// `jcode run --socket X` had no way to ever get a listener on `X` (#1748).
@@ -236,20 +328,23 @@ fn daemon_lock_is_socket_scoped_for_custom_sockets() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
-    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+    // Canonical fixture: lock paths are derived from the resolved socket, and
+    // on macOS a tempdir under /var resolves to /private/var.
+    let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
+    crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
 
-    let shared = temp.path().join("jcode.sock");
-    let isolated = temp.path().join("run-isolated.sock");
+    let shared = runtime_dir.join("jcode.sock");
+    let isolated = runtime_dir.join("run-isolated.sock");
 
     let shared_lock = daemon_lock_path_for(&shared);
     let isolated_lock = daemon_lock_path_for(&isolated);
 
     // The shared socket keeps the historical name so a daemon from an older
     // build still blocks a second shared daemon across an upgrade.
-    assert_eq!(shared_lock, temp.path().join("jcode-daemon.lock"));
+    assert_eq!(shared_lock, runtime_dir.join("jcode-daemon.lock"));
     assert_eq!(
         isolated_lock,
-        temp.path().join("run-isolated.sock.daemon.lock")
+        runtime_dir.join("run-isolated.sock.daemon.lock")
     );
 
     // Both locks are holdable at once: the shared daemon keeps running while

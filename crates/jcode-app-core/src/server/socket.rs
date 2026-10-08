@@ -17,6 +17,48 @@ pub fn default_socket_path() -> PathBuf {
     crate::storage::runtime_dir().join("jcode.sock")
 }
 
+/// Resolve a socket path to a comparable identity: absolute, with symlinks
+/// collapsed.
+///
+/// `JCODE_SOCKET` carries a user-supplied *spelling*, and several spellings
+/// name the same socket: `jcode.sock` relative to the runtime dir, a path
+/// through a symlinked parent, a `..` segment. Comparing spellings would call
+/// those "custom" and hand the shared socket to a process-scoped server that
+/// then takes it down with the run, disconnecting every other client.
+///
+/// The socket file usually does not exist yet, so the whole path cannot be
+/// canonicalized; its parent directory can. Fall back to the plain absolute
+/// path when even the parent is absent — two absent paths still compare
+/// consistently with each other.
+fn resolved_socket_identity(path: &std::path::Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    // A live socket (or a symlink to one) resolves fully.
+    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
+        return canonical;
+    }
+
+    match (absolute.parent(), absolute.file_name()) {
+        (Some(parent), Some(file_name)) => match std::fs::canonicalize(parent) {
+            Ok(canonical_parent) => canonical_parent.join(file_name),
+            Err(_) => absolute,
+        },
+        _ => absolute,
+    }
+}
+
+/// True when `path` is the shared daemon socket for this runtime dir, however
+/// it happens to be spelled.
+pub fn is_shared_socket(path: &std::path::Path) -> bool {
+    resolved_socket_identity(path) == resolved_socket_identity(&default_socket_path())
+}
+
 /// True when `--socket`/`JCODE_SOCKET` points somewhere other than the shared
 /// daemon socket for this runtime dir.
 ///
@@ -24,7 +66,7 @@ pub fn default_socket_path() -> PathBuf {
 /// lets an isolated server be started for it without disturbing the shared
 /// daemon (issue #1748).
 pub fn socket_path_is_custom() -> bool {
-    socket_path() != default_socket_path()
+    !is_shared_socket(&socket_path())
 }
 
 /// Debug socket path for testing/introspection
@@ -186,15 +228,19 @@ pub async fn has_live_listener(path: &std::path::Path) -> bool {
 /// aligns the daemon lock with it.
 #[cfg(unix)]
 pub(super) fn daemon_lock_path_for(socket: &std::path::Path) -> PathBuf {
-    if socket == default_socket_path() {
+    if is_shared_socket(socket) {
         return crate::storage::runtime_dir().join("jcode-daemon.lock");
     }
 
-    let filename = socket
+    // Derive the lock from the resolved identity, not the spelling: two
+    // spellings of one custom socket must contend for the same lock, or two
+    // daemons could bind the same socket.
+    let resolved = resolved_socket_identity(socket);
+    let filename = resolved
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("jcode.sock");
-    socket.with_file_name(format!("{filename}.daemon.lock"))
+    resolved.with_file_name(format!("{filename}.daemon.lock"))
 }
 
 /// Remove this socket's daemon lock file on a path that exits the process

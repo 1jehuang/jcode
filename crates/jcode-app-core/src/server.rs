@@ -116,6 +116,22 @@ fn idle_monitor_should_start(client_count: usize, has_live_headless_worker: bool
     client_count == 0 && !has_live_headless_worker
 }
 
+/// Whether a starting server may delete a reload marker another process wrote.
+///
+/// `jcode.reload` is one file per runtime dir, but only the shared daemon ever
+/// owns a reload. Since the daemon lock became socket-scoped, a server on a
+/// custom socket can start while the shared daemon is mid-reload, and clearing
+/// a marker whose pid differs would erase that daemon's in-flight `Starting`
+/// state — dropping the guard that makes clients wait while it drains its
+/// sessions, so they would send work into a daemon about to interrupt it.
+///
+/// Only the shared socket's server gets to touch the shared marker. A stale
+/// marker left by nobody is not lost: `recent_reload_state` expires it by age,
+/// and the next shared daemon clears it.
+fn may_clear_foreign_reload_marker(socket_path: &std::path::Path) -> bool {
+    self::socket::is_shared_socket(socket_path)
+}
+
 async fn has_live_headless_worker(sessions: &SessionAgents, swarm_state: &SwarmState) -> bool {
     let live_sessions: HashSet<String> = sessions.read().await.keys().cloned().collect();
     swarm_state
@@ -620,7 +636,7 @@ pub use self::socket::spawn_server_notify;
 use self::socket::{acquire_daemon_lock_for, mark_close_on_exec};
 pub use self::socket::{
     cleanup_socket_pair, connect_socket, debug_socket_path, default_socket_path, has_live_listener,
-    is_server_ready, reap_stale_socket_if_dead, set_socket_path, socket_path,
+    is_server_ready, is_shared_socket, reap_stale_socket_if_dead, set_socket_path, socket_path,
     socket_path_is_custom, wait_for_server_ready,
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
@@ -657,6 +673,36 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 /// comfortably below the default idle threshold so reclamation is prompt and
 /// predictable rather than delayed by another full sampling interval.
 const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
+
+#[cfg(test)]
+mod reload_marker_scope_tests {
+    use super::may_clear_foreign_reload_marker;
+
+    /// Only the shared socket's server may clear the runtime-dir-wide reload
+    /// marker. A custom-socket server that cleared it would erase the shared
+    /// daemon's in-flight `Starting` state (review of #1768, finding 3).
+    #[test]
+    fn only_shared_socket_server_clears_the_shared_reload_marker() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
+        crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
+
+        assert!(may_clear_foreign_reload_marker(
+            &runtime_dir.join("jcode.sock")
+        ));
+        assert!(!may_clear_foreign_reload_marker(
+            &runtime_dir.join("run-isolated.sock")
+        ));
+
+        if let Some(prev_runtime) = prev_runtime {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+}
 
 #[cfg(test)]
 mod idle_monitor_tests {
@@ -2307,7 +2353,9 @@ impl Server {
 
         // Preserve an in-flight reload marker for exec-based reloads owned by this
         // process, but clear stale markers from unrelated/stale processes.
-        clear_reload_marker_if_stale_for_pid(std::process::id());
+        if may_clear_foreign_reload_marker(&self.socket_path) {
+            clear_reload_marker_if_stale_for_pid(std::process::id());
+        }
 
         match reload_recovery::collect_garbage() {
             Ok(stats) if stats.removed > 0 || stats.errors > 0 => {
