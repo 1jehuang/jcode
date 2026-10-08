@@ -413,7 +413,10 @@ deployment name, and either an API key or Microsoft Entra ID. Agent turns use
 Responses route carries encrypted reasoning and tool results between turns;
 `/chat/completions` cannot combine function tools with reasoning on GPT-5.6
 and later Azure deployments. The saved Azure credentials remain in
-`~/.config/jcode/azure-openai.env`. See the [Azure reasoning model guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning#tool-calling-with-reasoning-models).
+`~/.config/jcode/azure-openai.env`. Azure omits reasoning effort unless you
+set `AZURE_OPENAI_REASONING_EFFORT` for a deployment that supports it; this
+avoids sending the global OpenAI default to non-reasoning deployments.
+See the [Azure reasoning model guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning#tool-calling-with-reasoning-models).
 
 The native OpenAI providers use Responses WebSocket v2 with opportunistic
 background prewarming and HTTPS fallback. See [OpenAI WebSocket transport](docs/OPENAI_WEBSOCKET.md)

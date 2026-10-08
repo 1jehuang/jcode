@@ -1067,10 +1067,14 @@ impl OpenRouterProvider {
         self.model_reasoning_config()
             .and_then(|config| config.1.clone())
             .or_else(|| {
-                jcode_base::config::config()
-                    .provider
-                    .openai_reasoning_effort
-                    .clone()
+                if self.builtin_azure {
+                    jcode_base::auth::azure::load_reasoning_effort()
+                } else {
+                    jcode_base::config::config()
+                        .provider
+                        .openai_reasoning_effort
+                        .clone()
+                }
             })
             .and_then(|effort| self.normalize_reasoning_effort_for_self(&effort))
     }
@@ -1722,9 +1726,7 @@ impl OpenRouterProvider {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             reasoning_effort: Arc::new(RwLock::new(if builtin_azure {
-                jcode_base::config::config()
-                    .provider
-                    .openai_reasoning_effort
+                jcode_base::auth::azure::load_reasoning_effort()
                     .as_deref()
                     .and_then(Self::normalize_openai_reasoning_effort)
             } else {

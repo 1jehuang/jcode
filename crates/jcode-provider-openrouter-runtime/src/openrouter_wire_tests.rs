@@ -364,6 +364,7 @@ fn azure_runtime_constructor_preserves_azure_route_identity() {
     );
     let _key = EnvVarGuard::set(jcode_base::auth::azure::API_KEY_ENV, "test-key");
     let _model = EnvVarGuard::set("JCODE_OPENROUTER_MODEL", "southindia-production");
+    let _azure_effort = EnvVarGuard::set("AZURE_OPENAI_REASONING_EFFORT", "high");
     let provider = OpenRouterProvider::new().unwrap();
     assert_eq!(provider.profile_id.as_deref(), Some("azure-openai"));
     assert!(!provider.is_user_named_profile());
@@ -372,7 +373,10 @@ fn azure_runtime_constructor_preserves_azure_route_identity() {
     assert_eq!(label, "Azure OpenAI");
     assert_eq!(api_method, "openrouter");
     assert!(provider.supports_openai_reasoning_effort());
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
     assert_eq!(provider.model(), "southindia-production");
+    provider.set_model("another-deployment").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
     let fork = provider.fork();
     assert_eq!(fork.runtime_display_name(), "Azure OpenAI");
     assert!(
@@ -428,6 +432,51 @@ fn named_azure_openai_profile_keeps_chat_protocol_and_named_route() {
     assert_eq!(body["model"], "custom-chat-deployment");
     assert!(body.get("messages").is_some());
     assert!(body.get("input").is_none());
+}
+
+#[test]
+fn builtin_azure_does_not_send_global_reasoning_default_to_unknown_deployment() {
+    let _lock = ENV_LOCK.lock();
+    let (api_base, captured) = spawn_single_response_chat_server();
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
+    let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", api_base);
+    let _features = EnvVarGuard::set("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+    let _catalog = EnvVarGuard::set("JCODE_OPENROUTER_MODEL_CATALOG", "0");
+    let _key_name = EnvVarGuard::set(
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        jcode_base::auth::azure::API_KEY_ENV,
+    );
+    let _env_file = EnvVarGuard::set(
+        "JCODE_OPENROUTER_ENV_FILE",
+        jcode_base::auth::azure::ENV_FILE,
+    );
+    let _key = EnvVarGuard::set(jcode_base::auth::azure::API_KEY_ENV, "test-key");
+    let _model = EnvVarGuard::set("JCODE_OPENROUTER_MODEL", "nonreasoning-deployment");
+    let _azure_effort = EnvVarGuard::remove("AZURE_OPENAI_REASONING_EFFORT");
+    let provider = OpenRouterProvider::new().unwrap();
+    provider.set_model("nonreasoning-deployment").unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&[Message::user("hello")], &[], "test", None)
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    });
+    let raw = captured.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(raw.starts_with("POST /v1/responses "), "{raw}");
+    let body: serde_json::Value =
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["model"], "nonreasoning-deployment");
+    assert!(
+        body.get("reasoning").is_none(),
+        "unexpected reasoning default: {body}"
+    );
 }
 
 #[test]
