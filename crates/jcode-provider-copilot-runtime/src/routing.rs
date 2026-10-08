@@ -21,8 +21,30 @@ pub(crate) fn copilot_model_efforts(
     }
 }
 
-pub(crate) fn copilot_model_uses_responses_api(model: &str) -> bool {
-    model.trim().to_ascii_lowercase().starts_with("gpt-5.6")
+/// Whether `model` must be sent to `/responses` instead of `/chat/completions`.
+///
+/// The live catalog's `supported_endpoints` is authoritative: chat completions
+/// stays the default wherever it is offered, and `/responses` is used for
+/// models that only accept it (e.g. `gpt-5.5`, `gpt-6-luna`, codex variants).
+/// Without catalog data, OpenAI gpt-5 and newer are guessed to need
+/// `/responses`: every such Copilot model accepts it, while many reject chat
+/// completions with `unsupported_api_for_model`.
+pub(crate) fn copilot_model_uses_responses_api(
+    catalog: &std::collections::HashMap<String, Vec<String>>,
+    model: &str,
+) -> bool {
+    if let Some(endpoints) = catalog.get(model).filter(|endpoints| !endpoints.is_empty()) {
+        let supports = |path: &str| endpoints.iter().any(|endpoint| endpoint == path);
+        return supports("/responses") && !supports("/chat/completions");
+    }
+    gpt_major_version(model).is_some_and(|major| major >= 5)
+}
+
+fn gpt_major_version(model: &str) -> Option<u32> {
+    let normalized = model.trim().to_ascii_lowercase();
+    let rest = normalized.strip_prefix("gpt-")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
 }
 
 pub(crate) fn copilot_api_path(uses_responses_api: bool) -> &'static str {

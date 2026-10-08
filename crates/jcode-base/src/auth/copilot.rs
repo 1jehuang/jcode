@@ -882,6 +882,9 @@ pub struct CopilotModelInfo {
     pub model_picker_enabled: bool,
     #[serde(default)]
     pub capabilities: Option<CopilotModelCapabilities>,
+    /// API paths the model accepts, e.g. `["/responses", "ws:/responses"]`.
+    #[serde(default)]
+    pub supported_endpoints: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -915,6 +918,20 @@ impl CopilotModelInfo {
             .iter()
             .filter_map(|v| v.as_str())
             .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty())
+            .collect()
+    }
+
+    /// API paths advertised in the catalog. Empty when the model does not
+    /// advertise any.
+    pub fn supported_endpoints(&self) -> Vec<String> {
+        let Some(Value::Array(endpoints)) = self.supported_endpoints.as_ref() else {
+            return Vec::new();
+        };
+        endpoints
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
             .collect()
     }
