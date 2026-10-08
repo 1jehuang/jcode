@@ -34,7 +34,7 @@ struct RootView: View {
                         deviceName: UIDevice.current.name
                     )
                 } catch {
-                    deepLinkError = "Pairing failed: \(error.localizedDescription)"
+                    deepLinkError = PairingFailure.message(for: error, gateway: payload.gateway)
                 }
             }
         }

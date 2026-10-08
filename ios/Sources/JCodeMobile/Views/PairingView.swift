@@ -178,17 +178,8 @@ struct PairingView: View {
                     code: pairCode,
                     deviceName: UIDevice.current.name
                 )
-            } catch let error as PairingClient.PairingError {
-                switch error {
-                case .invalidCode(let message):
-                    errorMessage = message
-                case .serverError(_, let message):
-                    errorMessage = message
-                case .invalidResponse:
-                    errorMessage = "Unexpected response from server"
-                }
             } catch {
-                errorMessage = "Could not reach \(gateway.host):\(gateway.port)"
+                errorMessage = PairingFailure.message(for: error, gateway: gateway)
             }
         }
     }
