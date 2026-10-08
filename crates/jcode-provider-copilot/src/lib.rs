@@ -40,6 +40,10 @@ pub const FALLBACK_MODELS: &[&str] = &[
 pub struct PersistedCatalog {
     pub models: Vec<String>,
     pub fetched_at_rfc3339: String,
+    /// Per-model API paths, so a restart routes cached models correctly before
+    /// the live catalog arrives.
+    #[serde(default)]
+    pub endpoints: HashMap<String, Vec<String>>,
 }
 
 pub fn is_known_display_model(model: &str) -> bool {

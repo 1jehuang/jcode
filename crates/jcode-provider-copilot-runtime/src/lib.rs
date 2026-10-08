@@ -135,7 +135,10 @@ impl CopilotApiProvider {
             .filter(|catalog: &PersistedCatalog| !catalog.models.is_empty())
     }
 
-    fn persist_catalog(models: &[String]) {
+    fn persist_catalog(
+        models: &[String],
+        endpoints: &std::collections::HashMap<String, Vec<String>>,
+    ) {
         if models.is_empty() {
             return;
         }
@@ -145,6 +148,7 @@ impl CopilotApiProvider {
         let payload = PersistedCatalog {
             models: models.to_vec(),
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
+            endpoints: endpoints.clone(),
         };
         if let Err(error) = jcode_base::storage::write_json(&path, &payload) {
             jcode_base::logging::warn(&format!(
@@ -159,6 +163,9 @@ impl CopilotApiProvider {
         if let Some(catalog) = Self::load_persisted_catalog() {
             if let Ok(mut models) = self.fetched_models.try_write() {
                 *models = catalog.models;
+            }
+            if let Ok(mut endpoints) = self.model_endpoints.try_write() {
+                *endpoints = catalog.endpoints;
             }
             if let Ok(mut source) = self.catalog_source.try_write() {
                 *source = CatalogSource::Cached;
@@ -180,7 +187,7 @@ impl CopilotApiProvider {
         }
         let provider = self.shared_clone();
         handle.spawn(async move {
-            provider.detect_tier_and_set_default().await;
+            provider.refresh_catalog(false).await;
         });
     }
 
@@ -412,6 +419,13 @@ impl CopilotApiProvider {
     /// Call this after construction. Fetches a bearer token and queries /models.
     /// If JCODE_COPILOT_MODEL is set, this is a no-op (user override).
     pub async fn detect_tier_and_set_default(&self) {
+        self.refresh_catalog(true).await;
+    }
+
+    /// Fetch the live catalog. With `select_default`, also replace the
+    /// placeholder default (or a model the catalog no longer serves); the
+    /// background refresh passes false so it never changes a selection.
+    async fn refresh_catalog(&self, select_default: bool) {
         let detect_start = std::time::Instant::now();
         if std::env::var("JCODE_COPILOT_MODEL").is_ok() {
             jcode_base::logging::info(
@@ -479,7 +493,8 @@ impl CopilotApiProvider {
                 // Only replace the placeholder default (or a model the live
                 // catalog no longer serves). A model the user or session already
                 // chose must survive the periodic tier re-detection.
-                if let Ok(mut m) = self.model.try_write()
+                if select_default
+                    && let Ok(mut m) = self.model.try_write()
                     && (m.as_str() == DEFAULT_MODEL || !all_ids.iter().any(|id| id == m.as_str()))
                 {
                     *m = default;
@@ -500,6 +515,11 @@ impl CopilotApiProvider {
                         .fetched_models
                         .try_read()
                         .map(|models| models.clone())
+                        .unwrap_or_default(),
+                    &self
+                        .model_endpoints
+                        .read()
+                        .map(|endpoints| endpoints.clone())
                         .unwrap_or_default(),
                 );
             }

@@ -190,6 +190,41 @@ fn stale_catalog_refresh_is_claimed_once_per_interval() {
 }
 
 #[test]
+fn cached_catalog_restores_endpoint_routing() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    jcode_base::env::set_var("JCODE_HOME", temp.path());
+
+    let endpoints = [(
+        "mai-code-1.1-flash".to_string(),
+        vec!["/responses".to_string(), "ws:/responses".to_string()],
+    )]
+    .into_iter()
+    .collect();
+    CopilotApiProvider::persist_catalog(&["mai-code-1.1-flash".to_string()], &endpoints);
+
+    // A restarted server routes the cached model before any live fetch.
+    let provider = make_test_provider(Vec::new());
+    assert!(!provider.uses_responses_api("mai-code-1.1-flash"));
+    provider.seed_cached_catalog();
+    assert!(provider.uses_responses_api("mai-code-1.1-flash"));
+
+    match previous_home {
+        Some(home) => jcode_base::env::set_var("JCODE_HOME", home),
+        None => jcode_base::env::remove_var("JCODE_HOME"),
+    }
+
+    // Caches written before endpoints were persisted still load.
+    let legacy: PersistedCatalog = serde_json::from_value(json!({
+        "models": ["gpt-4o"],
+        "fetched_at_rfc3339": "2026-10-01T00:00:00Z",
+    }))
+    .unwrap();
+    assert!(legacy.endpoints.is_empty());
+}
+
+#[test]
 fn context_window_handles_dot_and_dash_names() {
     assert_eq!(
         jcode_base::provider::context_limit_for_model_with_provider(
