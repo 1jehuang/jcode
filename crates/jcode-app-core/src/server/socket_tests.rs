@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+use super::reload_state::{ForeignMarkerPolicy, publish_reload_socket_ready};
 use super::socket::sibling_socket_path;
 #[cfg(unix)]
 use super::socket::{
@@ -7,8 +8,8 @@ use super::socket::{
 };
 use super::{
     ReloadPhase, ReloadState, ReloadWaitStatus, await_reload_handoff, cleanup_socket_pair,
-    clear_reload_marker, inspect_reload_wait_status, publish_reload_socket_ready,
-    reload_marker_active, reload_marker_path, reload_process_alive, write_reload_state,
+    clear_reload_marker, inspect_reload_wait_status, reload_marker_active, reload_marker_path,
+    reload_process_alive, write_reload_state,
 };
 #[cfg(unix)]
 use super::{connect_socket, reap_stale_socket_if_dead};
@@ -327,6 +328,80 @@ fn shared_socket_aliases_are_not_custom() {
 /// publish a different socket, so a later server on the target path was
 /// rejected with "already running" while nothing listened there (review of
 /// #1768, finding 2).
+/// A custom-socket server reloads itself too, and on Unix the exec keeps the
+/// same pid, so it must still advance its *own* marker to `SocketReady`.
+/// Suppressing the publish for custom sockets outright left the marker stuck
+/// in `Starting`, and the reloaded server rejected new messages until it
+/// expired (review of #1768, "Custom reloads keep clients waiting").
+#[test]
+fn own_reload_marker_is_published_even_when_foreign_markers_are_preserved() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
+    let current = std::process::id();
+    write_reload_state("req-own", "hash-own", ReloadPhase::Starting, None);
+
+    publish_reload_socket_ready(ForeignMarkerPolicy::Preserve);
+
+    let state = ReloadState::load().expect("own marker must survive the publish");
+    assert_eq!(
+        state.phase,
+        ReloadPhase::SocketReady,
+        "a server must advance its own marker regardless of the foreign-marker policy"
+    );
+    assert_eq!(state.pid, current);
+
+    clear_reload_marker();
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
+/// The mirror case: a marker owned by a *different* live process is left
+/// alone, so a custom-socket server cannot erase the shared daemon's in-flight
+/// `Starting` state.
+#[test]
+fn foreign_reload_marker_is_preserved_under_the_preserve_policy() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
+    let foreign_pid = std::process::id().wrapping_add(1).max(1);
+    ReloadState {
+        request_id: "req-foreign".to_string(),
+        hash: "hash-foreign".to_string(),
+        phase: ReloadPhase::Starting,
+        pid: foreign_pid,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        detail: None,
+    }
+    .write();
+
+    publish_reload_socket_ready(ForeignMarkerPolicy::Preserve);
+    let preserved = ReloadState::load().expect("foreign marker must be preserved");
+    assert_eq!(preserved.phase, ReloadPhase::Starting);
+    assert_eq!(preserved.pid, foreign_pid);
+
+    // And the shared daemon is still allowed to clean it up.
+    publish_reload_socket_ready(ForeignMarkerPolicy::MayClear);
+    assert!(
+        ReloadState::load().is_none(),
+        "the shared socket's server must still clear a stale foreign marker"
+    );
+
+    clear_reload_marker();
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn daemon_lock_does_not_follow_the_final_socket_symlink() {
@@ -496,7 +571,7 @@ fn publish_reload_socket_ready_updates_current_process_marker() {
         ReloadPhase::Starting,
         Some("detail".to_string()),
     );
-    publish_reload_socket_ready();
+    publish_reload_socket_ready(ForeignMarkerPolicy::MayClear);
 
     let state = ReloadState::load().expect("reload state should exist");
     assert_eq!(state.phase, ReloadPhase::SocketReady);
@@ -529,7 +604,7 @@ fn publish_reload_socket_ready_clears_marker_for_foreign_pid() {
     }
     .write();
 
-    publish_reload_socket_ready();
+    publish_reload_socket_ready(ForeignMarkerPolicy::MayClear);
     assert!(
         ReloadState::load().is_none(),
         "foreign reload marker should be cleared"
