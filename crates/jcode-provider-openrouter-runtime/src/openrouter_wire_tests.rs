@@ -223,6 +223,7 @@ fn azure_tool_turn_uses_responses_with_reasoning_and_replays_tool_history() {
     let provider = OpenRouterProvider {
         api_base: format!("http://{addr}/openai/v1"),
         profile_id: Some("azure-openai".into()),
+        builtin_azure: true,
         auth: Arc::new(|| {
             Ok(ProviderAuth::HeaderValue {
                 header_name: reqwest::header::HeaderName::from_static("api-key"),
@@ -353,8 +354,15 @@ fn azure_runtime_constructor_preserves_azure_route_identity() {
     let _features = EnvVarGuard::set("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
     let _catalog = EnvVarGuard::set("JCODE_OPENROUTER_MODEL_CATALOG", "0");
     let _auth = EnvVarGuard::set("JCODE_OPENROUTER_AUTH_HEADER", "api-key");
-    let _key_name = EnvVarGuard::set("JCODE_OPENROUTER_API_KEY_NAME", "JCODE_TEST_AZURE_KEY");
-    let _key = EnvVarGuard::set("JCODE_TEST_AZURE_KEY", "test-key");
+    let _key_name = EnvVarGuard::set(
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        jcode_base::auth::azure::API_KEY_ENV,
+    );
+    let _env_file = EnvVarGuard::set(
+        "JCODE_OPENROUTER_ENV_FILE",
+        jcode_base::auth::azure::ENV_FILE,
+    );
+    let _key = EnvVarGuard::set(jcode_base::auth::azure::API_KEY_ENV, "test-key");
     let _model = EnvVarGuard::set("JCODE_OPENROUTER_MODEL", "southindia-production");
     let provider = OpenRouterProvider::new().unwrap();
     assert_eq!(provider.profile_id.as_deref(), Some("azure-openai"));
@@ -365,6 +373,61 @@ fn azure_runtime_constructor_preserves_azure_route_identity() {
     assert_eq!(api_method, "openrouter");
     assert!(provider.supports_openai_reasoning_effort());
     assert_eq!(provider.model(), "southindia-production");
+    let fork = provider.fork();
+    assert_eq!(fork.runtime_display_name(), "Azure OpenAI");
+    assert!(
+        fork.model_routes()
+            .iter()
+            .any(|route| route.api_method == "openrouter")
+    );
+}
+
+#[test]
+fn named_azure_openai_profile_keeps_chat_protocol_and_named_route() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let (api_base, captured) = spawn_single_response_chat_server();
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: api_base,
+        api_key: Some("test-key".into()),
+        default_model: Some("custom-chat-deployment".into()),
+        ..Default::default()
+    };
+    let provider =
+        OpenRouterProvider::new_named_openai_compatible("azure-openai", &profile).unwrap();
+    assert!(provider.is_user_named_profile());
+    assert_eq!(provider.runtime_display_name(), "azure-openai");
+    let (label, method, _) = provider.direct_openai_compatible_route_parts().unwrap();
+    assert_eq!(label, "azure-openai");
+    assert_eq!(method, "openai-compatible:azure-openai");
+    assert!(!provider.supports_openai_reasoning_effort());
+    let fork = provider.fork();
+    assert_eq!(fork.runtime_display_name(), "azure-openai");
+    assert!(
+        fork.model_routes()
+            .iter()
+            .any(|route| route.api_method == "openai-compatible:azure-openai")
+    );
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut stream = fork
+            .complete(&[Message::user("hello")], &[], "test", None)
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
+        }
+    });
+    let raw = captured.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(raw.starts_with("POST /v1/chat/completions "), "{raw}");
+    let body: serde_json::Value =
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["model"], "custom-chat-deployment");
+    assert!(body.get("messages").is_some());
+    assert!(body.get("input").is_none());
 }
 
 #[test]
@@ -389,6 +452,7 @@ fn azure_responses_http_error_names_the_actual_route() {
     let provider = OpenRouterProvider {
         api_base: format!("http://{addr}/openai/v1"),
         profile_id: Some("azure-openai".into()),
+        builtin_azure: true,
         ..make_custom_compatible_provider()
     };
     provider.set_model("custom-deployment").unwrap();

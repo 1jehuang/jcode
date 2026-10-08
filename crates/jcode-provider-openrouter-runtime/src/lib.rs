@@ -894,6 +894,8 @@ pub struct OpenRouterProvider {
     supports_provider_features: bool,
     supports_model_catalog: bool,
     profile_id: Option<String>,
+    /// The built-in Azure route uses Responses; a named profile with the same ID does not.
+    builtin_azure: bool,
     /// Explicit `supports_reasoning_effort` override from named-profile config.
     /// `None` means auto-detect (deepseek profile id or DeepSeek-family model).
     reasoning_effort_support: Option<bool>,
@@ -974,7 +976,7 @@ impl OpenRouterProvider {
     }
 
     fn profile_supports_openai_reasoning_effort(profile_id: Option<&str>) -> bool {
-        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai") || id.eq_ignore_ascii_case("azure-openai"))
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai"))
     }
 
     /// DeepSeek-family models accept the DeepSeek-style top-level
@@ -1032,7 +1034,9 @@ impl OpenRouterProvider {
         if self.reasoning_effort_support == Some(false) {
             return false;
         }
-        if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref()) {
+        if self.builtin_azure
+            || Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref())
+        {
             return true;
         }
         !self.disable_reasoning_heuristics
@@ -1284,7 +1288,7 @@ impl OpenRouterProvider {
 
         // Direct OpenAI-compatible profile (NVIDIA NIM, DeepSeek, Z.AI, ...).
         if let Some(profile_id) = self.profile_id.as_deref() {
-            if profile_id == "azure-openai" {
+            if self.builtin_azure {
                 return "Azure OpenAI".to_string();
             }
             if let Some(profile) = openai_compatible_profile_by_id(profile_id) {
@@ -1331,7 +1335,7 @@ impl OpenRouterProvider {
                 self.api_base.clone(),
             ));
         }
-        if self.profile_id.as_deref() == Some("azure-openai") {
+        if self.builtin_azure {
             return Some((
                 "Azure OpenAI".to_string(),
                 "openrouter".to_string(),
@@ -1496,6 +1500,7 @@ impl OpenRouterProvider {
                     jcode_base::config::NamedProviderType::OpenRouter
                 ),
             profile_id: Some(profile_name.to_string()),
+            builtin_azure: false,
             reasoning_effort_support: profile.supports_reasoning_effort,
             disable_reasoning_heuristics: profile.disable_reasoning_heuristics,
             static_reasoning_config,
@@ -1650,6 +1655,9 @@ impl OpenRouterProvider {
             .or_else(|| {
                 openai_compatible_profile_id_for_api_base(&api_base).map(ToString::to_string)
             });
+        let builtin_azure = profile_id.as_deref() == Some("azure-openai")
+            && configured_api_key_name() == jcode_base::auth::azure::API_KEY_ENV
+            && configured_env_file_name() == jcode_base::auth::azure::ENV_FILE;
         let static_context_limits = profile_id
             .as_deref()
             .and_then(openai_compatible_profile_by_id)
@@ -1713,15 +1721,21 @@ impl OpenRouterProvider {
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
-            reasoning_effort: Arc::new(RwLock::new(Self::initial_reasoning_effort(
-                None,
-                profile_id.as_deref(),
-            ))),
+            reasoning_effort: Arc::new(RwLock::new(if builtin_azure {
+                jcode_base::config::config()
+                    .provider
+                    .openai_reasoning_effort
+                    .as_deref()
+                    .and_then(Self::normalize_openai_reasoning_effort)
+            } else {
+                Self::initial_reasoning_effort(None, profile_id.as_deref())
+            })),
             api_base,
             auth,
             supports_provider_features,
             supports_model_catalog,
             profile_id,
+            builtin_azure,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -1778,6 +1792,7 @@ impl OpenRouterProvider {
             // curated list so `/model` works offline and before first request.
             supports_model_catalog: false,
             profile_id: Some("grok-build".to_string()),
+            builtin_azure: false,
             reasoning_effort_support: Some(false),
             disable_reasoning_heuristics: true,
             static_reasoning_config: HashMap::new(),
@@ -1826,6 +1841,7 @@ impl OpenRouterProvider {
             supports_provider_features: true,
             supports_model_catalog: true,
             profile_id: None,
+            builtin_azure: false,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -1906,6 +1922,7 @@ impl OpenRouterProvider {
             supports_provider_features: false,
             supports_model_catalog: true,
             profile_id: Some(resolved.id.clone()),
+            builtin_azure: false,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -2112,6 +2129,7 @@ impl OpenRouterProvider {
                 supports_provider_features: true,
                 supports_model_catalog: true,
                 profile_id: None,
+                builtin_azure: false,
                 reasoning_effort_support: None,
                 disable_reasoning_heuristics: false,
                 static_reasoning_config: HashMap::new(),

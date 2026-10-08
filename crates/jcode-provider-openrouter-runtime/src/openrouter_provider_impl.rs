@@ -41,7 +41,7 @@ impl Provider for OpenRouterProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        if self.profile_id.as_deref() == Some("azure-openai") {
+        if self.builtin_azure {
             return self.complete_azure_responses(messages, tools, system).await;
         }
         let model = self.model.read().await.clone();
@@ -419,7 +419,8 @@ impl Provider for OpenRouterProvider {
             self.clear_pin_if_model_changed(&model_id, true);
         }
 
-        if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref())
+        if (self.builtin_azure
+            || Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref()))
             || self
                 .model_reasoning_config()
                 .and_then(|config| config.1.as_ref())
@@ -806,6 +807,7 @@ impl Provider for OpenRouterProvider {
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
+            builtin_azure: self.builtin_azure,
             reasoning_effort_support: self.reasoning_effort_support,
             disable_reasoning_heuristics: self.disable_reasoning_heuristics,
             static_reasoning_config: self.static_reasoning_config.clone(),
@@ -973,7 +975,7 @@ impl OpenRouterProvider {
         let Some(id) = self.profile_id.as_deref() else {
             return false;
         };
-        if id == "azure-openai" {
+        if self.builtin_azure {
             return false;
         }
         match jcode_base::provider_catalog::openai_compatible_profile_by_id(id) {
