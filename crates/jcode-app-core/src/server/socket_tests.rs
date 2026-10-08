@@ -3,7 +3,7 @@
 use super::socket::sibling_socket_path;
 #[cfg(unix)]
 use super::socket::{
-    daemon_lock_path, server_start_matches_existing_server, try_acquire_daemon_lock,
+    daemon_lock_path_for, server_start_matches_existing_server, try_acquire_daemon_lock,
 };
 use super::{
     ReloadPhase, ReloadState, ReloadWaitStatus, await_reload_handoff, cleanup_socket_pair,
@@ -84,7 +84,7 @@ fn daemon_lock_serializes_server_processes() {
     let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
     crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
 
-    let lock_path = daemon_lock_path();
+    let lock_path = daemon_lock_path_for(&temp.path().join("jcode.sock"));
     let first = try_acquire_daemon_lock(&lock_path)
         .expect("acquire first daemon lock")
         .expect("first daemon lock should succeed");
@@ -114,7 +114,7 @@ async fn reap_stale_socket_removes_dead_socket_pair_and_lock() {
 
     let socket = temp.path().join("jcode.sock");
     let debug = temp.path().join("jcode-debug.sock");
-    let lock = daemon_lock_path();
+    let lock = daemon_lock_path_for(&socket);
 
     // Simulate the post-upgrade/crash state: socket + debug + lock files left
     // behind, but no process is listening on the socket.
@@ -172,7 +172,7 @@ async fn reap_stale_socket_spares_socket_when_lock_is_held() {
 
     // Hold the daemon lock, emulating a live daemon whose socket probe happens
     // to be momentarily unanswerable. The reaper must not unlink the socket.
-    let lock_path = daemon_lock_path();
+    let lock_path = daemon_lock_path_for(&socket);
     let held = try_acquire_daemon_lock(&lock_path)
         .expect("acquire lock")
         .expect("lock should be free");
@@ -195,11 +195,97 @@ async fn reap_stale_socket_spares_socket_when_lock_is_held() {
     }
 }
 
+#[test]
+fn socket_override_is_reported_as_custom() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    let prev_socket = std::env::var_os("JCODE_SOCKET");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
+    crate::env::remove_var("JCODE_SOCKET");
+    assert_eq!(super::socket_path(), super::default_socket_path());
+    assert!(!super::socket_path_is_custom());
+
+    // An override that resolves to the shared socket is not "custom": the
+    // shared daemon owns that path, so nothing may start a second server there.
+    crate::env::set_var("JCODE_SOCKET", temp.path().join("jcode.sock"));
+    assert!(!super::socket_path_is_custom());
+
+    crate::env::set_var("JCODE_SOCKET", temp.path().join("run-isolated.sock"));
+    assert!(super::socket_path_is_custom());
+
+    if let Some(prev_socket) = prev_socket {
+        crate::env::set_var("JCODE_SOCKET", prev_socket);
+    } else {
+        crate::env::remove_var("JCODE_SOCKET");
+    }
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
+/// A custom `--socket` must get its own daemon lock. With a single
+/// runtime-dir-wide lock, a second server could never start, which is why
+/// `jcode run --socket X` had no way to ever get a listener on `X` (#1748).
+#[cfg(unix)]
+#[test]
+fn daemon_lock_is_socket_scoped_for_custom_sockets() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+
+    let shared = temp.path().join("jcode.sock");
+    let isolated = temp.path().join("run-isolated.sock");
+
+    let shared_lock = daemon_lock_path_for(&shared);
+    let isolated_lock = daemon_lock_path_for(&isolated);
+
+    // The shared socket keeps the historical name so a daemon from an older
+    // build still blocks a second shared daemon across an upgrade.
+    assert_eq!(shared_lock, temp.path().join("jcode-daemon.lock"));
+    assert_eq!(
+        isolated_lock,
+        temp.path().join("run-isolated.sock.daemon.lock")
+    );
+
+    // Both locks are holdable at once: the shared daemon keeps running while
+    // an isolated server binds its own socket.
+    let shared_held = try_acquire_daemon_lock(&shared_lock)
+        .expect("acquire shared daemon lock")
+        .expect("shared daemon lock should be free");
+    let isolated_held = try_acquire_daemon_lock(&isolated_lock)
+        .expect("acquire isolated daemon lock")
+        .expect("isolated daemon lock should be free while the shared one is held");
+
+    // Within one socket the lock is still exclusive.
+    assert!(
+        try_acquire_daemon_lock(&isolated_lock)
+            .expect("re-acquire isolated daemon lock")
+            .is_none(),
+        "a second server on the same socket must still be rejected"
+    );
+
+    drop(isolated_held);
+    drop(shared_held);
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn existing_server_start_errors_are_detected() {
     assert!(server_start_matches_existing_server(
         "Error: Another jcode server process is already running for runtime dir /run/user/1000"
+    ));
+    assert!(server_start_matches_existing_server(
+        "Error: Another jcode server process is already running on socket /tmp/run.sock"
     ));
     assert!(server_start_matches_existing_server(
         "Error: Refusing to replace active server socket at /run/user/1000/jcode.sock"

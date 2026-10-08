@@ -8,7 +8,23 @@ pub fn socket_path() -> PathBuf {
     if let Ok(custom) = std::env::var("JCODE_SOCKET") {
         return PathBuf::from(custom);
     }
+    default_socket_path()
+}
+
+/// The shared-daemon socket for this runtime dir, ignoring any
+/// `--socket`/`JCODE_SOCKET` override.
+pub fn default_socket_path() -> PathBuf {
     crate::storage::runtime_dir().join("jcode.sock")
+}
+
+/// True when `--socket`/`JCODE_SOCKET` points somewhere other than the shared
+/// daemon socket for this runtime dir.
+///
+/// A custom socket means "this process wants its own server", which is what
+/// lets an isolated server be started for it without disturbing the shared
+/// daemon (issue #1748).
+pub fn socket_path_is_custom() -> bool {
+    socket_path() != default_socket_path()
 }
 
 /// Debug socket path for testing/introspection
@@ -93,12 +109,13 @@ pub(super) async fn socket_has_live_listener(path: &std::path::Path) -> bool {
 /// path present but cannot connect/handshake gets wedged into a connect-retry
 /// loop and never recovers on its own (see issues #277 and #291).
 ///
-/// Safety: a live daemon holds an exclusive `flock` on `jcode-daemon.lock` for
-/// its entire lifetime. So if (a) the socket has no live listener AND (b) we can
-/// acquire that exclusive lock, then no daemon is running and the socket is
-/// provably stale. Only then do we unlink the socket pair (main + debug) and the
-/// lock file. This can never strand a live daemon, because a live daemon would
-/// either still be answering on the socket or still be holding the lock.
+/// Safety: a live daemon holds an exclusive `flock` on this socket's daemon
+/// lock ([`daemon_lock_path_for`]) for its entire lifetime. So if (a) the socket
+/// has no live listener AND (b) we can acquire that exclusive lock, then no
+/// daemon is running and the socket is provably stale. Only then do we unlink
+/// the socket pair (main + debug) and the lock file. This can never strand a
+/// live daemon, because a live daemon would either still be answering on the
+/// socket or still be holding the lock.
 ///
 /// Returns true if a stale socket was reaped.
 #[cfg(unix)]
@@ -113,9 +130,10 @@ pub async fn reap_stale_socket_if_dead(path: &std::path::Path) -> bool {
         return false;
     }
 
-    // Try to grab the daemon lock. If a live daemon holds it, this fails and we
-    // leave everything alone (the daemon may just be slow to answer).
-    let lock_path = daemon_lock_path();
+    // Try to grab this socket's daemon lock. If a live daemon holds it, this
+    // fails and we leave everything alone (the daemon may just be slow to
+    // answer).
+    let lock_path = daemon_lock_path_for(path);
     let Ok(Some(_lock)) = try_acquire_daemon_lock(&lock_path) else {
         return false;
     };
@@ -156,9 +174,40 @@ pub async fn has_live_listener(path: &std::path::Path) -> bool {
     socket_has_live_listener(path).await
 }
 
+/// Lock path that enforces "one daemon per socket".
+///
+/// The shared socket keeps the historical runtime-dir-scoped name, so a daemon
+/// from an older build that only knows that name is still respected across an
+/// upgrade. A custom `--socket` path gets its own sibling lock, so an isolated
+/// server can bind it while the shared daemon keeps running — a runtime-wide
+/// lock made the second server impossible, which is why `run --socket X` could
+/// never get a listener on `X` (issue #1748). The spawn lock
+/// (`cli::dispatch::spawn_lock_path`) has always been socket-scoped; this
+/// aligns the daemon lock with it.
 #[cfg(unix)]
-pub(super) fn daemon_lock_path() -> PathBuf {
-    crate::storage::runtime_dir().join("jcode-daemon.lock")
+pub(super) fn daemon_lock_path_for(socket: &std::path::Path) -> PathBuf {
+    if socket == default_socket_path() {
+        return crate::storage::runtime_dir().join("jcode-daemon.lock");
+    }
+
+    let filename = socket
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("jcode.sock");
+    socket.with_file_name(format!("{filename}.daemon.lock"))
+}
+
+/// Remove this socket's daemon lock file on a path that exits the process
+/// without unwinding, where [`DaemonLockGuard`]'s `Drop` never runs.
+///
+/// Only the lock holder may call this: unlinking a lock another process holds
+/// would let a third process lock a fresh inode and start a second daemon.
+/// `flock` is released by process exit either way, so the file left behind is
+/// litter rather than a stuck lock — but a per-run socket would leave one file
+/// per run.
+#[cfg(unix)]
+pub(super) fn cleanup_daemon_lock(socket: &std::path::Path) {
+    let _ = std::fs::remove_file(daemon_lock_path_for(socket));
 }
 
 #[cfg(unix)]
@@ -201,12 +250,12 @@ pub(super) fn try_acquire_daemon_lock(path: &std::path::Path) -> Result<Option<D
 }
 
 #[cfg(unix)]
-pub(super) fn acquire_daemon_lock() -> Result<DaemonLockGuard> {
-    let path = daemon_lock_path();
+pub(super) fn acquire_daemon_lock_for(socket: &std::path::Path) -> Result<DaemonLockGuard> {
+    let path = daemon_lock_path_for(socket);
     try_acquire_daemon_lock(&path)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "Another jcode server process is already running for runtime dir {}",
-            crate::storage::runtime_dir().display()
+            "Another jcode server process is already running on socket {}",
+            socket.display()
         )
     })
 }

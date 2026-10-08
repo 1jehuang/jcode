@@ -96,7 +96,13 @@ pub(crate) struct Args {
     #[arg(long = "update-sim")]
     pub(crate) update_sim: bool,
 
-    /// Custom socket path for server/client communication
+    /// Custom socket path for server/client communication.
+    ///
+    /// Clients dial this path instead of the shared daemon socket. A headless
+    /// `run` hosts its agent in-process, so nothing binds the path until a
+    /// tool needs a server (today: `swarm`); the first such tool starts a
+    /// temporary server here that exits with the run, leaving no daemon
+    /// behind on a one-off socket.
     #[arg(long, global = true)]
     pub(crate) socket: Option<String>,
 

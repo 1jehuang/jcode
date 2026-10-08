@@ -106,6 +106,44 @@ impl Drop for ReloadTestEnv {
     }
 }
 
+/// The shared daemon must keep its plain `serve` argv; an owned server must
+/// ask for the temporary lifecycle and name its owner, or the ephemeral server
+/// a headless `run` starts would outlive the run (#1748).
+#[test]
+fn owned_server_argv_requests_the_temporary_lifecycle() {
+    assert_eq!(
+        serve_subcommand_args(ServerLifetime::Shared, 4321),
+        vec!["serve".to_string()]
+    );
+    assert_eq!(
+        serve_subcommand_args(ServerLifetime::OwnedByThisProcess, 4321),
+        vec![
+            "serve".to_string(),
+            "--temporary-server".to_string(),
+            "--owner-pid".to_string(),
+            "4321".to_string(),
+        ]
+    );
+
+    // The argv must parse back into the flags `serve` actually reads.
+    let argv = std::iter::once("jcode".to_string())
+        .chain(serve_subcommand_args(
+            ServerLifetime::OwnedByThisProcess,
+            4321,
+        ))
+        .collect::<Vec<_>>();
+    let parsed = <crate::cli::args::Args as clap::Parser>::try_parse_from(argv)
+        .expect("parse owned serve argv");
+    assert!(matches!(
+        parsed.command,
+        Some(Command::Serve {
+            temporary_server: true,
+            owner_pid: Some(4321),
+            ..
+        })
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn spawn_lock_serializes_shared_server_bootstrap() {

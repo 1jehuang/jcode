@@ -617,10 +617,11 @@ pub use self::lifecycle::configure_temporary_server;
 #[cfg(unix)]
 pub use self::socket::spawn_server_notify;
 #[cfg(unix)]
-use self::socket::{acquire_daemon_lock, mark_close_on_exec};
+use self::socket::{acquire_daemon_lock_for, mark_close_on_exec};
 pub use self::socket::{
-    cleanup_socket_pair, connect_socket, debug_socket_path, has_live_listener, is_server_ready,
-    reap_stale_socket_if_dead, set_socket_path, socket_path, wait_for_server_ready,
+    cleanup_socket_pair, connect_socket, debug_socket_path, default_socket_path, has_live_listener,
+    is_server_ready, reap_stale_socket_if_dead, set_socket_path, socket_path,
+    socket_path_is_custom, wait_for_server_ready,
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
@@ -2280,7 +2281,7 @@ impl Server {
         }
 
         #[cfg(unix)]
-        let _daemon_lock = acquire_daemon_lock()?;
+        let _daemon_lock = acquire_daemon_lock_for(&self.socket_path)?;
 
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(
