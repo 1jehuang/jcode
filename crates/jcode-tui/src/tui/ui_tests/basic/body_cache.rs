@@ -1113,6 +1113,21 @@ fn test_prefix_reuse_truncation_matches_full_build() {
 #[cfg(unix)]
 #[test]
 fn test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain() {
+    // Earlier tests can cache a missing toolchain. Exercise the real probe and
+    // worker in a fresh process, not that process-global cached result.
+    if std::env::var_os("JCODE_STALLED_TEX_TEST_CHILD").is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tui::ui::tests::basic::test_prepare_body_with_math_never_blocks_on_a_stalled_tex_toolchain",
+                "--nocapture",
+            ])
+            .env("JCODE_STALLED_TEX_TEST_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated stalled TeX regression failed");
+        return;
+    }
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
 
