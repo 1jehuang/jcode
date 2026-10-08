@@ -218,7 +218,7 @@ fn without_heredoc_bodies(command: &str) -> String {
         let delimiters = heredoc_delimiters(line.trim_end_matches('\n'));
         index += 1;
 
-        for (delimiter, strip_tabs) in delimiters {
+        for (delimiter, strip_tabs, _quoted) in delimiters {
             while index < lines.len() {
                 let candidate = lines[index].trim_end_matches(['\r', '\n']);
                 let candidate = if strip_tabs {
@@ -238,7 +238,146 @@ fn without_heredoc_bodies(command: &str) -> String {
     output
 }
 
-fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
+/// Command sources that the shell runs through `$(...)` or backtick
+/// substitution but that `tokenize` flattens into a single word.
+///
+/// `echo "$(rm -rf ~)"`, `` echo `rm -rf ~` `` and an unquoted heredoc body
+/// containing `$(rm -rf ~)` all run `rm`, yet the word-level tokenizer never
+/// sees `rm` as a program (#1753). The caller assesses each returned source
+/// like a top-level command. Single-quoted text and quoted heredoc bodies are
+/// inert in the shell and are skipped.
+pub fn embedded_substitutions(command: &str) -> Vec<String> {
+    let lines: Vec<&str> = command.split_inclusive('\n').collect();
+    let mut shell_source = String::with_capacity(command.len());
+    let mut found = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        shell_source.push_str(line);
+        index += 1;
+        for (delimiter, strip_tabs, quoted) in heredoc_delimiters(line.trim_end_matches('\n')) {
+            let mut body = String::new();
+            while index < lines.len() {
+                let raw = lines[index];
+                let candidate = raw.trim_end_matches(['\r', '\n']);
+                let candidate = if strip_tabs {
+                    candidate.trim_start_matches('\t')
+                } else {
+                    candidate
+                };
+                index += 1;
+                if candidate == delimiter {
+                    shell_source.push('\n');
+                    break;
+                }
+                body.push_str(raw);
+            }
+            // An unquoted heredoc body still expands `$(...)` and backticks,
+            // but quotes inside it are literal text.
+            if !quoted {
+                scan_substitutions(&body, false, &mut found);
+            }
+        }
+    }
+    scan_substitutions(&shell_source, true, &mut found);
+    found
+}
+
+fn scan_substitutions(text: &str, shell_quotes: bool, found: &mut Vec<String>) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    let mut in_double = false;
+
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '\'' if shell_quotes && !in_double => {
+                index += 1;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+                index += 1;
+            }
+            '"' if shell_quotes => {
+                in_double = !in_double;
+                index += 1;
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                let (body, next) = matching_paren_body(&chars, index + 2);
+                found.push(body);
+                index = next;
+            }
+            '`' => {
+                let mut body = String::new();
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\'
+                        && let Some(&next) = chars.get(index + 1)
+                        && matches!(next, '`' | '\\' | '$')
+                    {
+                        body.push(next);
+                        index += 2;
+                        continue;
+                    }
+                    body.push(chars[index]);
+                    index += 1;
+                }
+                index += 1;
+                found.push(body);
+            }
+            _ => index += 1,
+        }
+    }
+}
+
+/// The text of a `$(...)` body starting at `start`, plus the index after its
+/// closing paren. An unterminated body runs to the end of the input, which
+/// keeps it assessed rather than silently dropped.
+fn matching_paren_body(chars: &[char], start: usize) -> (String, usize) {
+    let mut depth = 1usize;
+    let mut quote: Option<char> = None;
+    let mut index = start;
+
+    while index < chars.len() {
+        let c = chars[index];
+        match quote {
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                }
+            }
+            Some(_) => {
+                if c == '\\' {
+                    index += 1;
+                } else if c == '"' {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\\' => index += 1,
+                '\'' | '"' => quote = Some(c),
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (chars[start..index].iter().collect(), index + 1);
+                    }
+                }
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+    (
+        chars[start.min(chars.len())..].iter().collect(),
+        chars.len(),
+    )
+}
+
+/// Heredoc declarations on one line: `(delimiter, strip_tabs, quoted)`.
+/// A quoted delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) makes the body inert.
+fn heredoc_delimiters(line: &str) -> Vec<(String, bool, bool)> {
     let bytes = line.as_bytes();
     let mut found = Vec::new();
     let mut index = 0;
@@ -287,8 +426,12 @@ fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
 
         let mut delimiter = String::new();
         let mut delimiter_quote = None;
+        let mut quoted = false;
         while index < bytes.len() {
             let byte = bytes[index];
+            if matches!(byte, b'\'' | b'"' | b'\\') {
+                quoted = true;
+            }
             if let Some(end) = delimiter_quote {
                 if byte == end {
                     delimiter_quote = None;
@@ -311,7 +454,7 @@ fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
             index += 1;
         }
         if !delimiter.is_empty() {
-            found.push((delimiter, strip_tabs));
+            found.push((delimiter, strip_tabs, quoted));
         }
     }
 
