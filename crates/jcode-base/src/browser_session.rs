@@ -7,6 +7,8 @@
 //! `FAB_BROWSER` set, which the bridge CLI uses to pick that browser's host.
 
 use super::*;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 fn runtime_dir() -> PathBuf {
     // Match the bridge CLI, which does not use JCODE_RUNTIME_DIR or TMPDIR.
@@ -44,13 +46,31 @@ pub fn ensure_browser_session(session_id: &str) -> Option<String> {
 /// Session daemon for `session_id` talking to the host of `browser` (a bridge
 /// browser name such as `chrome`, or `None` for the bridge's default host).
 pub fn ensure_browser_session_for(session_id: &str, browser: Option<&str>) -> Option<String> {
-    // Serialize startup so concurrent calls cannot both create a bound window.
-    static STARTUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = STARTUP_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
     let session_name = session_name_for(session_id, browser);
 
+    if is_session_alive(&session_name) {
+        return Some(session_name);
+    }
+
+    // Only calls for the same daemon should wait for its startup.
+    static STARTUP_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let startup_lock = {
+        let mut locks = STARTUP_LOCKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&session_name).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(Mutex::new(()));
+            locks.insert(session_name.clone(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    let _guard = startup_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     if is_session_alive(&session_name) {
         return Some(session_name);
     }
@@ -70,6 +90,26 @@ pub fn ensure_browser_session_for(session_id: &str, browser: Option<&str>) -> Op
         browser,
         browser_supports_bind_window(&bin),
     )
+}
+
+/// Keep process startup, socket checks, and lock waits off async workers.
+pub async fn ensure_browser_session_for_async(
+    session_id: &str,
+    browser: Option<&str>,
+) -> Option<String> {
+    let session_id = session_id.to_owned();
+    let browser = browser.map(str::to_owned);
+    match tokio::task::spawn_blocking(move || {
+        ensure_browser_session_for(&session_id, browser.as_deref())
+    })
+    .await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("[browser] Session startup worker failed: {}", error);
+            None
+        }
+    }
 }
 
 fn browser_supports_bind_window(bin: &std::path::Path) -> bool {

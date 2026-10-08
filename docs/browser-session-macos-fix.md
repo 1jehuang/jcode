@@ -14,8 +14,10 @@ Two independent bugs caused the window buildup and delay:
    process had already created a Chrome window.
 
 Jcode now follows the bridge's socket directory and verifies both the PID and
-an accepting socket. Startup is serialized, and a failed bound start no longer
-launches an unbound fallback. The bridge companion change replaces `/proc` with
+an accepting socket. Concurrent starts are serialized per browser session,
+while healthy sessions bypass startup locks. Async browser and Bash tools run
+startup on blocking workers so slow starts leave async workers available. A
+failed bound start no longer launches an unbound fallback. The bridge companion change replaces `/proc` with
 `kill(pid, 0)` (including `EPERM`), verifies its listener, saves bound-window
 metadata, reuses that window after a crash, and closes it on stop or SIGTERM.
 Stopping uses the session socket rather than signalling an unverified stale PID.
@@ -37,6 +39,13 @@ CLI against the installed Chrome extension made five `listTabs` calls. There was
 one new Chrome window, one daemon, and identical tab/window IDs throughout.
 Times were 113, 6, 7, 5, and 6 ms. `session list` reported `running`.
 The diagnostic daemon and window were removed afterward.
+
+Tool regressions cover five sequential calls, five concurrent calls starting
+one daemon, and stalled starts through both browser and Bash tools while a
+healthy browser call and an unrelated async task remain responsive. The stalled
+startup test reproduced a 3.16-second delay with the global startup lock; it
+passes with per-session locks and blocking workers. Removing the per-session
+lock makes the concurrent-start regression fail.
 
 The installed 0.10.0 extension lacks `closeWindow`, so automatic window cleanup
 was verified with a simulated native host and tests of the extension's actual

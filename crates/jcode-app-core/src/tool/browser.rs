@@ -1029,7 +1029,7 @@ async fn firefox_run_bridge_command(
     #[cfg(not(windows))]
     if std::env::var("BROWSER_SESSION").is_err()
         && let Some(session_name) =
-            crate::browser::ensure_browser_session_for(&_ctx.session_id, browser)
+            crate::browser::ensure_browser_session_for_async(&_ctx.session_id, browser).await
     {
         command.env("BROWSER_SESSION", session_name);
     }

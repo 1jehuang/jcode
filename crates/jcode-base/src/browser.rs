@@ -172,7 +172,9 @@ pub fn resolve_target_browser(requested: Option<&str>) -> Result<BrowserDetectio
 
 #[path = "browser_session.rs"]
 mod browser_session;
-pub use browser_session::{ensure_browser_session, ensure_browser_session_for};
+pub use browser_session::{
+    ensure_browser_session, ensure_browser_session_for, ensure_browser_session_for_async,
+};
 #[path = "browser_update.rs"]
 mod browser_update;
 pub use browser_update::{
