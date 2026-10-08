@@ -219,11 +219,11 @@ async fn shutdown_temporary_server(
     crate::transport::remove_socket(socket_path);
     crate::transport::remove_socket(debug_socket_path);
     cleanup_temporary_metadata(socket_path);
-    // `std::process::exit` skips `DaemonLockGuard::drop`, so clear this
-    // socket's lock file here. Per-run sockets would otherwise leave one
-    // stale lock file behind per run.
+    // `std::process::exit` skips `DaemonLockGuard::drop`, so clear the lock
+    // this process holds. Per-run sockets would otherwise leave one stale lock
+    // file behind per run.
     #[cfg(unix)]
-    super::socket::cleanup_daemon_lock(socket_path);
+    super::socket::cleanup_held_daemon_lock();
     // Same for the build-hash sidecar the registry publisher writes next to
     // the socket: an ephemeral server must leave nothing behind.
     let _ = std::fs::remove_file(format!("{}.hash", socket_path.display()));

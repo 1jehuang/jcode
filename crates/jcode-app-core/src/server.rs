@@ -116,19 +116,28 @@ fn idle_monitor_should_start(client_count: usize, has_live_headless_worker: bool
     client_count == 0 && !has_live_headless_worker
 }
 
-/// Whether a starting server may delete a reload marker another process wrote.
+/// Whether a starting server may touch the runtime-dir-wide reload marker.
 ///
 /// `jcode.reload` is one file per runtime dir, but only the shared daemon ever
 /// owns a reload. Since the daemon lock became socket-scoped, a server on a
-/// custom socket can start while the shared daemon is mid-reload, and clearing
-/// a marker whose pid differs would erase that daemon's in-flight `Starting`
-/// state — dropping the guard that makes clients wait while it drains its
-/// sessions, so they would send work into a daemon about to interrupt it.
+/// custom socket can start while the shared daemon is mid-reload, and both
+/// marker paths below treat a pid mismatch as "stale" and delete the marker —
+/// erasing that daemon's in-flight `Starting` state and dropping the guard
+/// that makes clients wait while it drains its sessions, so they would send
+/// work into a daemon about to interrupt it.
 ///
-/// Only the shared socket's server gets to touch the shared marker. A stale
-/// marker left by nobody is not lost: `recent_reload_state` expires it by age,
-/// and the next shared daemon clears it.
-fn may_clear_foreign_reload_marker(socket_path: &std::path::Path) -> bool {
+/// Two production call sites consult this, and missing either one leaves the
+/// hole open:
+///
+/// - `clear_reload_marker_if_stale_for_pid` during bind;
+/// - `publish_reload_socket_ready` once the accept loops are live, whose
+///   `state.pid != current_pid` branch also clears.
+///
+/// Only the shared socket's server gets to touch the shared marker. A custom
+/// socket has no reload of its own to publish, and a genuinely stale marker is
+/// not stranded: `recent_reload_state` expires it by age, and the next shared
+/// daemon clears it.
+fn may_touch_shared_reload_marker(socket_path: &std::path::Path) -> bool {
     self::socket::is_shared_socket(socket_path)
 }
 
@@ -676,23 +685,25 @@ const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
 
 #[cfg(test)]
 mod reload_marker_scope_tests {
-    use super::may_clear_foreign_reload_marker;
+    use super::may_touch_shared_reload_marker;
 
-    /// Only the shared socket's server may clear the runtime-dir-wide reload
+    /// Only the shared socket's server may touch the runtime-dir-wide reload
     /// marker. A custom-socket server that cleared it would erase the shared
-    /// daemon's in-flight `Starting` state (review of #1768, finding 3).
+    /// daemon's in-flight `Starting` state (review of #1768, finding 3). Both
+    /// the bind-time clear and the socket-ready publish consult this; the
+    /// publish path was missed on the first attempt and reopened the hole.
     #[test]
-    fn only_shared_socket_server_clears_the_shared_reload_marker() {
+    fn only_shared_socket_server_touches_the_shared_reload_marker() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
         let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
         crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
 
-        assert!(may_clear_foreign_reload_marker(
+        assert!(may_touch_shared_reload_marker(
             &runtime_dir.join("jcode.sock")
         ));
-        assert!(!may_clear_foreign_reload_marker(
+        assert!(!may_touch_shared_reload_marker(
             &runtime_dir.join("run-isolated.sock")
         ));
 
@@ -1285,7 +1296,13 @@ impl Server {
 
         // Signal readiness to the spawning client only after the accept loops
         // are live, so a "ready" server can immediately handle requests.
-        publish_reload_socket_ready();
+        //
+        // Skipped on a custom socket: this server has no reload of its own to
+        // publish, and the pid-mismatch branch inside would delete the shared
+        // daemon's in-flight marker.
+        if may_touch_shared_reload_marker(&self.socket_path) {
+            publish_reload_socket_ready();
+        }
         signal_ready_fd();
 
         // Persist auxiliary discovery metadata after the server is already live.
@@ -2353,7 +2370,7 @@ impl Server {
 
         // Preserve an in-flight reload marker for exec-based reloads owned by this
         // process, but clear stale markers from unrelated/stale processes.
-        if may_clear_foreign_reload_marker(&self.socket_path) {
+        if may_touch_shared_reload_marker(&self.socket_path) {
             clear_reload_marker_if_stale_for_pid(std::process::id());
         }
 

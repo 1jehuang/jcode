@@ -319,6 +319,57 @@ fn shared_socket_aliases_are_not_custom() {
     }
 }
 
+/// The final path component must be taken as written, never followed.
+///
+/// Binding unlinks and recreates that component, so a socket path that happens
+/// to be a symlink to another socket ends up owning its own, distinct socket.
+/// Resolving through the link made the server lock the *target's* file and then
+/// publish a different socket, so a later server on the target path was
+/// rejected with "already running" while nothing listened there (review of
+/// #1768, finding 2).
+#[cfg(unix)]
+#[test]
+fn daemon_lock_does_not_follow_the_final_socket_symlink() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
+    crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
+
+    // A stale socket, plus an alias path symlinked onto it.
+    let target = runtime_dir.join("target.sock");
+    std::fs::write(&target, b"").expect("write stale target socket");
+    let alias = runtime_dir.join("alias.sock");
+    std::os::unix::fs::symlink(&target, &alias).expect("symlink alias onto target");
+
+    assert_ne!(
+        daemon_lock_path_for(&alias),
+        daemon_lock_path_for(&target),
+        "the alias must not borrow the target's lock"
+    );
+    assert_eq!(
+        daemon_lock_path_for(&alias),
+        runtime_dir.join("alias.sock.daemon.lock")
+    );
+
+    // Both are custom, and each keeps its own lock, so a server on the target
+    // path is not blocked by a server on the alias path.
+    let alias_held = try_acquire_daemon_lock(&daemon_lock_path_for(&alias))
+        .expect("acquire alias lock")
+        .expect("alias lock should be free");
+    let target_held = try_acquire_daemon_lock(&daemon_lock_path_for(&target))
+        .expect("acquire target lock")
+        .expect("target lock must be free while the alias lock is held");
+
+    drop(target_held);
+    drop(alias_held);
+    if let Some(prev_runtime) = prev_runtime {
+        crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+    } else {
+        crate::env::remove_var("JCODE_RUNTIME_DIR");
+    }
+}
+
 /// A custom `--socket` must get its own daemon lock. With a single
 /// runtime-dir-wide lock, a second server could never start, which is why
 /// `jcode run --socket X` had no way to ever get a listener on `X` (#1748).

@@ -17,8 +17,8 @@ pub fn default_socket_path() -> PathBuf {
     crate::storage::runtime_dir().join("jcode.sock")
 }
 
-/// Resolve a socket path to a comparable identity: absolute, with symlinks
-/// collapsed.
+/// Resolve a socket path to a comparable identity: absolute, with its parent
+/// directory's symlinks collapsed.
 ///
 /// `JCODE_SOCKET` carries a user-supplied *spelling*, and several spellings
 /// name the same socket: `jcode.sock` relative to the runtime dir, a path
@@ -26,10 +26,16 @@ pub fn default_socket_path() -> PathBuf {
 /// those "custom" and hand the shared socket to a process-scoped server that
 /// then takes it down with the run, disconnecting every other client.
 ///
-/// The socket file usually does not exist yet, so the whole path cannot be
-/// canonicalized; its parent directory can. Fall back to the plain absolute
-/// path when even the parent is absent — two absent paths still compare
-/// consistently with each other.
+/// Only the *parent* is resolved; the final component is kept as written, even
+/// when it currently exists as a symlink to another socket. Binding always
+/// unlinks and recreates that last component (see `Server::run`), so the
+/// socket a server ends up owning is the one named here — not whatever the
+/// name happened to point at beforehand. Following the final link would pin
+/// the daemon lock to the old target and then publish a different socket,
+/// locking a path nobody is listening on (review of #1768, finding 2).
+///
+/// Falls back to the plain absolute path when the parent is absent too — two
+/// absent paths still compare consistently with each other.
 fn resolved_socket_identity(path: &std::path::Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -38,11 +44,6 @@ fn resolved_socket_identity(path: &std::path::Path) -> PathBuf {
             .map(|cwd| cwd.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     };
-
-    // A live socket (or a symlink to one) resolves fully.
-    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
-        return canonical;
-    }
 
     match (absolute.parent(), absolute.file_name()) {
         (Some(parent), Some(file_name)) => match std::fs::canonicalize(parent) {
@@ -243,17 +244,27 @@ pub(super) fn daemon_lock_path_for(socket: &std::path::Path) -> PathBuf {
     resolved.with_file_name(format!("{filename}.daemon.lock"))
 }
 
-/// Remove this socket's daemon lock file on a path that exits the process
-/// without unwinding, where [`DaemonLockGuard`]'s `Drop` never runs.
+/// The daemon lock this process actually acquired.
 ///
-/// Only the lock holder may call this: unlinking a lock another process holds
-/// would let a third process lock a fresh inode and start a second daemon.
-/// `flock` is released by process exit either way, so the file left behind is
-/// litter rather than a stuck lock — but a per-run socket would leave one file
-/// per run.
+/// Recorded at acquisition rather than recomputed at exit: the lock path is
+/// derived from the socket, and the filesystem under that socket can change
+/// while the server runs. Recomputing could name a different file and leave
+/// the real lock behind (review of #1768, finding 2).
 #[cfg(unix)]
-pub(super) fn cleanup_daemon_lock(socket: &std::path::Path) {
-    let _ = std::fs::remove_file(daemon_lock_path_for(socket));
+static HELD_DAEMON_LOCK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Remove the daemon lock this process holds, on a path that exits without
+/// unwinding and so skips [`DaemonLockGuard`]'s `Drop`.
+///
+/// Only the holder may do this: unlinking a lock another process holds would
+/// let a third process lock a fresh inode and start a second daemon. `flock`
+/// is released by process exit either way, so a file left behind is litter
+/// rather than a stuck lock — but a per-run socket would leave one per run.
+#[cfg(unix)]
+pub(super) fn cleanup_held_daemon_lock() {
+    if let Some(path) = HELD_DAEMON_LOCK.get() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(unix)]
@@ -298,12 +309,14 @@ pub(super) fn try_acquire_daemon_lock(path: &std::path::Path) -> Result<Option<D
 #[cfg(unix)]
 pub(super) fn acquire_daemon_lock_for(socket: &std::path::Path) -> Result<DaemonLockGuard> {
     let path = daemon_lock_path_for(socket);
-    try_acquire_daemon_lock(&path)?.ok_or_else(|| {
+    let guard = try_acquire_daemon_lock(&path)?.ok_or_else(|| {
         anyhow::anyhow!(
             "Another jcode server process is already running on socket {}",
             socket.display()
         )
-    })
+    })?;
+    let _ = HELD_DAEMON_LOCK.set(path);
+    Ok(guard)
 }
 
 #[cfg(unix)]
