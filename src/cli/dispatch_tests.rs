@@ -2,6 +2,28 @@ use super::*;
 use crate::transport::Listener;
 
 #[test]
+fn named_provider_profile_selects_its_runtime_transport() {
+    assert_eq!(
+        provider_choice_for_named_profile_type(Some(
+            &crate::config::NamedProviderType::AnthropicCompatible,
+        )),
+        ProviderChoice::AnthropicApi,
+    );
+    assert_eq!(
+        provider_choice_for_named_profile_type(Some(
+            &crate::config::NamedProviderType::OpenAiCompatible,
+        )),
+        ProviderChoice::OpenaiCompatible,
+    );
+    assert_eq!(
+        provider_choice_for_named_profile_type(
+            Some(&crate::config::NamedProviderType::OpenRouter,)
+        ),
+        ProviderChoice::OpenaiCompatible,
+    );
+}
+
+#[test]
 fn only_file_controlled_debug_clients_need_parent_lifetime_binding() {
     let _lock = crate::storage::lock_test_env();
     let previous = std::env::var_os("JCODE_DEBUG_CMD_PATH");

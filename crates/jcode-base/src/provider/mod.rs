@@ -410,7 +410,7 @@ pub struct MultiProvider {
     /// compatible endpoint selection from corrupting later OpenRouter model
     /// switches, catalog display, or auth refresh handling.
     openai_compatible_profiles: RwLock<HashMap<String, Arc<dyn Provider>>>,
-    active_openai_compatible_profile: RwLock<Option<String>>,
+    active_named_provider_profiles: RwLock<Option<ActiveNamedProviderProfiles>>,
     active: RwLock<ActiveProvider>,
     /// Notifications generated during provider/account auto-selection.
     /// The TUI should drain and display these on session start.
@@ -432,6 +432,16 @@ pub struct MultiProvider {
     /// Shared by forks so the server can wait for real work rather than sleeping
     /// through a fixed quiet period after login.
     post_auth_refreshes_pending: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Named profile identities held by one `MultiProvider`.
+///
+/// The selected profile must be instance-local: a shared server creates one
+/// provider per session, while environment variables are process-wide.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ActiveNamedProviderProfiles {
+    anthropic_compatible: Option<String>,
+    openai_compatible: Option<String>,
 }
 
 /// Memoized route catalog with the inputs that decide its freshness: build
@@ -519,12 +529,17 @@ impl MultiProvider {
     fn routes_memo_key(&self) -> String {
         let active = self.active_provider();
         let credential_mode = self.credential_mode();
-        let profile = self
-            .active_openai_compatible_profile
+        let profiles = self
+            .active_named_provider_profiles
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .unwrap_or_default();
+        let profile = format!(
+            "anthropic:{}|openai-compatible:{}",
+            profiles.anthropic_compatible.as_deref().unwrap_or_default(),
+            profiles.openai_compatible.as_deref().unwrap_or_default(),
+        );
         let mut compat_profiles: Vec<String> = self
             .openai_compatible_profiles
             .read()
@@ -1034,7 +1049,7 @@ impl MultiProvider {
                 .anthropic
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
-            self.clear_active_openai_compatible_profile();
+            ProviderRegistry::new(self).set_active_anthropic_profile(profile_name.to_string());
             self.set_active_provider(ActiveProvider::Claude);
             return Ok(());
         }
@@ -1129,15 +1144,9 @@ impl MultiProvider {
 
         match provider {
             ActiveProvider::Claude => {
-                let switching_from_named_anthropic = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
-                    .ok()
-                    .and_then(|name| crate::config::config().providers.get(&name))
-                    .is_some_and(|profile| {
-                        matches!(
-                            profile.provider_type,
-                            crate::config::NamedProviderType::AnthropicCompatible
-                        )
-                    });
+                let switching_from_named_anthropic = ProviderRegistry::new(self)
+                    .active_anthropic_profile_id()
+                    .is_some();
                 if switching_from_named_anthropic {
                     crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
                     crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
@@ -1174,6 +1183,9 @@ impl MultiProvider {
                     anyhow::bail!(
                         "Claude credentials not available. Run `jcode login --provider claude` first."
                     );
+                }
+                if switching_from_named_anthropic {
+                    ProviderRegistry::new(self).clear_active_anthropic_profile();
                 }
                 self.set_active_provider(ActiveProvider::Claude);
                 Ok(())
@@ -1696,6 +1708,24 @@ impl MultiProvider {
     fn fork_model_switch_request(&self, active: ActiveProvider, current_model: &str) -> String {
         let prefix = match active {
             ActiveProvider::Claude => {
+                if let Some(profile_name) =
+                    ProviderRegistry::new(self).active_anthropic_profile_id()
+                    && crate::config::config()
+                        .providers
+                        .get(&profile_name)
+                        .is_some_and(|profile| {
+                            matches!(
+                                profile.provider_type,
+                                crate::config::NamedProviderType::AnthropicCompatible
+                            )
+                        })
+                {
+                    // A named Anthropic profile needs its profile-prefixed
+                    // route when a session fork reapplies its selection. A
+                    // generic `anthropic-api:` prefix is treated as a switch
+                    // to the first-party Anthropic runtime.
+                    return format!("{profile_name}:{current_model}");
+                }
                 if let Some(anthropic) = self.anthropic_provider() {
                     // OAuth/ApiKey emit their canonical model prefix; Auto keeps
                     // the bare provider key (route without pinning a credential).
@@ -2902,7 +2932,7 @@ impl Provider for MultiProvider {
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
-            active_openai_compatible_profile: RwLock::new(None),
+            active_named_provider_profiles: RwLock::new(None),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider: self.initial_provider,

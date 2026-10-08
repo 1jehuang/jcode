@@ -1261,6 +1261,17 @@ fn explicit_credential_mode(choice: &ProviderChoice) -> Option<provider::Credent
     }
 }
 
+fn active_anthropic_named_profile() -> Option<String> {
+    let profile_name = std::env::var("JCODE_NAMED_PROVIDER_PROFILE").ok()?;
+    let config = crate::config::config();
+    let profile = config.providers.get(&profile_name)?;
+    matches!(
+        profile.provider_type,
+        crate::config::NamedProviderType::AnthropicCompatible
+    )
+    .then_some(profile_name)
+}
+
 fn disable_subscription_runtime_mode() {
     crate::subscription_catalog::clear_runtime_env();
 }
@@ -1455,6 +1466,8 @@ async fn init_provider_with_options(
         crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
     }
 
+    let active_anthropic_profile = active_anthropic_named_profile();
+
     if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
         && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()
     {
@@ -1485,7 +1498,9 @@ async fn init_provider_with_options(
         }
         ProviderChoice::AnthropicApi => {
             disable_subscription_runtime_mode();
-            ensure_external_api_key_auth_allowed_for_explicit_choice("ANTHROPIC_API_KEY")?;
+            if active_anthropic_profile.is_none() {
+                ensure_external_api_key_auth_allowed_for_explicit_choice("ANTHROPIC_API_KEY")?;
+            }
             init_notice("Using Anthropic API key as the initial provider (use /model to switch)");
             select_initial_model_provider("claude");
             Arc::new(provider::MultiProvider::with_preference_fast(false))
@@ -1842,14 +1857,30 @@ async fn init_provider_with_options(
         }
     };
 
-    if let Some(mode) = explicit_credential_mode(choice) {
+    let named_anthropic_profile_selected =
+        matches!(choice, ProviderChoice::AnthropicApi) && active_anthropic_profile.is_some();
+    if let Some(profile_name) = active_anthropic_profile.as_deref()
+        && matches!(choice, ProviderChoice::AnthropicApi)
+    {
+        // MultiProvider startup clears profile-specific environment after it
+        // captures the profile. Reapply it while pinning the explicit API-key
+        // route so custom api_key_env and auth = "none" remain resolvable.
+        crate::provider_catalog::apply_named_provider_profile_env(profile_name)?;
+    }
+    let credential_mode_result = if let Some(mode) = explicit_credential_mode(choice) {
         provider.set_credential_mode(mode).map_err(|err| {
             anyhow::anyhow!(
                 "Failed to select the credential route for --provider {}: {err}",
                 choice.as_arg_value()
             )
-        })?;
+        })
+    } else {
+        Ok(())
+    };
+    if named_anthropic_profile_selected {
+        crate::provider_catalog::clear_anthropic_profile_env();
     }
+    credential_mode_result?;
 
     if std::env::var_os("JCODE_PROVIDER_PROFILE_ACTIVE").is_none()
         && std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_none()

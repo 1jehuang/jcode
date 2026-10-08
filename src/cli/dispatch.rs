@@ -100,10 +100,15 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        provider_catalog::apply_named_provider_profile_env(profile_name)?;
+        let config = crate::config::Config::load_strict()?;
+        let provider_type = config
+            .providers
+            .get(profile_name)
+            .map(|profile| &profile.provider_type);
+        provider_catalog::apply_named_provider_profile_env_from_config(profile_name, &config)?;
         crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", profile_name);
         crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
-        args.provider = ProviderChoice::OpenaiCompatible;
+        args.provider = provider_choice_for_named_profile_type(provider_type);
     }
 
     if let Some(tool_profile) = args.tool_profile.as_deref() {
@@ -634,6 +639,19 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn provider_choice_for_named_profile_type(
+    provider_type: Option<&crate::config::NamedProviderType>,
+) -> ProviderChoice {
+    if matches!(
+        provider_type,
+        Some(crate::config::NamedProviderType::AnthropicCompatible)
+    ) {
+        ProviderChoice::AnthropicApi
+    } else {
+        ProviderChoice::OpenaiCompatible
+    }
 }
 
 fn auth_doctor_provider_arg<'a>(

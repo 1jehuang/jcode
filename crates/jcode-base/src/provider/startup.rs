@@ -317,7 +317,7 @@ impl MultiProvider {
             bedrock: RwLock::new(bedrock_provider),
             openrouter: RwLock::new(openrouter),
             openai_compatible_profiles: RwLock::new(HashMap::new()),
-            active_openai_compatible_profile: RwLock::new(None),
+            active_named_provider_profiles: RwLock::new(None),
             active: RwLock::new(active),
             startup_notices: RwLock::new(Vec::new()),
             initial_provider,
