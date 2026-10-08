@@ -2308,6 +2308,20 @@ impl Server {
         // process, but clear stale markers from unrelated/stale processes.
         clear_reload_marker_if_stale_for_pid(std::process::id());
 
+        // Reclaim disk from stale agent scratch work (old cargo target dirs,
+        // repo clones) and superseded binaries in builds/versions. This runs in
+        // the long-lived daemon rather than at CLI startup, because short-lived
+        // processes would claim the daily slot and exit mid-walk. Each pass is
+        // rate limited machine-wide to once per day.
+        let _ = std::thread::Builder::new()
+            .name("jcode-disk-cleanup".to_string())
+            .spawn(|| {
+                loop {
+                    crate::scratch_maintenance::prune_stale_scratch();
+                    crate::build::prune_old_versions();
+                    std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
+                }
+            });
         match reload_recovery::collect_garbage() {
             Ok(stats) if stats.removed > 0 || stats.errors > 0 => {
                 crate::logging::info(&format!(

@@ -53,13 +53,14 @@ pub fn prune_stale_scratch() {
         return;
     };
     let scratch = base.join("scratch");
-    if !scratch.is_dir() || !claim_prune_slot(&base) {
+    if !scratch.is_dir() || !prune_due(&base) {
         return;
     }
     // /proc cwd links are canonical, so compare against the canonical path.
     let scratch = std::fs::canonicalize(&scratch).unwrap_or(scratch);
     let busy = busy_process_dirs();
     let report = prune_stale_scratch_in(&scratch, SystemTime::now(), retention, &busy);
+    mark_pruned(&base);
     if !report.removed.is_empty() {
         crate::logging::info(&format!(
             "scratch cleanup removed {} stale entr{} from {} (kept {})",
@@ -75,16 +76,23 @@ pub fn prune_stale_scratch() {
     }
 }
 
-fn claim_prune_slot(base: &Path) -> bool {
-    let marker = base.join(PRUNE_MARKER);
-    if let Ok(metadata) = std::fs::metadata(&marker)
-        && let Ok(modified) = metadata.modified()
-        && let Ok(age) = SystemTime::now().duration_since(modified)
-        && age.as_secs() < PRUNE_INTERVAL_SECS
-    {
-        return false;
+/// True when the last completed pass is older than the interval. The marker
+/// is only written after a pass finishes (see [`mark_pruned`]), so a process
+/// killed mid-walk (for example by an exec reload) does not suppress the next
+/// attempt for a whole day.
+fn prune_due(dir: &Path) -> bool {
+    let marker = dir.join(PRUNE_MARKER);
+    match std::fs::metadata(&marker).and_then(|meta| meta.modified()) {
+        Ok(modified) => SystemTime::now()
+            .duration_since(modified)
+            .map(|age| age.as_secs() >= PRUNE_INTERVAL_SECS)
+            .unwrap_or(true),
+        Err(_) => true,
     }
-    std::fs::write(&marker, b"").is_ok()
+}
+
+fn mark_pruned(dir: &Path) {
+    let _ = std::fs::write(dir.join(PRUNE_MARKER), b"");
 }
 
 /// Core of [`prune_stale_scratch`], parameterized for unit testing.

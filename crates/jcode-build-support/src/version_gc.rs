@@ -128,7 +128,7 @@ pub fn prune_old_versions() {
     let Ok(dir) = builds_dir() else {
         return;
     };
-    if !claim_prune_slot(&dir) {
+    if !prune_due(&dir) {
         return;
     }
     let mut protected = protected_versions();
@@ -139,18 +139,26 @@ pub fn prune_old_versions() {
         keep_recent,
         SystemTime::now(),
     );
+    mark_pruned(&dir);
 }
 
-fn claim_prune_slot(dir: &Path) -> bool {
+/// True when the last completed pass is older than the interval. The marker
+/// is only written after a pass finishes (see [`mark_pruned`]), so a process
+/// killed mid-walk (for example by an exec reload) does not suppress the next
+/// attempt for a whole day.
+fn prune_due(dir: &Path) -> bool {
     let marker = dir.join(PRUNE_MARKER);
-    if let Ok(metadata) = std::fs::metadata(&marker)
-        && let Ok(modified) = metadata.modified()
-        && let Ok(age) = SystemTime::now().duration_since(modified)
-        && age.as_secs() < PRUNE_INTERVAL_SECS
-    {
-        return false;
+    match std::fs::metadata(&marker).and_then(|meta| meta.modified()) {
+        Ok(modified) => SystemTime::now()
+            .duration_since(modified)
+            .map(|age| age.as_secs() >= PRUNE_INTERVAL_SECS)
+            .unwrap_or(true),
+        Err(_) => true,
     }
-    std::fs::write(&marker, b"").is_ok()
+}
+
+fn mark_pruned(dir: &Path) {
+    let _ = std::fs::write(dir.join(PRUNE_MARKER), b"");
 }
 
 /// Core of [`prune_old_versions`], parameterized for unit tests.

@@ -54,16 +54,6 @@ pub async fn run() -> Result<()> {
         .name("jcode-session-bak-prune".to_string())
         .spawn(crate::session::prune_old_session_backups)
         .ok();
-    // Reclaim disk from stale agent scratch work (old cargo target dirs, repo
-    // clones) and superseded immutable binaries in builds/versions. Both are
-    // rate limited to one pass per day and never touch in-use entries.
-    std::thread::Builder::new()
-        .name("jcode-disk-cleanup".to_string())
-        .spawn(|| {
-            crate::scratch_maintenance::prune_stale_scratch();
-            build::prune_old_versions();
-        })
-        .ok();
     // Record which binary actually launched. Stale copies earlier on PATH (or a
     // shortcut pinned to an old install) otherwise look identical to the
     // updated launcher in logs, and keep re-offering the same update (#1626).
