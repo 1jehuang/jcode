@@ -46,7 +46,7 @@ fn clip_description(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let mut out: String = text.chars().take(max).collect();
-    out.push_str("…");
+    out.push('…');
     out
 }
 
