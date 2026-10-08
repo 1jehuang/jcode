@@ -41,6 +41,9 @@ impl Provider for OpenRouterProvider {
         system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        if self.profile_id.as_deref() == Some("azure-openai") {
+            return self.complete_azure_responses(messages, tools, system).await;
+        }
         let model = self.model.read().await.clone();
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
@@ -286,6 +289,7 @@ impl Provider for OpenRouterProvider {
                 send_openrouter_headers,
                 conversation_id,
                 request_for_retries,
+                false,
                 tx,
                 provider_pin,
                 model_for_stream,
@@ -835,6 +839,93 @@ impl Provider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    async fn complete_azure_responses(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Result<EventStream> {
+        use jcode_provider_openai::request::{
+            build_responses_input, build_tools, downgrade_web_search_calls, insert_additional_tools,
+        };
+
+        let model = self.model.read().await.clone();
+        let mut input = build_responses_input(messages);
+        insert_additional_tools(&mut input, messages, tools);
+        downgrade_web_search_calls(&mut input);
+        let api_tools = build_tools(tools);
+        let mut request = serde_json::json!({
+            "model": model,
+            "instructions": system,
+            "input": input,
+            "tools": api_tools,
+            "stream": true,
+            "store": false,
+            "include": ["reasoning.encrypted_content"],
+        });
+        if !api_tools.is_empty() {
+            request["tool_choice"] = serde_json::json!("auto");
+        }
+        if let Some(max_tokens) = self.max_tokens {
+            request["max_output_tokens"] = serde_json::json!(max_tokens);
+        }
+        if let Some(effort) = self.reasoning_effort() {
+            let effort =
+                jcode_base::prompt::swarm_root_reasoning_effort(&effort).unwrap_or(effort.as_str());
+            request["reasoning"] = serde_json::json!({"effort": effort});
+        }
+        if let Some(extra) = self.extra_body.as_ref()
+            && let Some(request_obj) = request.as_object_mut()
+        {
+            for (key, value) in extra {
+                request_obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        jcode_provider_core::fingerprint::log_provider_canonical_input(
+            "azure-openai",
+            &model,
+            "openai_responses_full",
+            &request,
+            &input,
+            request.get("instructions"),
+            request.get("tools"),
+            Some(api_tools.len()),
+            &[],
+        );
+        let auth = (self.auth)()?;
+        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
+        let client = self.client.clone();
+        let api_base = self.api_base.clone();
+        let conversation_id = self.conversation_id.clone();
+        let provider_pin = Arc::clone(&self.provider_pin);
+        tokio::spawn(async move {
+            if tx
+                .send(Ok(StreamEvent::ConnectionType {
+                    connection: "https/sse".to_string(),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            run_stream_with_retries(
+                client,
+                api_base,
+                auth,
+                false,
+                conversation_id,
+                request,
+                true,
+                tx,
+                provider_pin,
+                model,
+            )
+            .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
     /// The disk-cache namespace this provider's *foreground* catalog reads and
     /// writes should use.
     ///
@@ -882,6 +973,9 @@ impl OpenRouterProvider {
         let Some(id) = self.profile_id.as_deref() else {
             return false;
         };
+        if id == "azure-openai" {
+            return false;
+        }
         match jcode_base::provider_catalog::openai_compatible_profile_by_id(id) {
             // A `[providers.<name>]` block that shadows a built-in profile name
             // but points somewhere else is still a user-declared endpoint, so

@@ -96,6 +96,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
             false,
             conversation_id.to_string(),
             serde_json::json!({"model": "m", "messages": [], "stream": true}),
+            false,
             tx,
             Arc::new(Mutex::new(None)),
             "m".to_string(),
@@ -169,6 +170,252 @@ fn configured_swarm_root_effort_covers_all_wire_formats() {
         assert!(deepseek.apply_resolved_reasoning_effort(&mut request, effort, false));
         assert_eq!(request["reasoning_effort"], expected);
     }
+}
+
+#[test]
+fn azure_tool_turn_uses_responses_with_reasoning_and_replays_tool_history() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (requests_tx, requests_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for turn in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buf[..n]);
+                if let Some(headers_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers =
+                        String::from_utf8_lossy(&bytes[..headers_end]).to_ascii_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if bytes.len() >= headers_end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            requests_tx.send(String::from_utf8(bytes).unwrap()).unwrap();
+            let body = if turn == 0 {
+                "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"encrypted-reasoning\"}}\n\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"\"}}\n\ndata: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+            } else {
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    let provider = OpenRouterProvider {
+        api_base: format!("http://{addr}/openai/v1"),
+        profile_id: Some("azure-openai".into()),
+        auth: Arc::new(|| {
+            Ok(ProviderAuth::HeaderValue {
+                header_name: reqwest::header::HeaderName::from_static("api-key"),
+                value: "test-key".into(),
+                label: "test".into(),
+            })
+        }),
+        ..make_custom_compatible_provider()
+    };
+    provider.set_model("southindia-production").unwrap();
+    provider.set_reasoning_effort("high").unwrap();
+    let tools = vec![ToolDefinition {
+        name: "bash".into(),
+        description: "run".into(),
+        input_schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string"}}}),
+        defer_loading: false,
+    }];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let mut first = provider
+            .complete(&[Message::user("run pwd")], &tools, "sys", None)
+            .await
+            .unwrap();
+        let mut called = false;
+        let mut reasoning = None;
+        while let Some(event) = first.next().await {
+            match event.unwrap() {
+                StreamEvent::ToolUseStart { .. } => called = true,
+                StreamEvent::OpenAIReasoning {
+                    id,
+                    summary,
+                    encrypted_content,
+                    status,
+                } => {
+                    reasoning = Some(ContentBlock::OpenAIReasoning {
+                        id,
+                        summary,
+                        encrypted_content,
+                        status,
+                    });
+                }
+                _ => {}
+            }
+        }
+        assert!(called, "Responses function call must reach the agent");
+        let mut assistant = Message::assistant_text("");
+        assistant.content = vec![
+            reasoning.expect("encrypted reasoning item must reach the agent"),
+            ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"cmd":"pwd"}),
+                thought_signature: None,
+            },
+        ];
+        let history = [
+            Message::user("run pwd"),
+            assistant,
+            Message::tool_result("call_1", "/repo", false),
+        ];
+        let mut second = provider
+            .complete(&history, &tools, "sys", None)
+            .await
+            .unwrap();
+        let mut text = false;
+        while let Some(event) = second.next().await {
+            if matches!(event.unwrap(), StreamEvent::TextDelta(_)) {
+                text = true;
+            }
+        }
+        assert!(text, "Responses text must reach the agent");
+    });
+    let requests = [
+        requests_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        requests_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+    ];
+    for raw in &requests {
+        assert!(raw.starts_with("POST /openai/v1/responses "), "{raw}");
+        assert!(
+            raw.to_ascii_lowercase().contains("api-key: test-key"),
+            "{raw}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["model"], "southindia-production");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["tools"][0]["name"], "bash");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["store"], false);
+    }
+    let followup: serde_json::Value =
+        serde_json::from_str(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert!(
+        followup["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call" && item["call_id"] == "call_1")
+    );
+    assert!(
+        followup["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call_output" && item["call_id"] == "call_1")
+    );
+    assert!(
+        followup["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "reasoning"
+                && item["encrypted_content"] == "encrypted-reasoning")
+    );
+}
+
+#[test]
+fn azure_runtime_constructor_preserves_azure_route_identity() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "azure-openai");
+    let _base = EnvVarGuard::set(
+        "JCODE_OPENROUTER_API_BASE",
+        "https://example.services.ai.azure.com/openai/v1",
+    );
+    let _features = EnvVarGuard::set("JCODE_OPENROUTER_PROVIDER_FEATURES", "0");
+    let _catalog = EnvVarGuard::set("JCODE_OPENROUTER_MODEL_CATALOG", "0");
+    let _auth = EnvVarGuard::set("JCODE_OPENROUTER_AUTH_HEADER", "api-key");
+    let _key_name = EnvVarGuard::set("JCODE_OPENROUTER_API_KEY_NAME", "JCODE_TEST_AZURE_KEY");
+    let _key = EnvVarGuard::set("JCODE_TEST_AZURE_KEY", "test-key");
+    let _model = EnvVarGuard::set("JCODE_OPENROUTER_MODEL", "southindia-production");
+    let provider = OpenRouterProvider::new().unwrap();
+    assert_eq!(provider.profile_id.as_deref(), Some("azure-openai"));
+    assert!(!provider.is_user_named_profile());
+    let (label, api_method, _) = provider.direct_openai_compatible_route_parts().unwrap();
+    assert_eq!(provider.runtime_display_name(), "Azure OpenAI");
+    assert_eq!(label, "Azure OpenAI");
+    assert_eq!(api_method, "openrouter");
+    assert!(provider.supports_openai_reasoning_effort());
+    assert_eq!(provider.model(), "southindia-production");
+}
+
+#[test]
+fn azure_responses_http_error_names_the_actual_route() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = r#"{"error":{"message":"deployment missing"}}"#;
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    let provider = OpenRouterProvider {
+        api_base: format!("http://{addr}/openai/v1"),
+        profile_id: Some("azure-openai".into()),
+        ..make_custom_compatible_provider()
+    };
+    provider.set_model("custom-deployment").unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let error = rt.block_on(async {
+        let mut stream = provider
+            .complete(&[Message::user("test")], &[], "", None)
+            .await
+            .unwrap();
+        loop {
+            match stream.next().await {
+                Some(Err(error)) => break error,
+                Some(Ok(_)) => continue,
+                None => panic!("HTTP 400 must reach the caller"),
+            }
+        }
+    });
+    let error = error.to_string();
+    assert!(
+        error.contains("Azure OpenAI Responses request failed"),
+        "{error}"
+    );
+    assert!(error.contains("/openai/v1/responses"), "{error}");
+    assert!(error.contains("custom-deployment"), "{error}");
 }
 
 #[test]

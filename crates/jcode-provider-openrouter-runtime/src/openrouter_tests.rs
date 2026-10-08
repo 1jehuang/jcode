@@ -3223,6 +3223,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
             false,
             new_conversation_id(),
             request,
+            false,
             tx,
             Arc::new(Mutex::new(None)),
             "test-model".to_string(),

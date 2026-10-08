@@ -61,6 +61,7 @@ pub(super) async fn run_stream_with_retries(
     send_openrouter_headers: bool,
     conversation_id: String,
     request: Value,
+    responses_api: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
@@ -122,6 +123,7 @@ pub(super) async fn run_stream_with_retries(
             send_openrouter_headers,
             &conversation_id,
             request.clone(),
+            responses_api,
             attempt_tx,
             Arc::clone(&provider_pin),
             model.clone(),
@@ -191,6 +193,7 @@ async fn stream_response(
     send_openrouter_headers: bool,
     conversation_id: &str,
     request: Value,
+    responses_api: bool,
     tx: mpsc::Sender<Result<StreamEvent>>,
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
@@ -204,7 +207,17 @@ async fn stream_response(
     let connect_start = std::time::Instant::now();
     let stream_idle_timeout = jcode_base::provider::stream_idle_timeout();
 
-    let url = format!("{}/chat/completions", api_base);
+    let route = if responses_api {
+        "responses"
+    } else {
+        "chat/completions"
+    };
+    let request_kind = if responses_api {
+        "Azure OpenAI Responses"
+    } else {
+        "OpenAI-compatible chat"
+    };
+    let url = format!("{}/{}", api_base, route);
     let mut req = apply_kimi_coding_agent_headers(
         auth.apply(
             client
@@ -231,9 +244,13 @@ async fn stream_response(
     )
     .await
     .with_context(|| {
-        let hint = local_endpoint_troubleshooting_hint(&api_base, &model);
+        let hint = if responses_api {
+            "Hint: check the Azure deployment and that the endpoint supports /openai/v1/responses."
+        } else {
+            local_endpoint_troubleshooting_hint(&api_base, &model)
+        };
         format!(
-            "Failed to send OpenAI-compatible chat request\n  endpoint: {}\n  model: {}\n  auth: {}\n{}",
+            "Failed to send {request_kind} request\n  endpoint: {}\n  model: {}\n  auth: {}\n{}",
             url,
             model,
             auth.label(),
@@ -252,10 +269,22 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        let hint = http_status_hint(status.as_u16(), &api_base, &model);
+        let hint = if responses_api {
+            match status.as_u16() {
+                401 | 402 | 403 | 500..=599 => http_status_hint(status.as_u16(), &api_base, &model),
+                429 => {
+                    "Hint: Azure rate limited the request; jcode will retry before returning this error."
+                }
+                _ => {
+                    "Hint: check the Azure deployment and that the endpoint supports /openai/v1/responses."
+                }
+            }
+        } else {
+            http_status_hint(status.as_u16(), &api_base, &model)
+        };
         return Err(jcode_provider_core::retry_after::error_with_retry_after(
             format!(
-                "OpenAI-compatible chat request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\n{}",
+                "{request_kind} request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\n{}",
                 url,
                 model,
                 auth.label(),
@@ -273,7 +302,17 @@ async fn stream_response(
         }))
         .await;
 
-    let mut stream = OpenRouterStream::new(response.bytes_stream(), model.clone(), provider_pin);
+    let mut stream: EventStream = if responses_api {
+        Box::pin(jcode_provider_openai::stream::OpenAIResponsesStream::new(
+            response.bytes_stream(),
+        ))
+    } else {
+        Box::pin(OpenRouterStream::new(
+            response.bytes_stream(),
+            model.clone(),
+            provider_pin,
+        ))
+    };
 
     // Idle timeout between streamed chunks. Configurable so slow reasoning
     // models (e.g. DeepSeek) that think silently for minutes before emitting
@@ -282,6 +321,7 @@ async fn stream_response(
     // defaulting to 180s. Shared with the native provider paths (issue #434).
     let idle_timeout_secs = stream_idle_timeout.as_secs();
 
+    let mut saw_message_end = false;
     loop {
         let event = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
             Ok(Some(Ok(event))) => event,
@@ -308,9 +348,24 @@ async fn stream_response(
                 );
             }
         };
+        if responses_api {
+            if let StreamEvent::Error { message, .. } = &event {
+                anyhow::bail!("Azure OpenAI Responses stream error: {message}");
+            }
+            if matches!(event, StreamEvent::MessageEnd { .. }) {
+                saw_message_end = true;
+            }
+        }
         if tx.send(Ok(event)).await.is_err() {
             return Ok(());
         }
+        if saw_message_end {
+            break;
+        }
+    }
+
+    if responses_api && !saw_message_end {
+        anyhow::bail!("Azure OpenAI Responses stream ended before response.completed");
     }
 
     Ok(())

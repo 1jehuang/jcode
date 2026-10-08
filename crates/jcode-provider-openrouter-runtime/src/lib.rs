@@ -974,7 +974,7 @@ impl OpenRouterProvider {
     }
 
     fn profile_supports_openai_reasoning_effort(profile_id: Option<&str>) -> bool {
-        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai"))
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai") || id.eq_ignore_ascii_case("azure-openai"))
     }
 
     /// DeepSeek-family models accept the DeepSeek-style top-level
@@ -1284,6 +1284,9 @@ impl OpenRouterProvider {
 
         // Direct OpenAI-compatible profile (NVIDIA NIM, DeepSeek, Z.AI, ...).
         if let Some(profile_id) = self.profile_id.as_deref() {
+            if profile_id == "azure-openai" {
+                return "Azure OpenAI".to_string();
+            }
             if let Some(profile) = openai_compatible_profile_by_id(profile_id) {
                 return profile.display_name.to_string();
             }
@@ -1325,6 +1328,13 @@ impl OpenRouterProvider {
             return Some((
                 jcode_base::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 jcode_base::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                self.api_base.clone(),
+            ));
+        }
+        if self.profile_id.as_deref() == Some("azure-openai") {
+            return Some((
+                "Azure OpenAI".to_string(),
+                "openrouter".to_string(),
                 self.api_base.clone(),
             ));
         }
@@ -1631,7 +1641,7 @@ impl OpenRouterProvider {
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty())
-            .and_then(|id| openai_compatible_profile_by_id(&id).map(|_| id))
+            .filter(|id| id == "azure-openai" || openai_compatible_profile_by_id(id).is_some())
             .or_else(|| {
                 autodetected_profile
                     .as_ref()
