@@ -213,7 +213,7 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
             .any(|entry| matches!(entry.action, crate::tui::PickerAction::Model));
     if is_runtime_model_picker {
         Some(
-            " keys: Ctrl+O set default · Ctrl+N favorite · Shift+Tab switch active model to next favorite",
+            " keys: Ctrl+O set default · Ctrl+N favorite · Ctrl+S swarm model · Shift+Tab switch active model to next favorite",
         )
     } else {
         None
@@ -1411,6 +1411,7 @@ mod tests {
 
         assert!(hint.contains("Ctrl+O set default"));
         assert!(hint.contains("Ctrl+N favorite"));
+        assert!(hint.contains("Ctrl+S swarm model"));
     }
 
     #[test]

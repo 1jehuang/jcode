@@ -1357,6 +1357,7 @@ impl App {
                         );
                         routes
                     },
+                    None,
                 );
                 return;
             }
@@ -1420,9 +1421,12 @@ impl App {
         picker_started: std::time::Instant,
     ) {
         let provider = self.provider.clone();
-        self.start_model_picker_route_load_with(signature, picker_started, move || {
-            provider.model_routes()
-        });
+        self.start_model_picker_route_load_with(
+            signature,
+            picker_started,
+            move || provider.model_routes(),
+            None,
+        );
     }
 
     /// Run an arbitrary route builder off the UI thread and deliver the result
@@ -1432,6 +1436,7 @@ impl App {
         signature: ModelPickerCacheSignature,
         picker_started: std::time::Instant,
         build_routes: impl FnOnce() -> Vec<crate::provider::ModelRoute> + Send + 'static,
+        agent_target: Option<crate::tui::AgentModelTarget>,
     ) {
         self.model_picker_load_request_id = self.model_picker_load_request_id.wrapping_add(1);
         let request_id = self.model_picker_load_request_id;
@@ -1453,6 +1458,7 @@ impl App {
             request_id,
             signature,
             picker_started,
+            agent_target,
             receiver: rx,
         });
     }
@@ -1529,6 +1535,14 @@ impl App {
                     true,
                     true,
                 );
+                if let Some(target) = pending.agent_target {
+                    // This load feeds an agent-model sub-picker (Ctrl+S in
+                    // /model). `open_model_picker_with_routes` rebuilt the
+                    // ordinary model picker; re-tag it so Enter still saves
+                    // the agent override instead of switching the session
+                    // model.
+                    self.retag_picker_for_agent_model_target(target);
+                }
                 if self.inline_interactive_state.is_some() {
                     self.set_status_notice("Model list updated");
                 }
@@ -2314,8 +2328,15 @@ impl App {
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'o');
         let is_favorite =
             modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 'n');
+        let is_swarm =
+            modifiers.contains(KeyModifiers::CONTROL) && key_char_eq_ignore_ascii_case(code, 's');
         if is_default || is_favorite {
             self.handle_inline_interactive_key(code, modifiers)?;
+            return Ok(true);
+        }
+        if is_swarm {
+            // Open the swarm model sub-picker from the /model preview.
+            self.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
             return Ok(true);
         }
         Ok(false)
@@ -3580,6 +3601,22 @@ impl App {
                 && key_char_eq_ignore_ascii_case(code, 'n') =>
             {
                 self.toggle_selected_model_favorite();
+            }
+            code if modifiers.contains(KeyModifiers::CONTROL)
+                && key_char_eq_ignore_ascii_case(code, 's') =>
+            {
+                // Ctrl+S inside the /model picker opens the swarm model
+                // sub-picker so users can choose which model spawned swarm
+                // agents use, without leaving the /model flow. If no swarm
+                // model override is saved, agents inherit the current model.
+                if self
+                    .inline_interactive_state
+                    .as_ref()
+                    .map(picker_is_runtime_model_picker)
+                    .unwrap_or(false)
+                {
+                    self.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+                }
             }
             KeyCode::Enter => {
                 let Some(ref mut picker) = self.inline_interactive_state else {

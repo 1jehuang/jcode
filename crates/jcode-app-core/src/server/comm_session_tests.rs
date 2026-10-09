@@ -998,6 +998,36 @@ async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
 }
 
 #[tokio::test]
+async fn coordinator_identity_falls_back_to_config_default_when_session_load_fails() {
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    // Pin a known config default so the assertion checks the real fallback
+    // identity instead of passing trivially when both fields are None.
+    std::fs::write(
+        temp_home.path().join("config.toml"),
+        "[provider]\ndefault_model = \"gpt-5.4-luna\"\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    // No agent registered and no persisted session on disk: the load_startup_stub
+    // path fails. The fallback must use the config default model instead of
+    // returning all-None (which would silently use a hardcoded provider default).
+    let sessions = Arc::new(RwLock::new(HashMap::new()));
+    let identity = resolve_coordinator_spawn_identity("nonexistent", &sessions).await;
+
+    assert_eq!(
+        identity.model.as_deref(),
+        Some("gpt-5.4-luna"),
+        "error fallback must resolve the config default model, not silently return all-None"
+    );
+
+    crate::env::remove_var("JCODE_HOME");
+    crate::config::invalidate_config_cache();
+}
+
+#[tokio::test]
 async fn spawn_bootstraps_coordinator_when_swarm_has_none() {
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(

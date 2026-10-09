@@ -205,11 +205,9 @@ fn test_remote_fallback_bedrock_arn_does_not_create_openrouter_route() {
     assert!(routes.iter().any(|route| {
         route.model == model && route.api_method == "bedrock" && route.provider == "AWS Bedrock"
     }));
-    assert!(
-        !routes
-            .iter()
-            .any(|route| route.model == model && route.api_method == "openrouter")
-    );
+    assert!(!routes
+        .iter()
+        .any(|route| route.model == model && route.api_method == "openrouter"));
 }
 
 #[test]
@@ -383,8 +381,7 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
     // the picker must add the claude-api route instead of trusting the stale
     // single-route cache forever.
     with_temp_jcode_home(|| {
-        let _api_key_guard =
-            AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
+        let _api_key_guard = AnthropicApiKeyGuard(std::env::var("ANTHROPIC_API_KEY").ok());
         crate::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
         crate::auth::AuthStatus::invalidate_cache();
 
@@ -411,19 +408,18 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
             .entries
             .iter()
             .filter(|entry| {
-                entry.name == "claude-fable-5"
-                    || entry.name.starts_with("claude-fable-5 (")
+                entry.name == "claude-fable-5" || entry.name.starts_with("claude-fable-5 (")
             })
             .collect::<Vec<_>>();
         assert!(!fable_entries.is_empty(), "fable should be in the picker");
         assert!(
-            fable_entries.iter().any(|entry| entry.options.iter().any(
-                |option| option.api_method == "claude-api" && option.available
-            )),
+            fable_entries.iter().any(|entry| entry
+                .options
+                .iter()
+                .any(|option| option.api_method == "claude-api" && option.available)),
             "stale oauth-only cached route should be augmented with claude-api, got {:?}",
             fable_entries
         );
-
     });
 }
 
@@ -463,9 +459,7 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
 
         let expected = crate::subscription_catalog::curated_models()
             .iter()
-            .filter(|model| {
-                crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
-            })
+            .filter(|model| crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier))
             .map(|model| model.id)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(app.remote_model_options.len(), expected.len());
@@ -494,104 +488,104 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
     // empty home, which is what the sibling subscription-catalog test already
     // does for exactly this reason.
     with_temp_jcode_home(|| {
-    crate::auth::AuthStatus::invalidate_cache();
-    clear_persisted_test_ui_state();
-    crate::tui::ui::clear_test_render_state_for_tests();
+        crate::auth::AuthStatus::invalidate_cache();
+        clear_persisted_test_ui_state();
+        crate::tui::ui::clear_test_render_state_for_tests();
 
-    let mut app = create_test_app();
-    app.is_remote = true;
-    app.remote_provider_name = Some("Claude".to_string());
-    app.remote_available_entries = vec![
-        "claude-fable-5".to_string(),
-        "claude-opus-4-8".to_string(),
-        "gpt-5.5".to_string(),
-        "gpt-5.6-sol".to_string(),
-        "deepseek/deepseek-v4-pro".to_string(),
-    ];
-    app.remote_model_options = vec![
-        crate::provider::ModelRoute {
-            model: "claude-fable-5".to_string(),
-            provider: "Anthropic".to_string(),
-            api_method: "claude-oauth".to_string(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        },
-        crate::provider::ModelRoute {
-            model: "claude-opus-4-8".to_string(),
-            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-            available: true,
-            detail: "managed subscription route".to_string(),
-            usage: None,
-            cheapness: None,
-        },
-        crate::provider::ModelRoute {
-            model: "gpt-5.5".to_string(),
-            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-            available: true,
-            detail: "managed subscription route".to_string(),
-            usage: None,
-            cheapness: None,
-        },
-        crate::provider::ModelRoute {
-            model: "gpt-5.6-sol".to_string(),
-            provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
-            api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
-            available: true,
-            detail: "managed subscription route".to_string(),
-            usage: None,
-            cheapness: None,
-        },
-        crate::provider::ModelRoute {
-            model: "deepseek/deepseek-v4-pro".to_string(),
-            provider: "auto".to_string(),
-            api_method: "openrouter".to_string(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        },
-    ];
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("Claude".to_string());
+        app.remote_available_entries = vec![
+            "claude-fable-5".to_string(),
+            "claude-opus-4-8".to_string(),
+            "gpt-5.5".to_string(),
+            "gpt-5.6-sol".to_string(),
+            "deepseek/deepseek-v4-pro".to_string(),
+        ];
+        app.remote_model_options = vec![
+            crate::provider::ModelRoute {
+                model: "claude-fable-5".to_string(),
+                provider: "Anthropic".to_string(),
+                api_method: "claude-oauth".to_string(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "claude-opus-4-8".to_string(),
+                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                available: true,
+                detail: "managed subscription route".to_string(),
+                usage: None,
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "gpt-5.5".to_string(),
+                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                available: true,
+                detail: "managed subscription route".to_string(),
+                usage: None,
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "gpt-5.6-sol".to_string(),
+                provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
+                api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
+                available: true,
+                detail: "managed subscription route".to_string(),
+                usage: None,
+                cheapness: None,
+            },
+            crate::provider::ModelRoute {
+                model: "deepseek/deepseek-v4-pro".to_string(),
+                provider: "auto".to_string(),
+                api_method: "openrouter".to_string(),
+                available: true,
+                detail: String::new(),
+                usage: None,
+                cheapness: None,
+            },
+        ];
 
-    app.open_model_picker();
+        app.open_model_picker();
 
-    assert_eq!(app.remote_model_options.len(), 5);
-    let jcode_routes = app
-        .remote_model_options
-        .iter()
-        .filter(|route| {
-            route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(jcode_routes.len(), 3);
-    assert_eq!(
-        jcode_routes
+        assert_eq!(app.remote_model_options.len(), 5);
+        let jcode_routes = app
+            .remote_model_options
             .iter()
-            .map(|route| route.model.as_str())
-            .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from(["claude-opus-4-8", "gpt-5.5", "gpt-5.6-sol",])
-    );
-    assert!(app.remote_model_options.iter().any(|route| {
-        route.model == "claude-fable-5"
-            && route.provider == "Anthropic"
-            && route.api_method == "claude-oauth"
-    }));
-    assert!(app.remote_model_options.iter().any(|route| {
-        route.model == "deepseek/deepseek-v4-pro"
-            && route.provider == "auto"
-            && route.api_method == "openrouter"
-    }));
-    assert!(app.remote_model_options.iter().all(|route| {
-        route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-            || matches!(
-                route.model.as_str(),
-                "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
-            )
-    }));
+            .filter(|route| {
+                route.provider == crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                    && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(jcode_routes.len(), 3);
+        assert_eq!(
+            jcode_routes
+                .iter()
+                .map(|route| route.model.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["claude-opus-4-8", "gpt-5.5", "gpt-5.6-sol",])
+        );
+        assert!(app.remote_model_options.iter().any(|route| {
+            route.model == "claude-fable-5"
+                && route.provider == "Anthropic"
+                && route.api_method == "claude-oauth"
+        }));
+        assert!(app.remote_model_options.iter().any(|route| {
+            route.model == "deepseek/deepseek-v4-pro"
+                && route.provider == "auto"
+                && route.api_method == "openrouter"
+        }));
+        assert!(app.remote_model_options.iter().all(|route| {
+            route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+                || matches!(
+                    route.model.as_str(),
+                    "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
+                )
+        }));
     });
 }
 
@@ -678,9 +672,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
             .collect::<Vec<_>>();
         let expected = crate::subscription_catalog::curated_models()
             .iter()
-            .filter(|model| {
-                crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
-            })
+            .filter(|model| crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier))
             .map(|model| model.id)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(jcode_routes.len(), expected.len());
@@ -703,10 +695,9 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
         }));
         assert!(app.remote_model_options.iter().all(|route| {
             route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
-                || crate::subscription_catalog::find_curated_model(&route.model)
-                    .is_some_and(|model| {
-                        crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier)
-                    })
+                || crate::subscription_catalog::find_curated_model(&route.model).is_some_and(
+                    |model| crate::subscription_catalog::JcodeTier::Plus.allows(model.min_tier),
+                )
         }));
     });
 }
@@ -855,6 +846,328 @@ fn test_handle_key_cursor_movement() {
 }
 
 #[test]
+fn test_model_picker_ctrl_s_opens_swarm_model_picker() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_available_entries = vec!["gpt-5.5".to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            api_method: "openai".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+        }];
+
+        app.open_model_picker();
+
+        // Verify the model picker is open
+        assert!(
+            app.inline_interactive_state.is_some(),
+            "model picker should be open"
+        );
+
+        // Ctrl+S should open the swarm model sub-picker
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            .unwrap();
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("picker should still be open after Ctrl+S");
+
+        // After Ctrl+S, entries should be tagged as AgentModelChoice for Swarm target
+        assert!(
+            picker.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice {
+                    target: crate::tui::AgentModelTarget::Swarm,
+                    ..
+                }
+            )),
+            "Ctrl+S should open swarm model picker with AgentModelChoice entries"
+        );
+    });
+}
+
+#[test]
+fn test_swarm_picker_from_model_preview_stays_searchable() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        // >64 names-only entries and no hydrated routes: the typed /model
+        // preview opens on lightweight routes without caching them, so the
+        // Ctrl+S rebuild cannot be served from a fresh picker cache. That
+        // rebuild path is the one that restores preview=true from the /model
+        // preview picker, which used to leave the swarm sub-picker glued to
+        // the composer: the next typed character landed in the composer and
+        // the preview sync closed the picker instead of filtering it.
+        app.remote_available_entries = (0..80).map(|i| format!("gpt-test-model-{}", i)).collect();
+        if let Ok(config_dir) = crate::storage::app_config_dir() {
+            let _ = std::fs::remove_file(config_dir.join("remote_model_catalog_cache.json"));
+        }
+
+        for c in "/model".chars() {
+            app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+                .unwrap();
+        }
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("model picker preview should be open");
+        assert!(picker.preview);
+
+        // Ctrl+S opens the swarm sub-picker from the preview.
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            .unwrap();
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("swarm picker should be open after Ctrl+S");
+        assert!(
+            picker.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice {
+                    target: crate::tui::AgentModelTarget::Swarm,
+                    ..
+                }
+            )),
+            "Ctrl+S from preview should open swarm model picker"
+        );
+        assert!(
+            !picker.preview,
+            "swarm sub-picker must be a standalone picker, not a composer-glued preview"
+        );
+
+        // Typing must filter the sub-picker. With preview=true restored the
+        // character fell through to the composer and the preview sync closed
+        // the picker.
+        app.handle_key(KeyCode::Char('g'), KeyModifiers::empty())
+            .unwrap();
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("swarm picker must stay open while searching");
+        assert_eq!(picker.filter, "g");
+        assert!(
+            !picker.filtered.is_empty(),
+            "typed search must keep matching rows in the swarm picker"
+        );
+        assert_eq!(
+            app.input(),
+            "",
+            "search characters must not land in the composer"
+        );
+    });
+}
+
+/// Build a remote test app with a big names-only catalog and open the model
+/// picker, returning the app with the async picker load pending.
+///
+/// A sibling test that does not hold the env lock can persist its own catalog
+/// into this temp home while it is live, and a hydrated catalog opens the
+/// picker synchronously instead of leaving the async load pending. Clear the
+/// stray cache file before opening, and rebuild once if a write still
+/// sneaked between the guard and the open.
+fn open_app_with_pending_big_remote_catalog() -> App {
+    let build = || {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        // >64 remote entries with no hydrated routes take the async catalog
+        // path: the picker opens with lightweight routes and a pending
+        // background refresh.
+        app.remote_available_entries = (0..80).map(|i| format!("gpt-test-model-{}", i)).collect();
+        if let Ok(config_dir) = crate::storage::app_config_dir() {
+            let _ = std::fs::remove_file(config_dir.join("remote_model_catalog_cache.json"));
+        }
+        app.open_model_picker();
+        app
+    };
+    let app = build();
+    if app.pending_model_picker_load.is_none() {
+        build()
+    } else {
+        app
+    }
+}
+
+#[test]
+fn test_agent_model_picker_late_catalog_refresh_keeps_agent_entries() {
+    with_temp_jcode_home(|| {
+        let mut app = open_app_with_pending_big_remote_catalog();
+        assert!(
+            app.pending_model_picker_load.is_some(),
+            "large remote catalog should leave a pending background refresh"
+        );
+
+        // Ctrl+S opens the swarm sub-picker. If the refresh completes within
+        // the two-second wait window the open path retags inline; if it is
+        // still in flight the pending load carries the agent target so the
+        // poll completion path retags instead. Simulate the in-flight case:
+        // tag the still-pending load, then let the refresh land.
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            .unwrap();
+        if let Some(pending) = app.pending_model_picker_load.as_mut() {
+            pending.agent_target = Some(crate::tui::AgentModelTarget::Swarm);
+        }
+
+        let mut waited = 0;
+        while app.pending_model_picker_load.is_some() && waited < 500 {
+            app.poll_model_picker_load();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 5;
+        }
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("picker should still be open after the refresh");
+        assert!(
+            picker.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice {
+                    target: crate::tui::AgentModelTarget::Swarm,
+                    ..
+                }
+            )),
+            "late catalog refresh must keep AgentModelChoice entries, got {:?}",
+            picker
+                .entries
+                .iter()
+                .map(|e| e.action.clone())
+                .collect::<Vec<_>>()
+        );
+    });
+}
+
+#[test]
+fn test_agent_model_picker_late_refresh_keeps_inherit_override_search_and_selection() {
+    with_temp_jcode_home(|| {
+        // A saved swarm override that the refreshed catalog will NOT contain:
+        // the retag path must keep a row for it or the override can never be
+        // cleared from the picker. The picker opens in session scope by
+        // default, so seed the session override, not the global config.
+
+        let mut app = open_app_with_pending_big_remote_catalog();
+        assert!(
+            app.pending_model_picker_load.is_some(),
+            "large remote catalog should leave a pending background refresh"
+        );
+        app.session
+            .set_agent_model_override("swarm", Some("claude-legacy-model".to_string()))
+            .unwrap();
+
+        app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+            .unwrap();
+        if let Some(pending) = app.pending_model_picker_load.as_mut() {
+            pending.agent_target = Some(crate::tui::AgentModelTarget::Swarm);
+        }
+
+        // User narrows the picker with a search filter and moves down to a
+        // model row while the catalog refresh is still in flight.
+        for ch in "gpt-test-model-7".chars() {
+            app.handle_key(KeyCode::Char(ch), KeyModifiers::NONE)
+                .unwrap();
+        }
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
+        let filter_before = {
+            let picker = app.inline_interactive_state.as_ref().unwrap();
+            assert!(
+                !picker.filter.is_empty(),
+                "search text should be active before the refresh lands"
+            );
+            picker.filter.clone()
+        };
+        let selected_before = {
+            let picker = app.inline_interactive_state.as_ref().unwrap();
+            picker.entries[picker.filtered[picker.selected]]
+                .name
+                .clone()
+        };
+
+        // Let the late catalog refresh land while the search is active.
+        let mut waited = 0;
+        while app.pending_model_picker_load.is_some() && waited < 500 {
+            app.poll_model_picker_load();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited += 5;
+        }
+        assert!(
+            app.pending_model_picker_load.is_none(),
+            "refresh should have landed within the wait window"
+        );
+
+        let picker = app
+            .inline_interactive_state
+            .as_ref()
+            .expect("picker should still be open after the refresh");
+        // The inherit (clear-override) row must survive the retag.
+        assert!(
+            picker.entries.iter().any(|e| matches!(
+                e.action,
+                crate::tui::PickerAction::AgentModelChoice {
+                    target: crate::tui::AgentModelTarget::Swarm,
+                    clear_override: true,
+                }
+            )),
+            "late refresh must keep the inherit (clear override) row"
+        );
+        // The saved override missing from the catalog must keep its row.
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|e| e.name == "claude-legacy-model"),
+            "late refresh must keep a row for the saved override"
+        );
+        // The user's search filter must still be applied, not silently reset.
+        assert_eq!(
+            picker.filter, filter_before,
+            "late refresh must keep the active search filter"
+        );
+        // And the entry they had selected must still be the selected row, so
+        // Enter saves the model they actually chose.
+        let selected_after = picker.entries[picker.filtered[picker.selected]]
+            .name
+            .clone();
+        assert_eq!(
+            selected_after, selected_before,
+            "late refresh must keep the user's selected entry"
+        );
+    });
+}
+
+#[test]
+fn test_model_picker_ctrl_s_does_not_fire_when_not_in_model_picker() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_available_entries = vec!["gpt-5.5".to_string()];
+    app.remote_model_options = vec![crate::provider::ModelRoute {
+        model: "gpt-5.5".to_string(),
+        provider: "OpenAI".to_string(),
+        api_method: "openai".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+        usage: None,
+    }];
+
+    // Don't open the model picker — Ctrl+S should be a no-op
+    assert!(app.inline_interactive_state.is_none());
+
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .unwrap();
+
+    // Still no picker should be open
+    assert!(
+        app.inline_interactive_state.is_none(),
+        "Ctrl+S should not open anything when no picker is active"
+    );
+}
+
+#[test]
 fn test_handle_key_ctrl_word_movement_and_delete() {
     let mut app = create_test_app();
     app.set_input_for_test("hello world again");
@@ -977,7 +1290,8 @@ fn test_handle_key_super_left_right_move_to_edges() {
         app.handle_key(KeyCode::Left, KeyModifiers::SUPER).unwrap();
         assert_eq!(app.cursor_pos(), before);
 
-        app.handle_key(KeyCode::Home, KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Home, KeyModifiers::empty())
+            .unwrap();
         assert_eq!(app.cursor_pos(), 0);
 
         app.handle_key(KeyCode::End, KeyModifiers::empty()).unwrap();
@@ -1064,7 +1378,8 @@ fn test_typing_undo_preserves_space_and_cursor_edit_boundaries() {
     app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
         .unwrap();
     assert_eq!(app.input(), "가나");
-    app.handle_key(KeyCode::Left, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Left, KeyModifiers::empty())
+        .unwrap();
     app.handle_key(KeyCode::Char('다'), KeyModifiers::empty())
         .unwrap();
     app.handle_key(KeyCode::Char('z'), KeyModifiers::SUPER)
@@ -1096,11 +1411,14 @@ fn test_typing_undo_does_not_merge_paste_or_later_burst() {
 fn test_picker_swallowed_space_starts_new_typing_undo_step() {
     let mut app = create_test_app();
     for c in "/model".chars() {
-        app.handle_key(KeyCode::Char(c), KeyModifiers::empty()).unwrap();
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
     }
     assert_eq!(app.input(), "/model ");
-    app.handle_key(KeyCode::Char(' '), KeyModifiers::empty()).unwrap();
-    app.handle_key(KeyCode::Char('g'), KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Char('g'), KeyModifiers::empty())
+        .unwrap();
     assert_eq!(app.input(), "/model g");
     app.undo_input_change();
     assert_eq!(app.input(), "/model ");
@@ -1243,7 +1561,9 @@ fn test_submit_input_commits_pending_streaming_assistant_text_before_user_messag
             id: "tool_read".to_string(),
             name: "read".to_string(),
             input: serde_json::json!({"file_path": "src/main.rs"}),
-            intent: None, thought_signature: None, },
+            intent: None,
+            thought_signature: None,
+        },
     ));
     app.bump_display_messages_version();
     app.streaming.streaming_text = "Here is the final paragraph".to_string();
@@ -1821,7 +2141,10 @@ fn test_local_speed_cycle_walks_standard_fast_ultrafast_and_clamps() {
 
     let press = |app: &mut App, code| {
         app.handle_key(code, KeyModifiers::ALT).unwrap();
-        (tier.lock().unwrap().clone(), app.status_notice().unwrap_or_default())
+        (
+            tier.lock().unwrap().clone(),
+            app.status_notice().unwrap_or_default(),
+        )
     };
 
     assert_eq!(
@@ -1952,7 +2275,10 @@ fn test_interleave_submission_preserves_pending_images() {
 
     assert!(input::handle_enter(&mut app));
 
-    assert_eq!(app.interleave_message.as_deref(), Some("[image 1] describe this"));
+    assert_eq!(
+        app.interleave_message.as_deref(),
+        Some("[image 1] describe this")
+    );
     assert_eq!(app.interleave_images, images);
     assert!(app.pending_images.is_empty());
 }
@@ -2034,7 +2360,10 @@ fn test_model_picker_effort_variant_selection_stages_effort_in_remote_mode() {
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
-    assert!(app.inline_interactive_state.is_none(), "picker should close");
+    assert!(
+        app.inline_interactive_state.is_none(),
+        "picker should close"
+    );
     assert!(
         app.pending_route_selection.is_some(),
         "model switch should be staged for the remote dispatcher"
@@ -2128,7 +2457,10 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
     app.handle_key(KeyCode::Enter, KeyModifiers::empty())
         .unwrap();
 
-    assert!(app.inline_interactive_state.is_none(), "picker should close");
+    assert!(
+        app.inline_interactive_state.is_none(),
+        "picker should close"
+    );
     assert!(
         app.pending_reasoning_effort.is_none(),
         "plain rows must not override the server's effort"
@@ -2201,10 +2533,7 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
             .map(|(text, _)| text.clone())
             .expect("a model switch notice should be set");
         assert!(!notice.contains("remote-catalog"), "got {notice}");
-        assert!(
-            !notice.contains("refreshing route details"),
-            "got {notice}"
-        );
+        assert!(!notice.contains("refreshing route details"), "got {notice}");
         assert!(notice.starts_with("Model → "), "got {notice}");
         assert!(!notice.contains(" via "), "got {notice}");
     });
@@ -2278,7 +2607,10 @@ fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
             .as_ref()
             .expect("picker should still be open after the catalog update");
         assert!(
-            picker.entries.iter().any(|entry| entry.name.starts_with(model)),
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name.starts_with(model)),
             "rebuilt picker should still list the model"
         );
         assert!(

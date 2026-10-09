@@ -229,89 +229,131 @@ impl App {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
 
+        // Keep the target on the pending load so a late catalog refresh
+        // re-tags the rebuilt picker instead of leaving the ordinary model
+        // picker behind (Enter would then switch the session model).
+        if let Some(pending) = self.pending_model_picker_load.as_mut() {
+            pending.agent_target = Some(target);
+        }
         if let Some(ref mut picker) = self.inline_interactive_state {
-            if target == AgentModelTarget::Memory {
-                picker.entries.retain(|entry| {
-                    matches!(
-                        crate::provider::provider_for_model(&model_entry_base_name(entry)),
-                        Some("openai" | "claude")
-                    )
-                });
-            }
+            configure_agent_model_picker_entries(
+                picker,
+                target,
+                configured,
+                inherit_summary,
+                global_scope,
+                Self::apply_inline_interactive_filter,
+            );
+        }
+    }
 
-            for entry in &mut picker.entries {
-                let matches_saved = configured.as_deref().map(|saved| {
-                    let base = model_entry_base_name(entry);
-                    model_entry_saved_spec(entry) == saved || base == saved
-                }) == Some(true);
-                entry.action = PickerAction::AgentModelChoice {
-                    target,
-                    clear_override: false,
-                };
-                entry.is_current = matches_saved;
-                entry.is_default = false;
+    /// Re-tag the current model picker entries as an agent-model sub-picker
+    /// after an async catalog load rebuilt them.
+    pub(crate) fn retag_picker_for_agent_model_target(&mut self, target: AgentModelTarget) {
+        let global_scope = self.agent_models_global_scope;
+        let configured = load_agent_model_override(target);
+        let inherit_summary = agent_model_default_summary(target, self);
+        if let Some(ref mut picker) = self.inline_interactive_state {
+            // The catalog refresh rebuilt the picker from scratch; the user's
+            // filter text and selection must survive the retag so Enter saves
+            // the entry they actually picked, and the inherit / saved-override
+            // rows must exist so the override stays clearable.
+            let previous_filter = picker.filter.clone();
+            let previous_selected_name = picker
+                .entries
+                .get(picker.filtered.get(picker.selected).copied().unwrap_or(0))
+                .map(|entry| entry.name.clone());
+            configure_agent_model_picker_entries(
+                picker,
+                target,
+                configured,
+                inherit_summary,
+                global_scope,
+                Self::apply_inline_interactive_filter,
+            );
+            if !previous_filter.is_empty() {
+                picker.filter = previous_filter;
+                Self::apply_inline_interactive_filter(picker);
             }
-
-            if let Some(saved) = configured.as_deref() {
-                let already_present = picker.entries.iter().any(|entry| {
-                    model_entry_saved_spec(entry) == saved || model_entry_base_name(entry) == saved
-                });
-                if !already_present {
-                    picker.entries.insert(
-                        0,
-                        PickerEntry {
-                            name: saved.to_string(),
-                            options: vec![PickerOption {
-                                provider: "saved override".to_string(),
-                                api_method: agent_model_target_config_path(target).to_string(),
-                                available: true,
-                                detail: "not in current picker catalog".to_string(),
-                                estimated_reference_cost_micros: None,
-                            }],
-                            action: PickerAction::AgentModelChoice {
-                                target,
-                                clear_override: false,
-                            },
-                            selected_option: 0,
-                            is_current: true,
-                            is_default: false,
-                            is_favorite: false,
-                            recommended: false,
-                            recommendation_rank: usize::MAX,
-                            usage_score: 0,
-                            old: false,
-                            created_date: None,
-                            effort: None,
-                        },
-                    );
-                }
+            if let Some(name) = previous_selected_name
+                && let Some(position) = picker
+                    .filtered
+                    .iter()
+                    .position(|&idx| picker.entries[idx].name == name)
+            {
+                picker.selected = position;
+            } else {
+                // The rebuilt catalog may drop the previously selected entry;
+                // clamp so `selected` stays a valid index into `filtered`.
+                picker.selected = picker.selected.min(picker.filtered.len().saturating_sub(1));
             }
+        }
+    }
+}
 
+/// Shared agent-picker entry setup: tag every entry as an
+/// `AgentModelChoice`, keep a row for a saved override that the catalog
+/// lacks, prepend the inherit (clear-override) row, and reset filter +
+/// selection to a clean state. Used both when the picker first opens and
+/// when a late catalog load rebuilds it, so the retag path can never lose
+/// the inherit / saved-override rows.
+fn configure_agent_model_picker_entries(
+    picker: &mut InlineInteractiveState,
+    target: AgentModelTarget,
+    configured: Option<String>,
+    inherit_summary: String,
+    global_scope: bool,
+    apply_filter: fn(&mut InlineInteractiveState),
+) {
+    // The agent sub-picker is standalone, never a composer-glued preview.
+    // Opening it from a /model preview rebuilds the picker and that rebuild
+    // restores preview=true, which made the next typed character land in the
+    // composer and the preview sync close the picker instead of filtering it.
+    picker.preview = false;
+    if target == AgentModelTarget::Memory {
+        picker.entries.retain(|entry| {
+            matches!(
+                crate::provider::provider_for_model(&model_entry_base_name(entry)),
+                Some("openai" | "claude")
+            )
+        });
+    }
+
+    for entry in &mut picker.entries {
+        let matches_saved = configured.as_deref().map(|saved| {
+            let base = model_entry_base_name(entry);
+            model_entry_saved_spec(entry) == saved || base == saved
+        }) == Some(true);
+        entry.action = PickerAction::AgentModelChoice {
+            target,
+            clear_override: false,
+        };
+        entry.is_current = matches_saved;
+        entry.is_default = false;
+    }
+
+    if let Some(saved) = configured.as_deref() {
+        let already_present = picker.entries.iter().any(|entry| {
+            model_entry_saved_spec(entry) == saved || model_entry_base_name(entry) == saved
+        });
+        if !already_present {
             picker.entries.insert(
                 0,
                 PickerEntry {
-                    name: if global_scope {
-                        format!("use global fallback ({})", inherit_summary)
-                    } else {
-                        "use global default [session]".to_string()
-                    },
+                    name: saved.to_string(),
                     options: vec![PickerOption {
-                        provider: "default".to_string(),
+                        provider: "saved override".to_string(),
                         api_method: agent_model_target_config_path(target).to_string(),
                         available: true,
-                        detail: if global_scope {
-                            "clear global default".to_string()
-                        } else {
-                            format!("clear only this session override · {}", inherit_summary)
-                        },
+                        detail: "not in current picker catalog".to_string(),
                         estimated_reference_cost_micros: None,
                     }],
                     action: PickerAction::AgentModelChoice {
                         target,
-                        clear_override: true,
+                        clear_override: false,
                     },
                     selected_option: 0,
-                    is_current: configured.is_none(),
+                    is_current: true,
                     is_default: false,
                     is_favorite: false,
                     recommended: false,
@@ -322,49 +364,84 @@ impl App {
                     effort: None,
                 },
             );
-
-            let mut inherit = picker.entries[0].clone();
-            inherit.name = "inherit coordinator".to_string();
-            inherit.options[0].provider = "inherit".to_string();
-            inherit.options[0].detail = if global_scope {
-                "global default: inherit coordinator"
-            } else {
-                "session: bypass global default"
-            }
-            .to_string();
-            inherit.action = PickerAction::AgentModelChoice {
-                target,
-                clear_override: false,
-            };
-            inherit.is_current = configured.as_deref() == Some("inherit");
-            picker.entries.insert(1, inherit);
-            for entry in &mut picker.entries {
-                for option in &mut entry.options {
-                    option.detail = format!(
-                        "[{}] {}",
-                        if global_scope { "global" } else { "session" },
-                        option.detail
-                    );
-                }
-            }
-
-            if target == AgentModelTarget::Memory {
-                for entry in &mut picker.entries {
-                    for option in &mut entry.options {
-                        option.detail =
-                            format!("Extraction only; recall uses Jev. {}", option.detail);
-                    }
-                }
-            }
-
-            picker.filtered = (0..picker.entries.len()).collect();
-            picker.selected = picker
-                .entries
-                .iter()
-                .position(|entry| entry.is_current)
-                .unwrap_or(0);
-            picker.column = 0;
-            picker.filter.clear();
         }
     }
+
+    picker.entries.insert(
+        0,
+        PickerEntry {
+            name: if global_scope {
+                format!("use global fallback ({})", inherit_summary)
+            } else {
+                "use global default [session]".to_string()
+            },
+            options: vec![PickerOption {
+                provider: "default".to_string(),
+                api_method: agent_model_target_config_path(target).to_string(),
+                available: true,
+                detail: if global_scope {
+                    "clear global default".to_string()
+                } else {
+                    format!("clear only this session override · {}", inherit_summary)
+                },
+                estimated_reference_cost_micros: None,
+            }],
+            action: PickerAction::AgentModelChoice {
+                target,
+                clear_override: true,
+            },
+            selected_option: 0,
+            is_current: configured.is_none(),
+            is_default: false,
+            is_favorite: false,
+            recommended: false,
+            recommendation_rank: usize::MAX,
+            usage_score: 0,
+            old: false,
+            created_date: None,
+            effort: None,
+        },
+    );
+
+    let mut inherit = picker.entries[0].clone();
+    inherit.name = "inherit coordinator".to_string();
+    inherit.options[0].provider = "inherit".to_string();
+    inherit.options[0].detail = if global_scope {
+        "global default: inherit coordinator"
+    } else {
+        "session: bypass global default"
+    }
+    .to_string();
+    inherit.action = PickerAction::AgentModelChoice {
+        target,
+        clear_override: false,
+    };
+    inherit.is_current = configured.as_deref() == Some("inherit");
+    picker.entries.insert(1, inherit);
+    for entry in &mut picker.entries {
+        for option in &mut entry.options {
+            option.detail = format!(
+                "[{}] {}",
+                if global_scope { "global" } else { "session" },
+                option.detail
+            );
+        }
+    }
+
+    if target == AgentModelTarget::Memory {
+        for entry in &mut picker.entries {
+            for option in &mut entry.options {
+                option.detail = format!("Extraction only; recall uses Jev. {}", option.detail);
+            }
+        }
+    }
+
+    picker.filter.clear();
+    apply_filter(picker);
+    picker.selected = picker
+        .entries
+        .iter()
+        .position(|entry| entry.is_current)
+        .unwrap_or(0);
+    picker.column = 0;
 }
