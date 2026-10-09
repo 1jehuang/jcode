@@ -28,5 +28,6 @@ include!("resume/busy_existing_attach.rs");
 include!("resume/reconnect_takeover_with_history.rs");
 include!("resume/attach_without_local_history.rs");
 include!("resume/different_client_attach.rs");
+include!("resume/cross_project_attach.rs");
 include!("resume/live_events_before_history.rs");
 include!("resume/same_client_takeover.rs");

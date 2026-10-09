@@ -271,7 +271,16 @@ fn guarded_reload_target(
     }
 }
 
-fn canonicalize_or(path: PathBuf) -> PathBuf {
+/// Canonicalize a path for project-identity comparison, falling back to the
+/// literal path when it cannot be resolved (the directory can be deleted while
+/// the session that owns it stays alive).
+///
+/// Shared by every subsystem that decides whether two working directories name
+/// the same project. One helper keeps that decision from drifting: if resume and
+/// resume-all each canonicalized separately they could disagree about a symlinked
+/// checkout and the same session would count as in-scope in one path and
+/// out-of-scope in the other.
+pub(super) fn canonicalize_or(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 

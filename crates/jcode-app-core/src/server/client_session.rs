@@ -1,6 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::client_state::{handle_get_history, spawn_model_prefetch_update};
+#[path = "subscribe_working_dir_policy.rs"]
+mod subscribe_working_dir_policy;
 use super::{
     ClientConnectionInfo, ClientDebugState, FileTouchService, SessionInterruptQueues, SwarmEvent,
     SwarmMember, SwarmState, VersionedPlan, broadcast_swarm_status, fanout_live_client_event,
@@ -21,9 +23,13 @@ use anyhow::Result;
 use futures::FutureExt;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use subscribe_working_dir_policy::{
+    apply_or_defer_subscribe_working_dir, resolve_authoritative_subscribe_working_dir,
+    session_working_dir_for_client,
+};
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
@@ -450,123 +456,6 @@ async fn ensure_client_swarm_member(
     inserted
 }
 
-/// Resolve the working directory a subscribe should actually bind to.
-///
-/// Returns the reported dir when it is acceptable, or the session's existing
-/// dir when the report is rejected by [`subscribe_working_dir_replacement`].
-/// Every consumer of a subscribe cwd (agent state, swarm id, project-local MCP
-/// resolution) must agree on this one answer, otherwise the session's tools,
-/// swarm grouping, and MCP config can each resolve against a different
-/// directory (issue #481).
-pub(super) fn effective_subscribe_working_dir(
-    current: Option<&str>,
-    reported: &str,
-    home: Option<&Path>,
-) -> String {
-    match subscribe_working_dir_replacement(current, reported, home) {
-        Some(accepted) => accepted,
-        None => current
-            .map(str::to_string)
-            .unwrap_or_else(|| reported.trim().to_string()),
-    }
-}
-
-/// Decide whether a client-reported subscribe cwd may replace the session's
-/// current working directory.
-///
-/// Requiring a subscribe cwd to be non-empty and absolute (the earlier
-/// require-cwd change) is necessary but not sufficient: a client that launches
-/// with an inherited environment can report the user's *home* directory even
-/// though the real project lives elsewhere. Accepting that silently re-pins the
-/// session to home, so bash/file tools run against home while the header still
-/// shows the project path (issue #481).
-///
-/// The rule is deliberately narrow so it cannot break legitimate directory
-/// changes: a reported cwd that is exactly the home directory is ignored *only*
-/// when the session already has a different working directory. Working in home
-/// on purpose (no prior cwd, or a session already pinned to home) still works,
-/// and every other path is accepted as before.
-pub(super) fn subscribe_working_dir_replacement(
-    current: Option<&str>,
-    reported: &str,
-    home: Option<&Path>,
-) -> Option<String> {
-    let reported_trimmed = reported.trim();
-    if reported_trimmed.is_empty() {
-        return None;
-    }
-    let current = current.map(str::trim).filter(|dir| !dir.is_empty());
-    if current == Some(reported_trimmed) {
-        return None;
-    }
-    if let (Some(current), Some(home)) = (current, home)
-        && Path::new(reported_trimmed) == home
-        && Path::new(current) != home
-    {
-        return None;
-    }
-    Some(reported_trimmed.to_string())
-}
-
-fn log_ignored_subscribe_working_dir(session_id: &str, current: &str, reported: &str) {
-    crate::logging::warn(&format!(
-        "Ignoring subscribe working_dir {} for session {}: it is the home directory while the session is already bound to {} (issue #481)",
-        reported, session_id, current
-    ));
-}
-
-fn apply_or_defer_subscribe_working_dir(
-    agent: &Arc<Mutex<Agent>>,
-    working_dir: &str,
-    session_id: &str,
-) {
-    let home = dirs::home_dir();
-    if let Ok(mut agent_guard) = agent.try_lock() {
-        match subscribe_working_dir_replacement(
-            agent_guard.working_dir(),
-            working_dir,
-            home.as_deref(),
-        ) {
-            Some(accepted) => agent_guard.set_working_dir(&accepted),
-            None => {
-                if let Some(current) = agent_guard.working_dir()
-                    && current != working_dir
-                {
-                    log_ignored_subscribe_working_dir(session_id, current, working_dir);
-                }
-            }
-        }
-        return;
-    }
-
-    let agent = Arc::clone(agent);
-    let working_dir = working_dir.to_string();
-    let session_id = session_id.to_string();
-    tokio::spawn(async move {
-        let mut agent_guard = agent.lock().await;
-        match subscribe_working_dir_replacement(
-            agent_guard.working_dir(),
-            &working_dir,
-            home.as_deref(),
-        ) {
-            Some(accepted) => {
-                agent_guard.set_working_dir(&accepted);
-                crate::logging::info(&format!(
-                    "Applied deferred subscribe working directory for session {}",
-                    session_id
-                ));
-            }
-            None => {
-                if let Some(current) = agent_guard.working_dir()
-                    && current != working_dir
-                {
-                    log_ignored_subscribe_working_dir(&session_id, current, &working_dir);
-                }
-            }
-        }
-    });
-}
-
 fn apply_or_defer_subscribe_selfdev(agent: &Arc<Mutex<Agent>>, session_id: &str) {
     if let Ok(mut agent_guard) = agent.try_lock() {
         if !agent_guard.is_canary() {
@@ -595,6 +484,7 @@ pub(super) async fn handle_subscribe(
     subscribe_working_dir: Option<String>,
     selfdev: Option<bool>,
     register_mcp_tools: bool,
+    is_creation: bool,
     client_selfdev: &mut bool,
     client_session_id: &str,
     client_connection_id: &str,
@@ -645,20 +535,55 @@ pub(super) async fn handle_subscribe(
     )
     .await;
 
-    if let Some(ref dir) = subscribe_working_dir {
-        apply_or_defer_subscribe_working_dir(agent, dir, client_session_id);
+    let established_dir = match agent.try_lock() {
+        Ok(guard) => guard.working_dir().map(str::to_string),
+        Err(_) => {
+            // A target-aware subscribe can attach to an agent in the middle of a
+            // turn. Unavailable agent lock must not read as unset working directory;
+            // resolve from existing member state or persisted startup stub (issue 1).
+            let member_dir = swarm_members
+                .read()
+                .await
+                .get(client_session_id)
+                .and_then(|m| {
+                    m.working_dir
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                });
+            member_dir.or_else(|| {
+                crate::session::Session::load_startup_stub(client_session_id)
+                    .ok()
+                    .and_then(|s| s.working_dir)
+            })
+        }
+    };
 
-        // Swarm grouping must use the *bound* directory, not the raw report, or
-        // a home-dir subscribe would still re-key the session's swarm even
-        // though its agent stayed in the project (issue #481).
-        let bound_dir = {
-            let current = agent
-                .try_lock()
-                .ok()
-                .and_then(|guard| guard.working_dir().map(str::to_string));
-            effective_subscribe_working_dir(current.as_deref(), dir, dirs::home_dir().as_deref())
-        };
-        let new_path = PathBuf::from(&bound_dir);
+    let authoritative_dir = resolve_authoritative_subscribe_working_dir(
+        established_dir.as_deref(),
+        subscribe_working_dir.as_deref(),
+        dirs::home_dir().as_deref(),
+        is_creation,
+    );
+
+    if let Some(dir) = &subscribe_working_dir {
+        // A client-reported directory never re-pins a session that already has
+        // one. The desktop sends a Subscribe with its own cwd straight after a
+        // target-aware resume, so honoring it here would undo the directory the
+        // resume just preserved and move a session into the attaching client's
+        // project. `apply_or_defer_subscribe_working_dir` applies the same
+        // decision, so the agent and the swarm/mcp resolution below agree.
+        if let Some(established) = &established_dir
+            && super::util::canonicalize_or(established.into())
+                != super::util::canonicalize_or(dir.into())
+        {
+            crate::logging::warn(&format!(
+                "Ignoring subscribe working_dir {} for session {}: the session is already bound to {} (a client-reported directory is creation-only)",
+                dir, client_session_id, established,
+            ));
+        }
+        apply_or_defer_subscribe_working_dir(agent, dir, client_session_id, is_creation);
+
+        let new_path = authoritative_dir.as_ref().map(PathBuf::from);
         let mut old_swarm_id: Option<String> = None;
         let mut updated_swarm_id: Option<String> = None;
         {
@@ -677,7 +602,7 @@ pub(super) async fn handle_subscribe(
                         .clone()
                         .or_else(|| swarm_id_for_session(client_session_id))
                 };
-                member.working_dir = Some(new_path);
+                member.working_dir = new_path;
                 member.swarm_id = if member.swarm_enabled {
                     new_swarm_id.clone()
                 } else {
@@ -687,7 +612,7 @@ pub(super) async fn handle_subscribe(
             }
         }
 
-        if let Some(ref old_id) = old_swarm_id {
+        if let Some(old_id) = &old_swarm_id {
             if updated_swarm_id.as_ref() != Some(old_id) {
                 remove_session_channel_subscriptions(
                     client_session_id,
@@ -705,7 +630,7 @@ pub(super) async fn handle_subscribe(
             }
         }
 
-        if let Some(ref new_id) = updated_swarm_id {
+        if let Some(new_id) = &updated_swarm_id {
             let mut swarms = swarms_by_id.write().await;
             swarms
                 .entry(new_id.clone())
@@ -809,33 +734,9 @@ pub(super) async fn handle_subscribe(
 
     let mcp_register_ms = if register_mcp_tools {
         let mcp_register_start = Instant::now();
-        // Resolve project-local MCP config against the session working dir,
-        // not the server process cwd (issue #420). Prefer the subscribe
-        // request's dir; fall back to the agent's stored session dir.
-        let mcp_working_dir = match subscribe_working_dir.as_ref() {
-            // Resolve against the bound directory so a rejected home-dir report
-            // cannot point project-local MCP discovery at home (issue #481).
-            Some(dir) => {
-                let current = agent
-                    .try_lock()
-                    .ok()
-                    .and_then(|guard| guard.working_dir().map(str::to_string));
-                Some(PathBuf::from(effective_subscribe_working_dir(
-                    current.as_deref(),
-                    dir,
-                    dirs::home_dir().as_deref(),
-                )))
-            }
-            None => agent
-                .try_lock()
-                .ok()
-                .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
-                .or_else(|| {
-                    crate::session::Session::load_startup_stub(client_session_id)
-                        .ok()
-                        .and_then(|session| session.working_dir.map(PathBuf::from))
-                }),
-        };
+        // Resolve project-local MCP config against the authoritative session working dir,
+        // agreeing with agent state, bash execution and swarm grouping.
+        let mcp_working_dir = authoritative_dir.as_ref().map(PathBuf::from);
         registry
             .register_mcp_tools_for_dir(
                 Some(client_event_tx.clone()),
@@ -1262,6 +1163,50 @@ pub(super) async fn handle_resume_session(
     )
     .await;
 
+    // Resolve the directory this resume will bind to ONCE, and use that single
+    // answer for every consumer below (the restored session, project-local MCP
+    // resolution, and the swarm member). Two subsystems choosing different answers
+    // is the isolation bug: the agent could stay in project B while MCP discovery
+    // ran against project A.
+    //
+    // The target's own directory is read without blocking on the agent mutex: a
+    // generating target owns its lock, and awaiting it here would deadlock the
+    // attach behind a model turn. Fall back to the on-disk copy for a session that
+    // is not live in memory.
+    let bound_working_dir = {
+        // The on-disk stub is the same file the agent saves its directory to, so
+        // it answers this without a lock and a busy target still resolves. Only
+        // when it yields nothing is the live agent asked, and then through
+        // `try_lock`, so an attach never stalls behind an in-flight turn. A
+        // refused lock must not read as "this session has no directory", which is
+        // what let the attaching client's directory win.
+        let stub_dir = crate::session::Session::load_startup_stub(&session_id)
+            .ok()
+            .and_then(|session| session.working_dir);
+        let target_dir = match live_target_agent.as_ref() {
+            Some(live) => match live.try_lock() {
+                Ok(agent_guard) => agent_guard.working_dir().map(str::to_string),
+                Err(_) => stub_dir,
+            },
+            None => stub_dir,
+        };
+        session_working_dir_for_client(target_dir.as_deref(), working_dir_override, false)
+    };
+
+    if let (Some(target), Some(subscriber)) = (
+        bound_working_dir.as_deref(),
+        working_dir_override
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty()),
+    ) && super::util::canonicalize_or(target.into())
+        != super::util::canonicalize_or(subscriber.into())
+    {
+        crate::logging::warn(&format!(
+            "Preserving session {} working_dir {target}: a subscriber in {subscriber} attached to it (cross-project attach)",
+            session_id
+        ));
+    }
+
     if let Some(live_target_agent) = live_target_agent.as_ref() {
         let old_session_id = client_session_id.clone();
 
@@ -1419,17 +1364,10 @@ pub(super) async fn handle_resume_session(
         // working dir, not the server process cwd (issue #420).
         // Do not block on the agent lock here: the target agent may be busy
         // mid-turn (lock held), and awaiting it would deadlock the resume.
-        let mcp_working_dir = working_dir_override.map(PathBuf::from).or_else(|| {
-            live_target_agent
-                .try_lock()
-                .ok()
-                .and_then(|agent_guard| agent_guard.working_dir().map(PathBuf::from))
-                .or_else(|| {
-                    crate::session::Session::load_startup_stub(&session_id)
-                        .ok()
-                        .and_then(|session| session.working_dir.map(PathBuf::from))
-                })
-        });
+        // Must agree with the directory the restore above just bound, or the
+        // session's tools and its project-local MCP config resolve against
+        // different projects.
+        let mcp_working_dir = bound_working_dir.clone().map(PathBuf::from);
         registry
             .register_mcp_tools_for_dir(
                 Some(client_event_tx.clone()),
@@ -1582,7 +1520,7 @@ pub(super) async fn handle_resume_session(
     let (result, is_canary) = {
         let mut agent_guard = agent.lock().await;
         let result =
-            agent_guard.restore_session_with_working_dir(&session_id, working_dir_override);
+            agent_guard.restore_session_with_working_dir(&session_id, bound_working_dir.as_deref());
         if *client_selfdev {
             agent_guard.set_canary("self-dev");
         }

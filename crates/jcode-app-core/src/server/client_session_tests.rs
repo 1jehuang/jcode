@@ -1,10 +1,12 @@
+use super::subscribe_working_dir_policy::{
+    effective_subscribe_working_dir, subscribe_working_dir_replacement,
+};
 use super::{
-    apply_or_defer_subscribe_working_dir, claim_live_target_agent, effective_subscribe_working_dir,
-    handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
-    mark_remote_reload_started, prewarm_idle_agent, remove_detached_source_if_unclaimed,
-    rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
-    session_was_interrupted_by_reload, subscribe_should_mark_ready,
-    subscribe_working_dir_replacement,
+    apply_or_defer_subscribe_working_dir, claim_live_target_agent, handle_clear_session,
+    handle_reload, handle_resume_session, handle_subscribe, mark_remote_reload_started,
+    prewarm_idle_agent, remove_detached_source_if_unclaimed, rename_shutdown_signal,
+    rename_swarm_member_session, restored_session_was_interrupted,
+    session_was_interrupted_by_reload, session_working_dir_for_client, subscribe_should_mark_ready,
 };
 use crate::agent::Agent;
 use crate::message::ContentBlock;
@@ -381,6 +383,86 @@ async fn live_target_claim_is_atomic_with_detached_source_cleanup() {
     }
 }
 
+/// A target session belongs to a project, and attaching to it from another
+/// project must not move it. The subscriber's directory describes where the
+/// subscriber is sitting, not where the target session belongs, so letting it win
+/// re-points the target's tools, project-local MCP config, memory scope, and
+/// swarm grouping at the wrong tree.
+#[test]
+fn resume_preserves_target_working_dir_on_cross_project_attach() {
+    let target = "/home/tester/work/project-b";
+    let subscriber = "/home/tester/work/project-a";
+
+    assert_eq!(
+        session_working_dir_for_client(Some(target), Some(subscriber), false),
+        Some(target.to_string()),
+        "a cross-project attach must not re-pin the target session"
+    );
+
+    // Same project from both sides: unchanged either way, including when the two
+    // sides spell it differently (trailing separator, `..`, symlink).
+    assert_eq!(
+        session_working_dir_for_client(Some(target), Some(target), false),
+        Some(target.to_string())
+    );
+    assert_eq!(
+        session_working_dir_for_client(
+            Some("/home/tester/work/project-b"),
+            Some("/home/tester/work/./project-b"),
+            false
+        ),
+        Some("/home/tester/work/project-b".to_string())
+    );
+    assert_eq!(
+        session_working_dir_for_client(
+            Some("/home/tester/work/project-b"),
+            Some("/home/tester/work/project-b/"),
+            false
+        ),
+        Some("/home/tester/work/project-b".to_string())
+    );
+
+    // At creation there is no stored directory to lose, so the client's is the only
+    // description of the project available and must be adopted.
+    assert_eq!(
+        session_working_dir_for_client(None, Some(subscriber), true),
+        Some(subscriber.to_string()),
+        "a session being created must adopt the client's directory"
+    );
+
+    // Once the session exists, a later report from another project is refused even
+    // when the session has no stored directory: the reported path is then a
+    // statement about the reconnecting client, not about this session. Staying
+    // unattributed is correct, because falling back to a process-global default
+    // would reintroduce the daemon-cwd bug.
+    assert_eq!(
+        session_working_dir_for_client(None, Some(subscriber), false),
+        None,
+        "a client-reported directory must not be adopted after creation"
+    );
+
+    // A target directory with no subscriber report is kept as-is.
+    assert_eq!(
+        session_working_dir_for_client(Some(target), None, false),
+        Some(target.to_string())
+    );
+
+    // Neither side reports a directory: stay unattributed rather than inventing
+    // one. Falling back to the daemon's cwd here would be the isolation bug.
+    assert_eq!(session_working_dir_for_client(None, None, false), None);
+    assert_eq!(session_working_dir_for_client(None, None, true), None);
+
+    // Blank reports are not directories and must not clobber or override.
+    assert_eq!(
+        session_working_dir_for_client(Some(target), Some("   "), false),
+        Some(target.to_string())
+    );
+    assert_eq!(
+        session_working_dir_for_client(Some("  "), Some(subscriber), true),
+        Some(subscriber.to_string())
+    );
+}
+
 /// Issue #481: a subscribe cwd that is merely absolute is not enough. A client
 /// reporting the *home* directory must not silently re-pin (or clobber) a
 /// session that is already bound to a real project directory, because tools then
@@ -470,7 +552,7 @@ fn effective_subscribe_working_dir_binds_all_consumers_to_one_directory() {
 /// bash/file tools actually run in. The pure-resolver tests above cover the
 /// decision; this covers the wiring that applies it.
 #[tokio::test]
-async fn apply_subscribe_working_dir_keeps_project_when_client_reports_home() {
+async fn apply_subscribe_working_dir_keeps_project_when_client_reports_another_dir() {
     let home = dirs::home_dir().expect("home directory");
     let home_str = home.to_string_lossy().to_string();
     let project = home.join("jcode-481-project");
@@ -490,22 +572,77 @@ async fn apply_subscribe_working_dir_keeps_project_when_client_reports_home() {
         "precondition: session starts bound to the project"
     );
 
-    // A client whose inherited cwd is home must not re-pin the session.
-    apply_or_defer_subscribe_working_dir(&agent, &home_str, "session_test_481");
+    // A client whose inherited cwd is home must not re-pin the session (issue #481).
+    apply_or_defer_subscribe_working_dir(&agent, &home_str, "session_test_481", false);
     assert_eq!(
         agent.lock().await.working_dir(),
         Some(project_str.as_str()),
         "a home-dir subscribe must not clobber the project cwd"
     );
 
-    // A genuine project-to-project move still applies.
+    // A different project reported by a later client is refused, not just a home
+    // directory. This used to assert that a project-to-project move was honored,
+    // which is the bug this rule removes: the request is identical to the one an
+    // attach sends, so honoring it let any reconnecting client retarget an
+    // existing session. Moving a session to another project on purpose needs an
+    // explicit request that does not exist yet.
     let other = home.join("jcode-481-other");
     let other_str = other.to_string_lossy().to_string();
-    apply_or_defer_subscribe_working_dir(&agent, &other_str, "session_test_481");
+    apply_or_defer_subscribe_working_dir(&agent, &other_str, "session_test_481", false);
     assert_eq!(
         agent.lock().await.working_dir(),
+        Some(project_str.as_str()),
+        "a client-reported directory must not move an existing session to another project"
+    );
+
+    // A session with no directory yet still adopts one. That is the creation case,
+    // where the reported path is the only description of the project available.
+    let fresh_provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    // `Agent::new_with_initial_working_dir(.., None)` is not dir-less in practice:
+    // `Session::ensure_initial_session_context_message` stamps the daemon process
+    // cwd when the directory is None (jcode-base/src/session.rs). Seed a session
+    // that already has its context message so that stamping never runs, leaving
+    // the directory genuinely unset for the creation case.
+    let mut fresh_session = crate::session::Session::create(None, None);
+    fresh_session.ensure_initial_session_context_message();
+    assert!(
+        fresh_session.working_dir.is_some(),
+        "precondition: seeding the context stamps the daemon process cwd"
+    );
+    fresh_session.working_dir = None;
+    let fresh = Agent::new_with_session(
+        Arc::clone(&fresh_provider),
+        Registry::new(Arc::clone(&fresh_provider)).await,
+        fresh_session,
+        None,
+    );
+    let fresh = Arc::new(Mutex::new(fresh));
+    assert_eq!(
+        fresh.lock().await.working_dir(),
+        None,
+        "precondition: the fresh session has no directory yet"
+    );
+
+    // An existing unattributed session being attached to (is_creation: false)
+    // must NOT adopt the client directory (issue 3).
+    apply_or_defer_subscribe_working_dir(
+        &fresh,
+        &other_str,
+        "session_test_481_unattributed",
+        false,
+    );
+    assert_eq!(
+        fresh.lock().await.working_dir(),
+        None,
+        "an existing unattributed session being attached to must not adopt the subscriber's directory"
+    );
+
+    // But during session creation (is_creation: true), it adopts it.
+    apply_or_defer_subscribe_working_dir(&fresh, &other_str, "session_test_481_fresh", true);
+    assert_eq!(
+        fresh.lock().await.working_dir(),
         Some(other_str.as_str()),
-        "a real directory change must still be honored"
+        "a session being created must adopt the reported directory"
     );
 }
 
