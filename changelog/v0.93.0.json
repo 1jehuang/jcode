@@ -1,0 +1,24 @@
+{
+  "version": "0.93.0",
+  "date": "2026-10-09",
+  "title": "Instant startup",
+  "highlights": [
+    "New sessions paint their first frame in about 20ms instead of about 135ms, and the screen no longer shifts while connecting",
+    "Opening several sessions in quick succession is fast again, and resuming large sessions is about three times quicker",
+    "New post_tool_feedback hook feeds a script's output back to the model after each tool call, and post_tool hooks now receive the tool input, call id, and touched paths"
+  ],
+  "improvements": [
+    "The jcode: model prefix and JCODE_OPENROUTER_MODEL are honored, and jcode run fails clearly when --model cannot be applied",
+    "Onboarding predicts your default provider and model from existing logins",
+    "Expired status notices clear on their own without waiting for a keypress",
+    "Old build binaries and stale scratch files are pruned automatically",
+    "Web search hints no longer recommend the retired Bing Search API",
+    "jcode builds on FreeBSD"
+  ],
+  "fixes": [
+    "New sessions no longer show \"Waiting for reload handoff\" right after a reload",
+    "--provider-profile works with Anthropic-compatible profiles",
+    "Copy selections that end inside a wide character include that character",
+    "The warning gate fails closed on cargo check errors and prints the diagnostics"
+  ]
+}
