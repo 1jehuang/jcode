@@ -84,6 +84,8 @@ pub use app::{App, CloudHandoff, CopyBadgeUiState, ProcessingStatus, RunResult};
 use crate::message::ToolCall;
 use ratatui::prelude::Frame;
 use ratatui::text::Line;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub(crate) fn scheduled_notification_text(
@@ -116,6 +118,44 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
         | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
+/// Whether this process still owns an unbalanced entry on the terminal's
+/// Kitty keyboard-protocol stack.
+///
+/// The stack is shared with every program on the terminal: an editor spawned
+/// via `suspend_terminal_for_editor` may push its own entry after jcode popped
+/// ours. A later cleanup (signal handler, guard drop, picker exit) must not pop
+/// again, or it would remove the editor's entry instead of ours.
+static KITTY_KEYBOARD_PUSH_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether an external editor currently owns the terminal.
+///
+/// During editor handoff jcode has already restored cooked input, left the
+/// alternate screen, and disabled its reporting modes. If jcode receives a
+/// process-only termination signal while the editor remains alive, cleanup must
+/// not write mode disables again because the editor may have enabled those modes
+/// for itself.
+static EDITOR_TERMINAL_OWNERSHIP: AtomicBool = AtomicBool::new(false);
+
+/// Whether a termination signal has already begun the process's final cleanup.
+///
+/// Once termination started, the process is exiting and the shell behind it
+/// must inherit a fully restored terminal. Re-arming any mode afterwards (an
+/// editor reclaim/resume that lost the race against the signal cleanup) would
+/// leave modes enabled after death because no further cleanup runs (greptile
+/// #4232838288). Recorded under the kitty state lock so it cannot interleave
+/// with the reclaim's ownership swap.
+static TERMINATION_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Serializes the terminal writes and the ownership flag transitions of the
+/// Kitty push/pop pair. A termination signal (tokio task, not a UNIX signal
+/// handler, so taking a lock is allowed) runs its terminal cleanup on the
+/// event loop; this lock makes that cleanup wait for an in-flight push or pop
+/// to finish instead of observing a half-applied state and skipping the pop.
+static KITTY_KEYBOARD_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+pub(crate) static TERMINAL_OWNERSHIP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// Request Kitty keyboard reporting and tmux's extended-key mode.
 ///
 /// Intentionally avoid REPORT_ALL_KEYS_AS_ESCAPE_CODES for now. When that flag is enabled,
@@ -127,12 +167,41 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
 ///
 /// Returns whether the requests were written, not whether the terminal supports them.
 pub fn enable_keyboard_enhancement() -> bool {
+    let _guard = kitty_keyboard_state_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if termination_started() {
+        crate::logging::info("Keyboard enhancement request skipped: termination already started");
+        return false;
+    }
     let result = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux()).is_ok();
     crate::logging::info(&format!(
         "Keyboard enhancement request: {}",
         if result { "sent" } else { "FAILED" }
     ));
+    if result {
+        // Set while still holding the state lock so a signal cleanup cannot
+        // observe the push write without the ownership flag.
+        kitty_keyboard_push_active().store(true, Ordering::Release);
+    }
     result
+}
+
+/// Adopt a Kitty keyboard entry the previous process left on the stack when
+/// it exec'd into this one (restart, reload, rebuild, update).
+///
+/// The exec handoff deliberately keeps the terminal in raw mode with all
+/// modes armed instead of popping and re-pushing, so this process must record
+/// that the inherited entry is ours to pop on exit. Otherwise every cleanup
+/// gate skips the pop and the following shell is left in CSI u mode.
+pub fn adopt_keyboard_enhancement_ownership() {
+    let _guard = kitty_keyboard_state_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if termination_started() {
+        return;
+    }
+    kitty_keyboard_push_active().store(true, Ordering::Release);
 }
 
 fn inside_tmux() -> bool {
@@ -152,8 +221,131 @@ fn enable_keyboard_enhancement_to(
 }
 
 /// Reset tmux extended keys and pop Kitty keyboard reporting.
+///
+/// The pop is skipped when this process has no unbalanced push on the
+/// terminal's stack (a suspended editor or the calling shell may own the top
+/// entry), so an extra pop cannot remove someone else's keyboard settings.
 pub fn disable_keyboard_enhancement() {
-    let _ = disable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux());
+    if !disable_keyboard_enhancement_if_owned() {
+        crate::logging::info("Keyboard enhancement pop skipped: no active push owned");
+    }
+}
+
+/// Pop the Kitty keyboard entry this process pushed, if it is still unbalanced.
+///
+/// Returns whether a pop was performed. The state lock orders this against
+/// a concurrent push or signal cleanup, so the flag swap and the pop write
+/// happen as one unit: termination waits for the pop instead of exiting with
+/// the entry still active.
+pub fn disable_keyboard_enhancement_if_owned() -> bool {
+    disable_keyboard_enhancement_if_owned_to(&mut std::io::stdout(), inside_tmux())
+}
+
+/// Writer-backed form of [`disable_keyboard_enhancement_if_owned`] so tests
+/// can verify the pop bytes without writing to the developer's terminal or
+/// resetting tmux extended keys.
+fn disable_keyboard_enhancement_if_owned_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> bool {
+    let _guard = kitty_keyboard_state_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if !kitty_keyboard_push_active().swap(false, std::sync::atomic::Ordering::AcqRel) {
+        return false;
+    }
+    let _ = disable_keyboard_enhancement_to(writer, inside_tmux);
+    true
+}
+
+/// Test hook: reset the ownership flag without touching the terminal.
+#[cfg(test)]
+fn reset_keyboard_enhancement_ownership_for_test() {
+    kitty_keyboard_push_active().store(false, Ordering::Release);
+}
+
+fn kitty_keyboard_push_active() -> &'static AtomicBool {
+    &KITTY_KEYBOARD_PUSH_ACTIVE
+}
+
+fn kitty_keyboard_state_lock() -> &'static Mutex<()> {
+    &KITTY_KEYBOARD_STATE_LOCK
+}
+
+pub fn editor_owns_terminal() -> bool {
+    EDITOR_TERMINAL_OWNERSHIP.load(Ordering::Acquire)
+}
+
+pub fn set_editor_terminal_ownership(owns_terminal: bool) {
+    EDITOR_TERMINAL_OWNERSHIP.store(owns_terminal, Ordering::Release);
+}
+
+/// Publish that an external editor owns the terminal, atomically with the
+/// signal cleanup's ownership check (both take the kitty state lock).
+///
+/// Callers must only publish AFTER jcode's own terminal restores finished
+/// (`suspend_terminal_for_editor` completed): while the restores are in flight
+/// the flag must stay false so a termination signal in that window performs a
+/// full cleanup instead of skipping one and leaving the shell in raw mode
+/// (greptile #4230626960).
+pub fn publish_editor_terminal_handoff() {
+    with_kitty_state_lock(|| {
+        set_editor_terminal_ownership(true);
+    });
+}
+
+/// Reclaim the terminal after the editor exited, atomically with the signal
+/// cleanup's ownership check. Called before `resume_terminal_after_editor`
+/// re-arms jcode's own modes: a signal arriving after the editor exited must
+/// run the full cleanup against whatever state the resume loop has armed so
+/// far, not skip it.
+pub fn reclaim_editor_terminal_handoff() {
+    with_kitty_state_lock(|| {
+        // The signal cleanup released the lock but the process has not exited
+        // yet: this reclaim runs in that gap, and letting the subsequent resume
+        // re-arm modes would leave them enabled after death because no further
+        // cleanup runs (greptile #4232838288). Leave ownership set so the
+        // resume loop sees the terminating state and writes nothing.
+        if termination_started() {
+            return;
+        }
+        set_editor_terminal_ownership(false);
+    });
+}
+
+/// Run `cleanup` while holding the kitty state lock, so an in-flight editor
+/// handoff publication or reclaim (which takes the same lock) is ordered
+/// against it. A signal arriving mid-handoff then sees a consistent state:
+/// either jcode still owns the terminal (restore everything) or the editor
+/// does (skip).
+pub fn with_kitty_state_lock<R>(cleanup: impl FnOnce() -> R) -> R {
+    let lock = kitty_keyboard_state_lock();
+    let _state = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    cleanup()
+}
+
+/// Record that termination has begun, under the kitty state lock.
+///
+/// Called by the termination-signal cleanup as soon as it decides what to do
+/// with the terminal. Recording under the same lock as the editor handoff's
+/// publish/reclaim closes the gap between this cleanup releasing the lock and
+/// the process actually exiting: a reclaim racing into that gap observes the
+/// flag and leaves the terminal modes alone, so the shell receives normal
+/// input after jcode dies instead of escape sequences (greptile #4232838288).
+pub fn record_termination_started() {
+    with_kitty_state_lock(|| {
+        TERMINATION_STARTED.store(true, Ordering::Release);
+    });
+}
+
+fn termination_started() -> bool {
+    TERMINATION_STARTED.load(Ordering::Acquire)
+}
+
+/// Test hook: clear the shared termination flag without touching the terminal.
+#[cfg(test)]
+fn reset_termination_started_for_test() {
+    TERMINATION_STARTED.store(false, Ordering::Release);
 }
 
 fn disable_keyboard_enhancement_to(
@@ -247,9 +439,117 @@ fn reapply_terminal_modes_after_focus_to(
 mod terminal_mode_tests {
     use super::{
         disable_keyboard_enhancement_to, enable_keyboard_enhancement_to,
-        reapply_keyboard_enhancement_to, reapply_terminal_modes_after_focus_to,
-        reapply_terminal_modes_to,
+        kitty_keyboard_push_active, reapply_keyboard_enhancement_to,
+        reapply_terminal_modes_after_focus_to, reapply_terminal_modes_to,
+        reset_keyboard_enhancement_ownership_for_test,
     };
+
+    #[test]
+    fn disable_skips_kitty_pop_when_no_push_is_owned() {
+        let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_keyboard_enhancement_ownership_for_test();
+
+        // Greptile #4228191597: suspend_terminal_for_editor already popped our
+        // entry while the editor runs, so an extra pop (signal handler firing in
+        // that window) must be a no-op instead of removing the editor's own
+        // stack entry.
+        assert!(!super::disable_keyboard_enhancement_if_owned());
+        assert!(!kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
+
+        reset_keyboard_enhancement_ownership_for_test();
+    }
+
+    #[test]
+    fn disable_pops_kitty_entry_exactly_once_then_ownership_is_released() {
+        let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_keyboard_enhancement_ownership_for_test();
+
+        // Greptile #4228894633: run the pop against a buffer so the test never
+        // writes the pop (or the tmux extended-keys reset) to the developer's
+        // real terminal.
+        kitty_keyboard_push_active().store(true, std::sync::atomic::Ordering::Release);
+        let mut output = Vec::new();
+        assert!(super::disable_keyboard_enhancement_if_owned_to(
+            &mut output,
+            false
+        ));
+        assert!(!output.is_empty());
+        assert!(!kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
+
+        // A second cleanup (SIGTERM during the editor window, or a duplicated
+        // teardown) must not pop again now that the ownership is released.
+        let mut second = Vec::new();
+        assert!(!super::disable_keyboard_enhancement_if_owned_to(
+            &mut second,
+            false
+        ));
+        assert!(second.is_empty());
+
+        reset_keyboard_enhancement_ownership_for_test();
+    }
+
+    #[test]
+    fn adopt_records_inherited_entry_without_pushing() {
+        let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_keyboard_enhancement_ownership_for_test();
+
+        // Greptile #4228894613: after an exec handoff the entry is already on
+        // the stack, so adopting must only record ownership — no push bytes —
+        // and the pop must then balance the inherited entry.
+        super::adopt_keyboard_enhancement_ownership();
+        assert!(kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
+
+        let mut output = Vec::new();
+        assert!(super::disable_keyboard_enhancement_if_owned_to(
+            &mut output,
+            false
+        ));
+        assert_eq!(output, b"\x1b[<1u");
+
+        reset_keyboard_enhancement_ownership_for_test();
+    }
+
+    #[test]
+    fn cleanup_waits_for_in_flight_kitty_push_to_finish() {
+        let _guard = super::TERMINAL_OWNERSHIP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        reset_keyboard_enhancement_ownership_for_test();
+
+        // Greptile #4228894626: a termination cleanup must not observe the
+        // half-applied state between the push write and the ownership flag,
+        // so the disable waits for the state lock instead of racing it. Hold
+        // the lock, set the flag as if a push just completed, and confirm a
+        // concurrent cleanup stays blocked until the lock is released.
+        let state_guard = super::kitty_keyboard_state_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        kitty_keyboard_push_active().store(true, std::sync::atomic::Ordering::Release);
+
+        let cleanup = std::thread::spawn(|| {
+            // Buffer-backed so the blocked cleanup writes no bytes to the
+            // developer's terminal; the flag swap is the observable effect.
+            let mut sink = Vec::new();
+            super::disable_keyboard_enhancement_if_owned_to(&mut sink, false)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // The cleanup is still blocked on the state lock we hold, so the flag
+        // must be untouched and the thread must not have returned yet.
+        assert!(!cleanup.is_finished());
+        assert!(kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
+
+        drop(state_guard);
+        assert!(cleanup.join().expect("cleanup thread"));
+        assert!(!kitty_keyboard_push_active().load(std::sync::atomic::Ordering::Acquire));
+
+        reset_keyboard_enhancement_ownership_for_test();
+    }
 
     #[test]
     fn tmux_keyboard_lifecycle_requests_and_resets_extended_keys() {
