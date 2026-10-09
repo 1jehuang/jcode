@@ -967,6 +967,72 @@ async fn startup_recovery_resumes_interrupted_headless_sessions_after_reload() -
 #[tokio::test]
 #[allow(
     clippy::await_holding_lock,
+    reason = "test serializes process-wide JCODE_HOME while checking startup recovery"
+)]
+async fn passive_restart_restore_does_not_continue_headless_session() -> Result<()> {
+    let _storage_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new()?;
+    let _env = configure_test_env(&temp);
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("unexpected continuation".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+
+    let mut session = crate::session::Session::create(None, Some("paused worker".to_string()));
+    session.add_message(
+        Role::User,
+        vec![crate::message::ContentBlock::ToolResult {
+            tool_use_id: "tool_bash".to_string(),
+            content: "[Tool 'bash' interrupted by server reload]".to_string(),
+            is_error: Some(true),
+        }],
+    );
+    session.save()?;
+    ReloadContext {
+        task_context: Some("continue pending work".to_string()),
+        version_before: "old".to_string(),
+        version_after: "new".to_string(),
+        session_id: session.id.clone(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    }
+    .save()?;
+    crate::restart_snapshot::mark_passive_restore(&session.id)?;
+
+    let swarm_id = "swarm-paused-restart";
+    persist_swarm_state_snapshot(
+        swarm_id,
+        None,
+        None,
+        &[persisted_headless_member(
+            &session.id,
+            swarm_id,
+            "running",
+            "bash tool",
+        )],
+    );
+    let server = Server::new(provider.clone());
+    server.recover_headless_sessions_on_startup().await;
+
+    assert_eq!(provider.responses.lock().expect("response queue").len(), 1);
+    assert_eq!(
+        server
+            .swarm_state
+            .members
+            .read()
+            .await
+            .get(&session.id)
+            .map(|member| member.status.as_str()),
+        Some("ready")
+    );
+    assert!(crate::restart_snapshot::is_passive_restore(&session.id)?);
+    assert!(ReloadContext::peek_for_session(&session.id)?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+#[allow(
+    clippy::await_holding_lock,
     reason = "test intentionally serializes process-wide JCODE_HOME/env state across async recovery assertions"
 )]
 async fn startup_recovery_preserves_headed_session_reload_context_for_later_reconnect() -> Result<()>
@@ -1147,4 +1213,106 @@ async fn startup_ready_signal_is_not_blocked_by_headless_recovery_delay() -> Res
     .expect("accept loops should observe runtime cancellation");
 
     Ok(())
+}
+
+#[tokio::test]
+async fn passive_restore_delivers_background_notifications_without_waking() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _env = configure_test_env(&temp);
+    let provider: Arc<dyn Provider> = Arc::new(StreamingMockProvider::default());
+    let agent = test_agent(provider).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let queue = agent.lock().await.soft_interrupt_queue();
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        agent.clone(),
+    )])));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        queue.clone(),
+    )])));
+    let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        attached_swarm_member(&session_id, member_event_tx),
+    )])));
+    crate::restart_snapshot::mark_passive_restore(&session_id).unwrap();
+    let task = BackgroundTaskCompleted {
+        task_id: "bgnotify".to_string(),
+        tool_name: "bash".to_string(),
+        display_name: None,
+        session_id: session_id.clone(),
+        status: BackgroundTaskStatus::Completed,
+        exit_code: Some(0),
+        output_preview: "ok\n".to_string(),
+        output_file: std::env::temp_dir().join("bgnotify.output"),
+        duration_secs: 0.7,
+        notify: true,
+        wake: true,
+    };
+
+    let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
+    dispatch_background_task_completion(
+        &task,
+        &sessions,
+        &soft_interrupt_queues,
+        &swarm_members,
+        &swarms_by_id,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let notification = timeout(Duration::from_secs(2), member_event_rx.recv())
+        .await
+        .expect("background task notification should arrive promptly")
+        .expect("member stream should stay open");
+    match notification {
+        ServerEvent::Notification { message, .. } => {
+            assert!(message.contains("**Background task** `bgnotify`"));
+        }
+        other => panic!("expected notification, got {other:?}"),
+    }
+
+    let pending = queue.lock().expect("queue lock");
+    assert!(
+        pending.is_empty(),
+        "notify-only delivery should not wake the session"
+    );
+    drop(pending);
+    assert!(
+        !super::live_turn::run_live_turn_if_idle(
+            &session_id,
+            "wake",
+            None,
+            &sessions,
+            super::live_turn::LiveTurnSwarmContext::new(
+                &swarm_members,
+                &swarms_by_id,
+                &event_history,
+                &event_counter,
+                &swarm_event_tx
+            ),
+        )
+        .await
+    );
+    assert!(
+        !super::live_turn::run_live_system_turn_if_idle(
+            &session_id,
+            "scheduled work",
+            &sessions,
+            super::live_turn::LiveTurnSwarmContext::new(
+                &swarm_members,
+                &swarms_by_id,
+                &event_history,
+                &event_counter,
+                &swarm_event_tx
+            ),
+        )
+        .await
+    );
+    assert!(member_event_rx.try_recv().is_err());
+    assert_eq!(swarm_members.read().await[&session_id].status, "ready");
 }

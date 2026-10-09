@@ -1323,3 +1323,432 @@ fn test_new_for_remote_restored_interleave_triggers_dispatch_state() {
         }));
     });
 }
+
+#[test]
+fn test_passive_restore_preserves_followups_across_ticks_and_reopen() {
+    with_temp_jcode_home(|| {
+        let id = "session_passive_queues";
+        let mut original = create_test_app();
+        original.input = "draft".into();
+        original.cursor_pos = 3;
+        original.queued_messages.push("queued".into());
+        original.hidden_queued_system_messages.push("hidden".into());
+        original.interleave_message = Some("interrupt".into());
+        original.pending_soft_interrupts.push("pending".into());
+        original
+            .pending_soft_interrupt_requests
+            .push((17, "pending".into()));
+        original.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "retry".into(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: 1,
+            retry_at: None,
+        });
+        original.rate_limit_reset = Some(std::time::Instant::now());
+        original.save_input_for_reload(id);
+        crate::restart_snapshot::mark_passive_restore(id).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for _ in 0..2 {
+            let mut restored = App::new_for_remote(Some(id.into()));
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.mark_history_loaded();
+            assert!(restored.passive_restart_restore);
+            rt.block_on(super::remote::process_remote_followups(
+                &mut restored,
+                &mut remote,
+            ));
+            rt.block_on(super::remote::handle_tick(&mut restored, &mut remote));
+            assert_eq!(restored.input, "draft");
+            assert_eq!(restored.cursor_pos, 3);
+            assert_eq!(
+                restored.queued_messages(),
+                &["interrupt", "pending", "queued"]
+            );
+            assert_eq!(restored.hidden_queued_system_messages, vec!["hidden"]);
+            assert_eq!(
+                restored
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .unwrap()
+                    .content,
+                "retry"
+            );
+            assert!(!restored.is_processing);
+            assert!(restored.current_message_id.is_none());
+        }
+        assert!(App::restore_input_for_reload(id).is_some());
+    });
+}
+
+#[test]
+fn test_passive_restore_accepts_fresh_prompt_after_history_loads() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut app = create_test_app();
+        app.passive_restart_restore = true;
+        app.input = "new instructions".into();
+        let prepared = super::input::take_prepared_input(&mut app);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        rt.block_on(super::remote::submit_prepared_remote_input(
+            &mut app,
+            &mut remote,
+            prepared,
+        ))
+        .unwrap();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        assert!(app.passive_restart_restore);
+        assert!(!app.is_processing);
+        remote.mark_history_loaded();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        assert!(!app.passive_restart_restore);
+        assert!(app.is_processing);
+        assert!(app.pending_prompt_before_history.is_none());
+        assert!(app.current_message_id.is_some());
+    });
+}
+
+#[test]
+fn test_passive_restore_followups_survive_fresh_prompt_and_repeated_reopen() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let id = "session_durable_followups";
+        let mut original = create_test_app();
+        original.queued_messages.push("saved follow-up".into());
+        original
+            .hidden_queued_system_messages
+            .push("saved hidden follow-up".into());
+        original.save_input_for_reload(id);
+        crate::restart_snapshot::mark_passive_restore(id).unwrap();
+        let mut app = App::new_for_remote(Some(id.into()));
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.set_session_id(id.into());
+        remote.mark_history_loaded();
+        app.input = "fresh prompt".into();
+        let prepared = super::input::take_prepared_input(&mut app);
+        rt.block_on(super::remote::submit_prepared_remote_input(
+            &mut app,
+            &mut remote,
+            prepared,
+        ))
+        .unwrap();
+        crate::restart_snapshot::clear_passive_restore(id).unwrap();
+        // Simulate crashes without graceful-save hooks, including a crash
+        // after reopening but before the saved queue can dispatch.
+        drop(app);
+        for _ in 0..2 {
+            let reopened = App::new_for_remote(Some(id.into()));
+            assert_eq!(reopened.queued_messages(), &["saved follow-up"]);
+            assert_eq!(
+                reopened.hidden_queued_system_messages,
+                vec!["saved hidden follow-up"]
+            );
+            assert!(!reopened.submit_input_on_startup);
+            reopened.save_input_for_reload(id);
+        }
+        let mut reopened = App::new_for_remote(Some(id.into()));
+        rt.block_on(super::remote::process_remote_followups(
+            &mut reopened,
+            &mut remote,
+        ));
+        assert!(reopened.is_processing);
+        assert!(reopened.queued_messages().is_empty());
+        assert!(reopened.hidden_queued_system_messages.is_empty());
+        let unread = App::new_for_remote(Some(id.into()));
+        assert_eq!(unread.restored_retries.len(), 1);
+        assert_eq!(unread.restored_retries[0].content, "saved follow-up");
+        assert_eq!(
+            unread.restored_retries[0].system_reminder.as_deref(),
+            Some("saved hidden follow-up")
+        );
+        let request_id = reopened.current_message_id.unwrap();
+        reopened.handle_server_event(
+            crate::protocol::ServerEvent::Done { id: request_id },
+            &mut remote,
+        );
+        let after_dispatch = App::new_for_remote(Some(id.into()));
+        assert!(
+            after_dispatch.queued_messages().is_empty(),
+            "sent follow-ups must not replay"
+        );
+        assert!(after_dispatch.hidden_queued_system_messages.is_empty());
+        assert!(after_dispatch.restored_retries.is_empty());
+    });
+}
+
+#[test]
+fn test_passive_restore_checkpoints_legacy_plain_text_input() {
+    with_temp_jcode_home(|| {
+        let id = "session_legacy_plain_input";
+        let path = crate::storage::jcode_dir()
+            .unwrap()
+            .join(format!("client-input-{id}"));
+        std::fs::write(&path, "legacy draft").unwrap();
+        let mut app = create_test_app();
+        app.passive_restart_restore = true;
+        app.queued_messages.push("remaining follow-up".into());
+        app.checkpoint_restored_followups(id).unwrap();
+        let restored = App::restore_input_for_reload(id).unwrap();
+        assert_eq!(restored.queued_messages, vec!["remaining follow-up"]);
+        assert!(path.exists());
+    });
+}
+
+#[test]
+fn test_passive_restore_retry_survives_fresh_prompt_crash_and_dispatch() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for is_system in [false, true] {
+            let id = if is_system {
+                "session_saved_system_retry"
+            } else {
+                "session_saved_user_retry"
+            };
+            let path = crate::storage::jcode_dir()
+                .unwrap()
+                .join(format!("client-input-{id}"));
+            let mut original = create_test_app();
+            original.rate_limit_pending_message = Some(PendingRemoteMessage {
+                content: "saved retry".into(),
+                images: vec![("image/png".into(), "payload".into())],
+                is_system,
+                system_reminder: Some("saved reminder".into()),
+                auto_retry: true,
+                retry_attempts: 2,
+                retry_at: None,
+            });
+            original.rate_limit_reset =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+            original.save_input_for_reload(id);
+            crate::restart_snapshot::mark_passive_restore(id).unwrap();
+            let mut app = App::new_for_remote(Some(id.into()));
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.set_session_id(id.into());
+            remote.mark_history_loaded();
+            app.input = "fresh prompt".into();
+            let prepared = super::input::take_prepared_input(&mut app);
+            rt.block_on(super::remote::submit_prepared_remote_input(
+                &mut app,
+                &mut remote,
+                prepared,
+            ))
+            .unwrap();
+            crate::restart_snapshot::clear_passive_restore(id).unwrap();
+            let mut saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["restored_retries"][0]["content"], "saved retry");
+            assert_eq!(saved["restored_retries"][0]["images"][0][1], "payload");
+            assert!(
+                saved["restored_retries"][0]["retry_deadline_unix_ms"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
+            drop(app);
+            for _ in 0..2 {
+                let mut reopened = App::new_for_remote(Some(id.into()));
+                rt.block_on(super::remote::process_remote_followups(
+                    &mut reopened,
+                    &mut remote,
+                ));
+                assert!(!reopened.is_processing, "retry must respect its delay");
+                reopened.save_input_for_reload(id);
+            }
+            saved = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            saved["restored_retries"][0]["retry_deadline_unix_ms"] = serde_json::json!(0);
+            std::fs::write(&path, saved.to_string()).unwrap();
+            let mut reopened = App::new_for_remote(Some(id.into()));
+            reopened.rate_limit_reset =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+            rt.block_on(super::remote::process_remote_followups(
+                &mut reopened,
+                &mut remote,
+            ));
+            assert!(
+                reopened.current_message_id.is_none(),
+                "preserve the fresh prompt's own retry window"
+            );
+            reopened.rate_limit_reset = None;
+            let mut disconnected = crate::tui::backend::RemoteConnection::dummy();
+            disconnected.set_session_id(id.into());
+            disconnected.mark_history_loaded();
+            drop(disconnected.take_dummy_peer());
+            rt.block_on(super::remote::process_remote_followups(
+                &mut reopened,
+                &mut disconnected,
+            ));
+            assert!(!reopened.is_processing);
+            let after_failure: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(
+                after_failure["restored_retries"][0]["content"],
+                "saved retry"
+            );
+            reopened.is_processing = true;
+            rt.block_on(super::remote::process_remote_followups(
+                &mut reopened,
+                &mut remote,
+            ));
+            assert!(
+                reopened.current_message_id.is_none(),
+                "do not interrupt a running fresh prompt"
+            );
+            reopened.is_processing = false;
+            if is_system {
+                rt.block_on(super::remote::handle_tick(&mut reopened, &mut remote));
+            } else {
+                rt.block_on(super::remote::process_remote_followups(
+                    &mut reopened,
+                    &mut remote,
+                ));
+            }
+            let sent = reopened.rate_limit_pending_message.as_ref().unwrap();
+            assert_eq!(sent.content, "saved retry");
+            assert_eq!(sent.images, vec![("image/png".into(), "payload".into())]);
+            assert_eq!(sent.system_reminder.as_deref(), Some("saved reminder"));
+            assert_eq!(sent.is_system, is_system);
+            assert!(sent.auto_retry);
+            assert_eq!(sent.retry_attempts, 2);
+            // The dummy socket is connected but unread: writing to it is
+            // not evidence that the server accepted the request.
+            let unread = App::new_for_remote(Some(id.into()));
+            assert_eq!(unread.restored_retries.len(), 1);
+            reopened.save_input_for_reload(id);
+            let saved_inflight = App::restore_input_for_reload(id).unwrap();
+            assert_eq!(saved_inflight.restored_retries.len(), 1);
+            assert!(saved_inflight.queued_messages.is_empty());
+            assert!(saved_inflight.hidden_queued_system_messages.is_empty());
+            assert!(saved_inflight.rate_limit_pending_message.is_none());
+            let request_id = reopened.current_message_id.unwrap();
+            reopened.handle_server_event(
+                crate::protocol::ServerEvent::Done {
+                    id: request_id + 100,
+                },
+                &mut remote,
+            );
+            assert_eq!(
+                reopened.restored_retries.len(),
+                1,
+                "unrelated completion cannot consume a retry"
+            );
+            reopened.handle_server_event(
+                crate::protocol::ServerEvent::Done { id: request_id },
+                &mut remote,
+            );
+            let mut after_dispatch = App::new_for_remote(Some(id.into()));
+            rt.block_on(super::remote::process_remote_followups(
+                &mut after_dispatch,
+                &mut remote,
+            ));
+            assert!(
+                !after_dispatch.is_processing,
+                "completed retry must not replay"
+            );
+        }
+    });
+}
+
+#[test]
+fn test_restored_retry_rejection_retains_checkpoint() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let id = "session_rejected_retry";
+        let mut app = create_test_app();
+        app.restored_retries.push(PendingRemoteMessage {
+            content: "keep until completed".into(),
+            images: vec![],
+            is_system: true,
+            system_reminder: None,
+            auto_retry: true,
+            retry_attempts: 0,
+            retry_at: None,
+        });
+        app.save_input_for_reload(id);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.set_session_id(id.into());
+        remote.mark_history_loaded();
+        rt.block_on(super::remote::process_remote_followups(
+            &mut app,
+            &mut remote,
+        ));
+        let request_id = app.current_message_id.unwrap();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: request_id,
+                message: "Session is busy".into(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Done { id: request_id },
+            &mut remote,
+        );
+        let reopened = App::new_for_remote(Some(id.into()));
+        assert_eq!(reopened.restored_retries.len(), 1);
+        assert_eq!(reopened.restored_retries[0].content, "keep until completed");
+    });
+}
+
+#[test]
+fn test_restored_retry_deadline_does_not_restart_on_reopen() {
+    with_temp_jcode_home(|| {
+        for legacy_format in [false, true] {
+            let id = "session_retry_deadline";
+            let mut app = create_test_app();
+            app.restored_retries.push(PendingRemoteMessage {
+                content: "due soon".into(),
+                images: vec![],
+                is_system: true,
+                system_reminder: None,
+                auto_retry: true,
+                retry_attempts: 0,
+                retry_at: Some(std::time::Instant::now() + std::time::Duration::from_millis(300)),
+            });
+            app.save_input_for_reload(id);
+            if legacy_format {
+                let path = crate::storage::jcode_dir()
+                    .unwrap()
+                    .join(format!("client-input-{id}"));
+                let mut saved: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                saved["restored_retries"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("retry_deadline_unix_ms");
+                saved["restored_retries"][0]["retry_delay_ms"] = serde_json::json!(300);
+                std::fs::write(path, saved.to_string()).unwrap();
+            }
+            let before = App::new_for_remote(Some(id.into()));
+            assert!(before.restored_retries[0].retry_at.unwrap() > std::time::Instant::now());
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let _guard = rt.enter();
+            let mut after = App::new_for_remote(Some(id.into()));
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            remote.set_session_id(id.into());
+            remote.mark_history_loaded();
+            rt.block_on(super::remote::process_remote_followups(
+                &mut after,
+                &mut remote,
+            ));
+            assert!(
+                after.is_processing,
+                "the original deadline passed while the window was closed"
+            );
+        }
+    });
+}

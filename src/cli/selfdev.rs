@@ -98,7 +98,11 @@ async fn wait_for_reloading_server() -> bool {
     }
 }
 
-pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) -> Result<()> {
+pub async fn run_self_dev(
+    should_build: bool,
+    resume_session: Option<String>,
+    passive_restore: bool,
+) -> Result<()> {
     startup_profile::mark("run_self_dev_enter");
     crate::env::set_var(CLIENT_SELFDEV_ENV, "1");
 
@@ -231,6 +235,7 @@ pub async fn run_self_dev(should_build: bool, resume_session: Option<String>) ->
         None,
         !server_running,
         false,
+        passive_restore,
         None,
         false,
         false,

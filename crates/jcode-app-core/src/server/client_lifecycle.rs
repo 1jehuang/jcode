@@ -3433,6 +3433,27 @@ async fn start_processing_message(
         return;
     }
 
+    if crate::restart_snapshot::passive_restore_guard_active(client_session_id) {
+        if system_reminder.is_some() || (content.trim().is_empty() && images.is_empty()) {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: "Restored session is paused; submit a new message to continue".to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+        if let Err(error) =
+            super::reload_recovery::resume_passive_session_with_new_prompt(client_session_id)
+        {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: format!("Could not resume restored session: {error}"),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    }
+
     *state.client_is_processing = true;
     *state.message_id = Some(id);
     *state.session_id = Some(client_session_id.to_string());

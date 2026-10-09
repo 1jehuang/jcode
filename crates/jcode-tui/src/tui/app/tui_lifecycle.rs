@@ -31,6 +31,11 @@ impl App {
         self.interleave_images.clear();
         self.rate_limit_pending_message = restored.rate_limit_pending_message;
         self.rate_limit_reset = restored.rate_limit_reset;
+        self.restored_retries = restored.restored_retries;
+        self.restored_retry_stopped =
+            restored.restored_retry_stopped && !self.restored_retries.is_empty();
+        self.restored_retry_delivery = None;
+        self.pending_remote_is_restored_retry = false;
         self.observe_page_markdown = restored.observe_page_markdown;
         self.observe_page_updated_at_ms = restored.observe_page_updated_at_ms;
         self.set_observe_mode_enabled(restored.observe_mode_enabled, restored.observe_mode_enabled);
@@ -231,8 +236,7 @@ impl App {
 
         match outcome {
             Err(current_attempts) => {
-                self.rate_limit_pending_message = None;
-                self.rate_limit_reset = None;
+                self.stop_pending_remote_retry();
                 self.push_display_message(DisplayMessage::error(format!(
                     "{} Auto-retry limit reached after {} attempt{}. Use `/poke` again to retry manually.",
                     reason,
@@ -285,8 +289,38 @@ impl App {
     }
 
     pub(super) fn clear_pending_remote_retry(&mut self) {
+        if self.pending_remote_is_restored_retry {
+            self.stop_restored_retries();
+        }
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
+    }
+
+    /// A terminal error blocks all waiting saved work, even when the failed
+    /// request was an independent fresh prompt. Normal completion only clears
+    /// the current request and does not stop the saved queue.
+    pub(super) fn stop_pending_remote_retry(&mut self) {
+        self.stop_restored_retries();
+        self.rate_limit_pending_message = None;
+        self.rate_limit_reset = None;
+    }
+
+    fn stop_restored_retries(&mut self) {
+        if self.restored_retries.is_empty() {
+            return;
+        }
+        self.restored_retry_stopped = true;
+        self.restored_retry_delivery = None;
+        if let Some(session_id) = self
+            .remote_session_id
+            .as_deref()
+            .or(self.resume_session_id.as_deref())
+            && let Err(error) = self.checkpoint_restored_followups(session_id)
+        {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Could not save stopped retry checkpoint: {error}"
+            )));
+        }
     }
 
     /// Track a failed turn for the credential-failure circuit breaker.
@@ -321,7 +355,7 @@ impl App {
     /// session (one failed turn per resend) until the user noticed.
     pub(super) fn trip_credential_failure_breaker(&mut self, message: &str) {
         let failures = self.consecutive_credential_failures;
-        self.clear_pending_remote_retry();
+        self.stop_pending_remote_retry();
         let cleared_pokes = if self.auto_poke_incomplete_todos {
             super::commands::disable_auto_poke(self)
         } else {
@@ -514,6 +548,7 @@ impl App {
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
+            passive_restart_restore: false,
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
             onboarding_sim: false,
@@ -744,6 +779,10 @@ impl App {
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
             rate_limit_pending_message: None,
+            restored_retries: Vec::new(),
+            restored_retry_delivery: None,
+            pending_remote_is_restored_retry: false,
+            restored_retry_stopped: false,
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
@@ -976,6 +1015,7 @@ impl App {
             pending_images: Vec::new(),
             route_next_prompt_to_new_session: false,
             submit_input_on_startup: false,
+            passive_restart_restore: false,
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
             onboarding_sim: false,
@@ -1206,6 +1246,10 @@ impl App {
                 .and_then(|m| m.modified().ok()),
             rate_limit_reset: None,
             rate_limit_pending_message: None,
+            restored_retries: Vec::new(),
+            restored_retry_delivery: None,
+            pending_remote_is_restored_retry: false,
+            restored_retry_stopped: false,
             consecutive_credential_failures: 0,
             last_stream_error: None,
             last_submitted_input: None,
@@ -1358,6 +1402,19 @@ impl App {
     }
 
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        Self::new_for_remote_with_restore(resume_session, fresh_spawn, false)
+    }
+
+    pub fn new_for_remote_with_restore(
+        resume_session: Option<String>,
+        fresh_spawn: bool,
+        passive_restore: bool,
+    ) -> Self {
+        let passive_restore = passive_restore
+            || (!crate::tui::is_ssh_remote()
+                && resume_session
+                    .as_deref()
+                    .is_some_and(crate::restart_snapshot::passive_restore_guard_active));
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1368,6 +1425,7 @@ impl App {
             .unwrap_or_else(|| Session::create(None, None));
         let mut app = Self::new_minimal_with_session(provider, registry, session);
         app.is_remote = true;
+        app.passive_restart_restore = passive_restore;
         app.runtime_mode = AppRuntimeMode::RemoteClient;
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
         app.remote_startup_phase_started = Some(Instant::now());
@@ -1424,11 +1482,17 @@ impl App {
                     session_id
                 ));
             }
-            if let Some(restored) = Self::restore_input_for_reload(session_id) {
+            if let Some(restored) = Self::read_input_for_reload(session_id, !passive_restore) {
                 app.apply_restored_reload_input(restored);
+                if passive_restore {
+                    app.submit_input_on_startup = false;
+                }
             }
         }
 
+        if passive_restore {
+            app.set_status_notice("Restored session paused; submit a new message to continue");
+        }
         app.resume_session_id = resume_session;
         app
     }

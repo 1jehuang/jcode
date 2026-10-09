@@ -101,6 +101,87 @@ fn clear_snapshot_removes_saved_file() {
 }
 
 #[test]
+fn passive_marker_is_session_scoped_and_persists_until_cleared() {
+    let _guard = TestEnvGuard::new().expect("setup test env");
+    super::mark_passive_restore("session/one").expect("mark session");
+    assert!(super::is_passive_restore("session/one").expect("marker"));
+    assert!(!super::is_passive_restore("session/two").expect("marker"));
+    super::clear_passive_restore("session/one").expect("clear session");
+    assert!(!super::is_passive_restore("session/one").expect("marker"));
+}
+
+fn launch_test_snapshot() -> super::RestartSnapshot {
+    super::RestartSnapshot {
+        version: 1,
+        created_at: Utc::now(),
+        auto_restore_on_next_start: false,
+        sessions: ["first", "second", "third"]
+            .into_iter()
+            .map(|id| super::RestartSnapshotSession {
+                session_id: id.to_string(),
+                display_name: id.to_string(),
+                working_dir: None,
+                is_selfdev: false,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn failed_restore_launches_remove_only_new_unused_markers() -> anyhow::Result<()> {
+    let _guard = TestEnvGuard::new()?;
+    super::mark_passive_restore("third")?;
+    let snapshot = launch_test_snapshot();
+    let result = super::restore_snapshot_with_launcher(
+        std::path::Path::new("jcode"),
+        snapshot,
+        |session| {
+            // All sessions must be protected before the first window can start a server.
+            for id in ["first", "second", "third"] {
+                assert!(super::is_passive_restore(id)?);
+            }
+            Ok(session.session_id == "first")
+        },
+    )?;
+    assert_eq!(
+        result
+            .outcomes
+            .iter()
+            .map(|o| o.launched)
+            .collect::<Vec<_>>(),
+        [true, false, false]
+    );
+    assert!(super::is_passive_restore("first")?);
+    assert!(!super::is_passive_restore("second")?);
+    assert!(
+        super::is_passive_restore("third")?,
+        "existing pause must survive a failed retry"
+    );
+    Ok(())
+}
+
+#[test]
+fn launch_error_cleans_failed_and_unattempted_markers() -> anyhow::Result<()> {
+    let _guard = TestEnvGuard::new()?;
+    let result = super::restore_snapshot_with_launcher(
+        std::path::Path::new("jcode"),
+        launch_test_snapshot(),
+        |session| {
+            if session.session_id == "first" {
+                Ok(true)
+            } else {
+                anyhow::bail!("terminal failed")
+            }
+        },
+    );
+    assert!(result.is_err());
+    assert!(super::is_passive_restore("first")?);
+    assert!(!super::is_passive_restore("second")?);
+    assert!(!super::is_passive_restore("third")?);
+    Ok(())
+}
+
+#[test]
 fn arm_auto_restore_from_recent_crashes_captures_dead_active_sessions() {
     let _guard = TestEnvGuard::new().expect("setup test env");
 

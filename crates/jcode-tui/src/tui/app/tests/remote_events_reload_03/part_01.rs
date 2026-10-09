@@ -124,78 +124,73 @@ fn test_reload_handoff_active_when_socket_ready_marker_present() {
 
 #[test]
 fn test_handle_server_event_history_with_interruption_queues_continuation() {
-    let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
-    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    for passive_restore in [false, true] {
+        let mut app = create_test_app();
+        app.passive_restart_restore = passive_restore;
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
 
-    app.handle_server_event(
-        crate::protocol::ServerEvent::History {
-            id: 1,
-            session_id: "ses_test_123".to_string(),
-            messages: vec![crate::protocol::HistoryMessage {
-                response_stats: None,
-                role: "assistant".to_string(),
-                content: "I was working on something".to_string(),
-                tool_calls: None,
-                tool_data: None,
-            }],
-            images: vec![],
-            provider_name: Some("claude".to_string()),
-            provider_model: Some("claude-sonnet-4-20250514".to_string()),
-            subagent_model: None,
-            autoreview_enabled: None,
-            autojudge_enabled: None,
-            available_models: vec![],
-            available_model_routes: vec![],
-            mcp_servers: vec![],
-            skills: vec![],
-            total_tokens: None,
-            token_usage_totals: None,
-            all_sessions: vec![],
-            client_count: None,
-            is_canary: None,
-            server_version: None,
-            server_name: None,
-            server_icon: None,
-            server_has_update: None,
-            was_interrupted: Some(true),
-            reload_recovery: None,
-            connection_type: Some("websocket".to_string()),
-            status_detail: None,
-            upstream_provider: None,
-            resolved_credential: None,
-            reasoning_effort: None,
-            service_tier: None,
-            compaction_mode: crate::config::CompactionMode::Reactive,
-            activity: None,
-            side_panel: crate::side_panel::SidePanelSnapshot::default(),
-            applets: Default::default(),
-        },
-        &mut remote,
-    );
+        app.handle_server_event(
+            crate::protocol::ServerEvent::History {
+                id: 1,
+                session_id: "ses_test_123".to_string(),
+                messages: vec![crate::protocol::HistoryMessage {
+                    response_stats: None,
+                    role: "assistant".to_string(),
+                    content: "I was working on something".to_string(),
+                    tool_calls: None,
+                    tool_data: None,
+                }],
+                images: vec![],
+                provider_name: Some("claude".to_string()),
+                provider_model: Some("claude-sonnet-4-20250514".to_string()),
+                subagent_model: None,
+                autoreview_enabled: None,
+                autojudge_enabled: None,
+                available_models: vec![],
+                available_model_routes: vec![],
+                mcp_servers: vec![],
+                skills: vec![],
+                total_tokens: None,
+                token_usage_totals: None,
+                all_sessions: vec![],
+                client_count: None,
+                is_canary: None,
+                server_version: None,
+                server_name: None,
+                server_icon: None,
+                server_has_update: None,
+                was_interrupted: Some(true),
+                reload_recovery: None,
+                connection_type: Some("websocket".to_string()),
+                status_detail: None,
+                upstream_provider: None,
+                resolved_credential: None,
+                reasoning_effort: None,
+                service_tier: None,
+                compaction_mode: crate::config::CompactionMode::Reactive,
+                activity: None,
+                side_panel: crate::side_panel::SidePanelSnapshot::default(),
+                applets: Default::default(),
+            },
+            &mut remote,
+        );
 
-    assert!(app.display_messages().len() >= 2);
-    assert_eq!(app.connection_type.as_deref(), Some("websocket"));
-    let system_msg = app
-        .display_messages()
-        .iter()
-        .find(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
-        .expect("should have a short reload continuation message");
-    assert!(
-        system_msg
-            .content
-            .starts_with("Reload complete - continuing")
-    );
-
-    assert!(app.queued_messages().is_empty());
-    assert_eq!(app.hidden_queued_system_messages.len(), 1);
-    assert!(app.hidden_queued_system_messages[0].contains("interrupted by a server reload"));
-    assert!(
-        app.display_messages()
-            .iter()
-            .any(|m| m.role == "system" && m.content.starts_with("Reload complete - continuing"))
-    );
+        assert!(app.display_messages().len() >= if passive_restore { 1 } else { 2 });
+        assert_eq!(app.connection_type.as_deref(), Some("websocket"));
+        assert!(app.queued_messages().is_empty());
+        assert_eq!(
+            app.hidden_queued_system_messages.len(),
+            usize::from(!passive_restore)
+        );
+        assert_eq!(
+            app.display_messages().iter().any(
+                |m| m.role == "system" && m.content.starts_with("Reload complete - continuing")
+            ),
+            !passive_restore,
+        );
+    }
 }
 
 #[test]
@@ -763,7 +758,10 @@ fn test_handle_server_event_history_restores_active_resume_processing_state() {
         &mut remote,
     );
 
-    assert!(needs_redraw, "resumed session history must redraw immediately");
+    assert!(
+        needs_redraw,
+        "resumed session history must redraw immediately"
+    );
     assert!(app.is_processing());
     assert!(app.processing_started.is_some());
     assert!(app.time_since_activity().is_some());

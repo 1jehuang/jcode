@@ -16,6 +16,57 @@ pub(in crate::tui::app) async fn begin_remote_send(
     auto_retry: bool,
     retry_attempts: u8,
 ) -> Result<u64> {
+    send_remote_message(
+        app,
+        remote,
+        PendingRemoteMessage {
+            content,
+            images,
+            is_system,
+            system_reminder,
+            auto_retry,
+            retry_attempts,
+            retry_at: None,
+        },
+        false,
+    )
+    .await
+}
+
+pub(super) async fn send_remote_message(
+    app: &mut App,
+    remote: &mut RemoteConnection,
+    pending: PendingRemoteMessage,
+    restored_retry: bool,
+) -> Result<u64> {
+    let PendingRemoteMessage {
+        content,
+        images,
+        is_system,
+        system_reminder,
+        auto_retry,
+        retry_attempts,
+        ..
+    } = pending;
+    if app.passive_restart_restore
+        && (restored_retry || is_system || auto_retry || system_reminder.is_some())
+    {
+        anyhow::bail!("Restored session is paused; submit a new message to continue");
+    }
+    if app.passive_restart_restore
+        && let Some(mut pending) = app.rate_limit_pending_message.take()
+    {
+        pending.retry_at = app.rate_limit_reset.take().or(pending.retry_at);
+        app.restored_retries.push(pending);
+    }
+    // Persist the remaining follow-ups before a fresh prompt can release the
+    // server's pause. A crash during the send must still leave them recoverable.
+    if app.passive_restart_restore
+        && !crate::tui::is_ssh_remote()
+        && let Some(session_id) = remote.session_id()
+    {
+        app.checkpoint_restored_followups(session_id)?;
+    }
     let msg_id = remote
         .send_message_with_images_reminder_and_skill(
             content.clone(),
@@ -24,6 +75,54 @@ pub(in crate::tui::app) async fn begin_remote_send(
             app.active_skill.clone(),
         )
         .await?;
+    let pending_delivery = PendingRemoteMessage {
+        content: content.clone(),
+        images: images.clone(),
+        is_system,
+        system_reminder: system_reminder.clone(),
+        auto_retry,
+        retry_attempts,
+        retry_at: None,
+    };
+    // Only a dispatch of the saved entry owns its completion. Equal payloads
+    // can be independent user requests (or independent queued follow-ups).
+    let retain_followup = is_system
+        && !restored_retry
+        && !crate::tui::is_ssh_remote()
+        && remote
+            .session_id()
+            .is_some_and(App::has_retained_followup_checkpoint);
+    if retain_followup {
+        app.restored_retries.insert(0, pending_delivery.clone());
+    }
+    app.pending_remote_is_restored_retry = restored_retry || retain_followup;
+    if !restored_retry && !is_system && !auto_retry && system_reminder.is_none() {
+        app.restored_retry_stopped = false;
+    }
+    if restored_retry && let Some(saved) = app.restored_retries.first_mut() {
+        saved.retry_attempts = retry_attempts;
+    }
+    if app.pending_remote_is_restored_retry
+        && let Some(session_id) = remote.session_id()
+    {
+        app.restored_retry_delivery = Some(super::super::RestoredRetryDelivery {
+            session_id: session_id.to_string(),
+            request_id: msg_id,
+        });
+    }
+    app.rate_limit_pending_message = Some(pending_delivery);
+    if !app.passive_restart_restore
+        && !crate::tui::is_ssh_remote()
+        && let Some(session_id) = remote.session_id()
+        && let Err(error) = app.checkpoint_restored_followups(session_id)
+    {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Could not update saved follow-ups: {error}"
+        )));
+    }
+    if !is_system {
+        app.passive_restart_restore = false;
+    }
     app.current_message_id = Some(msg_id);
     app.deferred_stream_done_id = None;
     app.is_processing = true;
@@ -47,15 +146,6 @@ pub(in crate::tui::app) async fn begin_remote_send(
     app.thought_line_inserted = false;
     app.thinking_prefix_emitted = false;
     app.thinking_buffer.clear();
-    app.rate_limit_pending_message = Some(PendingRemoteMessage {
-        content,
-        images,
-        is_system,
-        system_reminder,
-        auto_retry,
-        retry_attempts,
-        retry_at: None,
-    });
     app.autoreview_after_current_turn = !is_system;
     app.autojudge_after_current_turn = !is_system;
     remote.reset_call_output_tokens_seen();
@@ -343,7 +433,13 @@ pub(in crate::tui::app) fn begin_remote_split_launch(app: &mut App, label: &str)
 }
 
 pub(in crate::tui::app) fn finish_remote_split_launch(app: &mut App) {
-    if !app.is_processing || app.current_message_id.is_some() {
+    // Launch setup clears these markers. If they returned, a live attached
+    // turn has taken over; completed-turn token statistics are not activity.
+    if !app.is_processing
+        || app.current_message_id.is_some()
+        || app.remote_resume_activity.is_some()
+        || app.status_detail.is_some()
+    {
         return;
     }
     if !matches!(app.status, ProcessingStatus::Sending) {

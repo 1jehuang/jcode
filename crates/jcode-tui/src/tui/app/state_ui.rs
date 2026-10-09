@@ -17,6 +17,8 @@ pub(super) struct RestoredReloadInput {
     pub pending_soft_interrupt_resend: Option<Vec<String>>,
     pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
     pub rate_limit_reset: Option<Instant>,
+    pub restored_retries: Vec<super::PendingRemoteMessage>,
+    pub restored_retry_stopped: bool,
     pub observe_mode_enabled: bool,
     pub observe_page_markdown: String,
     pub observe_page_updated_at_ms: u64,
@@ -229,8 +231,10 @@ impl App {
     }
 
     pub(super) fn save_input_for_reload(&self, session_id: &str) {
+        let pending_is_restored = self.pending_remote_is_restored_retry;
         let resume_prompt = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            !pending.auto_retry
+            !pending_is_restored
+                && !pending.auto_retry
                 && !pending.is_system
                 && (!pending.content.trim().is_empty() || !pending.images.is_empty())
         });
@@ -241,7 +245,8 @@ impl App {
         // the queued/hidden lists instead; the restored queue re-sends it once
         // the turn is proven idle (issue #391).
         let inflight_continuation = self.rate_limit_pending_message.as_ref().filter(|pending| {
-            pending.is_system
+            !pending_is_restored
+                && pending.is_system
                 && self.rate_limit_reset.is_none()
                 && (!pending.content.trim().is_empty() || pending.system_reminder.is_some())
         });
@@ -253,6 +258,7 @@ impl App {
             && self.pending_soft_interrupts.is_empty()
             && self.pending_soft_interrupt_requests.is_empty()
             && self.rate_limit_pending_message.is_none()
+            && self.restored_retries.is_empty()
             && resume_prompt.is_none()
             && !self.observe_mode_enabled
             && !self.split_view_enabled
@@ -282,34 +288,38 @@ impl App {
         }
         if let Ok(jcode_dir) = crate::storage::jcode_dir() {
             let path = jcode_dir.join(format!("client-input-{}", session_id));
-            let rate_limit_reset_in_ms =
-                if resume_prompt.is_some() || inflight_continuation.is_some() {
-                    None
-                } else {
-                    self.rate_limit_reset.map(|reset| {
-                        let now = Instant::now();
-                        if reset <= now {
-                            0
-                        } else {
-                            (reset - now).as_millis().min(u64::MAX as u128) as u64
-                        }
+            let rate_limit_reset_in_ms = if pending_is_restored
+                || resume_prompt.is_some()
+                || inflight_continuation.is_some()
+            {
+                None
+            } else {
+                self.rate_limit_reset.map(|reset| {
+                    let now = Instant::now();
+                    if reset <= now {
+                        0
+                    } else {
+                        (reset - now).as_millis().min(u64::MAX as u128) as u64
+                    }
+                })
+            };
+            let rate_limit_pending_message = if pending_is_restored
+                || resume_prompt.is_some()
+                || inflight_continuation.is_some()
+            {
+                None
+            } else {
+                self.rate_limit_pending_message.as_ref().map(|pending| {
+                    serde_json::json!({
+                        "content": pending.content,
+                        "images": pending.images,
+                        "is_system": pending.is_system,
+                        "system_reminder": pending.system_reminder,
+                        "auto_retry": pending.auto_retry,
+                        "retry_attempts": pending.retry_attempts,
                     })
-                };
-            let rate_limit_pending_message =
-                if resume_prompt.is_some() || inflight_continuation.is_some() {
-                    None
-                } else {
-                    self.rate_limit_pending_message.as_ref().map(|pending| {
-                        serde_json::json!({
-                            "content": pending.content,
-                            "images": pending.images,
-                            "is_system": pending.is_system,
-                            "system_reminder": pending.system_reminder,
-                            "auto_retry": pending.auto_retry,
-                            "retry_attempts": pending.retry_attempts,
-                        })
-                    })
-                };
+                })
+            };
             let mut queued_messages = self.queued_messages.clone();
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
@@ -329,7 +339,17 @@ impl App {
                 .iter()
                 .map(|(_, content)| content.clone())
                 .collect::<Vec<_>>();
+            let retain_until_dispatch = self.passive_restart_restore
+                || std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                    .is_some_and(|value| {
+                        value.get("retain_until_dispatch").and_then(|v| v.as_bool()) == Some(true)
+                    });
             let data = serde_json::json!({
+                "retain_until_dispatch": retain_until_dispatch || !self.restored_retries.is_empty(),
+                "restored_retries": self.saved_restored_retries(),
+                "restored_retry_stopped": self.restored_retry_stopped && !self.restored_retries.is_empty(),
                 "cursor": resume_input.map(|input| input.len()).unwrap_or(self.cursor_pos),
                 "input": resume_input.unwrap_or(self.input.as_str()),
                 "pending_images": resume_images.unwrap_or(self.pending_images.as_slice()).iter().map(|(media_type, data)| serde_json::json!({
@@ -353,7 +373,11 @@ impl App {
                 "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
                 "final_response_todo_fingerprint": self.final_response_todo_fingerprint,
             });
-            let _ = std::fs::write(&path, data.to_string());
+            if retain_until_dispatch || !self.restored_retries.is_empty() {
+                let _ = crate::storage::write_json(&path, &data);
+            } else {
+                let _ = std::fs::write(&path, data.to_string());
+            }
         }
     }
 
@@ -397,14 +421,125 @@ impl App {
         crate::client_input::save_startup_submission_for_session(session_id, input, pending_images);
     }
 
+    pub(super) fn has_retained_followup_checkpoint(session_id: &str) -> bool {
+        crate::storage::jcode_dir()
+            .ok()
+            .and_then(|dir| {
+                std::fs::read_to_string(dir.join(format!("client-input-{session_id}"))).ok()
+            })
+            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+            .is_some_and(|value| {
+                value.get("retain_until_dispatch").and_then(|v| v.as_bool()) == Some(true)
+            })
+    }
+
+    fn saved_restored_retries(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.restored_retries
+                .iter()
+                .enumerate()
+                .map(|(index, saved)| {
+                    let pending = if index == 0 && self.pending_remote_is_restored_retry {
+                        self.rate_limit_pending_message.as_ref().unwrap_or(saved)
+                    } else {
+                        saved
+                    };
+                    let retry_at = if index == 0 && self.pending_remote_is_restored_retry {
+                        self.rate_limit_reset.or(pending.retry_at)
+                    } else {
+                        pending.retry_at
+                    };
+                    let mut value = serde_json::to_value(pending).expect("retry serialization");
+                    value["retry_deadline_unix_ms"] = serde_json::json!(retry_at.map(|at| {
+                        chrono::Utc::now().timestamp_millis().saturating_add(
+                            at.saturating_duration_since(Instant::now())
+                                .as_millis()
+                                .min(i64::MAX as u128) as i64,
+                        )
+                    }));
+                    value
+                })
+                .collect(),
+        )
+    }
+
+    /// Keep restored input recoverable across crashes until its queues have
+    /// been sent. Reopening a window must not consume this checkpoint.
+    pub(super) fn checkpoint_restored_followups(&self, session_id: &str) -> anyhow::Result<()> {
+        let path = crate::storage::jcode_dir()?.join(format!("client-input-{session_id}"));
+        let data = match std::fs::read_to_string(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut value = serde_json::from_str::<serde_json::Value>(&data)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        if !self.passive_restart_restore
+            && value.get("retain_until_dispatch").and_then(|v| v.as_bool()) != Some(true)
+        {
+            return Ok(());
+        }
+        // Interleaves and unacknowledged interrupts were folded into the
+        // restored queue. Save the remaining queue, not their old copies.
+        value["queued_messages"] = serde_json::json!(self.queued_messages);
+        value["hidden_queued_system_messages"] =
+            serde_json::json!(self.hidden_queued_system_messages);
+        value["interleave_message"] = serde_json::json!(self.interleave_message);
+        value["pending_soft_interrupts"] = serde_json::json!(self.pending_soft_interrupts);
+        value["pending_soft_interrupt_resend"] = serde_json::json!(
+            self.pending_soft_interrupt_requests
+                .iter()
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+        );
+        value["input"] = serde_json::json!(self.input);
+        value["cursor"] = serde_json::json!(self.cursor_pos);
+        value["pending_images"] = serde_json::json!(
+            self.pending_images
+                .iter()
+                .map(
+                    |(media_type, data)| serde_json::json!({"media_type": media_type, "data": data})
+                )
+                .collect::<Vec<_>>()
+        );
+        value["submit_on_restore"] = serde_json::json!(false);
+        value["restored_retries"] = self.saved_restored_retries();
+        value["restored_retry_stopped"] =
+            serde_json::json!(self.restored_retry_stopped && !self.restored_retries.is_empty());
+        value["rate_limit_pending_message"] = serde_json::Value::Null;
+        value["rate_limit_reset_in_ms"] = serde_json::Value::Null;
+        value["retain_until_dispatch"] = serde_json::json!(
+            self.has_queued_followups()
+                || !self.restored_retries.is_empty()
+                || self.interleave_message.is_some()
+                || !self.pending_soft_interrupt_requests.is_empty()
+        );
+        crate::storage::write_json(&path, &value)
+    }
+
     pub(super) fn restore_input_for_reload(session_id: &str) -> Option<RestoredReloadInput> {
+        Self::read_input_for_reload(session_id, true)
+    }
+
+    pub(super) fn read_input_for_reload(
+        session_id: &str,
+        consume: bool,
+    ) -> Option<RestoredReloadInput> {
         let jcode_dir = crate::storage::jcode_dir().ok()?;
         let path = jcode_dir.join(format!("client-input-{}", session_id));
         if !path.exists() {
             return None;
         }
         let data = std::fs::read_to_string(&path).ok()?;
-        let _ = std::fs::remove_file(&path);
+        let retain = serde_json::from_str::<serde_json::Value>(&data)
+            .ok()
+            .and_then(|value| value.get("retain_until_dispatch").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        if consume && !retain {
+            let _ = std::fs::remove_file(&path);
+        }
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
             let input = value
@@ -587,6 +722,52 @@ impl App {
                 pending_soft_interrupt_resend,
                 rate_limit_pending_message,
                 rate_limit_reset,
+                restored_retries: value
+                    .get("restored_retries")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                let mut pending: super::PendingRemoteMessage =
+                                    serde_json::from_value(item.clone()).ok()?;
+                                let deadline = item
+                                    .get("retry_deadline_unix_ms")
+                                    .and_then(|v| v.as_i64())
+                                    .or_else(|| {
+                                        // Migrate checkpoints from the relative-delay format
+                                        // using their write time, not the time of reopening.
+                                        let delay = item.get("retry_delay_ms")?.as_u64()?;
+                                        let written = std::fs::metadata(&path)
+                                            .ok()?
+                                            .modified()
+                                            .ok()?
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .ok()?
+                                            .as_millis();
+                                        Some(
+                                            written
+                                                .saturating_add(delay as u128)
+                                                .min(i64::MAX as u128)
+                                                as i64,
+                                        )
+                                    });
+                                pending.retry_at = deadline.map(|deadline| {
+                                    let remaining = deadline
+                                        .saturating_sub(chrono::Utc::now().timestamp_millis())
+                                        .max(0)
+                                        as u64;
+                                    Instant::now() + Duration::from_millis(remaining)
+                                });
+                                Some(pending)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                restored_retry_stopped: value
+                    .get("restored_retry_stopped")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 observe_mode_enabled,
                 observe_page_markdown,
                 observe_page_updated_at_ms,
@@ -621,6 +802,8 @@ impl App {
             pending_soft_interrupt_resend: None,
             rate_limit_pending_message: None,
             rate_limit_reset: None,
+            restored_retries: Vec::new(),
+            restored_retry_stopped: false,
             observe_mode_enabled: false,
             observe_page_markdown: String::new(),
             observe_page_updated_at_ms: 0,

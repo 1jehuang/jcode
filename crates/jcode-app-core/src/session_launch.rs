@@ -248,6 +248,9 @@ pub fn spawn_resume_in_new_terminal_with_context(
 ) -> Result<bool> {
     let title = resumed_window_title(session_id);
     let mut args = vec!["--fresh-spawn".to_string()];
+    if context.kind.as_deref() == Some("restart") {
+        args.push("--passive-restore".to_string());
+    }
     if let Some(provider_arg) = resume_provider_arg(provider_key) {
         args.push("--provider".to_string());
         args.push(provider_arg.to_string());
@@ -295,6 +298,9 @@ pub fn spawn_selfdev_in_new_terminal_with_context(
 ) -> Result<bool> {
     let selfdev_title = format!("{} [self-dev]", resumed_window_title(session_id));
     let mut args = vec!["--fresh-spawn".to_string()];
+    if context.kind.as_deref() == Some("restart") {
+        args.push("--passive-restore".to_string());
+    }
     if let Some(provider_arg) = resume_provider_arg(provider_key) {
         args.push("--provider".to_string());
         args.push(provider_arg.to_string());
@@ -429,6 +435,9 @@ pub fn spawn_resume_in_new_terminal_with_context(
     use std::process::{Command, Stdio};
 
     let mut jcode_args: Vec<String> = Vec::new();
+    if context.kind.as_deref() == Some("restart") {
+        jcode_args.push("--passive-restore".to_string());
+    }
     if let Some(provider_arg) = resume_provider_arg(provider_key) {
         jcode_args.push("--provider".to_string());
         jcode_args.push(provider_arg.to_string());
@@ -551,6 +560,9 @@ pub fn spawn_selfdev_in_new_terminal_with_context(
     use std::process::{Command, Stdio};
 
     let mut jcode_args: Vec<String> = Vec::new();
+    if context.kind.as_deref() == Some("restart") {
+        jcode_args.push("--passive-restore".to_string());
+    }
     if let Some(provider_arg) = resume_provider_arg(provider_key) {
         jcode_args.push("--provider".to_string());
         jcode_args.push(provider_arg.to_string());

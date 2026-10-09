@@ -221,7 +221,12 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         }
     }
 
-    if let Some(reset_time) = app.rate_limit_reset
+    if dispatch_restored_retry(app, remote).await {
+        return true;
+    }
+
+    if !app.passive_restart_restore
+        && let Some(reset_time) = app.rate_limit_reset
         && Instant::now() >= reset_time
     {
         app.rate_limit_reset = None;
@@ -258,17 +263,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
                 )
             };
             app.push_display_message(DisplayMessage::system(status));
-            let _ = begin_remote_send(
-                app,
-                remote,
-                pending.content,
-                pending.images,
-                pending.is_system,
-                pending.system_reminder,
-                pending.auto_retry,
-                pending.retry_attempts,
-            )
-            .await;
+            let restored_retry = app.pending_remote_is_restored_retry;
+            let _ = input_dispatch::send_remote_message(app, remote, pending, restored_retry).await;
             return true;
         }
     }
@@ -280,7 +276,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
-    if !app.is_processing && !app.queued_messages.is_empty() {
+    if !app.passive_restart_restore && !app.is_processing && !app.queued_messages.is_empty() {
         let queued_messages = std::mem::take(&mut app.queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
@@ -327,7 +323,10 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw = true;
     }
 
-    if !app.is_processing && !app.hidden_queued_system_messages.is_empty() {
+    if !app.passive_restart_restore
+        && !app.is_processing
+        && !app.hidden_queued_system_messages.is_empty()
+    {
         let reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let combined = reminders.join("\n\n");
         crate::logging::info(&format!(
@@ -1257,6 +1256,40 @@ async fn dispatch_pending_server_reload(app: &mut App, remote: &mut RemoteConnec
     }
 }
 
+async fn dispatch_restored_retry(app: &mut App, remote: &mut RemoteConnection) -> bool {
+    if app.passive_restart_restore
+        || app.restored_retry_stopped
+        || app.restored_retry_delivery.is_some()
+        // Also guard the current window before its stopped state is checkpointed.
+        || (app.pending_remote_is_restored_retry && app.rate_limit_pending_message.is_none())
+        || app.is_processing
+        || app.rate_limit_reset.is_some()
+        || !remote.has_loaded_history()
+        || app.remote_model_switch_in_flight
+        || app.auth_catalog_refresh_pending
+        || app
+            .restored_retries
+            .first()
+            .is_none_or(|pending| pending.retry_at.is_some_and(|at| at > Instant::now()))
+    {
+        return false;
+    }
+    let pending = if app.pending_remote_is_restored_retry {
+        app.rate_limit_pending_message
+            .as_ref()
+            .unwrap_or(&app.restored_retries[0])
+            .clone()
+    } else {
+        app.restored_retries[0].clone()
+    };
+    if let Err(error) = input_dispatch::send_remote_message(app, remote, pending, true).await {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to send restored retry: {error}"
+        )));
+    }
+    true
+}
+
 pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteConnection) {
     // A pending *server* reload must be dispatched even when the bootstrap
     // History payload was intentionally deferred. The runtime-identity /
@@ -1271,7 +1304,25 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         dispatch_pending_server_reload(app, remote).await;
         return;
     }
-
+    if app.passive_restart_restore {
+        // A prompt entered while History/model setup was pending is a fresh
+        // submission. Saved queues and retries remain untouched until then.
+        if remote.has_loaded_history()
+            && !app.is_processing
+            && !app.remote_model_switch_in_flight
+            && !app.auth_catalog_refresh_pending
+            && let Some(prepared) = app
+                .pending_prompt_before_history
+                .take()
+                .or_else(|| app.pending_prompt_after_model_switch.take())
+            && let Err(error) = submit_prepared_remote_input(app, remote, prepared).await
+        {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit prompt: {error}"
+            )));
+        }
+        return;
+    }
     // A headed fork stages its first prompt before launching the new client. We
     // can send that prompt immediately after Subscribe, without waiting for the
     // client to receive and render History: requests and events share one
@@ -1543,6 +1594,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
+    if dispatch_restored_retry(app, remote).await {
+        return;
+    }
+
     if let Some(interleave_msg) = app.interleave_message.take() {
         // Carry the staged attachments through. A local revert of #627 had this
         // passing `vec![]`, which silently dropped every image on an interleaved
@@ -1669,8 +1724,10 @@ const QUEUED_FOLLOWUP_STARVATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// queued follow-up has been idle-but-undispatched and re-arm the dispatch past
 /// the timeout, logging it so a recurrence is diagnosable from logs alone.
 fn detect_starved_queued_followup(app: &mut App) -> bool {
-    let starved_candidate =
-        !app.is_processing && !app.pending_queued_dispatch && app.has_queued_followups();
+    let starved_candidate = !app.passive_restart_restore
+        && !app.is_processing
+        && !app.pending_queued_dispatch
+        && app.has_queued_followups();
     if !starved_candidate {
         app.queued_followup_starved_since = None;
         return false;

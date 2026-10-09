@@ -362,7 +362,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         }
         Some(Command::Telemetry(action)) => super::telemetry::run(action)?,
         Some(Command::SelfDev { build }) => {
-            selfdev::run_self_dev(build, args.resume).await?;
+            selfdev::run_self_dev(build, args.resume, args.passive_restore).await?;
         }
         Some(Command::Debug {
             command,
@@ -623,7 +623,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             RestartCommand::Save { auto_restore } => {
                 commands::run_restart_save_command(auto_restore).await?
             }
-            RestartCommand::Restore => commands::run_restart_restore_command()?,
+            RestartCommand::Restore { yes } => commands::run_restart_restore_command(yes)?,
             RestartCommand::Status => commands::run_restart_status_command()?,
             RestartCommand::Clear => commands::run_restart_clear_command()?,
         },
@@ -1093,6 +1093,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         startup_hints,
         !server_running,
         args.fresh_spawn,
+        args.passive_restore,
         args.remote_working_dir,
         args.onboarding_sim,
         args.update_sim,

@@ -143,7 +143,7 @@ fn active_runtime_provider_key() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PendingRemoteMessage {
     content: String,
     images: Vec<(String, String)>,
@@ -151,7 +151,13 @@ struct PendingRemoteMessage {
     system_reminder: Option<String>,
     auto_retry: bool,
     retry_attempts: u8,
+    #[serde(skip)]
     retry_at: Option<Instant>,
+}
+
+struct RestoredRetryDelivery {
+    session_id: String,
+    request_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1142,6 +1148,8 @@ pub struct App {
     route_next_prompt_to_new_session: bool,
     // Restore-time flag: auto-submit restored input after startup.
     submit_input_on_startup: bool,
+    /// This client was opened from a reboot snapshot; old turns stay paused.
+    passive_restart_restore: bool,
     /// Debug guard: tracks the last reason the startup auto-submit was deferred
     /// so `process_remote_followups` logs each distinct blocker exactly once
     /// instead of spamming every tick. Used to debug headed-spawn prompts that
@@ -1654,6 +1662,10 @@ pub struct App {
     rate_limit_reset: Option<Instant>,
     // Message being sent when rate limit hit (to auto-retry in remote mode)
     rate_limit_pending_message: Option<PendingRemoteMessage>,
+    restored_retries: Vec<PendingRemoteMessage>,
+    restored_retry_delivery: Option<RestoredRetryDelivery>,
+    pending_remote_is_restored_retry: bool,
+    restored_retry_stopped: bool,
     // Consecutive turn errors that classify as credential/auth failures.
     // Reset on turn success or auth change; drives the credential-failure
     // circuit breaker that halts automatic resends (see

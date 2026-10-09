@@ -77,6 +77,10 @@ pub(crate) struct Args {
     #[arg(long, global = true, hide = true)]
     pub(crate) fresh_spawn: bool,
 
+    /// Internal: reopen a reboot snapshot without resuming pending work.
+    #[arg(long, global = true, hide = true)]
+    pub(crate) passive_restore: bool,
+
     /// Internal: canonical global hotkey that launched this process.
     #[arg(long, global = true, hide = true, value_name = "CHORD")]
     pub(crate) spawn_hotkey: Option<String>,
@@ -1015,7 +1019,11 @@ pub(crate) enum RestartCommand {
         auto_restore: bool,
     },
     /// Restore the most recently saved reboot snapshot
-    Restore,
+    Restore {
+        /// Confirm restoration without an interactive prompt
+        #[arg(long)]
+        yes: bool,
+    },
     /// Show the currently saved reboot snapshot
     Status,
     /// Remove the currently saved reboot snapshot

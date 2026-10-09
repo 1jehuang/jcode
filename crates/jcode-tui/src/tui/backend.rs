@@ -5,6 +5,8 @@
 //!
 //! Also provides debug socket events for exposing full TUI state.
 
+mod event_state;
+
 use crate::message::ToolCall;
 use crate::protocol::{AuthChanged, FeatureToggle, Request, ServerEvent};
 use crate::server;
@@ -238,7 +240,9 @@ pub struct RemoteConnection {
     _dummy_peer: Option<Stream>,
     session_id: Option<String>,
     client_instance_id: Option<String>,
+    first_request_id: u64,
     next_request_id: u64,
+    pending_session_launch_id: Option<u64>,
     // Bootstrap Done acknowledgments are not completions of a detached turn.
     // Retain recent ids because target Subscribe can acknowledge twice.
     control_done_ids: std::sync::Mutex<std::collections::VecDeque<u64>>,
@@ -284,6 +288,8 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
 }
 
 pub(crate) trait RemoteEventState {
+    fn issued_request_id(&self, id: u64) -> bool;
+    fn finish_session_launch(&mut self, id: u64) -> bool;
     fn handle_tool_start(&mut self, id: &str, name: &str);
     fn handle_tool_input(&mut self, id: Option<&str>, delta: &str);
     fn get_tool_input(&self, id: &str) -> serde_json::Value;
@@ -326,6 +332,7 @@ impl RemoteConnection {
         let socket_connect_ms = socket_connect_start.elapsed().as_millis();
         let (reader, writer) = stream.into_split();
 
+        let first_request_id = (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62);
         let mut conn = Self {
             reader: BufReader::new(reader),
             writer: Arc::new(Mutex::new(writer)),
@@ -335,7 +342,9 @@ impl RemoteConnection {
             // A reattached turn carries the old connection's request id on
             // local sockets as well as SSH. Keep its Done distinct from this
             // connection's Subscribe/GetHistory acknowledgments.
-            next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
+            first_request_id,
+            next_request_id: first_request_id,
+            pending_session_launch_id: None,
             control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
@@ -990,6 +999,7 @@ impl RemoteConnection {
         let request = Request::Split { id };
         self.next_request_id += 1;
         self.send_request(request).await?;
+        self.pending_session_launch_id = Some(id);
         Ok(id)
     }
 
@@ -999,6 +1009,7 @@ impl RemoteConnection {
         let request = Request::Transfer { id };
         self.next_request_id += 1;
         self.send_request(request).await?;
+        self.pending_session_launch_id = Some(id);
         Ok(id)
     }
 
@@ -1345,7 +1356,9 @@ impl RemoteConnection {
             _dummy_peer: Some(b),
             session_id: None,
             client_instance_id: None,
+            first_request_id: 1,
             next_request_id: 1,
+            pending_session_launch_id: None,
             control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
@@ -1429,94 +1442,6 @@ impl RemoteConnection {
     pub fn reset_call_output_tokens_seen(&mut self) {
         self.call_output_tokens_seen = 0;
     }
-}
-
-impl RemoteEventState for RemoteConnection {
-    fn handle_tool_start(&mut self, id: &str, name: &str) {
-        Self::handle_tool_start(self, id, name);
-    }
-
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        Self::handle_tool_input(self, id, delta);
-    }
-
-    fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        Self::get_tool_input(self, id)
-    }
-
-    fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        Self::handle_tool_exec(self, id, name);
-    }
-
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        Self::handle_tool_done(self, id, name, output)
-    }
-
-    fn clear_pending(&mut self) {
-        Self::clear_pending(self);
-    }
-
-    fn call_output_tokens_seen(&mut self) -> &mut u64 {
-        Self::call_output_tokens_seen(self)
-    }
-
-    fn reset_call_output_tokens_seen(&mut self) {
-        Self::reset_call_output_tokens_seen(self);
-    }
-
-    fn set_session_id(&mut self, id: String) {
-        Self::set_session_id(self, id);
-    }
-
-    fn has_loaded_history(&self) -> bool {
-        Self::has_loaded_history(self)
-    }
-
-    fn mark_history_loaded(&mut self) {
-        Self::mark_history_loaded(self);
-    }
-}
-
-impl RemoteEventState for ReplayRemoteState {
-    fn handle_tool_start(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_start(id, name);
-    }
-
-    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
-        self.tool_diff.handle_tool_input(id, delta);
-    }
-
-    fn get_tool_input(&self, id: &str) -> serde_json::Value {
-        self.tool_diff.tool_input_json(id)
-    }
-
-    fn handle_tool_exec(&mut self, id: &str, name: &str) {
-        self.tool_diff.handle_tool_exec(id, name);
-    }
-
-    fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String {
-        self.tool_diff.finish_tool(id, name, output)
-    }
-
-    fn clear_pending(&mut self) {
-        self.tool_diff.clear();
-    }
-
-    fn call_output_tokens_seen(&mut self) -> &mut u64 {
-        &mut self.call_output_tokens_seen
-    }
-
-    fn reset_call_output_tokens_seen(&mut self) {
-        self.call_output_tokens_seen = 0;
-    }
-
-    fn set_session_id(&mut self, _id: String) {}
-
-    fn has_loaded_history(&self) -> bool {
-        true
-    }
-
-    fn mark_history_loaded(&mut self) {}
 }
 
 #[cfg(test)]
