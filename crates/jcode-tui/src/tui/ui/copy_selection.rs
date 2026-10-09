@@ -1,6 +1,8 @@
 use unicode_width::UnicodeWidthStr;
 
-use super::display_width::{clamp_display_col, display_col_slice, line_display_width};
+use super::display_width::{
+    clamp_display_col, display_col_slice, display_col_slice_copy, line_display_width,
+};
 use super::url_regex_support::link_target_for_display_column;
 use super::{CopyViewportData, CopyViewportSnapshot};
 
@@ -112,7 +114,7 @@ pub(super) fn copy_selection_text_from_wrapped_lines(
 /// selected inline-math span with its `$source$` LaTeX form.
 fn semantic_slice(text: &str, start_col: usize, end_col: usize) -> std::borrow::Cow<'_, str> {
     let Some(spans) = jcode_tui_markdown::inline_math_spans_for_plain_line(text) else {
-        return std::borrow::Cow::Borrowed(display_col_slice(text, start_col, end_col));
+        return std::borrow::Cow::Borrowed(display_col_slice_copy(text, start_col, end_col));
     };
     let mut out = String::new();
     let mut col = start_col;
@@ -131,10 +133,10 @@ fn semantic_slice(text: &str, start_col: usize, end_col: usize) -> std::borrow::
         col = span.end_col.max(col);
     }
     if !replaced {
-        return std::borrow::Cow::Borrowed(display_col_slice(text, start_col, end_col));
+        return std::borrow::Cow::Borrowed(display_col_slice_copy(text, start_col, end_col));
     }
     if col < end_col {
-        out.push_str(display_col_slice(text, col, end_col));
+        out.push_str(display_col_slice_copy(text, col, end_col));
     }
     std::borrow::Cow::Owned(out)
 }
