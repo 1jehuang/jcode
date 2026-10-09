@@ -859,7 +859,11 @@ mod rerun_safety_tests {
 
         assert_eq!(pending_external_auth_review_candidates().unwrap().len(), 1);
         auth::gemini::trust_cli_auth_for_future_use().unwrap();
-        assert!(pending_external_auth_review_candidates().unwrap().is_empty());
+        assert!(
+            pending_external_auth_review_candidates()
+                .unwrap()
+                .is_empty()
+        );
         let detected = detected_external_auth_review_candidates().unwrap();
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].provider_summary(), "Gemini");

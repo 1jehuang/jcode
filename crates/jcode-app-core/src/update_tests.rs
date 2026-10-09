@@ -583,6 +583,9 @@ fn release_url_override_requires_sandboxed_home() {
         Some("http://127.0.0.1:9/release.json")
     );
     assert_eq!(release_url_override_with(url, false), None);
-    assert_eq!(release_url_override_with(Some("  ".to_string()), true), None);
+    assert_eq!(
+        release_url_override_with(Some("  ".to_string()), true),
+        None
+    );
     assert_eq!(release_url_override_with(None, true), None);
 }
