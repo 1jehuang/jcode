@@ -293,6 +293,10 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         }
         match child.try_wait() {
             Ok(Some(status)) => {
+                // The daemon is a separate process the bridge spawned, so the bridge
+                // exiting does not stop it. Stop it before joining stderr: a daemon
+                // that inherited the pipe would keep the reader blocked.
+                stop_instance_daemon(&jcode_home, &runtime_dir);
                 if let Some(reader) = stderr_reader.take() {
                     let _ = reader.join();
                 }
@@ -308,6 +312,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
             }
             Ok(None) => {}
             Err(cause) => {
+                stop_instance_daemon(&jcode_home, &runtime_dir);
                 terminate_child(&mut child);
                 cleanup_on_error();
                 return Err(Error::new(ErrorKind::StartupFailed, cause.to_string()));
@@ -316,6 +321,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    stop_instance_daemon(&jcode_home, &runtime_dir);
     terminate_child(&mut child);
     if let Some(reader) = stderr_reader.take() {
         let _ = reader.join();
@@ -853,5 +859,112 @@ mod tests {
 
         assert!(!process_exists(pid), "owned bridge process survived Drop");
         assert!(!home.exists(), "ephemeral instance home survived Drop");
+    }
+
+    /// Kills a stand-in daemon still running when the test ends, so a failed
+    /// assertion does not leak a process.
+    #[cfg(unix)]
+    struct KillOnDrop(i32);
+
+    #[cfg(unix)]
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if process_exists(self.0) {
+                // SAFETY: the pid was read from this test's own fake runtime.
+                unsafe {
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    /// Launch an ephemeral instance whose fake `jcode` starts a stand-in daemon
+    /// registered in `servers.json`, then runs `bridge_tail`. Returns the launch
+    /// result and a guard for the stand-in daemon.
+    #[cfg(unix)]
+    fn launch_with_stand_in_daemon(
+        bridge_tail: &str,
+        startup_timeout: Duration,
+    ) -> (Result<LaunchedInstance>, KillOnDrop) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let binary = sandbox.path().join("fake-jcode");
+        let captured = sandbox.path().join("daemon-pid.txt");
+        // The daemon is backgrounded inside a command substitution so it is
+        // reparented rather than left as a zombie child of the bridge, and it
+        // does not hold the bridge's stderr pipe open.
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\n\
+                 daemon=$(sleep 30 </dev/null >/dev/null 2>&1 & echo $!)\n\
+                 printf '%s' \"$daemon\" > \"$CAPTURE_PATH\"\n\
+                 printf '{{\"x\":{{\"socket\":\"%s\",\"pid\":%s}}}}' \"$JCODE_RUNTIME_DIR/jcode.sock\" \"$daemon\" > \"$JCODE_HOME/servers.json\"\n\
+                 {bridge_tail}\n"
+            ),
+        )
+        .expect("write fake runtime");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("make fake runtime executable");
+
+        let mut options = LaunchOptions {
+            jcode_home: None,
+            inherit_logins: false,
+            binary: Some(binary),
+            startup_timeout,
+            ..LaunchOptions::default()
+        };
+        options.env.insert(
+            OsString::from("CAPTURE_PATH"),
+            captured.as_os_str().to_owned(),
+        );
+        let result = launch_instance(&options);
+        let pid = fs::read_to_string(&captured)
+            .expect("fake runtime recorded its daemon pid")
+            .trim()
+            .parse()
+            .expect("daemon pid is an integer");
+        (result, KillOnDrop(pid))
+    }
+
+    #[cfg(unix)]
+    fn process_exits_within(pid: i32, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while process_exists(pid) {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        true
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_startup_stops_daemon_when_jcode_exits() {
+        let (result, daemon) = launch_with_stand_in_daemon("exit 1", Duration::from_secs(5));
+        let error = result
+            .err()
+            .expect("a runtime that exits should fail startup");
+        assert_eq!(error.kind, ErrorKind::StartupFailed);
+        assert!(
+            process_exits_within(daemon.0, Duration::from_secs(2)),
+            "daemon registered by the failed runtime survived startup failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_startup_stops_daemon_when_socket_never_appears() {
+        let (result, daemon) = launch_with_stand_in_daemon("exec sleep 30", Duration::from_secs(2));
+        let error = result
+            .err()
+            .expect("a runtime without an API socket should time out");
+        assert_eq!(error.kind, ErrorKind::StartupTimeout);
+        assert!(
+            process_exits_within(daemon.0, Duration::from_secs(2)),
+            "daemon registered by the timed-out runtime survived startup failure"
+        );
     }
 }
