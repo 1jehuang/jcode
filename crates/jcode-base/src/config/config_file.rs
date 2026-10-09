@@ -2,6 +2,17 @@ use super::*;
 use crate::storage::jcode_dir;
 use std::path::PathBuf;
 
+type TrustedExternalAuthKey = (
+    Option<PathBuf>,
+    Option<std::time::SystemTime>,
+    Option<u64>,
+    Option<String>,
+);
+type TrustedExternalAuthLists = std::sync::Arc<(Vec<String>, Vec<String>)>;
+static TRUSTED_EXTERNAL_AUTH_MEMO: std::sync::Mutex<
+    Option<(TrustedExternalAuthKey, TrustedExternalAuthLists)>,
+> = std::sync::Mutex::new(None);
+
 impl Config {
     /// Get the config file path
     pub fn path() -> Option<PathBuf> {
@@ -83,6 +94,11 @@ impl Config {
 
     /// Mark the process-cached config as stale and notify dependent caches.
     pub fn invalidate_cache() {
+        // Also drop the trust-list memo: its mtime key can miss two same-length
+        // saves inside one filesystem timestamp tick.
+        if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
+            *guard = None;
+        }
         super::invalidate_config_cache();
     }
 
@@ -585,9 +601,8 @@ impl Config {
             return false;
         }
 
-        let cfg = Self::load();
-        cfg.auth
-            .trusted_external_sources
+        Self::trusted_external_auth_lists()
+            .0
             .iter()
             .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
     }
@@ -597,11 +612,45 @@ impl Config {
             return false;
         };
 
-        let cfg = Self::load();
-        cfg.auth
-            .trusted_external_source_paths
+        Self::trusted_external_auth_lists()
+            .1
             .iter()
             .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+    }
+
+    /// Fresh `(trusted_external_sources, trusted_external_source_paths)`.
+    ///
+    /// Trust checks must observe a just-saved decision immediately, so they
+    /// cannot use the throttled [`config()`] snapshot. Re-parsing config.toml
+    /// on every call was the alternative, and a single auth probe makes a dozen
+    /// of these checks (~0.5ms of TOML parsing each, on the TUI's first frame).
+    /// Memoize the two lists keyed on everything that can change them: the
+    /// config path, the file's mtime and length, and the env override.
+    fn trusted_external_auth_lists() -> TrustedExternalAuthLists {
+        let path = Self::path();
+        let metadata = path.as_ref().and_then(|path| std::fs::metadata(path).ok());
+        let key: TrustedExternalAuthKey = (
+            path,
+            metadata.as_ref().and_then(|meta| meta.modified().ok()),
+            metadata.as_ref().map(std::fs::Metadata::len),
+            std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES").ok(),
+        );
+        if let Ok(guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock()
+            && let Some((cached_key, lists)) = guard.as_ref()
+            && *cached_key == key
+        {
+            return lists.clone();
+        }
+
+        let cfg = Self::load();
+        let lists = std::sync::Arc::new((
+            cfg.auth.trusted_external_sources,
+            cfg.auth.trusted_external_source_paths,
+        ));
+        if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
+            *guard = Some((key, lists.clone()));
+        }
+        lists
     }
 
     /// Startup-sensitive variant that uses the process-cached config snapshot.
@@ -626,11 +675,11 @@ impl Config {
 
         // The global config snapshot can be initialized before an auth flow saves
         // a new path-bound trust decision, or before tests switch JCODE_HOME. Fall
-        // back to a fresh load on cache misses so fast auth probes remain correct
-        // without penalizing the common already-trusted path.
-        Self::load()
-            .auth
-            .trusted_external_source_paths
+        // back to a fresh read on cache misses so fast auth probes remain correct
+        // without penalizing the common already-trusted path. The memo re-stats
+        // config.toml, so it is as fresh as a full reload.
+        Self::trusted_external_auth_lists()
+            .1
             .iter()
             .any(|value| value.trim().eq_ignore_ascii_case(&entry))
     }

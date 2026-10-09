@@ -1823,9 +1823,12 @@ pub(super) async fn handle_client(
                         &swarm_event_tx,
                     )
                     .await;
-                    if let Some(snapshot) = try_available_models_snapshot(&agent) {
-                        last_available_models_snapshot = Some(snapshot);
-                    }
+                    // No catalog dedup baseline here. A fresh subscribe sends
+                    // no catalog to the client (History does, and GetHistory
+                    // records the baseline right after). Building the snapshot
+                    // here cost ~200ms on a cold server and sat directly in
+                    // front of the client's GetHistory, delaying first paint.
+                    last_available_models_snapshot = None;
                 }
                 client_subscribed = true;
                 provisional_session = false;

@@ -389,15 +389,15 @@ fn globally_preferred_model_rank(model: &str) -> (u8, usize) {
     if normalized == claude_default {
         return (2, 0);
     }
-    if let Some(position) = crate::provider::ALL_CLAUDE_MODELS
+    if let Some(position) = normalized_preference_order(crate::provider::ALL_CLAUDE_MODELS)
         .iter()
-        .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+        .position(|candidate| *candidate == normalized)
     {
         return (3, position);
     }
-    if let Some(position) = crate::provider::ALL_OPENAI_MODELS
+    if let Some(position) = normalized_preference_order(crate::provider::ALL_OPENAI_MODELS)
         .iter()
-        .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+        .position(|candidate| *candidate == normalized)
     {
         return (4, position);
     }
@@ -483,18 +483,46 @@ fn provider_preferred_model_orders(
 /// preference tiers. Lower is more preferred: an earlier family tier always
 /// outranks a later one, and within a tier the curated position decides.
 /// Unknown models sort last so they only win when nothing curated matches.
-fn preferred_model_rank(orders: &[&[&str]], model: &str) -> usize {
+fn preferred_model_rank(orders: &[&'static [&'static str]], model: &str) -> usize {
     const TIER_STRIDE: usize = 10_000;
     let normalized = normalize_model_for_preference(model);
     for (tier, order) in orders.iter().enumerate() {
-        if let Some(position) = order
+        if let Some(position) = normalized_preference_order(order)
             .iter()
-            .position(|candidate| normalize_model_for_preference(candidate) == normalized)
+            .position(|candidate| *candidate == normalized)
         {
             return tier * TIER_STRIDE + position;
         }
     }
     usize::MAX
+}
+
+/// `order` with every id passed through [`normalize_model_for_preference`],
+/// memoized per curated list. Ranking a catalog compares every catalog model
+/// against every curated id; re-normalizing the curated side each time made a
+/// single OpenRouter catalog ranking cost ~80ms (it runs on every new session).
+/// Curated orders are `&'static` constants, so the slice address identifies
+/// them.
+fn normalized_preference_order(order: &'static [&'static str]) -> std::sync::Arc<Vec<String>> {
+    static CACHE: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let key = (order.as_ptr() as usize, order.len());
+    if let Ok(cache) = CACHE.lock()
+        && let Some(hit) = cache.get(&key)
+    {
+        return hit.clone();
+    }
+    let normalized = std::sync::Arc::new(
+        order
+            .iter()
+            .map(|candidate| normalize_model_for_preference(candidate))
+            .collect::<Vec<_>>(),
+    );
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(key, normalized.clone());
+    }
+    normalized
 }
 
 /// Normalize a model id for flagship-preference comparison: lowercase, drop a

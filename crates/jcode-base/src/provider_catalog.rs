@@ -34,6 +34,27 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     profile: OpenAiCompatibleProfile,
     api_key_hint: Option<&str>,
 ) -> ResolvedOpenAiCompatibleProfile {
+    let mut resolved = resolve_openai_compatible_profile_endpoint(profile, api_key_hint);
+    if profile.id != OPENAI_COMPAT_PROFILE.id
+        && let Some(newest_model) =
+            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
+    {
+        resolved.default_model = Some(newest_model);
+    }
+    resolved
+}
+
+/// Resolve a profile's endpoint and credential bindings (api base, key env,
+/// env file, `requires_api_key`) without picking a default model.
+///
+/// Choosing the default model reads the profile's cached model catalog from
+/// disk and ranks it, which costs milliseconds per profile. Credential checks
+/// (auth status, which runs on the TUI's first frame across every profile)
+/// never look at the model, so they use this cheaper path.
+fn resolve_openai_compatible_profile_endpoint(
+    profile: OpenAiCompatibleProfile,
+    api_key_hint: Option<&str>,
+) -> ResolvedOpenAiCompatibleProfile {
     let mut resolved = ResolvedOpenAiCompatibleProfile {
         id: profile.id.to_string(),
         display_name: profile.display_name.to_string(),
@@ -58,11 +79,6 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     apply_profile_key_based_endpoint_overrides(profile, &mut resolved, api_key_hint);
 
     if profile.id != OPENAI_COMPAT_PROFILE.id {
-        if let Some(newest_model) =
-            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
-        {
-            resolved.default_model = Some(newest_model);
-        }
         return resolved;
     }
 
@@ -1168,7 +1184,7 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
         return configured;
     }
 
-    let resolved = resolve_openai_compatible_profile(profile);
+    let resolved = resolve_openai_compatible_profile_endpoint(profile, None);
     if load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file).is_some() {
         return true;
     }

@@ -933,6 +933,9 @@ fn map_transcript_mode(mode: TranscriptModeArg) -> crate::protocol::TranscriptMo
 
 async fn run_default_command(args: Args) -> Result<()> {
     startup_profile::mark("run_main_none_branch");
+    // The TUI's first frame reads the auth snapshot (welcome/onboarding gate).
+    // Probe it now on a side thread so it overlaps the setup work below.
+    crate::auth::AuthStatus::prewarm_fast_in_background();
 
     let explicit_provider_or_model = args.provider != ProviderChoice::Auto
         || args.model.is_some()

@@ -1853,6 +1853,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.update_terminal_title();
 
             if !mcp_servers.is_empty() {
+                let previous = std::mem::take(&mut app.mcp_server_names);
                 app.mcp_server_names = mcp_servers
                     .iter()
                     .filter_map(|s| {
@@ -1861,6 +1862,9 @@ pub(in crate::tui::app) fn handle_server_event(
                         Some((name.to_string(), count))
                     })
                     .collect();
+                if previous != app.mcp_server_names {
+                    app.persist_remote_header_hint();
+                }
             }
 
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();

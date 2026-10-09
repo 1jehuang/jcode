@@ -90,6 +90,7 @@ mod onboarding_sim;
 mod productivity;
 mod prompt_history;
 mod remote;
+mod remote_header_hint;
 mod remote_notifications;
 mod replay;
 pub(crate) mod run_shell;

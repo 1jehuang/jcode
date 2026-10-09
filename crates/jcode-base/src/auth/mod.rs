@@ -333,12 +333,43 @@ impl AuthStatus {
             return status.clone();
         }
 
+        // Single-flight: a startup prewarm (see `prewarm_fast_in_background`)
+        // may already be probing. Wait for it and reuse its snapshot instead of
+        // running a second identical probe in parallel on the frame thread.
+        static PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _probe_guard = PROBE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Ok(cache) = AUTH_STATUS_FAST_CACHE.read()
+            && let Some((ref status, ref when, ref cached_home)) = *cache
+            && when.elapsed().as_secs() < AUTH_STATUS_FAST_CACHE_TTL_SECS
+            && *cached_home == home_key
+        {
+            return status.clone();
+        }
+
         let status = Self::check_uncached_fast();
         if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
             *cache = Some((status.clone(), Instant::now(), home_key));
         }
 
         status
+    }
+
+    /// Start the fast auth probe on a background thread so the first TUI
+    /// frame finds a warm snapshot instead of paying ~5-10ms of credential
+    /// file reads inline. Safe to call any time: [`Self::check_fast`] is
+    /// single-flight, so a caller that races the prewarm waits for it rather
+    /// than probing twice.
+    pub fn prewarm_fast_in_background() {
+        if running_in_test_harness() {
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("auth-prewarm".into())
+            .spawn(|| {
+                let _ = Self::check_fast();
+            });
     }
 
     /// Non-blocking auth snapshot for per-frame render paths (the TUI header).

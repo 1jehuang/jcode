@@ -116,17 +116,17 @@ fn autodetected_openai_compatible_profile()
         return Some(compat);
     }
 
+    // Check credentials first and only fully resolve (default-model ranking
+    // reads each profile's cached catalog from disk) the profiles that match.
+    // Resolving every profile up front was wasted work on every provider
+    // construction.
     let mut matches = openai_compatible_profiles()
         .iter()
         .filter(|profile| profile.id != OPENAI_COMPAT_PROFILE.id)
-        .filter_map(|profile| {
-            let resolved = resolve_openai_compatible_profile(*profile);
-            if crate::provider_catalog::openai_compatible_profile_is_configured(*profile) {
-                Some(resolved)
-            } else {
-                None
-            }
+        .filter(|profile| {
+            crate::provider_catalog::openai_compatible_profile_is_configured(**profile)
         })
+        .map(|profile| resolve_openai_compatible_profile(*profile))
         .collect::<Vec<_>>();
 
     if matches.len() == 1 {

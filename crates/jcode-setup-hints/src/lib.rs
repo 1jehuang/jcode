@@ -320,12 +320,39 @@ fn load_launch_hotkeys_config() -> jcode_config_types::LaunchHotkeysConfig {
         return Default::default();
     };
     let path = dir.join("config.toml");
+    // Startup calls this several times (hotkey notice, resolve, install
+    // checks), each a full TOML parse of config.toml. Memoize on the file's
+    // path, mtime and length so edits are still picked up immediately.
+    type Key = (
+        std::path::PathBuf,
+        Option<std::time::SystemTime>,
+        Option<u64>,
+    );
+    static MEMO: std::sync::Mutex<Option<(Key, jcode_config_types::LaunchHotkeysConfig)>> =
+        std::sync::Mutex::new(None);
+    let metadata = std::fs::metadata(&path).ok();
+    let key: Key = (
+        path.clone(),
+        metadata.as_ref().and_then(|meta| meta.modified().ok()),
+        metadata.as_ref().map(std::fs::Metadata::len),
+    );
+    if !cfg!(test)
+        && let Ok(guard) = MEMO.lock()
+        && let Some((cached_key, config)) = guard.as_ref()
+        && *cached_key == key
+    {
+        return config.clone();
+    }
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Default::default();
     };
-    toml::from_str::<Wrapper>(&text)
+    let config = toml::from_str::<Wrapper>(&text)
         .map(|w| w.launch_hotkeys)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Ok(mut guard) = MEMO.lock() {
+        *guard = Some((key, config.clone()));
+    }
+    config
 }
 
 /// Record the directories the global launch hotkeys should reopen.
