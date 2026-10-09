@@ -1186,6 +1186,15 @@ impl Agent {
         }
     }
 
+    /// Detach the concurrency telemetry guard so the caller can finish it off
+    /// a latency-sensitive path. `finish` performs a blocking delivery (up to
+    /// ~800ms) that must not run under server-wide locks.
+    pub(crate) fn take_concurrency_session(
+        &mut self,
+    ) -> Option<crate::telemetry::ConcurrencySession> {
+        self.concurrency_session.take()
+    }
+
     #[cfg(test)]
     pub(crate) fn has_concurrency_tracking(&self) -> bool {
         self.concurrency_session.is_some()

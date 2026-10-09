@@ -214,6 +214,14 @@ pub(super) async fn cleanup_client_connection(
 
             match lock_result {
                 Ok(mut agent) => {
+                    // Concurrency telemetry delivery blocks (bounded at
+                    // ~800ms) and is pure reporting. Finishing it inline held
+                    // the server-wide connections lock for ~250ms on every
+                    // disconnect, stalling the next client's attach. Detach
+                    // the guard and finish it on a blocking worker instead.
+                    if let Some(mut concurrency) = agent.take_concurrency_session() {
+                        tokio::task::spawn_blocking(move || concurrency.finish());
+                    }
                     match disposition {
                         DisconnectDisposition::Closed => {
                             agent.mark_closed();
