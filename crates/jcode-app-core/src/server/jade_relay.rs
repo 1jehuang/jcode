@@ -1203,7 +1203,7 @@ async fn deliver_to_session(
             session_id,
             format!("[jade relay message from user]\n{text}"),
             false,
-            SoftInterruptSource::User,
+            SoftInterruptSource::UserExternal,
             soft_interrupt_queues,
             sessions,
         )

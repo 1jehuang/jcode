@@ -87,7 +87,13 @@ fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
 }
 
 fn is_visible_conversation_message(message: &StoredMessage) -> bool {
-    message.display_role.is_none()
+    // An out-of-band user request is still user-authored conversation. Hiding it
+    // here made a session started by such a request look empty, and stopped the
+    // last-user-message lookup that names the session.
+    !matches!(
+        message.display_role,
+        Some(StoredDisplayRole::System) | Some(StoredDisplayRole::BackgroundTask)
+    )
         && !is_internal_system_reminder_message(message)
         && !is_scheduled_task_message(message)
 }

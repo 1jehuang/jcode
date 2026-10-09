@@ -1797,7 +1797,14 @@ fn searchable_message_text(msg: &StoredMessage, include_tools: bool) -> String {
 }
 
 fn is_system_like_message(msg: &StoredMessage) -> bool {
-    msg.display_role.is_some()
+    // A user request that arrived out of band is user-authored content, not a
+    // system message. Treating it as system-like hid it from ordinary searches,
+    // so a request could not be found again except with include_system=true.
+    matches!(
+        msg.display_role,
+        Some(crate::session::StoredDisplayRole::System)
+            | Some(crate::session::StoredDisplayRole::BackgroundTask)
+    )
         || msg
             .content
             .iter()
@@ -1828,6 +1835,7 @@ fn role_label(msg: &StoredMessage) -> &'static str {
         return match display_role {
             crate::session::StoredDisplayRole::System => "system",
             crate::session::StoredDisplayRole::BackgroundTask => "background",
+            crate::session::StoredDisplayRole::UserExternal => "user_external",
         };
     }
 

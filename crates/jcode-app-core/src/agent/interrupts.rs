@@ -12,6 +12,7 @@ use std::sync::Arc;
 fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<StoredDisplayRole> {
     match source {
         SoftInterruptSource::User => None,
+        SoftInterruptSource::UserExternal => Some(StoredDisplayRole::UserExternal),
         SoftInterruptSource::System => Some(StoredDisplayRole::System),
         SoftInterruptSource::BackgroundTask => Some(StoredDisplayRole::BackgroundTask),
     }
@@ -20,6 +21,7 @@ fn soft_interrupt_session_display_role(source: SoftInterruptSource) -> Option<St
 fn soft_interrupt_protocol_display_role(source: SoftInterruptSource) -> Option<String> {
     match source {
         SoftInterruptSource::User => None,
+        SoftInterruptSource::UserExternal => Some("user_external".to_string()),
         SoftInterruptSource::System => Some("system".to_string()),
         SoftInterruptSource::BackgroundTask => Some("background_task".to_string()),
     }
@@ -504,5 +506,62 @@ impl Agent {
                 tools_skipped: if idx == 0 { tools_skipped } else { None },
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod user_external_attribution_tests {
+    use super::*;
+
+    /// A user message that arrived out-of-band must NOT collapse into "no
+    /// display role". `None` renders as an ordinary typed user turn, which is
+    /// what let the agent replay its own injected history back as fresh
+    /// requests. Typed input keeps `None`; only the external channel is
+    /// tagged.
+    #[test]
+    fn typed_user_input_stays_untagged() {
+        assert_eq!(
+            soft_interrupt_session_display_role(SoftInterruptSource::User),
+            None
+        );
+        assert_eq!(
+            soft_interrupt_protocol_display_role(SoftInterruptSource::User),
+            None
+        );
+    }
+
+    #[test]
+    fn out_of_band_user_input_is_tagged() {
+        assert_eq!(
+            soft_interrupt_session_display_role(SoftInterruptSource::UserExternal),
+            Some(StoredDisplayRole::UserExternal)
+        );
+        assert_eq!(
+            soft_interrupt_protocol_display_role(SoftInterruptSource::UserExternal),
+            Some("user_external".to_string())
+        );
+    }
+
+    /// The stored form is what the transcript and session_search read, so the
+    /// serde name is part of the contract, not an implementation detail.
+    #[test]
+    fn stored_display_role_serialises_as_snake_case() {
+        let json = serde_json::to_string(&StoredDisplayRole::UserExternal)
+            .expect("serialise UserExternal");
+        assert_eq!(json, "\"user_external\"");
+    }
+
+    /// system and background_task must keep their existing names so older
+    /// sessions and any consumer matching on them are unaffected.
+    #[test]
+    fn existing_display_role_names_are_unchanged() {
+        assert_eq!(
+            serde_json::to_string(&StoredDisplayRole::System).unwrap(),
+            "\"system\""
+        );
+        assert_eq!(
+            serde_json::to_string(&StoredDisplayRole::BackgroundTask).unwrap(),
+            "\"background_task\""
+        );
     }
 }
