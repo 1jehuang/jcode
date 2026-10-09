@@ -860,6 +860,10 @@ impl crate::tui::TuiState for App {
         self.cursor_pos
     }
 
+    fn input_copy_scroll_override(&self) -> Option<usize> {
+        self.input_copy_scroll_offset
+    }
+
     fn is_processing(&self) -> bool {
         self.is_processing || self.pending_queued_dispatch || self.split_launch_in_flight()
     }

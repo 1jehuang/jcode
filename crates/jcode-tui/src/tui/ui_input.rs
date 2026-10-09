@@ -2170,16 +2170,13 @@ pub(super) fn draw_input(
     let total_input_lines = all_lines.len();
     let visible_height = area.height as usize;
 
-    let scroll_offset = if total_input_lines + suggestions_offset <= visible_height {
-        0
-    } else {
-        let available_for_input = visible_height.saturating_sub(suggestions_offset);
-        if cursor_line < available_for_input {
-            0
-        } else {
-            cursor_line.saturating_sub(available_for_input.saturating_sub(1))
-        }
-    };
+    let scroll_offset = composer_scroll_offset(
+        app.input_copy_scroll_override(),
+        total_input_lines,
+        suggestions_offset,
+        visible_height,
+        cursor_line,
+    );
 
     for line in all_lines.into_iter().skip(scroll_offset) {
         lines.push(line);
@@ -2462,6 +2459,30 @@ fn char_offset_for_clicked_column(text: &str, target_col: usize, display_width: 
     chars_before
 }
 
+/// First visible wrapped composer row. The composer follows the caret unless a
+/// copy-selection drag armed an explicit scroll override (edge auto-scroll),
+/// which is clamped against the current content so text edits shrink it safely.
+fn composer_scroll_offset(
+    override_scroll: Option<usize>,
+    total_input_lines: usize,
+    reserved_rows: usize,
+    visible_height: usize,
+    cursor_line: usize,
+) -> usize {
+    let available_for_input = visible_height.saturating_sub(reserved_rows);
+    if total_input_lines <= available_for_input {
+        return 0;
+    }
+    if let Some(override_scroll) = override_scroll {
+        return override_scroll.min(total_input_lines.saturating_sub(available_for_input));
+    }
+    if cursor_line < available_for_input {
+        0
+    } else {
+        cursor_line.saturating_sub(available_for_input.saturating_sub(1))
+    }
+}
+
 pub(crate) fn input_cursor_pos_from_screen(
     app: &dyn TuiState,
     area: Rect,
@@ -2485,25 +2506,21 @@ pub(crate) fn input_cursor_pos_from_screen(
     let hint_lines = input_hint_line_height(app) as usize;
     let visible_height = area.height as usize;
     let total_input_lines = wrapped_lines.len().max(1);
+    let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input_text, app.cursor_pos());
+    let cursor_line = wrapped_lines
+        .iter()
+        .position(|segment| {
+            cursor_char_pos >= segment.start_char && cursor_char_pos <= segment.end_char
+        })
+        .unwrap_or_else(|| wrapped_lines.len().saturating_sub(1));
 
-    let scroll_offset = if total_input_lines + hint_lines <= visible_height {
-        0
-    } else {
-        let available_for_input = visible_height.saturating_sub(hint_lines);
-        let cursor_char_pos =
-            crate::tui::core::byte_offset_to_char_index(input_text, app.cursor_pos());
-        let cursor_line = wrapped_lines
-            .iter()
-            .position(|segment| {
-                cursor_char_pos >= segment.start_char && cursor_char_pos <= segment.end_char
-            })
-            .unwrap_or_else(|| wrapped_lines.len().saturating_sub(1));
-        if cursor_line < available_for_input {
-            0
-        } else {
-            cursor_line.saturating_sub(available_for_input.saturating_sub(1))
-        }
-    };
+    let scroll_offset = composer_scroll_offset(
+        app.input_copy_scroll_override(),
+        total_input_lines,
+        hint_lines,
+        visible_height,
+        cursor_line,
+    );
 
     let screen_line = row.saturating_sub(area.y) as usize;
     if screen_line < hint_lines {

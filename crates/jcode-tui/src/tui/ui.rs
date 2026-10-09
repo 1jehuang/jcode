@@ -2305,6 +2305,11 @@ pub(crate) fn copy_viewport_visible_range() -> Option<(usize, usize)> {
     Some((snapshot.scroll, snapshot.visible_end))
 }
 
+pub(crate) fn input_pane_visible_range() -> Option<(usize, usize)> {
+    let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::Input)?;
+    Some((snapshot.scroll, snapshot.visible_end))
+}
+
 #[cfg(test)]
 pub(crate) fn side_pane_visible_range() -> Option<(usize, usize)> {
     let snapshot = copy_snapshot_for_pane(crate::tui::CopySelectionPane::SidePane)?;
