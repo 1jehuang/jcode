@@ -456,8 +456,11 @@ impl Session {
     /// session restore + history bootstrap.
     pub fn load_startup_stub(session_id: &str) -> Result<Self> {
         let path = session_path(session_id)?;
-        let reader = BufReader::new(std::fs::File::open(&path)?);
-        let stub: SessionStartupStub = serde_json::from_reader(reader)?;
+        // `from_slice` over the whole file is several times faster than
+        // `from_reader` (which pulls bytes one at a time through io::Read) on
+        // multi-MB sessions, and resume reads this on the first-frame path.
+        let bytes = std::fs::read(&path)?;
+        let stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
         Ok(Self::session_from_startup_stub(stub))
     }
 
@@ -466,8 +469,9 @@ impl Session {
         let load_start = Instant::now();
         let snapshot_bytes = file_len_or_zero(&path);
         let snapshot_start = Instant::now();
-        let reader = BufReader::new(std::fs::File::open(&path)?);
-        let snapshot: RemoteStartupSessionSnapshot = serde_json::from_reader(reader)?;
+        let bytes = std::fs::read(&path)?;
+        let snapshot: RemoteStartupSessionSnapshot = serde_json::from_slice(&bytes)?;
+        drop(bytes);
         let snapshot_ms = snapshot_start.elapsed().as_millis();
         let mut session = Self::session_from_remote_startup_snapshot(snapshot);
         dedupe_messages_by_id(&mut session.messages);
