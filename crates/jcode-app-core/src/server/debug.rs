@@ -305,7 +305,7 @@ pub(super) async fn handle_debug_client(
                 let event = ServerEvent::Pong {
                     id,
                     native_ssh_protocol: Some(1),
-                    capabilities: vec!["session_tools".into()],
+                    capabilities: vec!["session_tools".into(), "soft_interrupt_ids".into()],
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;
@@ -321,6 +321,7 @@ pub(super) async fn handle_debug_client(
                     session_id: current_session_id,
                     message_count,
                     is_processing: *is_processing.read().await,
+                    pending_soft_interrupts: None,
                 };
                 let json = encode_event(&event);
                 writer.write_all(json.as_bytes()).await?;

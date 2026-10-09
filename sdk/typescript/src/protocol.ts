@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 8;
+export const API_VERSION_MINOR = 9;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -161,6 +161,8 @@ export type ApiRequest =
       content: string;
       images?: ImageAttachment[];
       urgent?: boolean;
+      /** Opaque id echoed in `soft_interrupt_injected` and accepted by a filtered cancel. */
+      client_id?: string;
     }
   | { req: "get_history"; session_id: string }
   | { req: "peek_session"; session_id: string; limit?: number }
@@ -197,7 +199,9 @@ export type ApiRequest =
     }
   | { req: "close_applet"; session_id: string; instance: string }
   | { req: "rewind_undo"; session_id: string }
-  | { req: "cancel_soft_interrupts"; session_id: string }
+  /** Without `client_ids`, clears the queue (replies `ok`). With them, replies `soft_interrupts_cancelled`. */
+  | { req: "cancel_soft_interrupts"; session_id: string; client_ids?: string[] }
+  /** Replies `background_tool_result` when the `background_tool_result` capability is advertised, else `ok`. */
   | { req: "background_tool"; session_id: string }
   | { req: "ping" };
 
@@ -300,7 +304,26 @@ export type ApiEvent =
       message: string;
     }
   | { ev: "turn_stopped"; session_id: string; reason: TurnStopReason; message: string; provider_stop_reason?: string }
-  | { ev: "turn_done"; session_id: string }
+  /** `pending_soft_interrupts`: queued messages this turn never saw (only when nonzero). */
+  | { ev: "turn_done"; session_id: string; pending_soft_interrupts?: number }
+  /**
+   * Queued soft interrupts reached the model. Output after this event was written
+   * having seen them. Several queued messages arrive as one user message, so
+   * `client_ids` lists every id delivered, in queue order. `point` is B, C, D, or
+   * `turn_start` (sent while idle, so it started a turn).
+   */
+  | {
+      ev: "soft_interrupt_injected";
+      session_id: string;
+      client_ids: string[];
+      point: string;
+      tools_skipped?: number;
+      display_role?: string;
+    }
+  /** Reply to a filtered `cancel_soft_interrupts`. Decided atomically against delivery. */
+  | { ev: "soft_interrupts_cancelled"; cancelled: string[]; not_queued: string[] }
+  /** Reply to `background_tool`. */
+  | { ev: "background_tool_result"; moved: boolean; tool_call_id?: string; tool_name?: string }
   | {
       ev: "wake_requested";
       session_id: string;
@@ -326,7 +349,7 @@ export type ApiEvent =
     }
   /** Attachment recovery intent. Can precede attached. Never auto-sent by the bridge. */
   | { ev: "session_recovery"; session_id: string; continuation_message: string; reconnect_notice?: string }
-  | { ev: "session_status"; session_id: string; status: string }
+  | { ev: "session_status"; session_id: string; status: string; pending_soft_interrupts?: number }
   | { ev: "connection_phase"; session_id: string; phase: string }
   | {
       ev: "model_info";
@@ -431,6 +454,9 @@ export const KNOWN_EVENT_KINDS = [
   "token_usage",
   "kv_cache_miss",
   "turn_done",
+  "soft_interrupt_injected",
+  "soft_interrupts_cancelled",
+  "background_tool_result",
   "turn_stopped",
   "wake_requested",
   "background_progress",

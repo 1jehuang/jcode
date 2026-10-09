@@ -82,6 +82,7 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
         content: "look at this".to_string(),
         images: vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
         urgent: true,
+        client_id: None,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -107,6 +108,67 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
         return Err(anyhow!("wrong legacy request type"));
     };
     assert!(images.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_soft_interrupt_ids_wire_shape_and_legacy_defaults() -> Result<()> {
+    let req = Request::SoftInterrupt {
+        id: 4,
+        content: "steer".to_string(),
+        images: Vec::new(),
+        urgent: false,
+        client_id: Some("f1".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_string(&req)?,
+        r#"{"type":"soft_interrupt","id":4,"content":"steer","urgent":false,"client_id":"f1"}"#
+    );
+    let legacy = parse_request_json(r#"{"type":"soft_interrupt","id":5,"content":"x"}"#)?;
+    assert!(matches!(
+        legacy,
+        Request::SoftInterrupt {
+            client_id: None,
+            ..
+        }
+    ));
+
+    let cancel_all = parse_request_json(r#"{"type":"cancel_soft_interrupts","id":6}"#)?;
+    assert!(matches!(
+        cancel_all,
+        Request::CancelSoftInterrupts {
+            client_ids: None,
+            ..
+        }
+    ));
+    let cancel_some = Request::CancelSoftInterrupts {
+        id: 7,
+        client_ids: Some(vec!["f1".to_string()]),
+    };
+    assert_eq!(
+        serde_json::to_string(&cancel_some)?,
+        r#"{"type":"cancel_soft_interrupts","id":7,"client_ids":["f1"]}"#
+    );
+
+    // An injection without ids keeps the pre-#1778 wire shape exactly.
+    let injected = ServerEvent::SoftInterruptInjected {
+        content: "a".to_string(),
+        display_role: None,
+        point: "D".to_string(),
+        tools_skipped: None,
+        client_ids: Vec::new(),
+    };
+    assert_eq!(
+        serde_json::to_string(&injected)?,
+        r#"{"type":"soft_interrupt_injected","content":"a","point":"D"}"#
+    );
+    let with_ids: ServerEvent = serde_json::from_str(
+        r#"{"type":"soft_interrupt_injected","content":"a","point":"B","client_ids":["f1","f2"]}"#,
+    )?;
+    assert!(matches!(
+        with_ids,
+        ServerEvent::SoftInterruptInjected { client_ids, .. } if client_ids == ["f1", "f2"]
+    ));
     Ok(())
 }
 

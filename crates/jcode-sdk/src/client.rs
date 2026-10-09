@@ -892,11 +892,29 @@ impl JcodeClient {
         images: Vec<(String, String)>,
         urgent: bool,
     ) -> Result<()> {
+        self.soft_interrupt_with_id(session_id, content, images, urgent, None)
+    }
+
+    /// Queue a soft interrupt tagged with an opaque `client_id`.
+    ///
+    /// The id comes back in [`ApiEvent::SoftInterruptInjected`] when the model
+    /// receives the message, and [`Self::cancel_soft_interrupt`] can take it
+    /// back before then. Needs the `soft_interrupt_ids` capability; an older
+    /// server accepts the message but drops the id.
+    pub fn soft_interrupt_with_id(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        client_id: Option<&str>,
+    ) -> Result<()> {
         self.request_ok(ApiRequest::SoftInterrupt {
             session_id: session_id.to_string(),
             content: content.to_string(),
             images,
             urgent,
+            client_id: client_id.map(str::to_string),
         })
         .map(drop)
     }
@@ -1342,16 +1360,65 @@ impl JcodeClient {
     pub fn cancel_soft_interrupts(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::CancelSoftInterrupts {
             session_id: session_id.to_string(),
+            client_ids: None,
         })
         .map(drop)
     }
 
+    /// Take back specific queued soft interrupts by `client_id`.
+    ///
+    /// Returns `(cancelled, not_queued)`. The server decides against injection
+    /// atomically, so an id in `cancelled` was never seen by the model, and an
+    /// id in `not_queued` was already delivered (or never queued).
+    pub fn cancel_soft_interrupts_by_id(
+        &self,
+        session_id: &str,
+        client_ids: &[&str],
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let request = ApiRequest::CancelSoftInterrupts {
+            session_id: session_id.to_string(),
+            client_ids: Some(client_ids.iter().map(|id| id.to_string()).collect()),
+        };
+        match self.request_ok(request)?.event {
+            ApiEvent::SoftInterruptsCancelled {
+                cancelled,
+                not_queued,
+            } => Ok((cancelled, not_queued)),
+            other => Err(unexpected("soft_interrupts_cancelled", &other)),
+        }
+    }
+
+    /// Take back one queued soft interrupt. `true` means it was removed before
+    /// the model saw it, `false` that it was already delivered (or unknown).
+    pub fn cancel_soft_interrupt(&self, session_id: &str, client_id: &str) -> Result<bool> {
+        self.cancel_soft_interrupts_by_id(session_id, &[client_id])
+            .map(|(cancelled, _)| !cancelled.is_empty())
+    }
+
     /// Move the running tool call to the background (the TUI's Alt+B).
     pub fn background_tool(&self, session_id: &str) -> Result<()> {
-        self.request_ok(ApiRequest::BackgroundTool {
-            session_id: session_id.to_string(),
-        })
-        .map(drop)
+        self.background_tool_result(session_id).map(drop)
+    }
+
+    /// Move the running tool call to the background and report what moved.
+    ///
+    /// Returns `(moved, tool_call_id)`. A server without the
+    /// `background_tool_result` capability answers only `Ok`, reported here as
+    /// `(false, None)` even if a tool was moved.
+    pub fn background_tool_result(&self, session_id: &str) -> Result<(bool, Option<String>)> {
+        match self
+            .request_ok(ApiRequest::BackgroundTool {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::BackgroundToolResult {
+                moved,
+                tool_call_id,
+                ..
+            } => Ok((moved, tool_call_id)),
+            _ => Ok((false, None)),
+        }
     }
 
     pub fn ping(&self) -> Result<()> {
@@ -1824,6 +1891,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | TokenUsage { session_id, .. }
         | KvCacheMiss { session_id, .. }
         | TurnDone { session_id, .. }
+        | SoftInterruptInjected { session_id, .. }
         | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }
         | MessageAccepted { session_id, .. }

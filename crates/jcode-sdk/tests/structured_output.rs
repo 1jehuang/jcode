@@ -96,6 +96,7 @@ fn send_turn(writer: &mut dyn Write, session_id: &str, text: &str) {
     push(
         ApiEvent::TurnDone {
             session_id: session_id.to_string(),
+            pending_soft_interrupts: None,
         },
         writer,
     );
@@ -289,6 +290,7 @@ fn structured_output_uses_final_message_not_process_narration() {
             push(
                 ApiEvent::TurnDone {
                     session_id: session_id.clone(),
+                    pending_soft_interrupts: None,
                 },
                 writer,
             );

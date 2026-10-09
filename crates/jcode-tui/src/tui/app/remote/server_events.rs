@@ -2524,6 +2524,7 @@ pub(in crate::tui::app) fn handle_server_event(
             display_role,
             point,
             tools_skipped,
+            ..
         } => {
             crate::logging::info(&format!(
                 "REMOTE_INTERRUPT_EVENT_RECEIVED kind=soft_interrupt_injected session={:?} point={} display_role={:?} tools_skipped={:?} content_bytes={} content_chars={} pending_soft_interrupts={}",

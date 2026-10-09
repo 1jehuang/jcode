@@ -156,6 +156,71 @@ test("softInterrupt preserves images and the legacy text-only wire shape", async
   }
 });
 
+test("soft interrupt ids: tag, cancel by id, and background result", async () => {
+  const received: any[] = [];
+  const server = await startMockHarness({
+    capabilities: ["soft_interrupt_ids", "background_tool_result"],
+    onRequest(request, send) {
+      received.push(request);
+      if (request.req === "cancel_soft_interrupts" && request.client_ids) {
+        send({
+          v: 1, reply_to: request.id, ev: "soft_interrupts_cancelled",
+          cancelled: request.client_ids.filter((id: string) => id !== "f1"),
+          not_queued: request.client_ids.filter((id: string) => id === "f1"),
+        });
+      } else if (request.req === "background_tool") {
+        send({
+          v: 1, reply_to: request.id, ev: "background_tool_result",
+          moved: true, tool_call_id: "call_1", tool_name: "bash",
+        });
+      } else {
+        send({ v: 1, reply_to: request.id, ev: "ok" });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    assert.ok(client.supports("soft_interrupt_ids"));
+    await client.softInterruptWithId("s1", "steer", { clientId: "f1" });
+    assert.deepEqual(
+      await client.cancelSoftInterruptsById("s1", ["f1", "f2"]),
+      { cancelled: ["f2"], notQueued: ["f1"] },
+    );
+    assert.equal(await client.cancelSoftInterrupt("s1", "f1"), false);
+    assert.equal(await client.cancelSoftInterrupt("s1", "f2"), true);
+    assert.deepEqual(await client.backgroundToolResult("s1"), {
+      moved: true, toolCallId: "call_1", toolName: "bash",
+    });
+    await client.cancelSoftInterrupts("s1");
+    const { v, id, ...first } = received[0];
+    assert.deepEqual(first, {
+      req: "soft_interrupt", session_id: "s1", content: "steer", urgent: false, client_id: "f1",
+    });
+    const clearAll = received.at(-1);
+    assert.equal(clearAll.req, "cancel_soft_interrupts");
+    assert.equal(clearAll.client_ids, undefined);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
+test("backgroundToolResult degrades to moved:false against an older bridge", async () => {
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      send({ v: 1, reply_to: request.id, ev: "ok" });
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    assert.deepEqual(await client.backgroundToolResult("s1"), { moved: false });
+    await client.backgroundTool("s1");
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
 test("sendMessage supports context-only options and waits for request completion", async () => {
   let received: any;
   const server = await startMockHarness({

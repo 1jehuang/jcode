@@ -373,7 +373,9 @@ discovery pass only.
 | `renameSession(id, title?)` | Set a session title, or clear it |
 | `rewindUndo(id)` | Restore what the last `rewind` removed |
 | `cancelSoftInterrupts(id)` | Retract queued soft interrupts |
-| `backgroundTool(id)` | Move the running tool call to the background |
+| `softInterruptWithId(id, content, { clientId, images?, urgent? })` | Queue a mid-turn message you can track and retract |
+| `cancelSoftInterruptsById(id, clientIds)` / `cancelSoftInterrupt(id, clientId)` | Retract specific queued messages, with an exact "too late?" answer |
+| `backgroundTool(id)` / `backgroundToolResult(id)` | Move the running tool call to the background, optionally reporting what moved |
 | `ping()` | Liveness |
 
 ## Models
@@ -436,6 +438,39 @@ await client.rewind(id, 4);
 await client.rewindUndo(id);                          // rewind is reversible
 await client.cancelSoftInterrupts(id);                // retract what is queued
 ```
+
+## Messages sent mid-turn
+
+A message sent while the agent is working joins the running turn at the next
+safe point. Give it a `clientId` to follow it from there (needs the
+`soft_interrupt_ids` capability):
+
+```ts
+await client.softInterruptWithId(id, "also update the changelog", { clientId: "m-42" });
+
+client.on("event", (frame) => {
+  if (frame.ev === "soft_interrupt_injected" && frame.client_ids.includes("m-42")) {
+    // The model has it now. Everything it writes from here on was written
+    // having seen the message, so the next text answers it.
+  }
+  if (frame.ev === "turn_done" && frame.pending_soft_interrupts) {
+    // Messages still queued when the turn ended. They were never seen.
+  }
+});
+
+// Take it back while it is still queued. `false` means it was already delivered.
+const retracted = await client.cancelSoftInterrupt(id, "m-42");
+```
+
+`soft_interrupt_injected` arrives after the last `tool_done` of the batch and
+before the model's first output that sees the message. Several queued messages
+are delivered together as one user message, so `client_ids` can list more than
+one id. Retraction is decided against delivery atomically: an id is never
+reported both cancelled and delivered. `session_status` after attaching carries
+`pending_soft_interrupts` so a reconnecting client can reconcile its own queue.
+
+`backgroundToolResult(id)` moves the running tool to the background so a
+queued message can be read sooner, and reports `{ moved, toolCallId, toolName }`.
 
 ## Instance lifecycle
 

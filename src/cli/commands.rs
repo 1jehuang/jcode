@@ -3390,6 +3390,7 @@ fn emit_ndjson_event(
             display_role,
             point,
             tools_skipped,
+            client_ids,
         } => write_json_line(
             stdout,
             &serde_json::json!({
@@ -3398,6 +3399,7 @@ fn emit_ndjson_event(
                 "display_role": display_role,
                 "point": point,
                 "tools_skipped": tools_skipped,
+                "client_ids": client_ids,
             }),
         ),
         ServerEvent::BatchProgress { progress } => write_json_line(

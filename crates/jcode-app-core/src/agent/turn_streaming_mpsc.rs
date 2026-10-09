@@ -1692,6 +1692,8 @@ impl Agent {
                 let allow_reload_handoff = tc.name == "bash";
                 let tool_result;
                 let mut tool_handle = tool_handle;
+                let running_tool_guard =
+                    crate::running_tool_registry::register(self.session_id(), &tc.id, &tc.name);
                 tokio::select! {
                     biased;
                     res = &mut tool_handle => {
@@ -1724,6 +1726,7 @@ impl Agent {
                         }
                     }
                 };
+                drop(running_tool_guard);
 
                 self.unlock_tools_if_needed(&tc.name);
                 let tool_elapsed = tool_start.elapsed();

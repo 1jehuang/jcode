@@ -50,10 +50,13 @@ fn release_large_frame(buffer: &mut Vec<u8>) {
     }
 }
 
+/// Capabilities the native daemon advertises in its ping reply. Empty when
+/// the daemon is too old to advertise any or did not answer in time.
+///
 /// Probe only an old, universally supported control request on a disposable
 /// connection. Older daemons close that connection after ping, and may close
 /// connections receiving unknown requests. Never probe on the session stream.
-async fn daemon_supports_session_tools(socket: &std::path::Path) -> bool {
+async fn daemon_capabilities(socket: &std::path::Path) -> Vec<String> {
     let probe = async {
         let mut stream = Stream::connect(socket).await.ok()?;
         write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0}))
@@ -63,19 +66,25 @@ async fn daemon_supports_session_tools(socket: &std::path::Path) -> bool {
         let mut line = String::new();
         read_frame(&mut reader, &mut line).await.ok()?;
         let reply: Value = serde_json::from_str(&line).ok()?;
+        if reply["type"] != "pong" || reply["id"] != 0 {
+            return None;
+        }
         Some(
-            reply["type"] == "pong"
-                && reply["id"] == 0
-                && reply["capabilities"]
-                    .as_array()
-                    .is_some_and(|caps| caps.iter().any(|cap| cap == "session_tools")),
+            reply["capabilities"]
+                .as_array()
+                .map(|caps| {
+                    caps.iter()
+                        .filter_map(|cap| cap.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
         )
     };
     tokio::time::timeout(std::time::Duration::from_millis(500), probe)
         .await
         .ok()
         .flatten()
-        .unwrap_or(false)
+        .unwrap_or_default()
 }
 
 /// Largest single request frame accepted from an API client, in bytes.
@@ -318,7 +327,9 @@ where
     let legacy = Stream::connect(&legacy_socket)
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
-    let session_tools_supported = daemon_supports_session_tools(&legacy_socket).await;
+    let daemon_caps = daemon_capabilities(&legacy_socket).await;
+    let session_tools_supported = daemon_caps.iter().any(|cap| cap == "session_tools");
+    let soft_interrupt_ids_supported = daemon_caps.iter().any(|cap| cap == "soft_interrupt_ids");
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -343,6 +354,12 @@ where
             .into_iter()
             .map(str::to_string)
             .chain(session_tools_supported.then(|| "session_tools".to_string()))
+            .chain(
+                ["soft_interrupt_ids", "background_tool_result"]
+                    .into_iter()
+                    .filter(|_| soft_interrupt_ids_supported)
+                    .map(str::to_string),
+            )
             .collect(),
         },
     );
@@ -355,6 +372,7 @@ where
     let mut state =
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
     state.session_tools_supported = session_tools_supported;
+    state.soft_interrupt_ids_supported = soft_interrupt_ids_supported;
 
     // 3. Pump both directions in one select loop so translation state stays
     //    single-threaded.

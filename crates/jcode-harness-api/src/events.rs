@@ -189,7 +189,57 @@ pub enum ApiEvent {
     },
 
     /// The turn finished; the agent is idle.
-    TurnDone { session_id: String },
+    TurnDone {
+        session_id: String,
+        /// Soft interrupts still queued and not seen by this turn. Present only
+        /// when nonzero and the bridge advertises `soft_interrupt_ids`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_soft_interrupts: Option<u32>,
+    },
+
+    /// Queued soft interrupts were delivered to the model. Everything the
+    /// model writes after this event is written having seen them, and any
+    /// interrupt still queued has not been seen yet.
+    ///
+    /// Emitted in stream order: after the last `tool_done` of the batch and
+    /// before the first output of the response that sees the messages.
+    SoftInterruptInjected {
+        session_id: String,
+        /// Ids from `soft_interrupt.client_id`, in queue order. Several queued
+        /// messages are delivered as one user message. Empty when none of the
+        /// delivered messages carried an id.
+        #[serde(default)]
+        client_ids: Vec<String>,
+        /// `B` (turn would have ended), `C` (urgent, between tools), `D`
+        /// (after all tools), or `turn_start` (sent while idle, so it started
+        /// a new turn).
+        point: String,
+        /// Tools skipped by an urgent interrupt at point C.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools_skipped: Option<u32>,
+        /// `system` or `background_task` for daemon-originated injections.
+        /// Absent for user messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_role: Option<String>,
+    },
+
+    /// Reply to `CancelSoftInterrupts` with `client_ids`.
+    SoftInterruptsCancelled {
+        /// Ids removed before delivery.
+        cancelled: Vec<String>,
+        /// Ids that were not queued: already delivered, or never queued.
+        not_queued: Vec<String>,
+    },
+
+    /// Reply to `BackgroundTool`.
+    BackgroundToolResult {
+        /// Whether a running tool call was moved to the background.
+        moved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+    },
 
     /// The daemon requests that its external operator decide when to run the
     /// session. Emitted only when external wake ownership is configured.
@@ -253,7 +303,14 @@ pub enum ApiEvent {
     },
 
     /// Session-level status change (idle, generating, tool_running, ...).
-    SessionStatus { session_id: String, status: String },
+    SessionStatus {
+        session_id: String,
+        status: String,
+        /// Soft interrupts queued and not yet delivered, on the snapshot
+        /// statuses sent after attach or reconnect. Absent when unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_soft_interrupts: Option<u32>,
+    },
 
     /// Provider request lifecycle. The value uses the daemon's stable display
     /// vocabulary, for example `connecting`, `sending request`, `waiting for

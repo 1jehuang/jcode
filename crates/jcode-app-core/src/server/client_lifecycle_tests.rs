@@ -19,6 +19,51 @@ struct IsolatedReloadRecoveryEnv {
     _runtime: tempfile::TempDir,
 }
 
+#[test]
+fn cancel_soft_interrupts_by_id_reports_each_requested_id_exactly_once() {
+    let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let control = SessionControlHandle::cancel_only(
+        "session_cancel_by_id_test",
+        Arc::clone(&queue),
+        InterruptSignal::new(),
+    );
+    let user = SoftInterruptSource::User;
+    for (content, id) in [
+        ("a", Some("f1")),
+        ("b", None),
+        ("c", Some("f2")),
+        ("d", Some("f3")),
+    ] {
+        assert!(control.queue_soft_interrupt_with_id(
+            content.into(),
+            Vec::new(),
+            false,
+            user,
+            id.map(str::to_string),
+        ));
+    }
+    assert_eq!(control.pending_soft_interrupt_count(), 4);
+
+    let requested: Vec<String> = ["f3", "gone", "f1", "f3"].map(String::from).to_vec();
+    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&requested);
+    assert_eq!(cancelled, vec!["f3".to_string(), "f1".to_string()]);
+    assert_eq!(not_queued, vec!["gone".to_string()]);
+
+    let remaining: Vec<String> = queue
+        .lock()
+        .expect("queue lock")
+        .iter()
+        .map(|message| message.content.clone())
+        .collect();
+    assert_eq!(remaining, vec!["b".to_string(), "c".to_string()]);
+
+    // Once drained (injected), the same id can no longer be cancelled.
+    queue.lock().expect("queue lock").clear();
+    let (cancelled, not_queued) = control.cancel_soft_interrupts_by_id(&["f2".to_string()]);
+    assert!(cancelled.is_empty());
+    assert_eq!(not_queued, vec!["f2".to_string()]);
+}
+
 #[tokio::test]
 async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
     let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {

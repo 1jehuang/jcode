@@ -29,7 +29,11 @@ pub(super) fn interrupt_request_log_fields(
             content.len(),
             content.chars().count()
         )),
-        Request::CancelSoftInterrupts { id } => Some(base("cancel_soft_interrupts", *id)),
+        Request::CancelSoftInterrupts { id, client_ids } => Some(format!(
+            "{} filtered_ids={:?}",
+            base("cancel_soft_interrupts", *id),
+            client_ids.as_ref().map(Vec::len)
+        )),
         Request::BackgroundTool { id } => Some(base("background_tool", *id)),
         _ => None,
     }

@@ -532,6 +532,51 @@ async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
 }
 
 #[tokio::test]
+async fn injected_soft_interrupts_report_client_ids_per_group_in_queue_order() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+
+    let user = SoftInterruptSource::User;
+    agent.queue_soft_interrupt_with_id("one".into(), vec![], false, user, Some("f1".into()));
+    agent.queue_soft_interrupt_with_id("anon".into(), vec![], false, user, None);
+    agent.queue_soft_interrupt_with_id("two".into(), vec![], false, user, Some("f2".into()));
+    agent.queue_soft_interrupt(
+        "[Background Task Completed]".into(),
+        vec![],
+        false,
+        SoftInterruptSource::BackgroundTask,
+    );
+    agent.queue_soft_interrupt_with_id("three".into(), vec![], false, user, Some("f3".into()));
+
+    let injected = agent.inject_soft_interrupts();
+    let events = Agent::build_soft_interrupt_events(injected, "D", None);
+    let summary: Vec<(String, Vec<String>)> = events
+        .into_iter()
+        .map(|event| match event {
+            ServerEvent::SoftInterruptInjected {
+                content,
+                client_ids,
+                ..
+            } => (content, client_ids),
+            other => panic!("unexpected event {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "one\n\nanon\n\ntwo".to_string(),
+                vec!["f1".into(), "f2".into()]
+            ),
+            ("[Background Task Completed]".to_string(), vec![]),
+            ("three".to_string(), vec!["f3".into()]),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(DelayedProvider {

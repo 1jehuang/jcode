@@ -599,7 +599,7 @@ impl Request {
             Request::Cancel { id } => *id,
             Request::BackgroundTool { id } => *id,
             Request::SoftInterrupt { id, .. } => *id,
-            Request::CancelSoftInterrupts { id } => *id,
+            Request::CancelSoftInterrupts { id, .. } => *id,
             Request::Clear { id } => *id,
             Request::Rewind { id, .. } => *id,
             Request::RewindUndo { id } => *id,

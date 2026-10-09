@@ -1338,6 +1338,7 @@ pub(super) async fn handle_client(
                 content,
                 images,
                 urgent,
+                client_id,
             } => {
                 // A soft interrupt has somewhere to go only while a turn is
                 // active. When the session is idle, queueing it would strand
@@ -1365,6 +1366,18 @@ pub(super) async fn handle_client(
                     start
                 };
                 if start_idle_turn {
+                    // The interrupt becomes the new turn's prompt, so the
+                    // model sees it before anything else. A caller tracking it
+                    // by id must still learn that it was picked up.
+                    if let Some(client_id) = client_id {
+                        let _ = client_event_tx.send(ServerEvent::SoftInterruptInjected {
+                            content: content.clone(),
+                            display_role: None,
+                            point: "turn_start".to_string(),
+                            tools_skipped: None,
+                            client_ids: vec![client_id],
+                        });
+                    }
                     start_processing_message(
                         ProcessingMessage {
                             id,
@@ -1405,16 +1418,25 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         urgent,
-                        SoftInterruptSource::User,
+                        client_id,
                         &session_control,
                         &client_event_tx,
                     );
                 }
             }
 
-            Request::CancelSoftInterrupts { id } => {
-                clear_soft_interrupts(id, &client_session_id, &session_control, &client_event_tx);
-            }
+            Request::CancelSoftInterrupts { id, client_ids } => match client_ids {
+                Some(client_ids) => cancel_soft_interrupts_by_id(
+                    id,
+                    &client_session_id,
+                    &client_ids,
+                    &session_control,
+                    &client_event_tx,
+                ),
+                None => {
+                    clear_soft_interrupts(id, &client_session_id, &session_control, &client_event_tx)
+                }
+            },
 
             Request::BackgroundTool { id } => {
                 move_tool_to_background(id, &session_control, &client_event_tx);
@@ -1589,7 +1611,7 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1), capabilities: vec!["session_tools".into()] });
+                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1), capabilities: vec!["session_tools".into(), "soft_interrupt_ids".into()] });
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
@@ -1610,6 +1632,7 @@ pub(super) async fn handle_client(
                     id,
                     &client_session_id,
                     client_is_processing,
+                    session_control.pending_soft_interrupt_count(),
                     &sessions,
                     &writer,
                 )
@@ -3462,9 +3485,12 @@ async fn start_processing_message(
     )
     .await;
 
-    let start_message_index = {
+    let (start_message_index, pending_queue) = {
         let agent_guard = agent.lock().await;
-        agent_guard.message_count()
+        (
+            agent_guard.message_count(),
+            agent_guard.soft_interrupt_queue(),
+        )
     };
     let agent = Arc::clone(agent);
     let report_agent = Arc::clone(&agent);
@@ -3538,6 +3564,14 @@ async fn start_processing_message(
                     .and_then(|stream_error| stream_error.retry_after_secs),
             },
         };
+        // Interrupts still queued here were never seen by this turn. Report
+        // them on the ordered stream so a client can reconcile its own view.
+        // Usually zero (the turn injects everything it can before ending), so
+        // skip the event then and let clients default to zero.
+        let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
+        if pending > 0 {
+            let _ = tx.send(ServerEvent::SoftInterruptQueue { pending });
+        }
         let _ = tx.send(terminal_event);
         let _ = done_tx.send((id, result, completion_report));
     }));
@@ -3793,22 +3827,60 @@ fn queue_soft_interrupt(
     content: String,
     images: Vec<(String, String)>,
     urgent: bool,
-    source: SoftInterruptSource,
+    client_id: Option<String>,
     session_control: &SessionControlHandle,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
+    let source = SoftInterruptSource::User;
     let content_bytes = content.len();
     let content_chars = content.chars().count();
     crate::logging::info(&format!(
-        "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={}",
-        id, session_control.session_id, source, urgent, content_bytes, content_chars
+        "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={} client_id={}",
+        id,
+        session_control.session_id,
+        source,
+        urgent,
+        content_bytes,
+        content_chars,
+        client_id.is_some()
     ));
-    let queued = session_control.queue_soft_interrupt(content, images, urgent, source);
+    let queued =
+        session_control.queue_soft_interrupt_with_id(content, images, urgent, source, client_id);
     let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",
         id, session_control.session_id, queued, ack_queued
     ));
+}
+
+fn cancel_soft_interrupts_by_id(
+    id: u64,
+    session_id: &str,
+    client_ids: &[String],
+    session_control: &SessionControlHandle,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let (mut cancelled, mut not_queued) = session_control.cancel_soft_interrupts_by_id(client_ids);
+    // An interrupt sent while no live queue was reachable is parked on disk
+    // until the session restores it. It is just as cancellable.
+    if !not_queued.is_empty() {
+        match crate::soft_interrupt_store::remove_by_client_ids(session_id, &not_queued) {
+            Ok(removed) if !removed.is_empty() => {
+                not_queued.retain(|id| !removed.contains(id));
+                cancelled.extend(removed);
+            }
+            Ok(_) => {}
+            Err(err) => crate::logging::warn(&format!(
+                "SERVER_SOFT_INTERRUPT_CANCEL_BY_ID_PERSISTED_FAILED id={} session={} error={}",
+                id, session_id, err
+            )),
+        }
+    }
+    let _ = client_event_tx.send(ServerEvent::SoftInterruptsCancelled {
+        id,
+        cancelled,
+        not_queued,
+    });
 }
 
 fn clear_soft_interrupts(
@@ -3848,8 +3920,23 @@ fn move_tool_to_background(
         "SERVER_BACKGROUND_TOOL_REQUEST id={} session={}",
         id, session_control.session_id
     ));
+    let running = crate::running_tool_registry::current(&session_control.session_id);
+    // Fire regardless: the agent resets the signal before every tool wait, so
+    // an idle fire is harmless, and this keeps the pre-#1778 behavior.
     let signalled = session_control.request_background_current_tool();
     let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
+    let running = running.filter(|_| signalled);
+    let moved = running.is_some();
+    let (tool_call_id, tool_name) = match running {
+        Some(tool) => (Some(tool.call_id), Some(tool.name)),
+        None => (None, None),
+    };
+    let _ = client_event_tx.send(ServerEvent::BackgroundToolResult {
+        id,
+        moved,
+        tool_call_id,
+        tool_name,
+    });
     crate::logging::info(&format!(
         "SERVER_BACKGROUND_TOOL_RESULT id={} session={} signalled={} ack_queued={}",
         id, session_control.session_id, signalled, ack_queued

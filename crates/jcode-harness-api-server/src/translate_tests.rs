@@ -465,7 +465,7 @@ fn send_message_then_done_becomes_turn_done() {
     let done = state.legacy_event_to_api(&json!({"type": "done", "id": legacy_id}));
     assert!(matches!(
         &done[1].event,
-        ApiEvent::TurnDone { session_id } if session_id == "s1"
+        ApiEvent::TurnDone { session_id, .. } if session_id == "s1"
     ));
     assert!(matches!(&done[0].event, ApiEvent::TextDone { .. }));
 }
@@ -546,7 +546,217 @@ fn idle_soft_interrupt_done_becomes_turn_done() {
     let done = state.legacy_event_to_api(&json!({"type": "done", "id": interrupt_id}));
     assert!(matches!(
         &done[0].event,
-        ApiEvent::TurnDone { session_id } if session_id == "s1"
+        ApiEvent::TurnDone { session_id, .. } if session_id == "s1"
+    ));
+}
+
+fn ids_state() -> BridgeState {
+    BridgeState {
+        session_id: Some("s1".into()),
+        soft_interrupt_ids_supported: true,
+        ..Default::default()
+    }
+}
+
+fn legacy_out(out: &[Outbound]) -> &serde_json::Value {
+    match out {
+        [Outbound::Legacy(value)] => value,
+        other => panic!("expected one legacy frame, got {other:?}"),
+    }
+}
+
+#[test]
+fn soft_interrupt_forwards_client_id() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "soft_interrupt", "id": 3, "session_id": "s1",
+        "content": "steer", "client_id": "f1"
+    }));
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["type"], "soft_interrupt");
+    assert_eq!(legacy["client_id"], "f1");
+
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "soft_interrupt", "id": 4, "session_id": "s1", "content": "plain"
+    }));
+    assert!(legacy_out(&out).get("client_id").is_none());
+}
+
+#[test]
+fn soft_interrupt_injected_closes_open_text_and_carries_ids() {
+    let mut state = ids_state();
+    state.legacy_event_to_api(&json!({"type": "text_delta", "text": "working on it"}));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "soft_interrupt_injected",
+        "content": "first\n\nsecond",
+        "point": "D",
+        "client_ids": ["f1", "f2"],
+    }));
+    assert_eq!(frames.len(), 2, "{frames:?}");
+    assert!(matches!(frames[0].event, ApiEvent::TextDone { .. }));
+    assert_eq!(
+        frames[1].event,
+        ApiEvent::SoftInterruptInjected {
+            session_id: "s1".into(),
+            client_ids: vec!["f1".into(), "f2".into()],
+            point: "D".into(),
+            tools_skipped: None,
+            display_role: None,
+        }
+    );
+
+    // Daemon-originated injections are forwarded too, with no ids.
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "soft_interrupt_injected",
+        "content": "[Background Task Completed]",
+        "display_role": "background_task",
+        "point": "B",
+    }));
+    assert!(matches!(
+        &frames[..],
+        [frame] if matches!(&frame.event, ApiEvent::SoftInterruptInjected {
+            client_ids, display_role: Some(role), point, ..
+        } if client_ids.is_empty() && role == "background_task" && point == "B")
+    ));
+}
+
+#[test]
+fn cancel_soft_interrupts_by_id_waits_for_the_exact_result() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "cancel_soft_interrupts", "id": 9, "session_id": "s1",
+        "client_ids": ["f1", "f2"]
+    }));
+    let legacy = legacy_out(&out);
+    assert_eq!(legacy["client_ids"], json!(["f1", "f2"]));
+    let legacy_id = legacy["id"].as_u64().unwrap();
+
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "ack", "id": legacy_id}))
+            .is_empty(),
+        "the early ack is not the answer"
+    );
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "soft_interrupts_cancelled", "id": legacy_id,
+        "cancelled": ["f2"], "not_queued": ["f1"]
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, Some(9));
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::SoftInterruptsCancelled {
+            cancelled: vec!["f2".into()],
+            not_queued: vec!["f1".into()],
+        }
+    );
+}
+
+#[test]
+fn cancel_soft_interrupts_without_ids_keeps_legacy_behavior() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "cancel_soft_interrupts", "id": 9, "session_id": "s1"
+    }));
+    let legacy = legacy_out(&out);
+    assert!(legacy.get("client_ids").is_none());
+    let id = legacy["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({"type": "ack", "id": id}));
+    assert!(matches!(&frames[..], [f] if f.reply_to == Some(9) && f.event == ApiEvent::Ok));
+}
+
+#[test]
+fn filtered_cancel_is_refused_by_an_old_daemon_instead_of_clearing_everything() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "cancel_soft_interrupts", "id": 9, "session_id": "s1", "client_ids": ["f1"]
+    }));
+    assert!(matches!(
+        &out[..],
+        [Outbound::Reply(frame)] if matches!(frame.event, ApiEvent::Error { code: ErrorCode::UnknownRequest, .. })
+    ));
+
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "cancel_soft_interrupts", "id": 9, "session_id": "s1", "client_ids": "f1"
+    }));
+    assert!(matches!(
+        &out[..],
+        [Outbound::Reply(frame)] if matches!(frame.event, ApiEvent::Error { code: ErrorCode::InvalidRequest, .. })
+    ));
+}
+
+#[test]
+fn background_tool_reports_what_moved() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "background_tool", "id": 5, "session_id": "s1"
+    }));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "ack", "id": id}))
+            .is_empty()
+    );
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "background_tool_result", "id": id, "moved": true,
+        "tool_call_id": "call_1", "tool_name": "bash"
+    }));
+    assert_eq!(frames[0].reply_to, Some(5));
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::BackgroundToolResult {
+            moved: true,
+            tool_call_id: Some("call_1".into()),
+            tool_name: Some("bash".into()),
+        }
+    );
+
+    // Against an older daemon the plain ack still answers.
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "background_tool", "id": 6, "session_id": "s1"
+    }));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({"type": "ack", "id": id}));
+    assert!(matches!(&frames[..], [f] if f.reply_to == Some(6) && f.event == ApiEvent::Ok));
+}
+
+#[test]
+fn turn_done_reports_interrupts_left_in_the_queue() {
+    let mut state = ids_state();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 1, "session_id": "s1", "content": "go"
+    }));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    state.legacy_event_to_api(&json!({"type": "ack", "id": id}));
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type": "soft_interrupt_queue", "pending": 2}))
+            .is_empty()
+    );
+    let frames = state.legacy_event_to_api(&json!({"type": "done", "id": id}));
+    assert!(matches!(
+        frames.last().map(|f| &f.event),
+        Some(ApiEvent::TurnDone {
+            pending_soft_interrupts: Some(2),
+            ..
+        })
+    ));
+
+    // The count belongs to that turn only.
+    let out = state.api_request_to_legacy(&json!({
+        "req": "send_message", "id": 2, "session_id": "s1", "content": "again"
+    }));
+    let id = legacy_out(&out)["id"].as_u64().unwrap();
+    let frames = state.legacy_event_to_api(&json!({"type": "done", "id": id}));
+    assert!(matches!(
+        frames.last().map(|f| &f.event),
+        Some(ApiEvent::TurnDone {
+            pending_soft_interrupts: None,
+            ..
+        })
     ));
 }
 
@@ -2395,7 +2605,7 @@ fn observer_and_server_initiated_turns_finish_without_a_local_message_id() {
         state.legacy_event_to_api(&json!({"type":"text_delta", "text":"finished"}));
         let frames = state.legacy_event_to_api(&json!({"type":"done", "id":id}));
         assert!(
-            matches!(&frames.last().unwrap().event, ApiEvent::TurnDone { session_id } if session_id == "s1")
+            matches!(&frames.last().unwrap().event, ApiEvent::TurnDone { session_id, .. } if session_id == "s1")
         );
         assert!(
             state
@@ -2912,7 +3122,9 @@ fn hidden_system_reminder_is_forwarded_without_visible_content_or_no_reply() {
     assert_eq!(message["system_reminder"], "continue task");
     assert!(message.get("no_reply").is_none());
     let frames = state.legacy_event_to_api(&json!({"type":"done", "id":message["id"]}));
-    assert!(matches!(&frames[0].event, ApiEvent::TurnDone {session_id} if session_id == "s1"));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::TurnDone { session_id, .. } if session_id == "s1")
+    );
     let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":92,
         "session_id":"s1", "content":"normal user message"}));
     let Outbound::Legacy(message) = &out[0] else {

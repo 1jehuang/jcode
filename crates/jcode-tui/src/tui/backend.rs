@@ -447,7 +447,7 @@ impl RemoteConnection {
                 content.len(),
                 content.chars().count()
             )),
-            Request::CancelSoftInterrupts { id } => Some(base("cancel_soft_interrupts", *id)),
+            Request::CancelSoftInterrupts { id, .. } => Some(base("cancel_soft_interrupts", *id)),
             Request::BackgroundTool { id } => Some(base("background_tool", *id)),
             _ => None,
         }
@@ -968,6 +968,7 @@ impl RemoteConnection {
             content,
             images,
             urgent,
+            client_id: None,
         };
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some("soft_interrupt"))
@@ -978,6 +979,7 @@ impl RemoteConnection {
     pub async fn cancel_soft_interrupts(&mut self) -> Result<()> {
         let request = Request::CancelSoftInterrupts {
             id: self.next_request_id,
+            client_ids: None,
         };
         self.next_request_id += 1;
         self.send_request_with_interrupt_trigger(request, Some("cancel_soft_interrupts"))

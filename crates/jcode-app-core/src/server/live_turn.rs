@@ -119,6 +119,7 @@ pub(super) async fn spawn_tracked_live_turn(
     let session_id = session_id.to_string();
     tokio::spawn(async move {
         let start_message_index = agent.message_count();
+        let pending_queue = agent.soft_interrupt_queue();
         let (result, stop_reason) = catch_live_turn_panic(async {
             if let Some(display_role) = display_role {
                 agent
@@ -152,6 +153,10 @@ pub(super) async fn spawn_tracked_live_turn(
         // then overwrite, hiding the newer turn and suppressing its
         // coordinator completion notification.
         let reservation = agent;
+        let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
+        if pending > 0 {
+            let _ = event_tx.send(ServerEvent::SoftInterruptQueue { pending });
+        }
         match result {
             Ok(()) => {
                 update_member_status_with_report(

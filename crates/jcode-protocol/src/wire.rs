@@ -104,11 +104,23 @@ pub enum Request {
         /// If true, can skip remaining tools at injection point C
         #[serde(default)]
         urgent: bool,
+        /// Opaque caller id, echoed in `soft_interrupt_injected` and accepted
+        /// by a filtered `cancel_soft_interrupts`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
 
-    /// Cancel all pending soft interrupts (remove from server queue before injection)
+    /// Cancel pending soft interrupts (remove from server queue before injection).
+    ///
+    /// Without `client_ids` every queued interrupt is dropped and the request
+    /// is acknowledged. With `client_ids` only the matching ones are dropped,
+    /// and the daemon answers with `soft_interrupts_cancelled`.
     #[serde(rename = "cancel_soft_interrupts")]
-    CancelSoftInterrupts { id: u64 },
+    CancelSoftInterrupts {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_ids: Option<Vec<String>>,
+    },
 
     /// Clear conversation history
     #[serde(rename = "clear")]
@@ -1111,7 +1123,40 @@ pub enum ServerEvent {
         /// Number of tools skipped (only for urgent interrupt at point C)
         #[serde(skip_serializing_if = "Option::is_none")]
         tools_skipped: Option<usize>,
+        /// Caller ids of the queued messages combined into this injection, in
+        /// queue order. Messages queued without an id contribute nothing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        client_ids: Vec<String>,
     },
+
+    /// Reply to a `cancel_soft_interrupts` that named `client_ids`. Decided
+    /// under the queue lock, so an id is never both cancelled and injected.
+    #[serde(rename = "soft_interrupts_cancelled")]
+    SoftInterruptsCancelled {
+        id: u64,
+        /// Requested ids that were still queued and are now removed.
+        cancelled: Vec<String>,
+        /// Requested ids that were not queued: already injected, or unknown.
+        not_queued: Vec<String>,
+    },
+
+    /// Reply to `background_tool`.
+    #[serde(rename = "background_tool_result")]
+    BackgroundToolResult {
+        id: u64,
+        /// A tool was executing and has been signalled to move to the
+        /// background. A tool finishing in the same instant completes normally.
+        moved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+    },
+
+    /// Soft interrupts still queued when a turn ended. Sent immediately before
+    /// the turn's terminal `done`/`error` on the same ordered stream.
+    #[serde(rename = "soft_interrupt_queue")]
+    SoftInterruptQueue { pending: usize },
 
     /// Structured abnormal turn outcome, emitted before the terminal Done/Error.
     #[serde(rename = "turn_stopped")]
@@ -1235,6 +1280,9 @@ pub enum ServerEvent {
         session_id: String,
         message_count: usize,
         is_processing: bool,
+        /// Soft interrupts queued and not yet injected. Omitted by older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_soft_interrupts: Option<usize>,
     },
 
     /// Response for debug command

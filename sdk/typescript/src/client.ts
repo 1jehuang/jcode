@@ -665,12 +665,30 @@ export class JcodeClient extends EventEmitter {
     images: ImageAttachment[],
     urgent = false,
   ): Promise<void> {
+    await this.softInterruptWithId(sessionId, content, { images, urgent });
+  }
+
+  /**
+   * Queue a message for the running turn, tagged with an opaque `clientId`.
+   *
+   * The id comes back in a `soft_interrupt_injected` event once the model has
+   * the message, and {@link cancelSoftInterrupt} can take it back before then.
+   * Needs the `soft_interrupt_ids` capability; an older server accepts the
+   * message but drops the id.
+   */
+  async softInterruptWithId(
+    sessionId: string,
+    content: string,
+    options: { clientId?: string; images?: ImageAttachment[]; urgent?: boolean } = {},
+  ): Promise<void> {
+    const images = options.images ?? [];
     await this.requestOk({
       req: "soft_interrupt",
       session_id: sessionId,
       content,
       images: images.length > 0 ? images : undefined,
-      urgent,
+      urgent: options.urgent ?? false,
+      client_id: options.clientId,
     });
   }
 
@@ -903,9 +921,54 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "cancel_soft_interrupts", session_id: sessionId });
   }
 
+  /**
+   * Take back specific queued soft interrupts by `client_id`.
+   *
+   * Decided atomically against delivery: an id in `cancelled` never reached
+   * the model, and one in `notQueued` already did (or was never queued).
+   * Needs the `soft_interrupt_ids` capability.
+   */
+  async cancelSoftInterruptsById(
+    sessionId: string,
+    clientIds: string[],
+  ): Promise<{ cancelled: string[]; notQueued: string[] }> {
+    const frame = await this.expectReply(
+      { req: "cancel_soft_interrupts", session_id: sessionId, client_ids: clientIds },
+      "soft_interrupts_cancelled",
+    );
+    return { cancelled: frame.cancelled ?? [], notQueued: frame.not_queued ?? [] };
+  }
+
+  /**
+   * Take back one queued soft interrupt. Resolves `true` when it was removed
+   * before the model saw it, `false` when it was already delivered.
+   */
+  async cancelSoftInterrupt(sessionId: string, clientId: string): Promise<boolean> {
+    const { cancelled } = await this.cancelSoftInterruptsById(sessionId, [clientId]);
+    return cancelled.includes(clientId);
+  }
+
   /** Move the running tool call to the background (the TUI's Alt+B). */
   async backgroundTool(sessionId: string): Promise<void> {
-    await this.requestOk({ req: "background_tool", session_id: sessionId });
+    await this.backgroundToolResult(sessionId);
+  }
+
+  /**
+   * Move the running tool call to the background and report what moved.
+   * A server without the `background_tool_result` capability only answers
+   * `ok`, reported as `{ moved: false }` even if a tool was moved.
+   */
+  async backgroundToolResult(
+    sessionId: string,
+  ): Promise<{ moved: boolean; toolCallId?: string; toolName?: string }> {
+    const frame = await this.requestOk({ req: "background_tool", session_id: sessionId });
+    if (frame.ev !== "background_tool_result") return { moved: false };
+    const result: { moved: boolean; toolCallId?: string; toolName?: string } = {
+      moved: frame.moved === true,
+    };
+    if (typeof frame.tool_call_id === "string") result.toolCallId = frame.tool_call_id;
+    if (typeof frame.tool_name === "string") result.toolName = frame.tool_name;
+    return result;
   }
 
   async ping(): Promise<void> {

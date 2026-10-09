@@ -112,6 +112,7 @@ pub(super) async fn handle_get_state(
     id: u64,
     client_session_id: &str,
     client_is_processing: bool,
+    pending_soft_interrupts: usize,
     sessions: &SessionAgents,
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
@@ -128,6 +129,7 @@ pub(super) async fn handle_get_state(
             message_count: session_count,
             is_processing: client_is_processing
                 || crate::turn_cancel_registry::has_active_turn(client_session_id),
+            pending_soft_interrupts: Some(pending_soft_interrupts),
         },
     )
     .await

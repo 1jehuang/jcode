@@ -106,6 +106,7 @@ fn soft_interrupt_images_wire_shape_and_legacy_default() {
             content: "look".into(),
             images: vec![("image/png".into(), "aW1hZ2U=".into())],
             urgent: true,
+            client_id: None,
         },
     );
     assert_eq!(
@@ -125,6 +126,94 @@ fn soft_interrupt_images_wire_shape_and_legacy_default() {
             ..
         } if images.is_empty()
     ));
+}
+
+#[test]
+fn soft_interrupt_ids_requests_and_events_wire_shape() {
+    let frame = ClientFrame::new(
+        12,
+        ApiRequest::SoftInterrupt {
+            session_id: "s1".into(),
+            content: "steer".into(),
+            images: vec![],
+            urgent: false,
+            client_id: Some("f1".into()),
+        },
+    );
+    assert_eq!(
+        serde_json::to_string(&frame).unwrap(),
+        r#"{"v":1,"id":12,"req":"soft_interrupt","session_id":"s1","content":"steer","urgent":false,"client_id":"f1"}"#
+    );
+
+    // Unfiltered cancel keeps the legacy shape; the filter is additive.
+    let all: ClientFrame =
+        serde_json::from_str(r#"{"v":1,"id":13,"req":"cancel_soft_interrupts","session_id":"s1"}"#)
+            .unwrap();
+    assert_eq!(
+        all.request,
+        ApiRequest::CancelSoftInterrupts {
+            session_id: "s1".into(),
+            client_ids: None
+        }
+    );
+    let some = ClientFrame::new(
+        14,
+        ApiRequest::CancelSoftInterrupts {
+            session_id: "s1".into(),
+            client_ids: Some(vec!["f1".into()]),
+        },
+    );
+    assert_eq!(
+        serde_json::to_string(&some).unwrap(),
+        r#"{"v":1,"id":14,"req":"cancel_soft_interrupts","session_id":"s1","client_ids":["f1"]}"#
+    );
+
+    let injected = ServerFrame::event(ApiEvent::SoftInterruptInjected {
+        session_id: "s1".into(),
+        client_ids: vec!["f1".into(), "f2".into()],
+        point: "D".into(),
+        tools_skipped: None,
+        display_role: None,
+    });
+    assert_eq!(
+        serde_json::to_string(&injected).unwrap(),
+        r#"{"v":1,"ev":"soft_interrupt_injected","session_id":"s1","client_ids":["f1","f2"],"point":"D"}"#
+    );
+
+    let cancelled = ServerFrame::reply(
+        14,
+        ApiEvent::SoftInterruptsCancelled {
+            cancelled: vec!["f1".into()],
+            not_queued: vec![],
+        },
+    );
+    assert_eq!(
+        serde_json::to_string(&cancelled).unwrap(),
+        r#"{"v":1,"reply_to":14,"ev":"soft_interrupts_cancelled","cancelled":["f1"],"not_queued":[]}"#
+    );
+
+    let moved = ServerFrame::reply(
+        15,
+        ApiEvent::BackgroundToolResult {
+            moved: true,
+            tool_call_id: Some("call_1".into()),
+            tool_name: Some("bash".into()),
+        },
+    );
+    assert_eq!(
+        serde_json::to_string(&moved).unwrap(),
+        r#"{"v":1,"reply_to":15,"ev":"background_tool_result","moved":true,"tool_call_id":"call_1","tool_name":"bash"}"#
+    );
+
+    // A turn with nothing left queued keeps the legacy `turn_done` shape.
+    let done = ServerFrame::event(ApiEvent::TurnDone {
+        session_id: "s1".into(),
+        pending_soft_interrupts: None,
+    });
+    assert_eq!(
+        serde_json::to_string(&done).unwrap(),
+        r#"{"v":1,"ev":"turn_done","session_id":"s1"}"#
+    );
 }
 
 #[test]
@@ -158,7 +247,8 @@ fn unknown_fields_are_ignored() {
     assert_eq!(
         frame.event,
         ApiEvent::TurnDone {
-            session_id: "s1".into()
+            session_id: "s1".into(),
+            pending_soft_interrupts: None,
         }
     );
 }
