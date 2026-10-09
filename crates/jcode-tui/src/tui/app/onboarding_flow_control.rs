@@ -1094,34 +1094,16 @@ impl App {
         }
     }
 
-    /// Drop into the suggestion-card state (the "No" / no-OAuth path). Prints
-    /// the same starter prompts the empty-screen welcome offers, as an inline
-    /// numbered list the user can pick by typing the number or anything else.
+    /// Finish onboarding and land on the regular new-session screen.
     ///
-    /// This is also the "Start a new session" landing screen on first run. We
-    /// intentionally keep it clean: the usual login/import system chatter is
-    /// suppressed while onboarding drives the UI, and instead of that noise we
+    /// There are no starter suggestion cards anymore: the user sees exactly
+    /// what a normal fresh session looks like. The usual login/import system
+    /// chatter is suppressed while onboarding drives the UI, and instead we
     /// kick off a single lightweight live validation of the auto-selected
     /// default model and report it as one tidy "ready"/"failed" line.
     pub(super) fn onboarding_show_suggestions(&mut self) {
-        self.set_onboarding_phase(OnboardingPhase::Suggestions);
-        let suggestions = self.suggestion_prompts();
-        if suggestions.is_empty() {
-            self.onboarding_finish();
-            self.set_status_notice("You're all set, type anything to start");
-            self.onboarding_validate_default_model();
-            return;
-        }
-        let mut body = String::from("Here are a few things you can try:\n");
-        for (i, (label, _prompt)) in suggestions.iter().enumerate() {
-            body.push_str(&format!("  [{}] {}\n", i + 1, label));
-        }
-        body.push_str(&format!(
-            "Press 1-{} to use one, or just type anything to start.",
-            suggestions.len()
-        ));
-        self.push_display_message(DisplayMessage::system(body));
-        self.set_status_notice("Try a suggestion, or type anything to start");
+        self.onboarding_finish();
+        self.set_status_notice("You're all set, type anything to start");
         self.onboarding_validate_default_model();
     }
 

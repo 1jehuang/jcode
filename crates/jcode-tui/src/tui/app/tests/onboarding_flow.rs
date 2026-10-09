@@ -644,7 +644,7 @@ fn import_review_decline_all_falls_back_to_manual_login() {
 }
 
 #[test]
-fn answering_no_on_continue_prompt_shows_suggestions() {
+fn answering_no_on_continue_prompt_lands_on_regular_session() {
     with_temp_jcode_home(|| {
         let mut app = onboarding_test_app();
         if let Some(flow) = app.onboarding_flow.as_mut() {
@@ -655,10 +655,9 @@ fn answering_no_on_continue_prompt_shows_suggestions() {
             };
         }
         app.onboarding_answer_continue(false);
-        assert!(matches!(
-            app.onboarding_phase(),
-            Some(OnboardingPhase::Suggestions)
-        ));
+        // "No" lands on the regular new-session screen: no starter prompts.
+        assert!(!app.onboarding_flow_active());
+        assert!(app.suggestion_prompts().is_empty() || !app.onboarding_welcome_active());
         // No session picker overlay opened on the "No" path.
         assert!(app.session_picker_overlay.is_none());
     });
@@ -1653,7 +1652,7 @@ fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
 
     assert!(!app.pending_turn);
     assert!(app.queued_messages.is_empty());
-    assert!(matches!(app.onboarding_phase(), Some(OnboardingPhase::Suggestions)));
+    assert!(!app.onboarding_flow_active());
     assert!(app.status_notice.as_ref().is_some_and(|(notice, _)| {
         notice.contains("No active Git repository found")
     }));
