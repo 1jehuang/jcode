@@ -16,9 +16,13 @@ path = "src/lib.rs"
 
 [dependencies]
 futures = "0.3"
-rquickjs = { version = "0.14", features = ["futures"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+
+# rquickjs-sys ships no prebuilt FreeBSD bindings, and generating them needs
+# libclang in the build VM. Codemode reports itself unavailable there instead.
+[target.'cfg(not(target_os = "freebsd"))'.dependencies]
+rquickjs = { version = "0.14", features = ["futures"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
