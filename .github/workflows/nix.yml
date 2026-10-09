@@ -1,0 +1,105 @@
+name: Nix
+
+on:
+  push:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - crates/**
+      - docs/**
+      - assets/**
+      - scripts/**
+      - .cargo/**
+      - flake.nix
+      - flake.lock
+      - shell.nix
+      - nix/**
+      - .github/workflows/nix.yml
+      - .github/workflows/release.yml
+      - .github/workflows/update-nix-release.yml
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - src/**
+      - crates/**
+      - docs/**
+      - assets/**
+      - scripts/**
+      - .cargo/**
+      - flake.nix
+      - flake.lock
+      - shell.nix
+      - nix/**
+      - .github/workflows/nix.yml
+      - .github/workflows/release.yml
+      - .github/workflows/update-nix-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  JCODE_CI: "1"
+
+jobs:
+  packages:
+    name: Nix (${{ matrix.system }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+          - os: ubuntu-24.04-arm
+            system: aarch64-linux
+          - os: macos-15-intel
+            system: x86_64-darwin
+          - os: macos-latest
+            system: aarch64-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Nix (v31)
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+
+      - name: Check Nix formatting and modules
+        run: |
+          nix fmt -- --check flake.nix nix/binary.nix nix/checks.nix
+          nix flake check --no-update-lock-file
+
+      - name: Build and run release binary
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --no-update-lock-file ".#packages.$SYSTEM.jcode-bin" --out-link result-bin
+          ./result-bin/bin/jcode --version
+
+      - name: Test release updater
+        if: matrix.system == 'x86_64-linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -m unittest discover -s scripts -p test_update_nix_release.py -v
+          tag=$(python3 -c 'import json; print(json.load(open("nix/release.json"))["tag"])')
+          python3 scripts/update_nix_release.py --tag "$tag" --output "$RUNNER_TEMP/release.json"
+          cmp nix/release.json "$RUNNER_TEMP/release.json"
+          python3 scripts/update_nix_release.py --tag "$tag" --output "$RUNNER_TEMP/release.json"
+
+      - name: Build and run source package
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          nix build --no-update-lock-file --cores 2 .#jcode --out-link result-source
+          ./result-source/bin/jcode --version
+
+      - name: Verify repository files are unchanged
+        run: git diff --exit-code
