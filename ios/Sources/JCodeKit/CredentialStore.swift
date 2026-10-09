@@ -10,6 +10,9 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
     public var serverName: String
     public var serverVersion: String
     public var pairedAt: Date
+    public var workspaces: [String]
+
+    public static let maxWorkspaces = 8
 
     public init(
         host: String,
@@ -17,7 +20,8 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
         token: String,
         serverName: String,
         serverVersion: String,
-        pairedAt: Date = Date()
+        pairedAt: Date = Date(),
+        workspaces: [String] = []
     ) {
         self.host = host
         self.port = port
@@ -25,10 +29,78 @@ public struct ServerCredential: Codable, Equatable, Sendable, Identifiable {
         self.serverName = serverName
         self.serverVersion = serverVersion
         self.pairedAt = pairedAt
+        self.workspaces = workspaces
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case host, port, token, serverName, serverVersion, pairedAt, workspaces
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        host = try container.decode(String.self, forKey: .host)
+        port = try container.decode(UInt16.self, forKey: .port)
+        token = try container.decode(String.self, forKey: .token)
+        serverName = try container.decode(String.self, forKey: .serverName)
+        serverVersion = try container.decode(String.self, forKey: .serverVersion)
+        pairedAt = try container.decode(Date.self, forKey: .pairedAt)
+        workspaces = try container.decodeIfPresent([String].self, forKey: .workspaces) ?? []
     }
 
     public var gateway: Gateway {
         Gateway(host: host, port: port)
+    }
+
+    public var activeWorkspace: String? {
+        workspaces.first
+    }
+
+    public func selectingWorkspace(_ path: String) -> ServerCredential? {
+        guard let normalized = Workspace.normalize(path) else { return nil }
+        var copy = self
+        copy.workspaces.removeAll { $0 == normalized }
+        copy.workspaces.insert(normalized, at: 0)
+        if copy.workspaces.count > Self.maxWorkspaces {
+            copy.workspaces.removeLast(copy.workspaces.count - Self.maxWorkspaces)
+        }
+        return copy
+    }
+
+    public func forgettingWorkspace(_ path: String) -> ServerCredential {
+        var copy = self
+        copy.workspaces.removeAll { $0 == path }
+        return copy
+    }
+
+    public func keepingWorkspaces(from saved: [ServerCredential]) -> ServerCredential {
+        guard workspaces.isEmpty, let previous = saved.first(where: { $0.id == id }) else {
+            return self
+        }
+        var copy = self
+        copy.workspaces = previous.workspaces
+        return copy
+    }
+
+    public static func workspaceFallback(
+        pending: ServerCredential?, current: ServerCredential
+    ) -> ServerCredential {
+        pending ?? current
+    }
+}
+
+public enum Workspace {
+    public static func normalize(_ raw: String) -> String? {
+        var path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard path.hasPrefix("/") else { return nil }
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
+    }
+
+    public static func displayName(_ path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        return name.isEmpty ? path : name
     }
 }
 
