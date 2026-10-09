@@ -1568,8 +1568,10 @@ fn test_ctrl_c_requests_cancel_while_processing() {
 }
 
 #[test]
-fn test_escape_interrupt_disables_auto_poke_while_processing() {
-    let mut app = create_test_app();
+fn test_escape_interrupt_stops_the_poke_but_keeps_auto_poke_armed() {
+    // `auto_poke_default_on` is what must survive the interrupt, and it too comes
+    // from config.features.auto_poke at construction.
+    let mut app = with_temp_jcode_home(create_test_app);
     app.is_processing = true;
     app.auto_poke_incomplete_todos = true;
     app.queued_messages
@@ -1591,11 +1593,39 @@ fn test_escape_interrupt_disables_auto_poke_while_processing() {
     app.handle_key(KeyCode::Esc, KeyModifiers::empty()).unwrap();
 
     assert!(app.cancel_requested);
-    assert!(!app.auto_poke_incomplete_todos);
+    // The queued poke is dropped, ...
     assert!(app.queued_messages.is_empty());
+    // ... and auto-poke stays armed, because an interrupt says "stop this turn",
+    // not "never poke again". It used to clear auto_poke_default_on too, which
+    // disabled auto-poke for the rest of the session with no way back short of
+    // an explicit /poke on.
+    assert!(!app.auto_poke_incomplete_todos, "the in-flight poke is stopped");
+    assert!(
+        app.auto_poke_default_on,
+        "but the feature is still on for the session"
+    );
     assert_eq!(
         app.status_notice(),
-        Some("Interrupting... Auto-poke OFF".to_string())
+        Some("Interrupting... auto-poke resumes on your next message".to_string())
+    );
+    // A fresh fingerprint means the next turn end schedules a new poke.
+    assert!(app.last_auto_poke_fingerprint.is_none());
+}
+
+#[test]
+fn test_explicit_poke_off_still_disarms_permanently() {
+    // The counterpart to the interrupt: an explicit /poke off is a decision to
+    // stop, and it must survive the default-on re-arm.
+    let mut app = create_test_app();
+    app.auto_poke_incomplete_todos = true;
+    app.auto_poke_default_on = true;
+
+    super::commands::disable_auto_poke(&mut app);
+
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(
+        !app.auto_poke_default_on,
+        "/poke off must stay sticky across the re-arm"
     );
 }
 

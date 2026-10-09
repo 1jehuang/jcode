@@ -75,6 +75,27 @@ pub const DEFAULT_SWARM_PROMPT: &str = include_str!("prompt/swarm_prompt.md");
 /// project `./.jcode/swarm-prompt.md`, then global `~/.jcode/swarm-prompt.md`,
 /// then the built-in [`DEFAULT_SWARM_PROMPT`].
 pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
+    let machine_home = dirs::home_dir()
+        .map(|home| home.join(".jcode"))
+        .unwrap_or_default();
+    load_swarm_prompt_with_homes(working_dir, &machine_home)
+}
+
+/// Same resolution as [`load_swarm_prompt`], with the machine profile passed in
+/// explicitly so the shadowing case is reachable from a test.
+///
+/// The fallback to [`DEFAULT_SWARM_PROMPT`] is the dangerous step. It is
+/// indistinguishable from "the user configured no policy", which is exactly how
+/// a 2026-10-03 run lost a 19176-byte machine policy without any signal and then
+/// seeded seven root-level task-graph nodes as if none existed. When the resolved
+/// `jcode_dir()` holds nothing but the real profile does, that file is named in
+/// the returned prompt so the coordinator can see the policy is shadowed rather
+/// than absent.
+///
+/// Reaching this branch already implies the resolved dir differs from the
+/// machine profile: if they were the same path, the loop above would have
+/// returned the machine file.
+pub fn load_swarm_prompt_with_homes(working_dir: Option<&Path>, machine_home: &Path) -> String {
     let project_dir = working_dir.unwrap_or(Path::new("."));
     let candidates = [
         Some(project_dir.join(".jcode").join("swarm-prompt.md")),
@@ -90,7 +111,24 @@ pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
             }
         }
     }
-    DEFAULT_SWARM_PROMPT.trim().to_string()
+
+    let base = DEFAULT_SWARM_PROMPT.trim();
+    let machine_policy = machine_home.join("swarm-prompt.md");
+    let shadowed = std::fs::read_to_string(&machine_policy)
+        .is_ok_and(|content| !content.trim().is_empty());
+
+    if !shadowed {
+        return base.to_string();
+    }
+
+    format!(
+        "{base}\n\n> SANDBOX SHADOWING: this run resolved its jcode home to a sandbox \
+         with no swarm-prompt.md, so your machine policy at {} is shadowed and is \
+         NOT in effect. The text above is the built-in default only. Copy that file \
+         into the sandbox home to restore it, and do not conclude that no \
+         orchestration policy is configured.\n",
+        machine_policy.display()
+    )
 }
 
 /// Reasoning-effort sentinel that enables swarm orchestration. Providers
@@ -116,7 +154,51 @@ pub const SWARM_EFFORT_DIRECTIVE: &str = "# Swarm Effort\n\nSwarm orchestration 
 /// System-prompt directive injected when the active reasoning effort is
 /// [`SWARM_DEEP_EFFORT`]. Instructs the agent to run the comprehensive DAG-first
 /// task-graph workflow.
-pub const SWARM_DEEP_EFFORT_DIRECTIVE: &str = "# Deep Task Graph\n\nThe deep task-graph swarm workflow is enabled. Your root reasoning effort is configured independently from worker effort. Treat the task DAG as the primary object, not ad hoc agent chat. Workflow:\n\n1. Seed a graph with `swarm task_graph` using `mode: \"deep\"`: lay out nodes (kind explore|implement|verify|fix|synthesize) and `depends_on` edges instead of answering directly. (At this effort the server already defaults the plan to deep, but pass `mode: \"deep\"` explicitly anyway.) The engine auto-inserts a plan-wide root gate over your seed: the plan cannot finish until a final adversarial audit passes, and that audit can inject new top-level work.\n2. For any node that is too big, `swarm expand_node` to decompose it into a child sub-DAG (you become its planner/integrator). In deep mode a critique/verify gate is auto-inserted before a composite node can close. The graph is EXPECTED to outgrow its seed, often by several times: growth (expansions and gate-injected gaps) is the system working, not scope creep. plan_status reports seeded-vs-grown counts.\n3. Finish each node with `swarm complete_node` and a typed artifact: `findings`, `evidence` (file:line / commit refs), `validation`, `open_questions`, a required `confidence` (low|medium|high; report low honestly, it routes follow-up work to shore up that scope), and an honest `what_i_did_not_check`. Downstream nodes are hydrated with these artifacts automatically. There is no other way to close a deep node: a turn ending without expand_node/complete_node re-queues the node to a fresh worker and fails it on repeat.\n4. When a critique/verify gate finds gaps or failures, use `swarm inject_gap` to add new nodes; the parent cannot close until they drain. A passing gate artifact must account for EVERY node it audited by id (the server rejects rubber stamps), and cannot pass over a low-confidence sibling without addressing it explicitly, so treat low-confidence siblings as priority probe targets.\n5. Use `swarm run_plan` to drive the graph to completion. It returns immediately and drives the plan as a background task (progress card + wake on completion), so keep working or answer the user while it runs; check `swarm plan_status` or `bg` for progress. Deep mode fans out wide automatically (many workers run in parallel, bounded only by the swarm member cap), so prefer decomposing into MANY independent sibling nodes rather than a few serial ones: keep the ready set wide so run_plan can dispatch lots of agents at once. Only add `depends_on` edges for real data dependencies.\n\nComprehensiveness is structural: prefer decomposition + gates over a single thorough answer, so it is very unlikely any nook or cranny is missed.";
+pub const SWARM_DEEP_EFFORT_DIRECTIVE: &str = r##"# Deep Task Graph
+
+The deep task-graph swarm workflow is enabled. Your root reasoning effort is configured independently from worker effort. Treat the task DAG as the primary object, not ad hoc agent chat.
+
+## Where the parallelism comes from
+
+The fan-out is the children of ONE expanded root node, not the number of roots. docs/SWARM_TASK_GRAPH.md section 9 is the worked example: T0 seeds `explore, gate, synthesize` - one node; T1 the root expands explore into six facets; T2 the scheduler fans those facets out to parallel workers.
+
+A node nobody expands runs on exactly one worker no matter how large the budget. Measured: a single-node seed peaked at 1 of 32 concurrent worker slots.
+
+So: seed ONE root node in a single `swarm task_graph` call, then get it expanded. Every `task_graph` call is a re-seed, and re-seeding re-opens and re-widens the plan-wide root gate, which belongs to a worker once dispatched - measured cost of ignoring this: 31 root nodes spread across 14 calls left the coordinator closing zero nodes, unable to `inject_gap`, with the gate owned by another session.
+
+## Two ways to get the expansion, and the race between them
+
+**Preferred: write the root node as expandable and let its assignee expand it.** Say so in the node's own `content` - name the facets and state that the node is to be decomposed rather than executed serially. This does not depend on winning a race, and it is what produced eight genuinely concurrent workers in measurement. The injected node directive already tells the assignee to decompose a node containing more than one independently checkable concern, so an explicit marker needs no inference.
+
+**Alternatively: expand it yourself, but only while no driver is running.** A live `run_plan` driver dispatches a queued node and takes ownership before the coordinator can act; `expand_node` then fails with the actor not owning the node. Observed live. If you intend to expand yourself, do not start `run_plan` first.
+
+## spawn is not the plan
+
+`spawn` is the agent-first path: one worker receives one prompt, owns its whole scope, and finishes all of it. Launching N workers gives N scopes, never decomposition of one scope. Only a `swarm-deep` root may spawn recursively, and a spawned worker has no plan node to expand. Parallelism inside one scope comes from the task graph, not from spawning more agents.
+
+## Supervise, do not wait
+
+Do not block on a long `bg wait` for workers. Your job while a plan runs is to check whether they are progressing and to act on the ones that are not.
+
+- Poll with `swarm list` and `swarm plan_status`, not with a long wait.
+- A worker is suspect when its status line is stuck, its last activity is far in the past, or its node has been re-queued. A turn ending without `complete_node` re-queues a node once and then fails it, so a repeated re-queue means the assignee is not closing its node.
+- `peak N of 32` with `active 0` means the driver has nothing running, not that work is progressing.
+- When a worker is looping or ignoring messages, stop it with a direct DM that cuts scope and tells it to report what it already has and close the node. A negative result with evidence beats an unfinished positive one.
+- `plan_status` reaching a terminal state with nodes still Blocked is a signal to intervene, not to wait again.
+
+## Bounding the growth
+
+Deep mode has no fixed depth and no per-node fan-out limit: growth is bounded only by the live-worker budget and the total member cap. How far to expand is the owner's call at expansion time, on the node's own terms; there is no prescribed number, because the right breadth depends on what the node contains.
+
+A node's brief can also request atomic execution instead of decomposition. **Handle this carefully:** the server detects it by an ASCII-case-insensitive substring match anywhere in the brief, with no word boundary, no line anchoring and no position, so a node whose brief merely discusses the mechanism, quotes it, or contains it inside a code block is silently switched to atomic execution with no other signal. Decide per node whether it is genuinely atomic, and describe the intent in your own words rather than pasting the marker text into a brief.
+
+## Workflow
+
+1. Seed one root node in a single `task_graph` call with `mode: "deep"`, written so its assignee will expand it.
+2. `run_plan` fans the ready facets out to parallel workers; any facet whose owner finds it deep can self-decompose further.
+3. Finish each node with `swarm complete_node` and a typed artifact: `findings` (string), `evidence`, `edge_cases_considered`, `open_questions` and `what_i_did_not_check` (arrays of strings), `validation` and `confidence` (strings). Downstream nodes are hydrated with these artifacts automatically. There is no other way to close a deep node.
+4. When a critique/verify gate finds gaps or failures, use `swarm inject_gap` to add new nodes; the parent cannot close until they drain. A passing gate artifact must account for EVERY node it audited by id (the server rejects rubber stamps), and cannot pass over a low-confidence sibling without addressing it explicitly.
+5. Supervise while it runs rather than waiting on it."##;
 
 /// Returns true when `effort` is either swarm sentinel (light or deep),
 /// case-insensitive. Providers resolve their configured root reasoning level.
@@ -201,6 +283,34 @@ pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Opti
     }
     split.dynamic_part.push_str(directive);
 }
+
+/// Append per-turn harness reminders to the dynamic (uncached) prompt part.
+///
+/// Two callers assemble reminder text: the embedded TUI client in `jcode-tui`
+/// and the server-side agent in `jcode-app-core`. Each used to carry its own
+/// copy of the `# System Reminder` framing, so a fix applied to one of them
+/// silently did nothing in the other and read as covered. Keep the framing here
+/// so there is exactly one copy of it.
+pub fn append_system_reminder_sections(split: &mut SplitSystemPrompt, sections: &[Option<String>]) {
+    let joined: Vec<&str> = sections
+        .iter()
+        .filter_map(|section| {
+            section
+                .as_deref()
+                .map(str::trim)
+                .filter(|section| !section.is_empty())
+        })
+        .collect();
+    if joined.is_empty() {
+        return;
+    }
+    if !split.dynamic_part.is_empty() {
+        split.dynamic_part.push_str("\n\n");
+    }
+    split.dynamic_part.push_str("# System Reminder\n\n");
+    split.dynamic_part.push_str(&joined.join("\n\n"));
+}
+
 /// Mission-continuation template (embedded at compile time). Consumed by the
 /// `mission` module in the upper `jcode-app-core` layer; the asset lives here
 /// alongside the other prompt templates.

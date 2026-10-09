@@ -1594,6 +1594,26 @@ fn render_message_into(
                 }
             }
         }
+        // Externally injected instruction (#1648). The attribution is
+        // structural - the role reaches here - so this arm only has to render it
+        // visibly and distinctly. It deliberately does not go through the "user"
+        // arm: that numbers it as a typed prompt, which is the confusion the
+        // role exists to prevent.
+        "user_external" => {
+            let content_width = width.saturating_sub(4);
+            let mut labelled = msg.clone();
+            labelled.role = "system".to_string();
+            labelled.content = format!("[external request] {}", msg.content);
+            let cached = get_cached_message_lines(
+                &labelled,
+                content_width,
+                app.diff_mode(),
+                render_system_message,
+            );
+            for line in cached {
+                acc.push_auto(align_if_unset(line, align));
+            }
+        }
         "system" => {
             let content_width = width.saturating_sub(4);
             let cached = get_cached_message_lines(

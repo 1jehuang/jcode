@@ -898,6 +898,27 @@ pub(super) async fn handle_subscribe(
     let _ = client_event_tx.send(ServerEvent::SessionId {
         session_id: client_session_id.to_string(),
     });
+
+    // Report the active route on subscribe, for the same reason the swarm plan
+    // above is re-sent. Only the resume path sent it, so a session started from
+    // the launcher - a brand-new one rather than a resume - never learned the
+    // window the server resolved. A remote client's own provider is an inert
+    // placeholder with no model catalog, so it falls back to the generic 200_000
+    // default and shows 200K for a route that is actually 1M. Measured on
+    // stealth/space-bunny-alpha@Stealth via launcher start.
+    {
+        let guard = agent.lock().await;
+        let _ = client_event_tx.send(ServerEvent::ModelChanged {
+            id,
+            model: guard.provider_model(),
+            provider_name: Some(guard.provider_name()),
+            context_window: Some(guard.provider_context_window() as u64),
+            error: None,
+            resolved_credential: guard.active_resolved_credential(),
+            reasoning_effort: guard.provider_reasoning_effort(),
+        });
+    }
+
     let _ = client_event_tx.send(ServerEvent::Done { id });
     prewarm_idle_agent(agent);
 }

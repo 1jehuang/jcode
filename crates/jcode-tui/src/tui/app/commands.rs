@@ -103,6 +103,28 @@ pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
     removed
 }
 
+/// Stop the poke that is currently in flight, without disarming auto-poke.
+///
+/// `disable_auto_poke` is right for an explicit `/poke off` and for the
+/// circuit breaker: both are decisions to stop, and both must stick. An
+/// interrupt is not that decision - it means "stop this turn". Routing it
+/// through `disable_auto_poke` also cleared `auto_poke_default_on`, so one Esc
+/// silently disabled auto-poke for the rest of the session and the default-on
+/// re-arm in `schedule_auto_poke_followup_if_needed` could not undo it.
+pub(super) fn stop_auto_poke_episode(app: &mut App) -> usize {
+    let cleared = clear_queued_poke_messages(app);
+    // Left disarmed. `auto_poke_default_on` is untouched, so the next user turn
+    // re-arms through `rearm_auto_poke_on_user_turn`. Re-arming here instead
+    // would make "auto-poke resumes on your next message" untrue.
+    app.auto_poke_incomplete_todos = false;
+    app.todo_confidence_spike_challenged = false;
+    app.todo_completion_gate_attempts = 0;
+    app.last_auto_poke_fingerprint = None;
+    app.last_todo_ownership_fingerprint = None;
+    app.todo_gate_digest_delivered = false;
+    cleared
+}
+
 pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     let cleared = clear_queued_poke_messages(app);
     app.auto_poke_incomplete_todos = false;
@@ -113,6 +135,10 @@ pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.auto_poke_stall_count = 0;
+
+    app.auto_poke_refine_prompt_count = 0;
+    app.auto_poke_refine_exhausted = false;
     app.last_todo_ownership_fingerprint = None;
     app.todo_gate_digest_delivered = false;
     cleared
@@ -184,11 +210,16 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
         return false;
     }
 
-    let cleared = disable_auto_poke(app);
+    // Episode-scoped, not session-scoped: a request that failed once does not
+    // mean auto-poke should never run again. Clearing `auto_poke_default_on`
+    // here turned a single network or provider hiccup into a permanent stop for
+    // the session, which the user-turn re-arm cannot undo because the default
+    // itself was cleared.
+    let cleared = stop_auto_poke_episode(app);
     app.rate_limit_pending_message = None;
     app.rate_limit_reset = None;
     app.push_display_message(DisplayMessage::system(format!(
-        "🛑 The last request failed in a way that retrying won't fix, so we stopped poking.{} Fix the request or session, then /poke to resume.",
+        "🛑 The last request failed in a way that retrying won't fix, so we stopped poking for now.{} Fix the request or session; auto-poke resumes on your next message.",
         if cleared == 0 {
             String::new()
         } else {
@@ -238,6 +269,93 @@ pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String 
     )
 }
 
+/// Arm auto-poke if the plan still has open items.
+///
+/// Unlike [`activate_auto_poke`] this is the automatic path: it says nothing in
+/// the status line, and it leaves the guardrail circuit breaker
+/// (`consecutive_guardrail_stops` / `turn_guardrail_stopped`) at whatever budget
+/// it had spent, because no user decision was made here.
+///
+/// It DOES give the *completion-gate* budget (`todo_completion_gate_attempts`)
+/// back. That gate exists to stop one unfinished plan from being nudged
+/// forever, so a new user turn is exactly the point at which it is right to
+/// start counting again; only `activate_auto_poke` also refills the guardrail
+/// breaker, because there the user said so.
+///
+/// `todo_confidence_spike_challenged` is deliberately left alone. The challenge
+/// is issued once per plan state and is cleared when the plan changes
+/// (`schedule_auto_poke_followup_if_needed`), so clearing it on every automatic
+/// re-arm would let a single abrupt confidence jump be challenged over and
+/// over. `/poke on` clears it because that is a deliberate start-over. See
+/// issue #1666.
+pub(super) fn rearm_auto_poke_if_plan_unfinished(app: &mut App) -> bool {
+    if !app.auto_poke_default_on {
+        return false;
+    }
+    if incomplete_poke_todos(app).is_empty() {
+        return false;
+    }
+    app.auto_poke_incomplete_todos = true;
+    app.todo_completion_gate_attempts = 0;
+    app.last_auto_poke_fingerprint = None;
+    app.auto_poke_stall_count = 0;
+
+    app.auto_poke_refine_prompt_count = 0;
+    app.auto_poke_refine_exhausted = false;
+    app.last_todo_ownership_fingerprint = None;
+    app.todo_gate_digest_delivered = false;
+    true
+}
+
+/// The turn after a user message is the harness's own chance to verify
+/// completion: if the plan still has open items the agent should keep going
+/// instead of stopping half-done. This is what makes the feature automatic
+/// rather than something re-armed by hand after every interrupt, failed
+/// request or provider refusal.
+pub(super) fn rearm_auto_poke_on_user_turn(app: &mut App) -> bool {
+    if rearm_auto_poke_if_plan_unfinished(app) {
+        app.auto_poke_rearm_owed = false;
+        return true;
+    }
+    // The decline may be premature rather than final. An empty plan at the
+    // instant a user turn starts does not mean there is nothing to do: the agent
+    // can create todos later in this same turn. Dropping the decline here is how
+    // one Esc left auto-poke looking enabled while never firing again.
+    defer_auto_poke_rearm(app);
+    false
+}
+
+/// Record that the re-arm decision is owed because it was taken while the plan
+/// was not yet in view.
+///
+/// Latched rather than attempted so the decision can be retried the moment the
+/// plan is actually visible. Only latched when the feature is on, so an explicit
+/// `/poke off` is never undone.
+pub(super) fn defer_auto_poke_rearm(app: &mut App) {
+    if app.auto_poke_default_on {
+        app.auto_poke_rearm_owed = true;
+    }
+}
+
+/// Settle a deferred re-arm once the plan is in view.
+pub(super) fn settle_deferred_auto_poke_rearm(app: &mut App) -> bool {
+    if !app.auto_poke_rearm_owed {
+        return false;
+    }
+    if app.auto_poke_incomplete_todos || !app.auto_poke_default_on {
+        // Already armed, or the user turned the feature off for the session:
+        // nothing is owed, and an explicit off must never be undone.
+        app.auto_poke_rearm_owed = false;
+        return false;
+    }
+    if !rearm_auto_poke_if_plan_unfinished(app) {
+        // The plan is still not visible. Keep the debt so the next pass retries.
+        return false;
+    }
+    app.auto_poke_rearm_owed = false;
+    true
+}
+
 pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     let incomplete = incomplete_poke_todos(app);
     app.auto_poke_incomplete_todos = true;
@@ -246,6 +364,10 @@ pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
     app.last_auto_poke_fingerprint = None;
+    app.auto_poke_stall_count = 0;
+
+    app.auto_poke_refine_prompt_count = 0;
+    app.auto_poke_refine_exhausted = false;
     app.last_todo_ownership_fingerprint = None;
     // Re-arming starts a fresh review cycle, so the deferred quality digest is
     // eligible to be delivered again for the upcoming work.
@@ -1940,7 +2062,7 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if handle_disabled_mission_command(app, trimmed) {
+    if handle_mission_command(app, trimmed) {
         return true;
     }
 
@@ -2561,9 +2683,13 @@ fn handle_selfdev_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
+    // `/goal` singular used to be swallowed by the disabled-mission stub, and
+    // `/initiatives` is checked first so the plural form still matches `/goals`
+    // rather than being read as `/goal` + "s".
     let Some(trimmed) = trimmed
         .strip_prefix("/initiatives")
         .or_else(|| trimmed.strip_prefix("/goals"))
+        .or_else(|| trimmed.strip_prefix("/goal"))
     else {
         return false;
     };
@@ -2665,16 +2791,102 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
     true
 }
 
-pub(super) fn handle_disabled_mission_command(app: &mut App, trimmed: &str) -> bool {
-    if slash_command_rest(trimmed, "/mission").is_none()
-        && slash_command_rest(trimmed, "/goal").is_none()
-    {
+/// Create and steer this session's mission.
+///
+/// `/mission <objective>` sets it, `/mission status` renders it, `/mission
+/// checkpoint <text>` records progress, `/mission resume|pause|blocked|
+/// complete|abandon` moves the status, `/mission clear` removes it. The mission
+/// is injected into every turn by `mission_turn_reminder`, so the objective
+/// stays visible for the whole session instead of only when it is typed.
+///
+/// The writer side of mission had no reachable caller at all: `mission::set`
+/// was unreferenced and this dispatcher answered with "disabled in this build".
+pub(super) fn handle_mission_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = slash_command_rest(trimmed, "/mission") else {
         return false;
+    };
+    let session_id = active_session_id(app);
+    let rest = rest.trim();
+
+    if rest.is_empty() || rest == "status" || rest == "show" {
+        match crate::mission::load(&session_id) {
+            Ok(Some(mission)) => {
+                app.push_display_message(DisplayMessage::system(
+                    crate::mission::render_status(&mission),
+                ));
+            }
+            Ok(None) => app.push_display_message(DisplayMessage::system(
+                "No mission is set for this session. Set one with `/mission <objective>`."
+                    .to_string(),
+            )),
+            Err(err) => app.push_display_message(DisplayMessage::error(format!(
+                "Could not read the mission: {err}"
+            ))),
+        }
+        return true;
     }
 
-    app.push_display_message(DisplayMessage::system(
-        "The /mission and /goal commands are disabled in this build.".to_string(),
-    ));
+    if let Some(summary) = rest.strip_prefix("checkpoint") {
+        match crate::mission::checkpoint(&session_id, summary) {
+            Ok(Some(_)) => app.push_display_message(DisplayMessage::system(
+                "Recorded a mission checkpoint.".to_string(),
+            )),
+            Ok(None) => app.push_display_message(DisplayMessage::system(
+                "No mission is set for this session.".to_string(),
+            )),
+            Err(err) => app.push_display_message(DisplayMessage::error(format!(
+                "Could not record the checkpoint: {err}"
+            ))),
+        }
+        return true;
+    }
+
+    if rest == "clear" {
+        match crate::mission::clear(&session_id) {
+            Ok(true) => {
+                app.push_display_message(DisplayMessage::system("Mission cleared.".to_string()))
+            }
+            Ok(false) => app.push_display_message(DisplayMessage::system(
+                "No mission is set for this session.".to_string(),
+            )),
+            Err(err) => app.push_display_message(DisplayMessage::error(format!(
+                "Could not clear the mission: {err}"
+            ))),
+        }
+        return true;
+    }
+
+    let status = match rest {
+        "resume" => Some(crate::mission::MissionStatus::Active),
+        "pause" => Some(crate::mission::MissionStatus::Paused),
+        "blocked" => Some(crate::mission::MissionStatus::Blocked),
+        "complete" => Some(crate::mission::MissionStatus::Complete),
+        "abandon" => Some(crate::mission::MissionStatus::Abandoned),
+        _ => None,
+    };
+    if let Some(status) = status {
+        match crate::mission::update_status(&session_id, status) {
+            Ok(Some(_)) => app.push_display_message(DisplayMessage::system(
+                "Mission status updated.".to_string(),
+            )),
+            Ok(None) => app.push_display_message(DisplayMessage::system(
+                "No mission is set for this session.".to_string(),
+            )),
+            Err(err) => app.push_display_message(DisplayMessage::error(format!(
+                "Could not update the mission status: {err}"
+            ))),
+        }
+        return true;
+    }
+
+    match crate::mission::set(&session_id, rest) {
+        Ok(mission) => app.push_display_message(DisplayMessage::system(
+            crate::mission::render_status(&mission),
+        )),
+        Err(err) => app.push_display_message(DisplayMessage::error(format!(
+            "Could not set the mission: {err}"
+        ))),
+    }
     true
 }
 

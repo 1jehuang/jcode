@@ -343,6 +343,68 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
     });
 }
 
+/// The stall this guards is silent and unbounded.
+///
+/// When the agent stops without touching the todo list, the incomplete set is
+/// byte-identical to the previous poke, so `schedule_auto_poke_followup_if_needed`
+/// returns false with `reason=unchanged_todos` - forever. There is no bound on
+/// consecutive idles and nothing is surfaced, so from the user's side the poke
+/// simply stopped working with no explanation and no circuit breaker.
+///
+/// Idling itself is right as loop protection. Silence is not: once it has
+/// happened more than once, the user has to be told the poke gave up and why.
+#[test]
+fn test_unchanged_todo_idling_becomes_visible_after_a_repeat() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish the report".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save an open todo");
+
+        // First poke goes out and records the todo fingerprint.
+        assert!(
+            app.schedule_auto_poke_followup_if_needed(),
+            "the first poke should be queued"
+        );
+        let queued = app.queued_messages.len();
+        assert_eq!(queued, 1);
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+
+        // The agent stops without touching the todos. Idling is correct here,
+        // and must stay silent for the first repeat.
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(
+            !app
+                .display_messages()
+                .iter()
+                .any(|msg| msg.content.to_lowercase().contains("unchanged")),
+            "a single idle must not raise an alarm"
+        );
+
+        // A second consecutive idle with the same todo set means the agent has
+        // stopped responding, not that it is briefly busy. That has to surface.
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| msg.content.to_lowercase().contains("unchanged")),
+            "repeated idling with an unchanged todo list must tell the user the poke stopped and why"
+        );
+    });
+}
+
 #[test]
 fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
     with_temp_jcode_home(|| {
@@ -1005,6 +1067,111 @@ fn auto_poke_stays_armed_when_a_turn_has_no_todos() {
 }
 
 #[test]
+fn auto_poke_rearms_when_new_open_work_appears_after_the_breaker_disarmed_it() {
+    // The completion-gate breaker clears `auto_poke_incomplete_todos`, and the
+    // guard at the top of `schedule_auto_poke_followup_if_needed` returns on
+    // that same flag, so the re-arm assignment further down is unreachable.
+    // One exhausted budget then disables auto-poke silently for the rest of
+    // the session, even once real open work appears.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the workflow".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save open work");
+
+        app.auto_poke_incomplete_todos = false;
+        app.todo_completion_gate_attempts = 0;
+        assert!(!app.auto_poke_incomplete_todos, "the breaker disarmed auto-poke");
+
+        assert!(
+            super::commands::rearm_auto_poke_on_user_turn(&mut app),
+            "a user turn must re-arm auto-poke while open work remains"
+        );
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(!app.auto_poke_rearm_owed, "a settled debt leaves nothing owed");
+    });
+}
+
+#[test]
+fn auto_poke_rearm_is_latched_when_the_plan_is_not_yet_visible() {
+    // Remote bootstrap sends the user turn before the History payload lands, so
+    // the plan reads empty at that instant. Dropping the decision there is how
+    // one interrupt left auto-poke looking enabled while never firing again, so
+    // the decline is latched and retried instead.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        // Disarmed, and the plan is not visible yet - the state a user turn
+        // finds right after an interrupt on a session that has not loaded.
+        app.auto_poke_incomplete_todos = false;
+        app.auto_poke_default_on = true;
+
+        assert!(
+            !super::commands::rearm_auto_poke_on_user_turn(&mut app),
+            "an invisible plan cannot arm auto-poke yet"
+        );
+        assert!(
+            app.auto_poke_rearm_owed,
+            "the decline must be latched as owed, not dropped"
+        );
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the workflow".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save open work once the plan is visible");
+
+        assert!(
+            super::commands::settle_deferred_auto_poke_rearm(&mut app),
+            "the scheduler settles the owed re-arm once the plan is visible"
+        );
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(!app.auto_poke_rearm_owed);
+    });
+}
+
+#[test]
+fn auto_poke_rearm_never_overrides_an_explicit_poke_off() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_default_on = false;
+        super::commands::disable_auto_poke(&mut app);
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the workflow".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save open work");
+
+        assert!(!super::commands::rearm_auto_poke_on_user_turn(&mut app));
+        assert!(!app.auto_poke_rearm_owed, "an explicit /poke off owes nothing");
+        assert!(!app.auto_poke_incomplete_todos);
+    });
+}
+
+#[test]
 fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
@@ -1024,10 +1191,18 @@ fn auto_poke_does_not_repeat_until_incomplete_todos_change() {
         // Simulate dispatch and completion of the automatically poked turn.
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
+        // An unchanged list no longer refuses to re-poke. Refusing is what made
+        // the feature look broken: the operator kept seeing the plan stall with no
+        // explanation and no movement. Poking is the mechanism that unsticks a
+        // model which has run out of steam, so it repeats up to
+        // STALL_POKE_MAX_UNCHANGED and only then ends the episode visibly. What is
+        // still forbidden is an UNBOUNDED repeat, which the bound now covers.
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
-            "an unchanged list must not consume another model turn"
+            app.schedule_auto_poke_followup_if_needed(),
+            "an unchanged list must keep being poked within the bound"
         );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
 
         crate::todo::save_todos(&app.session.id, &[pending("Review worker result")])
             .expect("update");
@@ -1200,5 +1375,113 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             !app.auto_poke_incomplete_todos,
             "/poke off must not be undone by the default-on re-arm"
         );
+    });
+}
+
+/// A persistent unchanged-todo stall must reach the agent, not just the user.
+///
+/// Telling the user "the poke stopped" does not unstick anything. The agent is
+/// the one that can break the deadlock, and the likeliest reason the list is
+/// frozen is that the remaining items are too coarse to make progress visible,
+/// so after a few idle turn ends we ask the agent to decompose what is left or
+/// add the steps that are missing.
+///
+/// What is asserted here is the bounded shape, not the exact turn it starts on:
+/// which branch the very first poke takes is not this test's concern, and
+/// pinning it made the test fail for a reason unrelated to the feature. The
+/// "a single idle stays silent" property is covered separately by
+/// `test_unchanged_todo_idling_becomes_visible_after_a_repeat`.
+#[test]
+fn test_unchanged_todos_prompt_the_agent_to_refine_the_plan_and_then_stop() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Finish the migration".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                ..Default::default()
+            }],
+        )
+        .expect("save an open todo");
+
+        // Drive many turn ends with the todo list frozen. Somewhere in there the
+        // agent must be asked to fix its own plan.
+        let mut refine_queued = 0usize;
+        let mut refine_text = String::new();
+        for _ in 0..(App::STALL_JUDGE_MAX_ATTEMPTS as usize + 8) {
+            app.queued_messages.clear();
+            app.pending_queued_dispatch = false;
+            let _ = app.schedule_auto_poke_followup_if_needed();
+            for m in &app.queued_messages {
+                if m.to_lowercase().contains("decompose") {
+                    refine_queued += 1;
+                    refine_text = m.clone();
+                }
+            }
+        }
+
+        assert!(
+            refine_queued > 0,
+            "a persistent unchanged-todo stall must eventually ask the agent to refine its plan"
+        );
+        assert!(
+            refine_text.to_lowercase().contains("todo"),
+            "the refine prompt must talk about the todo list, got: {refine_text}"
+        );
+        assert!(
+            refine_queued <= App::STALL_JUDGE_MAX_ATTEMPTS as usize,
+            "the refine prompt must stop after its budget of {}, but it was queued {refine_queued} times",
+            App::STALL_JUDGE_MAX_ATTEMPTS
+        );
+    });
+}
+
+/// Finished work must never be nudged into decomposing itself.
+///
+/// This is the property the user cares about most: burning turns on work that
+/// is already done is worse than the stall it tries to fix. The all-complete
+/// path legitimately queues its own final-response continuation, so the check
+/// is that nothing ever asks the agent to refine a list with nothing left in it.
+#[test]
+fn test_refine_prompt_never_fires_when_all_todos_are_complete() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.auto_poke_default_on = true;
+
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship it".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence_history: vec![
+                    crate::todo::ConfidenceState::Validated,
+                    crate::todo::ConfidenceState::Verified,
+                ],
+                ..Default::default()
+            }],
+        )
+        .expect("save a completed todo");
+
+        for _ in 0..(App::STALL_JUDGE_MAX_ATTEMPTS as usize + 6) {
+            app.queued_messages.clear();
+            app.pending_queued_dispatch = false;
+            let _ = app.schedule_auto_poke_followup_if_needed();
+            let queued = app.queued_messages.join(" ").to_lowercase();
+            assert!(
+                !queued.contains("decompose"),
+                "a completed list must never be asked to decompose itself, got: {queued}"
+            );
+        }
     });
 }

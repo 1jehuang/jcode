@@ -305,9 +305,51 @@ pub fn process_fd_diagnostic_snapshot() -> String {
     }
 }
 
+/// Check whether `pid` currently refers to a live process.
+///
+/// On Unix, uses `kill(pid, 0)`, which probes existence without delivering a
+/// signal; `EPERM` still means the process exists.
+/// On Windows, opens the process with `PROCESS_QUERY_LIMITED_INFORMATION` and
+/// checks that its exit code is `STILL_ACTIVE`. A null handle means the PID is
+/// not live (it either never existed or the process has already exited), which
+/// is what makes this safe to use for pruning stale PID registries.
+pub fn is_process_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut exit_code = 0u32;
+            let ok = GetExitCodeProcess(handle, &mut exit_code);
+            CloseHandle(handle);
+            ok != 0 && exit_code == STILL_ACTIVE as u32
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_process_running_recognizes_self_and_rejects_pid_zero() {
+        assert!(is_process_running(std::process::id()));
+        assert!(!is_process_running(0));
+    }
 
     #[test]
     fn test_truncate_ascii() {

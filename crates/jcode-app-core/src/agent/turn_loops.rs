@@ -1341,5 +1341,6 @@ impl Agent {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 #[path = "turn_loops_tests.rs"]
 mod tests;

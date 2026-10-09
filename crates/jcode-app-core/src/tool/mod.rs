@@ -25,9 +25,7 @@ mod feedback;
 mod file_diff;
 pub(crate) mod file_lock;
 mod gmail;
-// The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
 pub mod applet;
-#[allow(dead_code)]
 mod goal;
 pub mod inflight;
 mod invalid;
@@ -450,6 +448,17 @@ impl Registry {
                 session_search::SessionSearchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
+            // Re-enabled after being unregistered in 4928a1c92 as "temporarily
+            // unavailable". That commit recorded no reason for the temporary part
+            // and never restored it, so the initiative store had a reader and a
+            // renderer but no way to create, update or step anything. The schema
+            // and stored data were left untouched precisely so it could come back.
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "initiative",
+                goal::InitiativeTool::new,
+            );
             // Initiative is temporarily unavailable. Keep its implementation and
             // saved data intact so it can be restored without a migration.
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);

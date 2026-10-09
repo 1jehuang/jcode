@@ -1043,7 +1043,11 @@ fn test_goals_command_opens_overview_in_side_panel() {
 }
 
 #[test]
-fn test_mission_and_goal_commands_are_disabled() {
+fn test_mission_command_writes_state_without_starting_a_turn() {
+    // This replaces a test that asserted the opposite: that `/mission` must not
+    // create a mission. That contract came from a stub saying "disabled in this
+    // build", while `mission::set` had no reachable caller at all, so the store
+    // could be read and rendered but never written. The stub is gone.
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -1052,6 +1056,8 @@ fn test_mission_and_goal_commands_are_disabled() {
     let mut app = create_test_app();
     app.input = "/mission make browser control reliable".to_string();
     app.submit_input();
+
+    // Writing state is not running a turn: nothing is queued or dispatched.
     assert!(!app.is_processing, "/mission must not start a turn");
     assert!(
         !app.pending_queued_dispatch,
@@ -1061,15 +1067,49 @@ fn test_mission_and_goal_commands_are_disabled() {
         app.queued_messages.is_empty(),
         "/mission must not queue prompts"
     );
+
+    let mission = crate::mission::load(&app.session.id)
+        .expect("load mission")
+        .expect("/mission must create a mission");
+    assert_eq!(mission.objective, "make browser control reliable");
+    assert_eq!(mission.status, crate::mission::MissionStatus::Active);
     assert!(
-        crate::mission::load(&app.session.id)
-            .expect("load mission")
-            .is_none(),
-        "/mission must not create a mission"
+        !mission.long_horizon_intent.trim().is_empty(),
+        "a fresh mission must still be seeded with a long-horizon intent"
     );
 
-    app.input = "/goal status".to_string();
+    // Re-typing the objective must not throw away the written intent, which is
+    // the part that actually carries the guidance.
+    let kept = mission.long_horizon_intent.clone();
+    app.input = "/mission make browser control reliable and verifiable".to_string();
     app.submit_input();
+    let again = crate::mission::load(&app.session.id)
+        .expect("load mission")
+        .expect("mission still present");
+    assert_eq!(again.objective, "make browser control reliable and verifiable");
+    assert_eq!(
+        again.long_horizon_intent, kept,
+        "re-typing the objective must preserve a written long-horizon intent"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_goal_command_opens_the_initiatives_overview_without_starting_a_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let mut app = create_test_app();
+    app.input = "/goal".to_string();
+    app.submit_input();
+
     assert!(!app.is_processing, "/goal must not start a turn");
     assert!(
         !app.pending_queued_dispatch,
@@ -1079,11 +1119,10 @@ fn test_mission_and_goal_commands_are_disabled() {
         app.queued_messages.is_empty(),
         "/goal must not queue prompts"
     );
-    assert!(
-        crate::mission::load(&app.session.id)
-            .expect("load mission")
-            .is_none(),
-        "/goal must not create a mission"
+    assert_eq!(
+        app.side_panel.focused_page_id.as_deref(),
+        Some("goals"),
+        "/goal must open the initiatives overview"
     );
 
     if let Some(prev_home) = prev_home {

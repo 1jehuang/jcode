@@ -16,6 +16,29 @@ use std::process::Command;
 fn main() {
     let repo_root = repo_root();
 
+    // Cargo reruns a build script only when a file in the script's OWN package
+    // changes. This script embeds the git hash, which moves on every commit, so
+    // with no explicit trigger the compiled-in hash freezes at whatever the last
+    // jcode-build-meta rebuild happened to see. Observed 2026-10-03: after two
+    // commits that did not touch this crate, `jcode --version` still reported
+    // b52949987 while HEAD was c37a4b329, and the publish guard refused the binary
+    // on every retry - correctly, because the binary genuinely was not the tree.
+    //
+    // Declaring any rerun-if-changed turns OFF cargo's package-wide default, so
+    // the crate directory is declared too, to keep the old behaviour intact.
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    println!("cargo:rerun-if-changed={}", manifest_dir.display());
+    println!("cargo:rerun-if-changed={}", repo_root.join(".git/HEAD").display());
+    // HEAD is normally a symref, so the commit moves the ref file it names, not
+    // HEAD itself. Watching only HEAD would miss every ordinary commit. A packed
+    // ref has no loose file yet, and rerun-if-changed fires when the path
+    // appears, which is exactly the transition we want to catch.
+    if let Ok(head) = fs::read_to_string(repo_root.join(".git/HEAD")) {
+        if let Some(reference) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed={}", repo_root.join(reference).display());
+        }
+    }
+
     let pkg_version = root_package_version(&repo_root).unwrap_or_else(|| "0.0.0".to_string());
     let base_version = parse_semver(&pkg_version).unwrap_or((0, 0, 0));
     let build_semver = resolve_build_semver(base_version).unwrap_or_else(|err| {

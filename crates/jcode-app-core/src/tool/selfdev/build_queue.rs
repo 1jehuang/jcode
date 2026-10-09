@@ -1,6 +1,31 @@
 use super::*;
 
 impl SelfDevTool {
+    /// Shell that runs a `selfdev test` command. POSIX keeps the bash wrapper
+    /// that routes cargo through scripts/dev_cargo.sh; on Windows `bash`
+    /// resolves to the WSL stub (which cannot reach the native toolchain and
+    /// often has no /bin/bash at all), so the command runs under cmd.exe /C
+    /// instead. See selfdev_build_command_for_target_on_platform for the same
+    /// split on the build path.
+    pub(super) fn test_shell_command(command: &str) -> SelfDevBuildCommand {
+        if cfg!(windows) {
+            SelfDevBuildCommand {
+                program: "cmd".to_string(),
+                args: vec!["/C".to_string(), command.to_string()],
+                display: command.to_string(),
+            }
+        } else {
+            SelfDevBuildCommand {
+                program: "bash".to_string(),
+                args: vec![
+                    "-lc".to_string(),
+                    SelfDevTool::optimized_test_shell_command(command),
+                ],
+                display: command.to_string(),
+            }
+        }
+    }
+
     pub(super) fn optimized_test_shell_command(command: &str) -> String {
         format!(
             r#"cargo() {{
@@ -872,14 +897,7 @@ export -f cargo
                 anyhow::anyhow!("Could not find the jcode repository directory for selfdev test")
             })?;
         let requested_source = SelfDevTool::requested_source_state(&repo_dir)?;
-        let shell_command = SelfDevBuildCommand {
-            program: "bash".to_string(),
-            args: vec![
-                "-lc".to_string(),
-                SelfDevTool::optimized_test_shell_command(&command),
-            ],
-            display: command.clone(),
-        };
+        let shell_command = Self::test_shell_command(&command);
         let dedupe_key = format!(
             "test:{}:{}:{}",
             requested_source.worktree_scope, requested_source.fingerprint, shell_command.display

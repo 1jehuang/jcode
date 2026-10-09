@@ -75,13 +75,81 @@ fn mission_turn_reminder(session_id: &str) -> Option<String> {
         .flatten()
 }
 
-fn merge_turn_reminders(a: Option<String>, b: Option<String>) -> Option<String> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(format!("{}\n\n{}", a, b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
+/// Merge any number of optional reminder sections, preserving order.
+fn merge_reminder_sections(parts: [Option<String>; 3]) -> Option<String> {
+    let joined: Vec<String> = parts.into_iter().flatten().collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join("\n\n"))
     }
+}
+
+/// State the live context budget once per turn.
+///
+/// Without this the model reasons about its remaining room from whatever
+/// figure was last in view, and that goes stale the moment a compaction
+/// resets it: it keeps reporting a full window while actually sitting at a
+/// fraction of one. Report the same value the status bar shows so the two can
+/// never disagree.
+pub(super) fn context_budget_turn_reminder(app: &App) -> Option<String> {
+    let limit = app.context_limit;
+    let observed = app.current_stream_context_tokens();
+    crate::logging::info(&format!(
+        "CONTEXT_BUDGET_REMINDER limit={limit} observed={observed:?} stale={}",
+        app.streaming.streaming_context_stale
+    ));
+    if limit == 0 {
+        return None;
+    }
+    // Mirror the status bar: prefer the provider-reported count, otherwise the
+    // estimate over the active messages. There is always a figure to report
+    // unless nothing has been measured at all, so the model reasons from the
+    // same number the user is looking at instead of a separate derivation.
+    let used_tokens = match app.current_stream_context_tokens() {
+        Some(tokens) => tokens,
+        None => {
+            let compaction = app.registry.compaction();
+            let Ok(manager) = compaction.try_write() else {
+                return None;
+            };
+            let provider_messages = app.materialized_provider_messages();
+            u64::try_from(manager.stats_with(&provider_messages).effective_tokens).ok()?
+        }
+    };
+    Some(format!(
+        "Context budget: {used_tokens} of {limit} tokens in use ({:.1}%). Judge how much room is \
+         left from this figure and not from an earlier one, because compaction resets it. \
+         Compaction here is normal policy, not a failure: it runs proactively on an EWMA \
+         forecast as the window fills, and only runs emergently after a context-limit error.",
+        (used_tokens as f64 / limit as f64) * 100.0
+    ))
+}
+
+/// Tell the model every turn whether it is operating in self-dev mode.
+///
+/// `Session::is_self_dev` decides this from the working directory rather than
+/// from how the binary was built, so it is easy to be wrong in both directions.
+/// An agent that assumes it is editing jcode when it is not will report on, or
+/// reload, the wrong tree. State it once per turn, with the evidence, instead of
+/// leaving it to be inferred.
+fn self_dev_turn_reminder(app: &App) -> Option<String> {
+    if !app.session.is_self_dev() {
+        return None;
+    }
+    let dir = app
+        .session
+        .working_dir
+        .clone()
+        .unwrap_or_else(|| "<unset>".to_string());
+    Some(format!(
+        "Self-dev mode is ON: the working directory `{dir}` is the jcode source tree. Here \\\\
+        `selfdev build` and `selfdev reload` publish and restart a locally built binary \\\\
+        rather than a released one (currently {} {}). Edits to this tree change that \\\\
+        binary, so confirm the running build with `server:info` after any reload.",
+        jcode_build_meta::version(),
+        jcode_build_meta::git_hash(),
+    ))
 }
 
 pub(super) fn extract_input_shell_command(input: &str) -> Option<&str> {
@@ -502,7 +570,14 @@ fn format_dropped_path(path: &std::path::Path, quote_for_batch: bool) -> String 
             .chars()
             .any(|ch| ch.is_whitespace() || matches!(ch, '\\' | '\'' | '"'))
     {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        // On Windows the backslash is a path separator, not an escape, so
+        // doubling it there corrupts the path when it is parsed back.
+        let escaped = if cfg!(windows) {
+            value.replace('"', "\\\"")
+        } else {
+            value.replace('\\', "\\\\").replace('"', "\\\"")
+        };
+        format!("\"{escaped}\"")
     } else {
         value.into_owned()
     }
@@ -576,12 +651,30 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
     let mut token = String::new();
     let mut quote = None;
     let mut escaped = false;
-    for ch in trimmed.chars() {
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
         if escaped {
             token.push(ch);
             escaped = false;
         } else if ch == '\\' && quote != Some('\'') {
-            escaped = true;
+            // A backslash only escapes when something escapable follows it. On
+            // Windows it is the path separator, and treating every one as an
+            // escape turns  + "C:\Users\me\my file.txt" +  into  + "C:Usersmemy file.txt" + , so a
+            // terminal file drop silently fails to resolve its path.
+            match chars.get(index + 1) {
+                // Inside double quotes the text came from format_dropped_path,
+                // which escapes every separator, so a doubled backslash there
+                // is an escaped one and must collapse back.
+                Some(&next) if quote == Some('"') && matches!(next, '\\' | '"') => {
+                    escaped = true;
+                }
+                Some(&next) if next.is_whitespace() || matches!(next, '\'' | '"') => {
+                    escaped = true;
+                }
+                _ => token.push(ch),
+            }
         } else if matches!(ch, '\'' | '"') {
             if quote == Some(ch) {
                 quote = None;
@@ -597,6 +690,7 @@ pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
         } else {
             token.push(ch);
         }
+        index += 1;
     }
     if escaped || quote.is_some() {
         return None;
@@ -1382,6 +1476,13 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
 pub(super) fn queue_message(app: &mut App) {
     let prepared = take_prepared_input(app);
     app.queued_messages.push(prepared.expanded);
+    // A queued message is a user turn too: it just starts one later. Without this
+    // the re-arm is reachable only from `submit_input`, and the message a user
+    // sends right after Esc takes this path - Esc sets `cancel_requested` but
+    // leaves `is_processing` true until the cancelled turn unwinds - so
+    // auto-poke stayed disarmed with no owed debt to settle. That is the silent
+    // stall: the default still reads as enabled and nothing ever fires again.
+    super::commands::rearm_auto_poke_on_user_turn(app);
 }
 
 pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
@@ -1602,11 +1703,15 @@ impl App {
     }
 
     pub(super) fn schedule_auto_poke_followup_if_needed(&mut self) -> bool {
-        // The completion-gate circuit breaker clears auto_poke_incomplete_todos,
-        // and it can only trip while every todo is complete, so the restore in
-        // the all-complete branch never runs for an agent that adds open work
-        // straight afterwards. Re-arm before the guard below, otherwise one
-        // breaker trip silences auto-poke for the rest of the session.
+        // Ours (issue #1666): settle a re-arm owed by a user turn. Settling is
+        // what arms auto-poke, and an episode stop clears the flag but leaves
+        // auto_poke_default_on on, so nothing re-arms until the user speaks again.
+        // Settling defers to `rearm_auto_poke_if_plan_unfinished` behind an
+        // owed-debt latch, so an explicit /poke off stays authoritative.
+        super::commands::settle_deferred_auto_poke_rearm(self);
+        // Upstream: the completion-gate circuit breaker can clear
+        // auto_poke_incomplete_todos while every todo is complete; if the agent
+        // then adds open work, restore the flag before the guard below.
         if self.auto_poke_default_on {
             let has_open_work = super::commands::poke_todos(self)
                 .iter()
@@ -1637,7 +1742,18 @@ impl App {
             if self.final_response_todo_fingerprint == todo_fingerprint {
                 // Check before timed reviews and deferred digests too: neither
                 // elapsed time nor a stale observation starts a new todo cycle.
-                return false;
+                //
+                // But an unchanged fingerprint is only proof of being FINISHED
+                // when nothing is still open. An agent that claimed completion
+                // and then sat on the same list - rewriting it every turn while
+                // carrying the same incomplete items forward - is stalled, and
+                // this early exit suppressed the stall ladder for exactly that
+                // case, so auto-poke looked armed and never fired again. Only
+                // take the exit when the plan is genuinely closed.
+                let still_open = todos.iter().any(super::commands::is_incomplete_poke_todo);
+                if !still_open {
+                    return false;
+                }
             }
             self.final_response_todo_fingerprint = None;
             self.todo_final_response_requested = false;
@@ -1716,6 +1832,10 @@ impl App {
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
                 crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=queue_ownership_gate attempt={}",
+                    self.todo_completion_gate_attempts
+                ));
                 self.push_display_message(DisplayMessage::system(
                     "🔍 Checking end-to-end ownership before finishing...",
                 ));
@@ -1743,6 +1863,11 @@ impl App {
                     );
                     "🔍 Double-checking confidence jumps..."
                 };
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=queue_confidence_gate spike={} attempt={}",
+                    needs_spike_challenge,
+                    self.todo_completion_gate_attempts
+                ));
                 self.push_display_message(DisplayMessage::system(notice));
                 // User-role content: reminder-only turns read as empty user
                 // messages and models answer instead of re-validating.
@@ -1809,12 +1934,95 @@ impl App {
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
+            // The list is byte-identical to the one we already poked about. That is
+            // not by itself a reason to stop: poking is the mechanism that unsticks a
+            // model which has run out of steam, and idling at the first repeat is what
+            // made the feature look broken. It IS a reason to count, because an agent
+            // that never touches the list must not be poked forever.
+            self.auto_poke_stall_count = self.auto_poke_stall_count.saturating_add(1);
+            let stalls = self.auto_poke_stall_count;
+
+
+            // The hook is a SEPARATE budget from the pokes. A frozen list is usually
+            // too coarse to show progress, so ask the agent to add what is missing and
+            // decompose what is left - but an agent ignoring the list ignores the ask
+            // exactly as it ignored the pokes, so this may be asked only a few times.
+            if stalls >= Self::STALL_POKE_ANNOUNCE_STALLS
+                && self.auto_poke_refine_prompt_count < Self::STALL_JUDGE_MAX_ATTEMPTS
+            {
+                self.auto_poke_refine_prompt_count =
+                    self.auto_poke_refine_prompt_count.saturating_add(1);
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=refine_prompt incomplete={} attempt={} stalls={}",
+                    incomplete.len(),
+                    self.auto_poke_refine_prompt_count,
+                    stalls,
+                ));
+                // This goes to the agent, not to the operator. Only the agent can
+                // unstick a frozen plan, and telling the user accomplishes nothing.
+                self.queued_messages.push(format!(
+                    "The todo list has not changed across {} pokes, so the plan is treated as stale and must be updated in THIS turn. Pick one and act: (1) if work remains that is not on the list - especially anything urgent - add it now; (2) if the listed items are too coarse to show progress, decompose them into concrete steps; (3) if the listed work is in fact finished, mark it completed rather than stopping. Make the edit before you end this turn; an unchanged list stops here.",
+                    stalls
+                ));
+                self.pending_queued_dispatch = true;
+                return true;
+            }
+
+            // Asked as often as we are willing to. Say so once, so the silence is
+            // explained rather than merely observed.
+            if self.auto_poke_refine_prompt_count >= Self::STALL_JUDGE_MAX_ATTEMPTS
+                && !self.auto_poke_refine_exhausted
+            {
+                self.auto_poke_refine_exhausted = true;
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=refine_exhausted attempts={} stalls={}",
+                    self.auto_poke_refine_prompt_count, stalls,
+                ));
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Todo list unchanged across {} pokes and {} requests to add or decompose items. We will keep poking, but stop asking; /poke re-enables everything.",
+                    stalls,
+                    self.auto_poke_refine_prompt_count
+                )));
+            }
+
+            // The bound. End the episode visibly rather than looping forever.
+            if stalls >= Self::STALL_POKE_MAX_UNCHANGED {
+                crate::logging::info(&format!(
+                    "AUTO_POKE_DECISION action=stall_poke_bound stalls={} bound={}",
+                    stalls,
+                    Self::STALL_POKE_MAX_UNCHANGED,
+                ));
+                super::commands::stop_auto_poke_episode(self);
+                self.push_display_message(DisplayMessage::system(format!(
+                    "Auto-poke stopped: the todo list did not move across {} pokes. The next message you send re-arms it.",
+                    Self::STALL_POKE_MAX_UNCHANGED,
+                )));
+                return false;
+            }
+
+            // Still under the bound: keep poking. The counters deliberately survive
+            // this path - only a changed list ends the episode.
             crate::logging::info(&format!(
-                "AUTO_POKE_DECISION action=idle reason=unchanged_todos incomplete={}",
-                incomplete.len()
+                "AUTO_POKE_DECISION action=stall_poke_continue stalls={} bound={}",
+                stalls,
+                Self::STALL_POKE_MAX_UNCHANGED,
             ));
-            return false;
+            self.push_display_message(DisplayMessage::system(format!(
+                "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
+                incomplete.len(),
+                if incomplete.len() == 1 { "" } else { "s" },
+            )));
+            self.queued_messages.push(poke_message.clone());
+            self.pending_queued_dispatch = true;
+            self.last_auto_poke_fingerprint = Some(fingerprint);
+            return true;
         }
+        // The todo set actually moved, so this episode is over: reset every counter
+        // that only means something within one frozen stretch.
+        self.auto_poke_stall_count = 0;
+        self.auto_poke_refine_prompt_count = 0;
+        self.auto_poke_refine_exhausted = false;
+        // The poke is firing on a todo set that actually moved.
 
         self.push_display_message(DisplayMessage::system(format!(
             "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
@@ -2896,11 +3104,13 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 app.pending_soft_interrupt_requests.clear();
                 let cancelled_overnight = app.cancel_overnight_for_interrupt();
                 if disabled_auto_poke {
-                    super::commands::disable_auto_poke(app);
+                    // Interrupt, not `/poke off`: stop the in-flight poke but keep
+                    // auto-poke armed so the next turn end can schedule another.
+                    super::commands::stop_auto_poke_episode(app);
                     if cancelled_overnight {
-                        app.set_status_notice("Interrupting... Auto-poke OFF, overnight cancelled");
+                        app.set_status_notice("Interrupting... auto-poke resumes on your next message, overnight cancelled");
                     } else {
-                        app.set_status_notice("Interrupting... Auto-poke OFF");
+                        app.set_status_notice("Interrupting... auto-poke resumes on your next message");
                     }
                 } else if cancelled_overnight {
                     app.set_status_notice("Interrupting... Overnight cancelled");
@@ -2940,6 +3150,10 @@ pub(super) fn stage_local_interleave(
 ) {
     app.interleave_message = Some(content);
     app.interleave_images = images;
+    // Same reasoning as `queue_message`: an interleave is a user turn too, and
+    // `submit_input` never runs for it, so without this a soft interrupt left
+    // auto-poke disarmed with no owed debt to settle.
+    super::commands::rearm_auto_poke_on_user_turn(app);
     app.set_status_notice("⏭ Sending now (interleave)");
 }
 
@@ -3984,8 +4198,21 @@ impl App {
                     .join(", ")
             ));
         }
+        // Every user turn re-arms auto-poke when the plan still has open items,
+        // images or not. If the plan is not visible yet the decision is latched
+        // as owed and settled by the end-of-turn scheduler instead of being
+        // dropped, which is how one interrupt used to leave auto-poke looking
+        // enabled while never firing again. `queue_message` and
+        // `stage_local_interleave` re-arm in their own bodies for the same reason:
+        // a message the user sends while a turn is still running never reaches
+        // this function.
+        super::commands::rearm_auto_poke_on_user_turn(self);
         if images.is_empty() {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
+            self.current_turn_system_reminder = merge_reminder_sections([
+                self_dev_turn_reminder(self),
+                None,
+                mission_turn_reminder(&self.session.id),
+            ]);
             self.add_provider_message(Message::user(&input));
             self.session.add_message(
                 Role::User,
@@ -3995,7 +4222,11 @@ impl App {
                 }],
             );
         } else {
-            self.current_turn_system_reminder = mission_turn_reminder(&self.session.id);
+            self.current_turn_system_reminder = merge_reminder_sections([
+                self_dev_turn_reminder(self),
+                None,
+                mission_turn_reminder(&self.session.id),
+            ]);
             self.add_provider_message(Message::user_with_images(&input, images.clone()));
             let mut blocks: Vec<ContentBlock> = images
                 .into_iter()
@@ -4077,7 +4308,11 @@ impl App {
             }
 
             self.current_turn_system_reminder =
-                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+                merge_reminder_sections([
+                    self_dev_turn_reminder(self),
+                    reminder,
+                    mission_turn_reminder(&self.session.id),
+                ]);
 
             if has_combined {
                 self.add_provider_message(Message::user(&combined));

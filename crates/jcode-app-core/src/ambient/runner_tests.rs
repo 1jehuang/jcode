@@ -15,6 +15,9 @@ use std::time::Duration;
 #[path = "runner_live_delivery_tests.rs"]
 mod live_delivery;
 
+#[path = "runner_modelchanged_resume_tests.rs"]
+mod modelchanged_resume;
+
 struct EnvVarGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,

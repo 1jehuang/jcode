@@ -21,3 +21,16 @@ captures/
 /*.avif
 /*.mp4
 /*.png
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Agent skills vendored by 'npx skills add' - local tooling, not repo content.
+/.agents/
+/.claude/skills/
+/skills-lock.json
+
+# Swarm/agent artifact output written into the repo root by relative paths.
+# These are scratch reports, not source: keeping them untracked stops them from
+# marking every self-dev build dirty.
+/artifacts/

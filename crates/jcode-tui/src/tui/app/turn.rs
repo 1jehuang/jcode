@@ -62,20 +62,13 @@ impl App {
         &self,
         split: &mut crate::prompt::SplitSystemPrompt,
     ) {
-        let Some(reminder) = self
-            .current_turn_system_reminder
-            .as_ref()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-        else {
-            return;
-        };
-
-        if !split.dynamic_part.is_empty() {
-            split.dynamic_part.push_str("\n\n");
-        }
-        split.dynamic_part.push_str("# System Reminder\n\n");
-        split.dynamic_part.push_str(reminder);
+        crate::prompt::append_system_reminder_sections(
+            split,
+            &[
+                super::input::context_budget_turn_reminder(self),
+                self.current_turn_system_reminder.clone(),
+            ],
+        );
     }
 
     /// Run turn with interactive input handling (redraws UI, accepts input during streaming)

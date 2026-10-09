@@ -49,6 +49,20 @@ fn format_reasoning_markup(text: &str) -> String {
     out
 }
 
+
+/// Text the harness injected, as opposed to text a user typed.
+///
+/// `orphan_tool_output_to_user_message` in the provider layer must send a
+/// persisted tool result as a user message when its `tool_call` is missing,
+/// because OpenAI-compatible endpoints reject an unpaired `tool` message. That
+/// substitution is correct on the wire, but the result is still harness output:
+/// it must not be shown as user speech, timestamped, or counted as a user turn.
+/// It previously slipped through precisely because only `<system-reminder>`
+/// was recognised here.
+fn is_harness_injected_text(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("<system-reminder>") || text.starts_with("[Recovered orphaned tool output:")
+}
 fn is_internal_system_reminder(msg: &super::StoredMessage) -> bool {
     msg.content
         .iter()
@@ -56,7 +70,7 @@ fn is_internal_system_reminder(msg: &super::StoredMessage) -> bool {
             ContentBlock::Text { text, .. } => Some(text.trim_start()),
             _ => None,
         })
-        .is_some_and(|text| text.starts_with("<system-reminder>"))
+        .is_some_and(is_harness_injected_text)
 }
 
 /// True when a stored user message is a synthetic auto-poke continuation
@@ -414,6 +428,7 @@ pub fn render_messages_and_images_with_compacted_history(
         let role = match msg.display_role {
             Some(StoredDisplayRole::System) => "system",
             Some(StoredDisplayRole::BackgroundTask) => "background_task",
+            Some(StoredDisplayRole::UserExternal) => "user_external",
             None if is_auto_poke_user_message(msg) => "system",
             None if super::is_scheduled_task_message(msg) => "system",
             None => match msg.role {

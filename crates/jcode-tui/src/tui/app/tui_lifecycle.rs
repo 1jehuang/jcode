@@ -83,6 +83,18 @@ impl App {
                 self.pending_turn = true;
             }
         }
+
+        // A reload rebuilds this client's view of the session, and for that
+        // window the plan is unreadable. A re-arm judged right here would read
+        // an empty plan, decline, and never be retried, so an interrupt that
+        // happened before the reload would leave auto-poke disarmed until the
+        // user typed again. Record that the decision is still owed instead, so
+        // `settle_deferred_auto_poke_rearm` can arm once the plan actually
+        // arrives with the history.
+        //
+        // `defer_auto_poke_rearm` latches only when the session default is on,
+        // so an explicit `/poke off` records nothing and still wins.
+        crate::tui::app::commands::defer_auto_poke_rearm(self);
     }
 
     /// Re-parse keybinding snapshots when the config cache has reloaded.
@@ -462,6 +474,7 @@ impl App {
             last_turn_input_tokens: None,
             pending_turn: false,
             auto_poke_incomplete_todos: features.auto_poke,
+            auto_poke_rearm_owed: false,
             auto_poke_default_on: features.auto_poke,
             todo_confidence_spike_challenged: false,
             todo_gate_digest_delivered: false,
@@ -470,6 +483,9 @@ impl App {
             todo_final_response_requested: false,
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
+            auto_poke_refine_prompt_count: 0,
+            auto_poke_stall_count: 0,
+            auto_poke_refine_exhausted: false,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,
@@ -924,6 +940,7 @@ impl App {
             last_turn_input_tokens: None,
             pending_turn: false,
             auto_poke_incomplete_todos: features.auto_poke,
+            auto_poke_rearm_owed: false,
             auto_poke_default_on: features.auto_poke,
             todo_confidence_spike_challenged: false,
             todo_gate_digest_delivered: false,
@@ -932,6 +949,9 @@ impl App {
             todo_final_response_requested: false,
             final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
+            auto_poke_refine_prompt_count: 0,
+            auto_poke_stall_count: 0,
+            auto_poke_refine_exhausted: false,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
             overnight_auto_poke: None,

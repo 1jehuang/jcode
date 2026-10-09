@@ -999,6 +999,11 @@ pub struct App {
     pending_turn: bool,
     // When armed by /poke, automatically continue prompting until todos are complete.
     auto_poke_incomplete_todos: bool,
+    /// A user turn asked for auto-poke to be re-armed but the plan was not yet
+    /// visible (remote bootstrap sends the user turn before History lands), so
+    /// the decision is owed rather than taken. Latched instead of attempted,
+    /// because an empty plan at that instant says nothing about the plan.
+    auto_poke_rearm_owed: bool,
     /// Whether auto-poke is on by default for this session (`features.auto_poke`).
     /// When true, finishing a poke cycle (all todos complete, or a turn with no
     /// todo list at all) must leave auto-poke armed for the next batch of work;
@@ -1030,6 +1035,18 @@ pub struct App {
     /// list must not trigger another automatic turn: the agent may be parked on
     /// a worker, wake, or human decision, and repeated pokes cannot help.
     last_auto_poke_fingerprint: Option<String>,
+    /// Consecutive turn ends that declined to re-nudge because the
+    /// incomplete-todo set was byte-identical to the previous poke. Reset
+    /// whenever the poke actually fires or the feature is toggled.
+    /// Refine prompts sent without the todo list moving. Bounded by
+    /// Reset alongside the fingerprint when the plan actually moves.
+    /// Consecutive auto-pokes issued while the incomplete-todo set stayed
+    /// byte-identical. Monotonic inside an episode; reset when the fingerprint
+    /// changes, on transport recovery, and on a re-arm.
+    auto_poke_stall_count: u8,
+    auto_poke_refine_prompt_count: u8,
+    /// Set once the refine prompt has given up, so the user is told exactly once.
+    auto_poke_refine_exhausted: bool,
     /// Set when the current turn ended with a provider guardrail/refusal stop
     /// (ServerEvent::ProviderGuardrail). Consumed by the Done handler to
     /// update `consecutive_guardrail_stops`.
@@ -1795,6 +1812,30 @@ impl App {
     /// full API call per nudge. The counter resets whenever a nudge actually
     /// changes the stored todos (progress) or auto-poke is re-armed.
     const TODO_COMPLETION_GATE_MAX_ATTEMPTS: u8 = 5;
+    /// Consecutive turn ends tolerated where auto-poke declines to re-nudge
+    /// because the incomplete-todo set is byte-identical to the previous poke.
+    /// Idling there is correct loop protection: the model has not touched the
+    /// plan, so repeating the same hidden continuation buys nothing. But the
+    /// stall is currently silent and unbounded - no breaker, no message - so the
+    /// poke just stops working with no explanation. After this many repeats we
+    /// tell the user the poke gave up and why, instead of idling indefinitely.
+    /// How many times auto-poke will re-poke an unchanged todo list before it
+    /// ends the episode and says so. Poking is the mechanism that works; this
+    /// bound is only what stops an unresponsive agent from being poked forever.
+    const STALL_POKE_MAX_UNCHANGED: u8 = 12;
+    /// The stall at which the operator is told what is happening and the agent is
+    /// asked to add and decompose items, so the plan can actually move.
+    const STALL_POKE_ANNOUNCE_STALLS: u8 = 6;
+    /// How many times that ask may be made within one episode. An agent ignoring
+    /// the list will ignore the ask exactly as it ignored the pokes, so this is
+    /// a separate, smaller budget than the pokes themselves.
+    const STALL_JUDGE_MAX_ATTEMPTS: u8 = 3;
+    /// How many times we may ask the agent to refine its own todo list while
+    /// the list stays unchanged, before giving up on asking. Asking an agent
+    /// that is ignoring the list five times is no more useful than poking it
+    /// five times, so the prompt is bounded. Ordinary pokes are unaffected:
+    /// this only stops the *suggestion*, never the poke machinery.
+    
     /// Consecutive guardrail/refusal-stopped turns tolerated before automatic
     /// continuation paths (auto-poke, overnight poke) are stopped. Guardrail
     /// refusals are deterministic for the same request, so re-poking the same

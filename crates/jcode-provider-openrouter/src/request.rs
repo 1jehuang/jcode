@@ -21,26 +21,6 @@ pub fn sanitize_tool_parameters_schema(schema: &Value) -> Value {
     jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::OPENROUTER)
 }
 
-fn orphan_tool_output_to_user_message(
-    tool_use_id: &str,
-    output: &str,
-    missing_output: &str,
-) -> Option<Value> {
-    let output = output.trim();
-    if output.is_empty() || output == missing_output {
-        return None;
-    }
-
-    Some(serde_json::json!({
-        "role": "user",
-        "content": format!(
-            "[Recovered orphaned tool output: {}]\n{}",
-            sanitize_tool_id(tool_use_id),
-            output
-        )
-    }))
-}
-
 /// Build OpenAI-compatible chat `messages` for OpenRouter/direct compatible providers.
 ///
 /// This stays in the OpenRouter leaf crate so provider-specific message normalization,
@@ -329,21 +309,25 @@ pub fn build_chat_messages(
         ));
     }
 
-    let mut rewritten_pending_orphans = 0usize;
+    let mut dropped_pending_orphans = 0usize;
     if !pending_tool_results.is_empty() {
         let mut pending_entries: Vec<(String, String)> = std::mem::take(&mut pending_tool_results)
             .into_iter()
             .collect();
         pending_entries.sort_by(|a, b| a.0.cmp(&b.0));
-        for (tool_use_id, output) in pending_entries {
-            if let Some(message) =
-                orphan_tool_output_to_user_message(&tool_use_id, &output, &missing_output)
-            {
-                api_messages.push(message);
-                rewritten_pending_orphans += 1;
-            } else {
-                skipped_results += 1;
-            }
+        // Whatever is still pending after both passes has no `tool_call`
+        // anywhere in the history we were handed, so there is no legal
+        // `role: tool` message to carry it. Re-encoding it as a `role: user`
+        // message did satisfy the wire format, but the history is unchanged
+        // between requests, so the orphan was re-detected and re-derived on
+        // *every* request. The harness then rendered each copy as text the
+        // user had typed: it was timestamped, counted as a user turn, and fed
+        // to memory extraction, which stored the tool's own output as if the
+        // user had said it. Dropping it costs the model nothing it could have
+        // interpreted, because there is no call left for it to belong to.
+        for _ in pending_entries {
+            dropped_pending_orphans += 1;
+            skipped_results += 1;
         }
     }
 
@@ -353,10 +337,10 @@ pub fn build_chat_messages(
             injected_missing
         ));
     }
-    if rewritten_pending_orphans > 0 {
+    if dropped_pending_orphans > 0 {
         jcode_logging::info(&format!(
-            "[openrouter] Rewrote {} pending orphaned tool output(s) as user messages",
-            rewritten_pending_orphans
+            "[openrouter] Dropped {} orphaned tool output(s) with no matching tool_call",
+            dropped_pending_orphans
         ));
     }
     if skipped_results > 0 {
@@ -514,7 +498,7 @@ pub fn build_chat_messages(
 
     let mut reordered: Vec<Value> = Vec::with_capacity(api_messages.len());
     let mut injected_ordered = 0usize;
-    let mut dropped_orphans = 0usize;
+    let mut relocated_tool_outputs = 0usize;
 
     for msg in api_messages.into_iter() {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
@@ -549,7 +533,13 @@ pub fn build_chat_messages(
         }
 
         if role == "tool" {
-            dropped_orphans += 1;
+            // Reached for every `role: tool` message, not only unmatchable ones:
+            // the assistant branch above already popped it from
+            // `tool_output_map` and emitted it next to its call, so what is
+            // dropped here is the stale position. This therefore counts the
+            // session's tool outputs, and a rising value means a growing
+            // conversation, not accumulating orphans.
+            relocated_tool_outputs += 1;
             continue;
         }
 
@@ -564,10 +554,10 @@ pub fn build_chat_messages(
             injected_ordered
         ));
     }
-    if dropped_orphans > 0 {
+    if relocated_tool_outputs > 0 {
         jcode_logging::info(&format!(
-            "[openrouter] Dropped {} orphaned tool output(s) during re-ordering",
-            dropped_orphans
+            "[openrouter] Relocated {} tool output(s) to follow their tool call",
+            relocated_tool_outputs
         ));
     }
 
@@ -615,17 +605,42 @@ mod request_tests {
     }
 
     #[test]
-    fn orphaned_tool_output_is_recovered_as_a_user_message() {
+    fn orphaned_tool_output_never_replays_as_user_speech() {
+        // A tool result whose `tool_call` is absent from history can never be
+        // matched, so request-time recovery re-derived a `role: user` message
+        // from it on *every* request. The harness then rendered it as text the
+        // user had typed: it was timestamped, counted as a user turn, and fed
+        // to memory extraction, which stored the tool's own output as if the
+        // user had said it. Recovery must not manufacture user speech, and it
+        // must be stable across requests either way.
+        let messages = vec![Message::tool_result("call_orphan", "orphan result", false)];
+
+        for _ in 0..2 {
+            let api_messages = build_chat_messages(&messages, "", false, false, false);
+            assert!(
+                !api_messages.iter().any(|m| {
+                    m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.starts_with("[Recovered orphaned tool output:"))
+                }),
+                "orphan tool output was replayed as user speech"
+            );
+        }
+    }
+
+    #[test]
+    fn orphaned_tool_output_is_dropped_rather_than_sent() {
+        // No `tool_call` exists for this result anywhere in history, so there is
+        // no legal `role: tool` message. It must not be smuggled onto the wire
+        // as `role: user` either, because the harness presents user-role text
+        // as something the user typed.
         let messages = vec![Message::tool_result("call_orphan", "orphan result", false)];
 
         let api_messages = build_chat_messages(&messages, "", false, false, false);
 
-        assert_eq!(
-            api_messages,
-            vec![json!({
-                "role": "user",
-                "content": "[Recovered orphaned tool output: call_orphan]\norphan result"
-            })]
+        assert!(
+            api_messages.is_empty(),
+            "orphan tool output must not be sent at all, got: {api_messages:?}"
         );
     }
 

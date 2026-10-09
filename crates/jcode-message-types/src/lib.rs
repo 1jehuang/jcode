@@ -232,7 +232,25 @@ pub enum ContentBlock {
     },
 }
 
+/// Prefix used by the provider layer when a persisted tool result has no
+/// matching assistant `tool_call` and must be sent as a user message for the
+/// API to accept it at all. OpenAI-compatible endpoints reject a `tool`
+/// message whose `tool_call_id` was never issued, so the substitution is
+/// required on the wire - but it is still harness output, never user speech,
+/// and must not be presented, timestamped or counted as a user turn.
+pub const RECOVERED_ORPHAN_TOOL_OUTPUT_PREFIX: &str = "[Recovered orphaned tool output:";
+
+/// True when this message was written by the harness rather than by the user.
+pub fn is_harness_injected_text(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("<system-reminder>") || text.starts_with(RECOVERED_ORPHAN_TOOL_OUTPUT_PREFIX)
+}
+
+
 impl Message {
+
+
+
     pub fn user(text: &str) -> Self {
         Self {
             role: Role::User,
@@ -318,7 +336,6 @@ impl Message {
             }
         }
     }
-
     pub fn is_internal_system_reminder(&self) -> bool {
         self.content
             .iter()
@@ -326,7 +343,7 @@ impl Message {
                 ContentBlock::Text { text, .. } => Some(text.trim_start()),
                 _ => None,
             })
-            .is_some_and(|text| text.starts_with("<system-reminder>"))
+            .is_some_and(is_harness_injected_text)
     }
 
     fn should_skip_timestamp_injection(&self) -> bool {

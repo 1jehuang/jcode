@@ -660,37 +660,35 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
 }
 
 #[test]
-fn test_build_responses_input_rewrites_orphan_tool_output_as_user_message() {
+fn test_build_responses_input_drops_orphan_tool_output() {
+    // An output whose `function_call` is absent from history has no legal
+    // Responses API representation. Re-encoding it as a `role: user` message
+    // satisfied the wire format, but the history is unchanged between requests,
+    // so it was re-derived on *every* request and the harness rendered each
+    // copy as text the user had typed: timestamped, counted as a user turn,
+    // and passed to memory extraction, which stored the tool's own output as a
+    // user statement. Built twice to pin the repeat, not just the shape.
     let messages = vec![ChatMessage::tool_result(
         "call_orphan",
         "orphan result",
         false,
     )];
 
-    let items = build_responses_input(&messages);
-    let mut saw_rewritten_message = false;
-
-    for item in &items {
-        assert_ne!(
-            item.get("type").and_then(|v| v.as_str()),
-            Some("function_call_output")
+    for _ in 0..2 {
+        let items = build_responses_input(&messages);
+        assert!(
+            !items.iter().any(|item| {
+                item.get("content")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|content| {
+                        content.iter().any(|part| {
+                            part.get("text")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|t| t.contains("[Recovered orphaned tool output:"))
+                        })
+                    })
+            }),
+            "orphan tool output was replayed as user speech"
         );
-        if item.get("type").and_then(|v| v.as_str()) == Some("message")
-            && item.get("role").and_then(|v| v.as_str()) == Some("user")
-            && let Some(content) = item.get("content").and_then(|v| v.as_array())
-        {
-            for part in content {
-                if part.get("type").and_then(|v| v.as_str()) == Some("input_text") {
-                    let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    if text.contains("[Recovered orphaned tool output: call_orphan]")
-                        && text.contains("orphan result")
-                    {
-                        saw_rewritten_message = true;
-                    }
-                }
-            }
-        }
     }
-
-    assert!(saw_rewritten_message);
 }

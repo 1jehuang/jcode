@@ -3146,3 +3146,106 @@ fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps()
         }
     });
 }
+
+// reference: no prior art, searched the auto-poke tests in this repo. These
+// are regression tests for the fix in `schedule_auto_poke_followup_if_needed`
+// (crates/jcode-tui/src/tui/app/input.rs), modelled on
+// `test_finish_turn_auto_pokes_again_when_todos_remain` in this same file.
+
+/// The final-response early exit sat BEFORE the stall ladder, so an agent that
+/// claimed completion and then kept rewriting the same list - the normal shape
+/// of a frozen plan - never reached the ladder at all. Auto-poke looked armed
+/// and silently stopped. With open work it must still poke.
+#[test]
+fn auto_poke_still_fires_when_the_plan_is_unchanged_but_still_has_open_items() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                group: None,
+                id: "todo-stall".to_string(),
+                content: "Unfinished work".to_string(),
+                status: "in_progress".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
+                confidence_history: Vec::new(),
+            }],
+        )
+        .expect("save todos");
+
+        app.auto_poke_default_on = true;
+        app.auto_poke_incomplete_todos = true;
+        app.todo_final_response_requested = true;
+
+        // The agent claimed completion and rewrote an identical list.
+        let sid = app
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&app.session.id)
+            .to_string();
+        let todos = super::commands::poke_todos(&app);
+        let plan = crate::todo::load_plan(&sid).unwrap_or_default();
+        let goals = crate::todo::load_goals(&sid).unwrap_or_default();
+        app.final_response_todo_fingerprint =
+            serde_json::to_string(&(&sid, &todos, &plan, &goals)).ok();
+
+        let scheduled = app.schedule_auto_poke_followup_if_needed();
+
+        assert!(
+            scheduled,
+            "a frozen list with an incomplete todo must still be poked, not \
+             short-circuited by the final-response fingerprint"
+        );
+    });
+}
+
+/// The other half of the contract: when nothing is actually left, the early
+/// exit is correct and must be preserved.
+#[test]
+fn auto_poke_stays_quiet_when_the_unchanged_plan_is_genuinely_closed() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        crate::todo::save_todos(
+            &app.session.id,
+            &[crate::todo::TodoItem {
+                group: None,
+                id: "todo-done".to_string(),
+                content: "Finished".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                blocked_by: Vec::new(),
+                assigned_to: None,
+                confidence: None,
+                completion_confidence: None,
+                confidence_history: Vec::new(),
+            }],
+        )
+        .expect("save todos");
+
+        app.auto_poke_default_on = true;
+        app.auto_poke_incomplete_todos = true;
+        app.todo_final_response_requested = true;
+
+        let sid = app
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&app.session.id)
+            .to_string();
+        let todos = super::commands::poke_todos(&app);
+        let plan = crate::todo::load_plan(&sid).unwrap_or_default();
+        let goals = crate::todo::load_goals(&sid).unwrap_or_default();
+        app.final_response_todo_fingerprint =
+            serde_json::to_string(&(&sid, &todos, &plan, &goals)).ok();
+
+        let scheduled = app.schedule_auto_poke_followup_if_needed();
+
+        assert!(
+            !scheduled,
+            "a completed plan must not be poked even though the fingerprint is unchanged"
+        );
+    });
+}

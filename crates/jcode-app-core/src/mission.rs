@@ -69,7 +69,15 @@ pub fn set(session_id: &str, objective: &str) -> Result<Mission> {
         anyhow::bail!("mission objective cannot be empty");
     }
     let now = Utc::now();
-    let mut mission = load(session_id)?.unwrap_or_else(|| Mission {
+    let existing = load(session_id)?;
+    // Only seed the long-horizon intent when there is nothing to preserve.
+    // Overwriting it on every call meant re-typing the objective silently
+    // discarded a hand-written intent, which is the part of the mission that
+    // actually carries the guidance.
+    let seed_intent = existing
+        .as_ref()
+        .is_none_or(|mission| mission.long_horizon_intent.trim().is_empty());
+    let mut mission = existing.unwrap_or_else(|| Mission {
         session_id: session_id.to_string(),
         objective: String::new(),
         long_horizon_intent: String::new(),
@@ -82,7 +90,9 @@ pub fn set(session_id: &str, objective: &str) -> Result<Mission> {
         updated_at: now,
     });
     mission.objective = objective.to_string();
-    mission.long_horizon_intent = default_long_horizon_intent(objective);
+    if seed_intent {
+        mission.long_horizon_intent = default_long_horizon_intent(objective);
+    }
     mission.status = MissionStatus::Active;
     mission.updated_at = now;
     save(&mission)?;
