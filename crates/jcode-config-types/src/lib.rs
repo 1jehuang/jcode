@@ -923,9 +923,18 @@ pub struct HooksConfig {
     /// Env override: JCODE_HOOK_PRE_TOOL.
     pub pre_tool: Option<HookCommands>,
     /// Runs after each tool call completes.
-    /// Fields: TOOL_NAME, STATUS ("ok"/"error"), DURATION_MS, OUTPUT_BYTES.
+    /// Fields: TOOL_NAME, TOOL_CALL_ID, TOOL_INPUT, TOUCHED_PATHS, STATUS
+    /// ("ok"/"error"), DURATION_MS, OUTPUT_BYTES, ERROR.
     /// Env override: JCODE_HOOK_POST_TOOL.
     pub post_tool: Option<HookCommands>,
+    /// Synchronous hook after each successful tool call. Same fields as
+    /// post_tool, tool input JSON on stdin. Its stdout is appended to the tool
+    /// result the model sees (e.g. linter output for edited files).
+    /// Env override: JCODE_HOOK_POST_TOOL_FEEDBACK.
+    pub post_tool_feedback: Option<HookCommands>,
+    /// Max milliseconds to wait for each post_tool_feedback hook (default:
+    /// 10000). Env override: JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS.
+    pub post_tool_feedback_timeout_ms: u64,
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
@@ -942,6 +951,8 @@ impl Default for HooksConfig {
             session_end: None,
             pre_tool: None,
             post_tool: None,
+            post_tool_feedback: None,
+            post_tool_feedback_timeout_ms: 10_000,
             pre_tool_timeout_ms: 5000,
         }
     }

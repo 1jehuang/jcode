@@ -641,9 +641,17 @@ swarm_max_concurrent_agents = 32
 # pre_tool_timeout_ms = 5000
 #
 # Runs after each tool call. Extra fields: JCODE_HOOK_TOOL_NAME,
+# JCODE_HOOK_TOOL_CALL_ID, JCODE_HOOK_TOOL_INPUT (tool input JSON, 16 KB cap),
+# JCODE_HOOK_TOUCHED_PATHS (newline-separated absolute paths),
 # JCODE_HOOK_STATUS, JCODE_HOOK_DURATION_MS, JCODE_HOOK_OUTPUT_BYTES,
 # JCODE_HOOK_ERROR.
 # post_tool = ""
+#
+# Synchronous hook after each successful tool call. Same fields as post_tool,
+# full tool input JSON on stdin. Anything it prints to stdout is appended to
+# the tool result the model sees, so linters can report findings inline.
+# post_tool_feedback = "~/bin/jcode-vale"
+# post_tool_feedback_timeout_ms = 10000
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
