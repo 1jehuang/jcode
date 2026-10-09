@@ -99,6 +99,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
             tx,
             Arc::new(Mutex::new(None)),
             "m".to_string(),
+            "openrouter::test-scope".to_string(),
         )
         .await;
         while events.recv().await.is_some() {}
