@@ -332,3 +332,35 @@ fn spawn_lock_creates_missing_runtime_directory() {
     assert!(!path.exists());
     assert!(path.parent().unwrap().is_dir());
 }
+
+#[test]
+fn provider_profile_transport_follows_profile_type() {
+    // Issue #1560: --provider-profile forced OpenAI-compatible for every profile.
+    let config: crate::config::Config = toml::from_str(
+        r#"
+[providers.fcc-anthropic]
+type = "anthropic-compatible"
+base_url = "http://127.0.0.1:8082/v1"
+auth = "none"
+
+[providers.local-openai]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+auth = "none"
+"#,
+    )
+    .expect("valid config");
+
+    assert!(matches!(
+        provider_choice_for_named_profile_in("fcc-anthropic", &config),
+        ProviderChoice::Auto
+    ));
+    assert!(matches!(
+        provider_choice_for_named_profile_in("local-openai", &config),
+        ProviderChoice::OpenaiCompatible
+    ));
+    assert!(matches!(
+        provider_choice_for_named_profile_in("missing", &config),
+        ProviderChoice::OpenaiCompatible
+    ));
+}
