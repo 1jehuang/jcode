@@ -1226,3 +1226,6 @@ fn per_call_auto_spawn_mode_defers_to_configured_mode() {
     assert_eq!(resolve_swarm_spawn_mode(Some(Headless), Visible), Headless);
     assert_eq!(resolve_swarm_spawn_mode(Some(Inline), Visible), Inline);
 }
+
+#[path = "comm_session_stop_tests.rs"]
+mod comm_session_stop_tests;
