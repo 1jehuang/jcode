@@ -44,6 +44,7 @@ struct RawSelectionPoint {
     column: usize,
 }
 
+#[cfg(test)]
 pub(super) fn copy_selection_text_from_raw_lines(
     snapshot: &CopyViewportSnapshot,
     start: crate::tui::CopySelectionPoint,
