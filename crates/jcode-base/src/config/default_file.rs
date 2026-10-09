@@ -534,9 +534,16 @@ swarm_stall_after_secs = 600
 # Optional text-generating extraction is separate from recall. Disable it to
 # learn only through the main agent's explicit memory writes.
 # (OpenAI defaults to gpt-5.6-luna with reasoning effort "none").
-# Env overrides: JCODE_MEMORY_SIDECAR_ENABLED, JCODE_MEMORY_MODEL
+# Env overrides: JCODE_MEMORY_SIDECAR_ENABLED, JCODE_MEMORY_MODEL,
+# JCODE_MEMORY_EFFORT
 # memory_sidecar_enabled = true
 # memory_model = "gpt-5.6-luna"
+# Reasoning effort for the memory extraction sidecar on any backend:
+# OpenAI effort, Claude thinking budget or output_config effort
+# (model-dependent), or the live provider's effort knob
+# ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | ...).
+# Leave unset for the per-model default.
+# memory_effort = "none"
 # Legacy memory_rerank_* and memory_embedding_* settings are accepted for
 # backwards compatibility, but have no effect on Jev recall.
 

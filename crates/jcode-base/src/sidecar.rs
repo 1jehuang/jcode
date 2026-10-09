@@ -35,8 +35,11 @@ const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
 /// Claude Messages API endpoint for direct API-key access (no OAuth beta flag).
 const CLAUDE_API_KEY_URL: &str = "https://api.anthropic.com/v1/messages";
 
-/// Beta headers required for OAuth
-const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
+/// Beta headers required for OAuth. When `agents.memory_effort` adds
+/// `output_config` effort or manual thinking, the request also needs the
+/// effort/thinking betas (mirrors the runtime's header handling).
+const OAUTH_BETA_HEADERS: &str =
+    "oauth-2025-04-20,claude-code-20250219,effort-2025-11-24,interleaved-thinking-2025-05-14";
 
 /// Claude Code identity block required for OAuth direct API access
 const CLAUDE_CODE_IDENTITY: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -44,6 +47,8 @@ const CLAUDE_CODE_JCODE_NOTICE: &str = "You are jcode, powered by Claude Code. Y
 
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
+const CLAUDE_MIN_THINKING_BUDGET: u32 = 1_024;
+const CLAUDE_THINKING_ANSWER_HEADROOM: u32 = 2_048;
 
 /// Whether retrying a failed sidecar request can reasonably succeed without a
 /// configuration or credential change.
@@ -156,7 +161,18 @@ impl Sidecar {
     /// Prefers OpenAI (GPT-5.6 Luna with no reasoning) if creds exist, falls back to Claude.
     pub fn new() -> Self {
         let configured_model = crate::config::config().agents.memory_model.clone();
-        Self::with_configured_model(configured_model)
+        // An empty/whitespace effort from the config file (the env override
+        // already trims) must mean "unset", not an invalid `""` effort pin.
+        // Surrounding spaces would flow into the request as `" low "`, so trim
+        // before storing: the OpenAI pin and the Claude budget lookup both
+        // match exact strings.
+        let configured_effort = crate::config::config()
+            .agents
+            .memory_effort
+            .clone()
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty());
+        Self::with_configured_model(configured_model, configured_effort)
     }
 
     pub fn for_session(session: &crate::session::Session) -> Self {
@@ -168,6 +184,18 @@ impl Sidecar {
         } else {
             model
         };
+        // Read the configured effort up front: the provider fork branch below
+        // returns early, and skipping this read there meant `for_session`
+        // ignored `agents.memory_effort` whenever a live provider could serve
+        // the configured model (greptile). The fork pin happens after the
+        // fork's model is selected, so `set_model_with_auth_refresh` never
+        // clobbers the effort.
+        let configured_effort = crate::config::Config::load()
+            .agents
+            .memory_effort
+            .clone()
+            .map(|e| e.trim().to_string())
+            .filter(|e| !e.is_empty());
         if let Some(model) = model.as_deref()
             && let Some(provider) = crate::provider::active_provider_fork()
         {
@@ -181,13 +209,24 @@ impl Sidecar {
                 model.to_string()
             };
             if crate::provider::set_model_with_auth_refresh(provider.as_ref(), &request).is_ok() {
+                // The fork is independent of the main agent (per the Provider
+                // fork contract), so pinning `agents.memory_effort` on it
+                // never disturbs the user's live session effort. Providers
+                // without an effort knob reject; keep their default.
+                if let Some(effort) = configured_effort.as_deref()
+                    && let Err(err) = provider.set_reasoning_effort(effort)
+                {
+                    crate::logging::warn(&format!(
+                        "Ignoring memory effort '{effort}' for provider sidecar: {err}"
+                    ));
+                }
                 return Self {
                     client: crate::provider::shared_http_client(),
                     model: provider.model(),
                     max_tokens: DEFAULT_MAX_TOKENS,
                     backend: SidecarBackend::Provider,
                     provider: Some(provider),
-                    reasoning_override: None,
+                    reasoning_override: configured_effort,
                 };
             }
         }
@@ -200,10 +239,13 @@ impl Sidecar {
                 .map(|(_, id)| id.to_string())
                 .unwrap_or(model)
         });
-        Self::with_configured_model(model)
+        Self::with_configured_model(model, configured_effort)
     }
 
-    fn with_configured_model(configured_model: Option<String>) -> Self {
+    fn with_configured_model(
+        configured_model: Option<String>,
+        configured_effort: Option<String>,
+    ) -> Self {
         let (backend, model, provider) = if let Some(model) = configured_model {
             match crate::provider::provider_for_model(&model) {
                 Some("openai") => (SidecarBackend::OpenAI, model, None),
@@ -225,8 +267,23 @@ impl Sidecar {
             model,
             max_tokens: DEFAULT_MAX_TOKENS,
             backend,
-            provider,
-            reasoning_override: None,
+            provider: provider.inspect(|fork| {
+                // The fork is independent of the main agent (per the Provider
+                // fork contract), so pinning `agents.memory_effort` on it
+                // never disturbs the user's live session effort. Providers
+                // without an effort knob reject; keep their default.
+                if let Some(effort) = configured_effort.as_deref()
+                    && let Err(err) = fork.set_reasoning_effort(effort)
+                {
+                    crate::logging::warn(&format!(
+                        "Ignoring memory effort '{effort}' for provider sidecar: {err}"
+                    ));
+                }
+            }),
+            // `agents.memory_effort` pins the reasoning effort on the OpenAI
+            // sidecar path; the Claude path derives its thinking budget from
+            // it per request (see `claude_reasoning_parts`).
+            reasoning_override: configured_effort,
         }
     }
 
@@ -378,11 +435,7 @@ impl Sidecar {
             .context("Failed to load OpenAI/Codex credentials for sidecar")?;
 
         let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
-        let base = if is_chatgpt_mode {
-            CHATGPT_API_BASE
-        } else {
-            OPENAI_API_BASE
-        };
+        let base = openai_responses_base(is_chatgpt_mode);
         let url = format!("{}/{}", base.trim_end_matches('/'), OPENAI_RESPONSES_PATH);
 
         let (primary_model, resolved_reasoning) =
@@ -425,6 +478,15 @@ impl Sidecar {
                     reason
                 ));
 
+                // The retry keeps the configured effort (`agents.memory_effort`):
+                // an override must survive the fallback, and with `none`
+                // configured the replacement request must not start thinking.
+                // Only without an override does the fallback model keep its
+                // own low-effort default.
+                let fallback_reasoning: Option<&str> = self
+                    .reasoning_override
+                    .as_deref()
+                    .or(Some(SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING));
                 let fallback = self
                     .complete_openai_with_model(
                         &url,
@@ -434,7 +496,7 @@ impl Sidecar {
                         system,
                         user_message,
                         SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL,
-                        Some(SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING),
+                        fallback_reasoning,
                     )
                     .await;
 
@@ -588,14 +650,21 @@ impl Sidecar {
         let creds = auth::claude::load_credentials()
             .context("Failed to load Claude credentials for sidecar")?;
 
+        let (thinking, output_config, request_max_tokens) = claude_reasoning_parts(
+            &self.model,
+            self.reasoning_override.as_deref(),
+            self.max_tokens,
+        );
         let request = ClaudeMessagesRequest {
             model: &self.model,
-            max_tokens: self.max_tokens,
+            max_tokens: request_max_tokens,
             system: build_claude_system_param(system),
             messages: vec![ClaudeMessage {
                 role: "user",
                 content: user_message,
             }],
+            thinking,
+            output_config,
         };
 
         let response = crate::provider::anthropic::apply_oauth_attribution_headers(
@@ -630,22 +699,36 @@ impl Sidecar {
         user_message: &str,
         api_key: &str,
     ) -> Result<String> {
+        let (thinking, output_config, request_max_tokens) = claude_reasoning_parts(
+            &self.model,
+            self.reasoning_override.as_deref(),
+            self.max_tokens,
+        );
         let request = ClaudeMessagesRequest {
             model: &self.model,
-            max_tokens: self.max_tokens,
+            max_tokens: request_max_tokens,
             system: build_claude_api_key_system_param(system),
             messages: vec![ClaudeMessage {
                 role: "user",
                 content: user_message,
             }],
+            thinking,
+            output_config,
         };
 
+        // Manual/adaptive thinking needs the interleaved-thinking beta
+        // (mirrors the runtime's `anthropic_beta_header_with_thinking`).
+        let api_key_betas = if request.thinking.is_some() {
+            "prompt-caching-2024-07-31,interleaved-thinking-2025-05-14"
+        } else {
+            "prompt-caching-2024-07-31"
+        };
         let response = self
             .client
             .post(CLAUDE_API_KEY_URL)
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "prompt-caching-2024-07-31")
+            .header("anthropic-beta", api_key_betas)
             .header("content-type", "application/json")
             .json(&request)
             .send()
@@ -851,6 +934,25 @@ impl Default for Sidecar {
 /// The public model constant for backward compatibility in tests.
 #[cfg(test)]
 pub const SIDECAR_FAST_MODEL: &str = SIDECAR_OPENAI_MODEL;
+
+/// Resolve the Responses API base for the sidecar: the ChatGPT backend in
+/// OAuth mode, the standard API base in API-key mode. A test-only override
+/// (`JCODE_SIDECAR_TEST_API_BASE`) redirects both to a loopback fixture so
+/// retry/fallback behavior can be asserted against real HTTP requests
+/// instead of constants; it is ignored outside `cfg(test)`.
+fn openai_responses_base(is_chatgpt_mode: bool) -> String {
+    #[cfg(test)]
+    if let Ok(base) = std::env::var("JCODE_SIDECAR_TEST_API_BASE")
+        && !base.trim().is_empty()
+    {
+        return base.trim().trim_end_matches('/').to_string();
+    }
+    if is_chatgpt_mode {
+        CHATGPT_API_BASE.to_string()
+    } else {
+        OPENAI_API_BASE.to_string()
+    }
+}
 
 fn resolve_openai_request_model(
     preferred_model: &str,
@@ -1112,12 +1214,146 @@ struct ClaudeMessagesRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     system: Option<ClaudeApiSystem<'a>>,
     messages: Vec<ClaudeMessage<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ClaudeThinking>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<ClaudeOutputConfig>,
 }
 
 #[derive(Serialize)]
 struct ClaudeMessage<'a> {
     role: &'a str,
     content: &'a str,
+}
+
+/// Reasoning thinking control for the Claude sidecar path, derived from
+/// `agents.memory_effort` and the model's capability set (single source of
+/// truth: `jcode_provider_core::anthropic_reasoning_caps`).
+///
+/// Mirrors the runtime's `build_reasoning_request_parts_with_effort`:
+/// - `output_config` effort when the model supports it,
+/// - a manual thinking budget for manual-thinking models,
+/// - adaptive thinking for adaptive-capable models (Sonnet 4.6 style: the
+///   request must carry `thinking` for the configured effort to take
+///   effect),
+/// - nothing when the model has no reasoning control or the effort is `none`.
+///
+/// Claude requires `thinking.budget_tokens` to be strictly smaller than
+/// `max_tokens`. When the configured response limit would clamp the effort's
+/// budget, the budget wins and the request limit is raised so memory
+/// extraction can still think at the requested level and return text.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "snake_case", tag = "type")]
+enum ClaudeThinking {
+    Enabled {
+        budget_tokens: u32,
+    },
+    Adaptive {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<&'static str>,
+    },
+}
+
+/// Effort control for models that accept `output_config: {effort}`.
+#[derive(Serialize)]
+struct ClaudeOutputConfig {
+    effort: String,
+}
+
+/// Reasoning request parts for the Claude sidecar path, derived from
+/// `agents.memory_effort` and the model's capability set (single source of
+/// truth: `jcode_provider_core::anthropic_reasoning_caps`).
+///
+/// Mirrors the runtime's `build_reasoning_request_parts_with_effort`:
+/// - `output_config` effort when the model supports it,
+/// - a manual thinking budget otherwise,
+/// - nothing when the model has no reasoning control or the effort is `none`.
+///
+/// Claude requires `thinking.budget_tokens` to be strictly smaller than
+/// `max_tokens`. When a small configured response limit would leave no answer
+/// room above the minimum thinking budget, the request limit is raised so memory
+/// extraction can still use manual thinking and return text.
+fn claude_reasoning_parts(
+    model: &str,
+    effort: Option<&str>,
+    max_tokens: u32,
+) -> (Option<ClaudeThinking>, Option<ClaudeOutputConfig>, u32) {
+    let Some(effort) = effort else {
+        return (None, None, max_tokens);
+    };
+    let caps = jcode_provider_core::anthropic::anthropic_reasoning_caps(model);
+    // Always-on thinking models (Opus 5.5, Fable 5.1) cannot disable thinking,
+    // so `none` means the lowest supported effort, same mapping as the main
+    // Claude runtime (`build_reasoning_request_parts_for_budget`). Without
+    // this the early return below would drop the effort control entirely and
+    // leave the model at its default (higher) effort.
+    let effort = if effort == "none"
+        && jcode_provider_core::anthropic::anthropic_thinking_always_on(model)
+    {
+        "low"
+    } else {
+        effort
+    };
+    if !caps.supports_reasoning_effort() || effort == "none" {
+        return (None, None, max_tokens);
+    }
+    // Both controls are independent, like the runtime: models with both
+    // (Opus 4.5) send output_config effort AND a manual budget.
+    let output_config = caps.output_effort.then(|| {
+        // Clamp levels the model doesn't accept, same ladder as the runtime.
+        let resolved = if effort == "minimal" {
+            "low"
+        } else if matches!(effort, "max" | "xhigh") && !caps.xhigh_effort && !caps.max_effort {
+            "high"
+        } else if effort == "max" && !caps.max_effort {
+            "xhigh"
+        } else if effort == "xhigh" && !caps.xhigh_effort {
+            "high"
+        } else {
+            effort
+        };
+        ClaudeOutputConfig {
+            effort: resolved.to_string(),
+        }
+    });
+    // Manual-thinking models need a concrete budget; adaptive-capable models
+    // need the `thinking` field present (without it the request runs without
+    // thinking and `output_config.effort` alone does nothing); others rely on
+    // output_config above.
+    let thinking = if caps.manual_thinking {
+        let budget = match effort {
+            "minimal" | "low" => CLAUDE_MIN_THINKING_BUDGET,
+            "medium" => 4_096,
+            "high" => 8_192,
+            "xhigh" | "max" => 16_384,
+            _ => return (None, output_config, max_tokens),
+        };
+        // The effort-selected budget wins over the configured response limit:
+        // clamping it down to `max_tokens - 1` collapses every effort above
+        // `low` into the 1,024 minimum (greptile). Keep the requested budget
+        // and raise the request limit instead so the answer keeps room.
+        Some(ClaudeThinking::Enabled {
+            budget_tokens: budget,
+        })
+    } else if caps.adaptive_thinking {
+        // Mirrors the runtime's `reasoning_request::adaptive_thinking`: the
+        // request carries `thinking` so the configured effort actually
+        // enables adaptive thinking (greptile: without this branch Sonnet 4.6
+        // ran memory extraction with no thinking at all).
+        Some(ClaudeThinking::Adaptive {
+            display: Some("summarized"),
+        })
+    } else {
+        None
+    };
+    let request_max_tokens = match &thinking {
+        Some(ClaudeThinking::Enabled { budget_tokens }) => {
+            max_tokens.max(budget_tokens + CLAUDE_THINKING_ANSWER_HEADROOM)
+        }
+        // Adaptive thinking has no budget: the request limit is unchanged.
+        _ => max_tokens,
+    };
+    (thinking, output_config, request_max_tokens)
 }
 
 #[derive(Serialize)]
@@ -1357,11 +1593,325 @@ mod tests {
         })
         .expect("write Claude test auth");
 
-        let sidecar = Sidecar::with_configured_model(None);
+        let sidecar = Sidecar::with_configured_model(None, None);
         assert_eq!(sidecar.backend, SidecarBackend::OpenAI);
         assert_eq!(sidecar.model, SIDECAR_OPENAI_MODEL);
         codex::set_active_account_override(None);
         crate::auth::claude::set_active_account_override(None);
+    }
+
+    #[test]
+    fn configured_memory_effort_pins_reasoning_override() {
+        // The effort pin is backend-independent: no credential isolation is
+        // needed, only the reasoning override itself matters.
+        let sidecar = Sidecar::with_configured_model(None, Some("low".to_string()));
+        assert_eq!(sidecar.reasoning_override.as_deref(), Some("low"));
+
+        // Unset effort leaves the per-model default in place.
+        let sidecar = Sidecar::with_configured_model(None, None);
+        assert_eq!(sidecar.reasoning_override, None);
+    }
+
+    #[test]
+    fn sidecar_new_ignores_empty_memory_effort() {
+        // A blank effort in the config file must mean "unset", never an
+        // invalid `""`/whitespace pin that would reach the OpenAI request.
+        // Padded values must trim to the bare token: providers match exact
+        // strings, so a raw `" low "` would break the pin lookup.
+        // Drives the real config file parse via the global config cache.
+        let _guard = crate::storage::lock_test_env();
+        let saved_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[agents]\nmemory_effort = \"   \"\n",
+        )
+        .expect("write config");
+        let sidecar = Sidecar::new();
+        assert_eq!(sidecar.reasoning_override, None);
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[agents]\nmemory_effort = \" low \"\n",
+        )
+        .expect("write config");
+        let sidecar = Sidecar::new();
+        assert_eq!(
+            sidecar.reasoning_override.as_deref(),
+            Some("low"),
+            "padded effort must trim, not pin the raw spaced string"
+        );
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[agents]\nmemory_effort = \"low\"\n",
+        )
+        .expect("write config");
+        let sidecar = Sidecar::new();
+        assert_eq!(sidecar.reasoning_override.as_deref(), Some("low"));
+
+        // Restore the saved home: the temp dir dies with this test, and a
+        // process-wide JCODE_HOME pointing at a deleted directory poisons
+        // later tests.
+        if let Some(home) = saved_home {
+            crate::env::set_var("JCODE_HOME", home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn claude_reasoning_parts_follow_model_caps() {
+        // Manual-thinking model (Opus 4.5): concrete budget + output_config.
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts("claude-opus-4-5", Some("low"), 8_192);
+        assert_eq!(request_max_tokens, 8_192);
+        assert_eq!(output_config.expect("effort").effort, "low");
+        match thinking {
+            Some(ClaudeThinking::Enabled { budget_tokens }) => assert_eq!(budget_tokens, 1_024),
+            other => panic!("expected manual thinking budget, got {other:?}"),
+        }
+
+        // Modern ladder model (Opus 4.7): output_config effort AND adaptive
+        // thinking (FULL caps; pre-fix the thinking field was omitted).
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts("claude-opus-4-7", Some("medium"), DEFAULT_MAX_TOKENS);
+        assert!(
+            matches!(&thinking, Some(ClaudeThinking::Adaptive { .. })),
+            "expected adaptive thinking, got {thinking:?}"
+        );
+        assert_eq!(request_max_tokens, DEFAULT_MAX_TOKENS);
+        assert_eq!(output_config.expect("effort").effort, "medium");
+
+        // Opus 4.6 has no xhigh: clamps down to high.
+        let (_, output_config, _) =
+            claude_reasoning_parts("claude-opus-4-6", Some("xhigh"), DEFAULT_MAX_TOKENS);
+        assert_eq!(output_config.expect("effort").effort, "high");
+
+        // `minimal` maps to `low` on the output_config ladder.
+        let (_, output_config, _) =
+            claude_reasoning_parts("claude-opus-4-7", Some("minimal"), DEFAULT_MAX_TOKENS);
+        assert_eq!(output_config.expect("effort").effort, "low");
+
+        // `none` disables reasoning on models that support a real off switch.
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts("claude-opus-4-7", Some("none"), DEFAULT_MAX_TOKENS);
+        assert!(thinking.is_none() && output_config.is_none());
+        assert_eq!(request_max_tokens, DEFAULT_MAX_TOKENS);
+
+        // Always-on thinking models (Opus 5.5, Fable 5.1) cannot disable
+        // thinking, so `none` maps to the lowest supported effort, same as
+        // the main Claude runtime. The request must carry the effort control
+        // and the adaptive `thinking` field (without `thinking` the request
+        // runs without reasoning and the effort control alone does nothing).
+        for model in ["claude-opus-5-5", "claude-fable-5-1"] {
+            let (thinking, output_config, request_max_tokens) =
+                claude_reasoning_parts(model, Some("none"), DEFAULT_MAX_TOKENS);
+            assert_eq!(request_max_tokens, DEFAULT_MAX_TOKENS);
+            assert_eq!(
+                output_config
+                    .as_ref()
+                    .expect("always-on model must keep the effort control")
+                    .effort,
+                "low",
+                "{model}: `none` must map to `low`"
+            );
+            match &thinking {
+                Some(ClaudeThinking::Adaptive { display }) => {
+                    assert_eq!(*display, Some("summarized"), "{model}");
+                }
+                other => panic!("{model}: expected adaptive thinking, got {other:?}"),
+            }
+        }
+
+        // Sonnet 4.6 (adaptive + output effort, no xhigh): the request must
+        // carry BOTH `thinking: {type: adaptive}` and `output_config.effort`.
+        // Pre-fix, `thinking` was omitted entirely and Sonnet 4.6 ran memory
+        // extraction without any thinking (greptile).
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts("claude-sonnet-4-6", Some("medium"), DEFAULT_MAX_TOKENS);
+        assert_eq!(
+            request_max_tokens, DEFAULT_MAX_TOKENS,
+            "adaptive thinking adds no budget"
+        );
+        assert_eq!(
+            output_config.expect("Sonnet 4.6 must keep effort").effort,
+            "medium"
+        );
+        match &thinking {
+            Some(ClaudeThinking::Adaptive { display }) => {
+                assert_eq!(*display, Some("summarized"));
+            }
+            other => panic!("expected adaptive thinking for Sonnet 4.6, got {other:?}"),
+        }
+
+        // `none` on Sonnet 4.6: nothing is added (it has a real off switch).
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts("claude-sonnet-4-6", Some("none"), DEFAULT_MAX_TOKENS);
+        assert!(thinking.is_none() && output_config.is_none());
+        assert_eq!(request_max_tokens, DEFAULT_MAX_TOKENS);
+
+        // No effort: nothing added, request stays minimal.
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts(SIDECAR_CLAUDE_MODEL, None, 1_024);
+        assert!(thinking.is_none() && output_config.is_none());
+        assert_eq!(request_max_tokens, 1_024);
+
+        // Small configured limit must NOT clamp the effort budget (greptile:
+        // the old `min(max_tokens - 1)` collapsed every effort above `low` to
+        // the 1,024 minimum). The budget wins and the request limit rises.
+        let (thinking, _, request_max_tokens) =
+            claude_reasoning_parts("claude-sonnet-3-7", Some("high"), 2_000);
+        match thinking {
+            Some(ClaudeThinking::Enabled { budget_tokens }) => {
+                assert_eq!(budget_tokens, 8_192, "effort budget must survive");
+                assert!(budget_tokens < request_max_tokens);
+                assert_eq!(request_max_tokens, 8_192 + CLAUDE_THINKING_ANSWER_HEADROOM);
+            }
+            other => panic!("expected preserved budget, got {other:?}"),
+        }
+
+        // Sonnet 3.7 (manual-only) at the sidecar's default 1,024-token
+        // limit: the configured budget is preserved and the request limit
+        // rises to leave answer room.
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts("claude-sonnet-3-7", Some("low"), DEFAULT_MAX_TOKENS);
+        assert!(output_config.is_none(), "Sonnet 3.7 has no output_config");
+        match thinking {
+            Some(ClaudeThinking::Enabled { budget_tokens }) => {
+                assert_eq!(budget_tokens, CLAUDE_MIN_THINKING_BUDGET);
+                assert!(budget_tokens < request_max_tokens);
+                assert!(request_max_tokens >= budget_tokens + CLAUDE_THINKING_ANSWER_HEADROOM);
+            }
+            other => panic!("expected minimum thinking budget, got {other:?}"),
+        }
+
+        // Higher efforts on Sonnet 3.7 must scale the budget, not collapse
+        // to the minimum (the pre-fix bug: medium/high/max all sent 1,024).
+        for (effort, want_budget) in [("medium", 4_096u32), ("high", 8_192), ("max", 16_384)] {
+            let (thinking, _, request_max_tokens) =
+                claude_reasoning_parts("claude-sonnet-3-7", Some(effort), DEFAULT_MAX_TOKENS);
+            match thinking {
+                Some(ClaudeThinking::Enabled { budget_tokens }) => {
+                    assert_eq!(budget_tokens, want_budget, "effort {effort}");
+                    assert!(budget_tokens < request_max_tokens, "effort {effort}");
+                }
+                other => panic!("expected budget for effort {effort}, got {other:?}"),
+            }
+        }
+
+        let (thinking, _, request_max_tokens) =
+            claude_reasoning_parts("claude-sonnet-3-7", Some("low"), 8_192);
+        match thinking {
+            Some(ClaudeThinking::Enabled { budget_tokens }) => {
+                assert_eq!(budget_tokens, CLAUDE_MIN_THINKING_BUDGET);
+                assert!(budget_tokens < request_max_tokens);
+            }
+            other => panic!("expected minimum thinking budget, got {other:?}"),
+        }
+        assert_eq!(request_max_tokens, 8_192);
+
+        // Sidecar default (Haiku 4.5) and unknown families: no reasoning
+        // control, nothing added.
+        for model in [SIDECAR_CLAUDE_MODEL, "totally-unknown-model"] {
+            let (thinking, output_config, request_max_tokens) =
+                claude_reasoning_parts(model, Some("high"), DEFAULT_MAX_TOKENS);
+            assert!(thinking.is_none() && output_config.is_none(), "{model}");
+            assert_eq!(request_max_tokens, DEFAULT_MAX_TOKENS);
+        }
+    }
+
+    #[test]
+    fn claude_request_omits_reasoning_fields_when_unset() {
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts(SIDECAR_CLAUDE_MODEL, None, 1_024);
+        let request = ClaudeMessagesRequest {
+            model: SIDECAR_CLAUDE_MODEL,
+            max_tokens: request_max_tokens,
+            system: None,
+            messages: vec![ClaudeMessage {
+                role: "user",
+                content: "hi",
+            }],
+            thinking,
+            output_config,
+        };
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert!(json.get("thinking").is_none(), "{json}");
+        assert!(json.get("output_config").is_none(), "{json}");
+    }
+
+    #[test]
+    fn claude_request_serializes_manual_thinking() {
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts("claude-opus-4-5", Some("low"), 8_192);
+        let request = ClaudeMessagesRequest {
+            model: "claude-opus-4-5",
+            max_tokens: request_max_tokens,
+            system: None,
+            messages: vec![ClaudeMessage {
+                role: "user",
+                content: "hi",
+            }],
+            thinking,
+            output_config,
+        };
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(
+            json.get("thinking").and_then(|t| t.get("type")),
+            Some(&serde_json::json!("enabled")),
+            "{json}"
+        );
+        assert_eq!(
+            json.pointer("/thinking/budget_tokens"),
+            Some(&serde_json::json!(1_024)),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn claude_request_raises_manual_thinking_max_tokens() {
+        let (thinking, output_config, request_max_tokens) =
+            claude_reasoning_parts("claude-sonnet-3-7", Some("low"), DEFAULT_MAX_TOKENS);
+        let request = ClaudeMessagesRequest {
+            model: "claude-sonnet-3-7",
+            max_tokens: request_max_tokens,
+            system: None,
+            messages: vec![ClaudeMessage {
+                role: "user",
+                content: "hi",
+            }],
+            thinking,
+            output_config,
+        };
+        let json = serde_json::to_value(&request).expect("serialize");
+        let budget_tokens = json
+            .pointer("/thinking/budget_tokens")
+            .and_then(|value| value.as_u64())
+            .expect("thinking budget");
+        let max_tokens = json
+            .get("max_tokens")
+            .and_then(|value| value.as_u64())
+            .expect("max tokens");
+
+        assert!(budget_tokens < max_tokens, "{json}");
+        assert!(
+            max_tokens >= budget_tokens + u64::from(CLAUDE_THINKING_ANSWER_HEADROOM),
+            "{json}"
+        );
+        assert_eq!(json.get("output_config"), None, "{json}");
+    }
+
+    #[test]
+    fn sidecar_unsupported_model_override_falls_back_to_auto_select() {
+        let sidecar = Sidecar::with_configured_model(
+            Some("totally-unknown-model".to_string()),
+            Some("low".to_string()),
+        );
+        // The configured effort survives the model fallback: it pins the
+        // OpenAI sidecar path whichever model it lands on.
+        assert_eq!(sidecar.reasoning_override.as_deref(), Some("low"));
     }
 
     #[test]
@@ -1435,6 +1985,208 @@ mod tests {
         let (model, reasoning) = resolve_openai_request_model(SIDECAR_OPENAI_MODEL, false);
         assert_eq!(model, SIDECAR_OPENAI_MODEL);
         assert_eq!(reasoning, Some(SIDECAR_OPENAI_REASONING));
+    }
+
+    // ---- ChatGPT Luna-unavailable retry (greptile P2: memory retries ignored effort)
+
+    /// Loopback Responses-API fixture: denies `gpt-5.6-luna` with the
+    /// model-unavailable body the production classifier recognizes, then
+    /// accepts the fallback model. Records every request body so tests can
+    /// assert what BOTH the first request and its replacement actually sent.
+    /// Success replies are SSE (ChatGPT OAuth mode requires streaming).
+    struct LunaUnavailableFixture {
+        requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl LunaUnavailableFixture {
+        /// Bind a loopback port, return the fixture plus its base URL (known
+        /// before the handler thread takes ownership of the listener).
+        fn spawn() -> (Self, String) {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            listener.set_nonblocking(true).unwrap();
+            let requests: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorder = std::sync::Arc::clone(&requests);
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let mut served = 0;
+                while served < 2 && std::time::Instant::now() < deadline {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(value) => value,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let (header_end, length) = loop {
+                        let mut chunk = [0; 4096];
+                        let n = stream.read(&mut chunk).unwrap();
+                        assert!(n > 0);
+                        bytes.extend_from_slice(&chunk[..n]);
+                        if let Some(offset) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&bytes[..offset]);
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    let (key, value) = line.split_once(':')?;
+                                    key.eq_ignore_ascii_case("content-length")
+                                        .then(|| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap_or(0);
+                            break (offset + 4, length);
+                        }
+                    };
+                    while bytes.len() < header_end + length {
+                        let mut chunk = [0; 4096];
+                        let n = stream.read(&mut chunk).unwrap();
+                        assert!(n > 0);
+                        bytes.extend_from_slice(&chunk[..n]);
+                    }
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                    recorder.lock().unwrap().push(body.clone());
+                    let response = if body["model"] == SIDECAR_OPENAI_MODEL {
+                        // Same denial the production classifier recognizes
+                        // ("model ... not available" + 404).
+                        served += 1;
+                        (
+                            "HTTP/1.1 404 Not Found",
+                            serde_json::json!({
+                                "error": {
+                                    "message": format!(
+                                        "Model '{}' is not available for your account",
+                                        SIDECAR_OPENAI_MODEL
+                                    )
+                                }
+                            })
+                            .to_string(),
+                        )
+                    } else {
+                        served += 1;
+                        let sse = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n\
+                             data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}}}\n\n\
+                             data: [DONE]\n\n"
+                            .to_string();
+                        ("HTTP/1.1 200 OK", sse)
+                    };
+                    let (status, payload) = response;
+                    write!(
+                        stream,
+                        "{status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    )
+                    .unwrap();
+                    stream.write_all(payload.as_bytes()).unwrap();
+                }
+            });
+            (Self { requests }, base_url)
+        }
+
+        fn recorded_requests(&self) -> Vec<serde_json::Value> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    /// Drive the sidecar through the real ChatGPT OAuth retry path against a
+    /// loopback fixture: the first request targets Luna, gets the
+    /// model-unavailable 404, and the replacement runs against the fallback
+    /// model. Asserts BOTH HTTP requests carry the expected reasoning effort:
+    /// the configured `agents.memory_effort` must survive the retry (greptile:
+    /// the retry used to hardcode `low`, re-enabling thinking under `none`).
+    fn assert_retry_preserves_effort(
+        configured_effort: Option<&str>,
+        expected_first: &str,
+        expected_retry: &str,
+    ) {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let (fixture, base_url) = LunaUnavailableFixture::spawn();
+        let _base = EnvVarGuard::set_path(
+            "JCODE_SIDECAR_TEST_API_BASE",
+            std::path::Path::new(&base_url),
+        );
+
+        // ChatGPT OAuth credentials: a non-empty refresh token selects
+        // chatgpt mode (streaming SSE), matching greptile's repro scenario.
+        codex::upsert_account_from_tokens(
+            "openai-chatgpt-1",
+            "sidecar-test-access",
+            "sidecar-test-refresh",
+            None,
+            None,
+        )
+        .expect("write ChatGPT test auth");
+        codex::set_active_account_override(Some("openai-chatgpt-1".to_string()));
+        crate::provider::clear_all_model_unavailability_for_account();
+        // Luna available: the first request targets Luna so the retry runs.
+        crate::provider::populate_account_models(vec![SIDECAR_OPENAI_MODEL.to_string()]);
+
+        let sidecar = Sidecar::with_configured_model(None, configured_effort.map(str::to_string));
+        assert_eq!(sidecar.backend_name(), "openai");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let out = rt
+            .block_on(sidecar.complete("be brief", "say ok"))
+            .expect("sidecar completion should succeed via retry");
+        assert_eq!(out, "ok");
+
+        let requests = fixture.recorded_requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "expected the Luna request plus its replacement, got: {requests:?}"
+        );
+        let first = &requests[0];
+        let retry = &requests[1];
+        assert_eq!(first["model"], SIDECAR_OPENAI_MODEL);
+        assert_eq!(retry["model"], SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL);
+        for (label, request, expected) in [
+            ("first", first, expected_first),
+            ("retry", retry, expected_retry),
+        ] {
+            assert_eq!(
+                request["reasoning"]["effort"],
+                serde_json::json!(expected),
+                "{label} request must carry effort {expected:?}, got: {request}"
+            );
+        }
+
+        codex::set_active_account_override(None);
+        crate::provider::clear_all_model_unavailability_for_account();
+    }
+
+    #[test]
+    fn luna_unavailable_retry_preserves_configured_effort() {
+        // `agents.memory_effort = "low"`: the retry keeps low (which happens
+        // to match the fallback default, but must come from the config).
+        assert_retry_preserves_effort(Some("low"), "low", "low");
+        // `agents.memory_effort = "medium"`: without the fix the retry sent
+        // "low" instead of the configured medium.
+        assert_retry_preserves_effort(Some("medium"), "medium", "medium");
+        // `agents.memory_effort = "none"`: without the fix the retry sent
+        // "low", silently re-enabling reasoning the user disabled.
+        assert_retry_preserves_effort(Some("none"), "none", "none");
+    }
+
+    #[test]
+    fn luna_unavailable_retry_without_override_keeps_fallback_default() {
+        // No `agents.memory_effort`: the per-model defaults apply. Luna's
+        // `none` on the first request, the fallback's `low` on the retry.
+        assert_retry_preserves_effort(None, "none", "low");
     }
 
     // ---- Provider-backed sidecar (works on ALL providers) -------------------
@@ -1545,6 +2297,102 @@ mod tests {
         );
     }
 
+    /// A stub whose set_reasoning_effort records the request, so tests can
+    /// verify the sidecar pins `agents.memory_effort` on the fork. The fork
+    /// shares the recorder so the test observes what the sidecar's fork got.
+    #[derive(Default)]
+    struct EffortRecordingStub {
+        set_effort: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+        rejected: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for EffortRecordingStub {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            let stream = futures::stream::once(async {
+                Ok(jcode_message_types::StreamEvent::TextDelta(
+                    "ok".to_string(),
+                ))
+            });
+            Ok(Box::pin(stream))
+        }
+
+        fn name(&self) -> &str {
+            "effort-stub"
+        }
+
+        fn model(&self) -> String {
+            "effort-stub-model".to_string()
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(EffortRecordingStub {
+                set_effort: std::sync::Arc::clone(&self.set_effort),
+                rejected: std::sync::atomic::AtomicBool::new(
+                    self.rejected.load(std::sync::atomic::Ordering::Relaxed),
+                ),
+            })
+        }
+
+        fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
+            if self.rejected.load(std::sync::atomic::Ordering::Relaxed) {
+                anyhow::bail!("stub rejects efforts");
+            }
+            *self.set_effort.lock().unwrap() = Some(effort.to_string());
+            Ok(())
+        }
+    }
+
+    impl EffortRecordingStub {
+        fn recorded_effort(&self) -> Option<String> {
+            self.set_effort.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn sidecar_pins_memory_effort_on_provider_fork() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let stub = std::sync::Arc::new(EffortRecordingStub::default());
+        crate::provider::set_active_provider(stub.clone());
+
+        let sidecar = Sidecar::with_configured_model(None, Some("low".to_string()));
+        assert_eq!(sidecar.backend_name(), "provider");
+        assert_eq!(
+            stub.recorded_effort(),
+            Some("low".to_string()),
+            "the fork must receive the configured memory effort"
+        );
+    }
+
+    #[test]
+    fn sidecar_ignores_rejected_memory_effort_on_provider_fork() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        let _openai = EnvVarGuard::unset("OPENAI_API_KEY");
+
+        let stub = std::sync::Arc::new(EffortRecordingStub {
+            set_effort: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            rejected: std::sync::atomic::AtomicBool::new(true),
+        });
+        crate::provider::set_active_provider(stub.clone());
+
+        // Must construct without panicking; the rejection is a logged warning.
+        let sidecar = Sidecar::with_configured_model(None, Some("low".to_string()));
+        assert_eq!(sidecar.backend_name(), "provider");
+        assert_eq!(stub.recorded_effort(), None);
+    }
+
     /// With NO OpenAI/Claude credentials, the sidecar must select the live
     /// agent provider (the universal path) instead of failing. This is the core
     /// guarantee that memory features work on every provider, not just two.
@@ -1561,7 +2409,7 @@ mod tests {
             reply: "[2,1]".to_string(),
         }));
 
-        let sidecar = Sidecar::with_configured_model(None);
+        let sidecar = Sidecar::with_configured_model(None, None);
         assert_eq!(
             sidecar.backend_name(),
             "provider",
@@ -1589,7 +2437,7 @@ mod tests {
             name: "configured-profile",
             reply: "configured-profile-response".to_string(),
         }));
-        let sidecar = Sidecar::with_configured_model(None);
+        let sidecar = Sidecar::with_configured_model(None, None);
 
         // Model switches and catalog refreshes can replace the process-global
         // provider while a background memory request is queued. Dispatch must
@@ -1640,7 +2488,7 @@ mod tests {
                 name: provider,
                 reply: "[1]".to_string(),
             }));
-            let sidecar = Sidecar::with_configured_model(None);
+            let sidecar = Sidecar::with_configured_model(None, None);
             assert_eq!(
                 sidecar.backend_name(),
                 "provider",

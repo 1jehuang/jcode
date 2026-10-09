@@ -377,6 +377,39 @@ fn swarm_effort_parses_from_toml_and_env_override() {
 }
 
 #[test]
+fn memory_effort_parses_from_toml_and_env_override() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MEMORY_EFFORT");
+    restore_env_var("JCODE_MEMORY_EFFORT", None);
+
+    // Public config-file interface, mirroring swarm_effort.
+    let cfg: Config =
+        toml::from_str("[agents]\nmemory_model = \"gpt-5.6-luna\"\nmemory_effort = \"none\"\n")
+            .expect("config with memory_effort parses");
+    assert_eq!(cfg.agents.memory_effort.as_deref(), Some("none"));
+    assert_eq!(Config::default().agents.memory_effort, None);
+
+    // Older config files without the key still parse (backward compat).
+    let cfg: Config = toml::from_str("[agents]\nmemory_model = \"gpt-5.6-luna\"\n")
+        .expect("config without memory_effort parses");
+    assert_eq!(cfg.agents.memory_effort, None);
+
+    crate::env::set_var("JCODE_MEMORY_EFFORT", "low");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_effort.as_deref(), Some("low"));
+
+    // A blank env value clears a preset (unset semantics, like swarm_effort).
+    crate::env::set_var("JCODE_MEMORY_EFFORT", " ");
+    let mut cfg = Config::default();
+    cfg.agents.memory_effort = Some("preset".to_string());
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.memory_effort, None);
+
+    restore_env_var("JCODE_MEMORY_EFFORT", prev);
+}
+
+#[test]
 fn wake_mode_defaults_parses_and_env_overrides() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_WAKE_MODE");
@@ -564,17 +597,21 @@ fn test_memory_sidecar_enabled_defaults_true() {
 fn test_env_override_memory_sidecar() {
     let _guard = crate::storage::lock_test_env();
     let prev_model = std::env::var_os("JCODE_MEMORY_MODEL");
+    let prev_effort = std::env::var_os("JCODE_MEMORY_EFFORT");
     let prev_enabled = std::env::var_os("JCODE_MEMORY_SIDECAR_ENABLED");
     crate::env::set_var("JCODE_MEMORY_MODEL", "claude-haiku-4");
+    crate::env::set_var("JCODE_MEMORY_EFFORT", "low");
     crate::env::set_var("JCODE_MEMORY_SIDECAR_ENABLED", "true");
 
     let mut cfg = Config::default();
     cfg.apply_env_overrides();
 
     assert_eq!(cfg.agents.memory_model.as_deref(), Some("claude-haiku-4"));
+    assert_eq!(cfg.agents.memory_effort.as_deref(), Some("low"));
     assert!(cfg.agents.memory_sidecar_enabled);
 
     restore_env_var("JCODE_MEMORY_MODEL", prev_model);
+    restore_env_var("JCODE_MEMORY_EFFORT", prev_effort);
     restore_env_var("JCODE_MEMORY_SIDECAR_ENABLED", prev_enabled);
 }
 

@@ -129,6 +129,59 @@ pub(crate) fn calculate_placements_anchored(
     enabled: bool,
     prev_anchors: &[WidgetAnchor],
 ) -> PlacementOutcome {
+    let outcome =
+        calculate_placements_anchored_inner(messages_area, margins, data, enabled, prev_anchors);
+    // Overview reclaim: if the Overview is available but could not place
+    // while an anchored *mergeable* widget holds a slot, that widget was
+    // anchored before the Overview had data and its content now folds into
+    // the Overview. Re-run once without those anchors so the higher-priority
+    // Overview can take the pocket. The retry is only adopted when the
+    // Overview actually places, so a frame that cannot host the Overview
+    // anyway keeps the original outcome (and its anchors) unchanged.
+    if data.available_widgets().contains(&WidgetKind::Overview)
+        && !outcome
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::Overview)
+    {
+        let mergeable_only: Vec<WidgetAnchor> = prev_anchors
+            .iter()
+            .filter(|a| {
+                a.placement.kind != WidgetKind::Overview && is_overview_mergeable(a.placement.kind)
+            })
+            .cloned()
+            .collect();
+        if !mergeable_only.is_empty() {
+            let non_mergeable: Vec<WidgetAnchor> = prev_anchors
+                .iter()
+                .filter(|a| {
+                    a.placement.kind == WidgetKind::Overview
+                        || !is_overview_mergeable(a.placement.kind)
+                })
+                .cloned()
+                .collect();
+            let retry = calculate_placements_anchored_inner(
+                messages_area,
+                margins,
+                data,
+                enabled,
+                &non_mergeable,
+            );
+            if retry.visible.iter().any(|p| p.kind == WidgetKind::Overview) {
+                return retry;
+            }
+        }
+    }
+    outcome
+}
+
+fn calculate_placements_anchored_inner(
+    messages_area: Rect,
+    margins: &Margins,
+    data: &InfoWidgetData,
+    enabled: bool,
+    prev_anchors: &[WidgetAnchor],
+) -> PlacementOutcome {
     if !enabled || messages_area.height == 0 || messages_area.width == 0 {
         return PlacementOutcome {
             visible: Vec::new(),
@@ -288,6 +341,23 @@ pub(crate) fn calculate_placements_anchored(
             .min(MAX_WIDGET_WIDTH)
             .min(messages_area.width);
         let renderable = fit_width >= MIN_WIDGET_WIDTH;
+
+        // Height recheck: an anchored Overview must be able to actually show
+        // its *current* content. The Overview folds sections in, so its
+        // required height grows when new data (commits, swarm members, ...)
+        // arrives after the anchor was recorded. Keeping the stale rectangle
+        // would draw nothing (`render_overview_framed` bails when no page
+        // fits the inner height), suppress its mergeable widgets, and hide
+        // the inline swarm strip - the content would surface nowhere.
+        // `calculate_widget_height` clamps to the anchor's own height, so an
+        // oversized need surfaces as 0 ("no page fits"); drop the anchor then
+        // and let Phase 2 either re-home the Overview at the required height
+        // or give the standalone widgets and the strip the content back.
+        if prev.kind == WidgetKind::Overview
+            && calculate_widget_height(WidgetKind::Overview, data, fit_width, prev.rect.height) == 0
+        {
+            continue;
+        }
 
         // Width is monotonic non-increasing for the life of an anchor: it shrinks to
         // clear newly-wide content but never grows back while pinned. Growing would
