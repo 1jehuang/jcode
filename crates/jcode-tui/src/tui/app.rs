@@ -765,12 +765,18 @@ struct TokenAccounting {
     total_cache_read_tokens: u64,
     total_cache_creation_tokens: u64,
     total_cache_optimal_input_tokens: u64,
+    /// Cache reads only from requests that also contributed an optimal denominator.
+    total_cache_optimal_read_tokens: u64,
     last_cache_reported_input_tokens: Option<u64>,
     last_cache_prompt_tokens: Option<u64>,
     last_cache_read_tokens: Option<u64>,
     last_cache_creation_tokens: Option<u64>,
     last_cache_optimal_input_tokens: Option<u64>,
     cache_next_optimal_input_tokens: Option<u64>,
+    /// Whether the most recently recorded request contributed an optimal
+    /// denominator, so later usage snapshots for that same request keep
+    /// `total_cache_optimal_read_tokens` in step with the read total.
+    current_request_has_optimal: bool,
 }
 
 /// KV cache baseline tracking and per-turn cache-miss attribution.
@@ -2086,6 +2092,7 @@ impl App {
         }
 
         let optimal_input_tokens = self.token_accounting.cache_next_optimal_input_tokens;
+        self.token_accounting.current_request_has_optimal = false;
         // Stash the *effective* prompt size for this request so the next request's
         // cache-read can be compared against everything that just became cacheable.
         // For split-accounting providers (Anthropic) bare `input` is only the
@@ -2138,6 +2145,11 @@ impl App {
                 .token_accounting
                 .total_cache_optimal_input_tokens
                 .saturating_add(optimal);
+            self.token_accounting.total_cache_optimal_read_tokens = self
+                .token_accounting
+                .total_cache_optimal_read_tokens
+                .saturating_add(self.streaming.streaming_cache_read_tokens.unwrap_or(0));
+            self.token_accounting.current_request_has_optimal = true;
         }
         self.token_accounting.total_cache_read_tokens = self
             .token_accounting
@@ -2192,7 +2204,7 @@ impl App {
         let session_optimal_read_pct = if self.token_accounting.total_cache_optimal_input_tokens > 0
         {
             Some(ratio_pct(
-                self.token_accounting.total_cache_read_tokens,
+                self.token_accounting.total_cache_optimal_read_tokens,
                 self.token_accounting.total_cache_optimal_input_tokens,
             ))
         } else {

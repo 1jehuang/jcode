@@ -422,6 +422,9 @@ pub struct CacheHitInfo {
     pub creation_tokens: u64,
     /// Approximate reusable prefix tokens expected to be cache-readable.
     pub optimal_input_tokens: u64,
+    /// Cache reads in the same scope as `optimal_input_tokens` (live requests
+    /// only when resumed history is present). `None` means `read_tokens`.
+    pub optimal_read_tokens: Option<u64>,
     /// Input tokens from the latest completed request with cache telemetry.
     pub last_reported_input_tokens: Option<u64>,
     /// Cached input tokens read on the latest completed request with cache telemetry.
@@ -478,7 +481,8 @@ impl CacheHitInfo {
         if self.optimal_input_tokens == 0 {
             None
         } else {
-            Some((self.read_tokens as f32 / self.optimal_input_tokens as f32).clamp(0.0, 1.0))
+            let read = self.optimal_read_tokens.unwrap_or(self.read_tokens);
+            Some((read as f32 / self.optimal_input_tokens as f32).clamp(0.0, 1.0))
         }
     }
 
@@ -1722,7 +1726,7 @@ fn render_kv_cache_rates_line(cache: &CacheHitInfo) -> Line<'static> {
     Line::from(spans)
 }
 
-fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
+pub(crate) fn render_kv_cache_summary_line(cache: &CacheHitInfo) -> Line<'static> {
     let Some(lifetime_ratio) = cache.hit_ratio() else {
         return Line::default();
     };

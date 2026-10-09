@@ -143,15 +143,16 @@ fn cache_accounting_mixed_history_and_live_sum_resolved_prompts() {
         app.info_widget_data().cache_hit_info.unwrap().prompt_tokens,
         Some(20_000)
     );
+    // Yield is live-scope only: 6k live reads / 10k live optimal.
+    let optimal = app
+        .info_widget_data()
+        .cache_hit_info
+        .unwrap()
+        .optimal_ratio()
+        .unwrap();
+    assert!((optimal - 0.6).abs() < 0.0001, "{optimal}");
     assert!(
-        app.info_widget_data()
-            .cache_hit_info
-            .unwrap()
-            .optimal_ratio()
-            .is_none()
-    );
-    assert!(
-        stats.contains("cache_read_pct_of_optimal_input: None"),
+        stats.contains("cache_read_pct_of_optimal_input: 60%"),
         "{stats}"
     );
 }
@@ -276,4 +277,192 @@ fn cache_report_exposes_actual_expiry_notification_policy() {
         stats.contains("cache_expiry_notification_active: true"),
         "{stats}"
     );
+}
+
+fn record_live_cache_request(app: &mut App, input: u64, read: u64) {
+    app.kv_cache.current_api_usage_recorded = false;
+    app.streaming.streaming_input_tokens = input;
+    app.streaming.streaming_cache_read_tokens = Some(read);
+    app.streaming.streaming_cache_creation_tokens = Some(0);
+    assert!(app.record_completed_stream_cache_usage());
+}
+
+fn kv_cache_summary(app: &App) -> String {
+    let info = app.info_widget_data().cache_hit_info.unwrap();
+    crate::tui::info_widget::render_kv_cache_summary_line(&info)
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[test]
+fn cache_yield_after_resume_uses_live_scope_not_priming() {
+    let mut app = cache_accounting_openai_app();
+    // Session resumed/reloaded with prior cache reads in history.
+    app.remote_token_usage_totals = Some(crate::protocol::TokenUsageTotals {
+        cache_prompt_tokens: Some(10_000),
+        input_tokens: 10_000,
+        cache_reported_input_tokens: 10_000,
+        cache_read_input_tokens: 7_000,
+        cache_creation_input_tokens: 0,
+        ..Default::default()
+    });
+    record_live_cache_request(&mut app, 10_000, 0);
+    assert!(kv_cache_summary(&app).contains("priming"));
+    record_live_cache_request(&mut app, 10_000, 9_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 90%"), "{summary}");
+    assert!(!summary.contains("priming"), "{summary}");
+    let info = app.info_widget_data().cache_hit_info.unwrap();
+    // Yield is live-scope only: 9k live reads / 10k live optimal.
+    assert!((info.optimal_ratio().unwrap() - 0.9).abs() < 0.0001);
+    // Session hit ratio still includes history: (7k + 9k) / 30k.
+    assert!((info.hit_ratio().unwrap() - 16.0 / 30.0).abs() < 0.0001);
+}
+
+#[test]
+fn cache_yield_new_session_single_request_is_priming() {
+    let mut app = cache_accounting_openai_app();
+    record_live_cache_request(&mut app, 10_000, 0);
+    assert!(kv_cache_summary(&app).contains("priming"));
+    record_live_cache_request(&mut app, 10_000, 8_000);
+    assert!(kv_cache_summary(&app).contains("yield 80%"));
+}
+
+#[test]
+fn cache_yield_after_resume_ignores_first_warm_read_without_optimal() {
+    let mut app = cache_accounting_openai_app();
+    app.remote_token_usage_totals = Some(crate::protocol::TokenUsageTotals {
+        cache_prompt_tokens: Some(10_000),
+        input_tokens: 10_000,
+        cache_reported_input_tokens: 10_000,
+        cache_read_input_tokens: 7_000,
+        ..Default::default()
+    });
+    record_live_cache_request(&mut app, 10_000, 9_000);
+    record_live_cache_request(&mut app, 10_000, 5_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 50%"), "{summary}");
+    let stats = cache_accounting_stats(&mut app);
+    assert!(
+        stats.contains("cache_read_pct_of_optimal_input: 50%"),
+        "{stats}"
+    );
+}
+
+#[test]
+fn cache_yield_fresh_session_ignores_warm_prefix_first_read() {
+    let mut app = cache_accounting_openai_app();
+    record_live_cache_request(&mut app, 10_000, 4_000);
+    record_live_cache_request(&mut app, 10_000, 8_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 80%"), "{summary}");
+}
+
+fn cache_usage_event(
+    app: &mut App,
+    remote: &mut crate::tui::backend::RemoteConnection,
+    input: u64,
+    read: u64,
+) {
+    app.handle_server_event(
+        crate::protocol::ServerEvent::TokenUsage {
+            input,
+            output: 100,
+            cache_read_input: Some(read),
+            cache_creation_input: Some(0),
+        },
+        remote,
+    );
+}
+
+#[test]
+fn cache_yield_follows_later_usage_snapshots_for_same_request() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut app = cache_accounting_openai_app();
+    // First request primes a 10k baseline.
+    cache_usage_event(&mut app, &mut remote, 10_000, 0);
+    // Second request reports 4k reads, then 6k for the same request.
+    app.kv_cache.current_api_usage_recorded = false;
+    app.streaming.streaming_cache_read_tokens = None;
+    app.streaming.streaming_cache_creation_tokens = None;
+    cache_usage_event(&mut app, &mut remote, 10_000, 4_000);
+    cache_usage_event(&mut app, &mut remote, 10_000, 6_000);
+    assert_eq!(app.token_accounting.total_cache_optimal_read_tokens, 6_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 60%"), "{summary}");
+    let stats = cache_accounting_stats(&mut app);
+    assert!(
+        stats.contains("cache_read_pct_of_optimal_input: 60%"),
+        "{stats}"
+    );
+}
+
+#[test]
+fn history_refresh_same_session_clears_optimal_baseline() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let mut app = cache_accounting_openai_app();
+    let history = || crate::protocol::ServerEvent::History {
+        id: 1,
+        session_id: "session_same".to_string(),
+        messages: vec![],
+        images: vec![],
+        provider_name: Some("OpenAI".to_string()),
+        provider_model: Some("gpt-5.6".to_string()),
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: Some(crate::protocol::TokenUsageTotals {
+            // Real servers always send a prompt total (Session::token_usage_totals
+            // starts at Some(0)); without it the KV line is not rendered at all.
+            cache_prompt_tokens: Some(10_000),
+            input_tokens: 10_000,
+            cache_reported_input_tokens: 10_000,
+            ..Default::default()
+        }),
+        all_sessions: vec![],
+        client_count: None,
+        is_canary: None,
+        reload_recovery: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: None,
+        was_interrupted: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+        service_tier: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+        applets: Default::default(),
+    };
+    app.handle_server_event(history(), &mut remote);
+    record_live_cache_request(&mut app, 10_000, 0);
+    assert!(app.token_accounting.cache_next_optimal_input_tokens.is_some());
+    // Reconnect: History for the same session refreshes usage.
+    app.handle_server_event(history(), &mut remote);
+    assert_eq!(app.token_accounting.cache_next_optimal_input_tokens, None);
+    // First request after refresh has no baseline: no yield yet.
+    record_live_cache_request(&mut app, 10_000, 8_000);
+    assert_eq!(app.token_accounting.total_cache_optimal_input_tokens, 0);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("priming"), "{summary}");
+    // Second request starts a clean measurement.
+    record_live_cache_request(&mut app, 10_000, 5_000);
+    let summary = kv_cache_summary(&app);
+    assert!(summary.contains("yield 50%"), "{summary}");
 }
