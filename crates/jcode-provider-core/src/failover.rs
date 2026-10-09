@@ -66,6 +66,36 @@ fn contains_independent_status_code(haystack: &str, code: &str) -> bool {
     })
 }
 
+/// Local pre-send card-number check, the harness-side twin of the gateway
+/// content filter that [`content_filter_block_label`] reads.
+#[path = "pan_check.rs"]
+pub mod pan_check;
+
+/// The entity label of a gateway content-filter block, e.g. `[CREDIT_CARD]`.
+///
+/// OpenRouter guardrails answer `403 Request blocked by content filter: [LABEL]`.
+/// The block is decided by the request content, and every turn resends the whole
+/// history, so resending it can never succeed until the matching text leaves the
+/// context or the guardrail changes. Measured 2026-09-25: a session looped on
+/// this for minutes, one empty continuation per auto-retry.
+pub fn content_filter_block_label(message: &str) -> Option<String> {
+    const MARKER: &str = "blocked by content filter";
+    let lower = message.to_ascii_lowercase();
+    let idx = lower.find(MARKER)?;
+    let rest = &message[idx + MARKER.len()..];
+    let label = rest
+        .trim_start_matches([':', ' '])
+        .split(['"', ',', '\n'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    Some(if label.is_empty() {
+        "[unlabelled]".to_string()
+    } else {
+        label.to_string()
+    })
+}
+
 pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
     let lower = message.to_ascii_lowercase();
 
@@ -169,6 +199,27 @@ mod tests {
         assert_eq!(
             classify_failover_error_message("context length exceeded"),
             FailoverDecision::RetryNextProvider
+        );
+    }
+
+    #[test]
+    fn content_filter_block_label_reads_the_openrouter_entity() {
+        // The live 2026-09-25 shape, as the OpenAI-compatible runtime formats it.
+        let blocked = "OpenAI-compatible chat request failed\n  status: 403 Forbidden\n  response: {\"error\":{\"message\":\"Request blocked by content filter: [CREDIT_CARD]\",\"code\":403}}";
+        assert_eq!(
+            content_filter_block_label(blocked).as_deref(),
+            Some("[CREDIT_CARD]")
+        );
+        assert_eq!(
+            content_filter_block_label("403: Request blocked by content filter").as_deref(),
+            Some("[unlabelled]")
+        );
+        // A plain 403 is an access problem, not a content block.
+        assert_eq!(
+            content_filter_block_label(
+                "status: 403 Forbidden\n  response: {\"error\":\"forbidden\"}"
+            ),
+            None
         );
     }
 
