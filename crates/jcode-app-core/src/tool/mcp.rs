@@ -357,6 +357,16 @@ impl Tool for McpCallTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let input_flags = input.clone();
         let mut params: McpCallInput = serde_json::from_value(input)?;
+        // Models sometimes spell the tool with its dispatch-time alias
+        // ("mcp__<server>__<tool>") instead of the bare tool name. Strip a
+        // matching self-prefix instead of letting the remote server answer
+        // -32602 "Tool mcp__... not found" and costing a retry round-trip.
+        let self_prefixed = format!("mcp__{}__", params.server);
+        if let Some(stripped) = params.tool.strip_prefix(&self_prefixed) {
+            if !stripped.is_empty() {
+                params.tool = stripped.to_string();
+            }
+        }
         let dispatched_name = dispatch_name(&params.server, &params.tool);
         // Check the current alias too: a per-alias deny must not be bypassed
         // by spelling the original server/tool pair through mcp_call.
@@ -928,6 +938,52 @@ impl McpManagementTool {
         let servers = manager.connected_servers().await;
         let all_tools = manager.all_tools().await;
         drop(manager);
+
+        // Sync the on-disk schema cache from the live re-fetch so future
+        // spawns advertise current descriptions/schemas. Without this,
+        // description-only server updates never reach new sessions:
+        // fingerprint_config covers connection config only (command/args/
+        // env/url/headers), so the spawn path's tools_for() happily serves
+        // stale tool text forever. Mirrors the #206 Phase 2 block in
+        // register_mcp_tools_for_dir.
+        {
+            let mut grouped: std::collections::BTreeMap<
+                String,
+                Vec<crate::mcp::McpToolDef>,
+            > = std::collections::BTreeMap::new();
+            for (server, def) in &all_tools {
+                grouped.entry(server.clone()).or_default().push(def.clone());
+            }
+            let config_snapshot: Vec<(String, crate::mcp::McpServerConfig)> = {
+                let manager = self.manager.read().await;
+                manager
+                    .config()
+                    .servers
+                    .iter()
+                    .map(|(name, cfg)| (name.clone(), cfg.clone()))
+                    .collect()
+            };
+            let mut cache = crate::mcp::McpSchemaCache::load();
+            let mut dirty = false;
+            for (server, cfg) in &config_snapshot {
+                if let Some(defs) = grouped.get(server) {
+                    if cache.update(server, cfg, defs.clone()) {
+                        dirty = true;
+                    }
+                }
+            }
+            let configured_names: Vec<String> =
+                config_snapshot.iter().map(|(n, _)| n.clone()).collect();
+            if cache.retain_servers(&configured_names) {
+                dirty = true;
+            }
+            if dirty {
+                cache.save();
+                crate::logging::info(
+                    "MCP: updated on-disk tool-schema cache during reload",
+                );
+            }
+        }
 
         // Re-register tools from fresh connections
         if let Some(registry) = self

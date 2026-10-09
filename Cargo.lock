@@ -3160,6 +3160,8 @@ dependencies = [
  "jcode-build-meta",
  "jcode-harness-api",
  "jcode-harness-api-server",
+ "jcode-memory-types",
+ "jcode-message-types",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
  "jcode-provider-copilot-runtime",

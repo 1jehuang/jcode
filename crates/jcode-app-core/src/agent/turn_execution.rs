@@ -19,8 +19,49 @@ impl Agent {
         )
     }
 
+    /// Fire the turn_start hook synchronously and fold its stdout into
+    /// `current_turn_system_reminder` for this turn. Used by the non-streaming
+    /// turn entries so `jcode run`, ambient cycles, debug exec and swarm
+    /// workers see hook-emitted context (e.g. alert banners) exactly like the
+    /// streaming entry point. Hook failure never blocks the turn.
+    ///
+    /// Skipped in test builds: unit tests drive turn entries directly and
+    /// must not execute the developer's real configured hooks, whose output
+    /// would leak into prompt/reminder assertions (proven: the fable
+    /// guardrail and retention scorecard tests failed on machines with a
+    /// real turn_start hook installed).
+    fn fire_turn_start_hook_into_reminder(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        if let Some(text) = crate::hooks::run_turn_start_collecting(
+            Some(self.session.id.as_str()),
+            self.working_dir(),
+            "run_once",
+        ) {
+            let banner = format!("[HOOK TURN_START]\n{}", text);
+            self.current_turn_system_reminder = Some(match self.current_turn_system_reminder.take() {
+                Some(existing) if !existing.trim().is_empty() => {
+                    format!("{}\n\n{}", existing, banner)
+                }
+                _ => banner,
+            });
+        }
+    }
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
+        self.run_once_with_optional_hook_banner(user_message, true).await
+    }
+
+    /// Shared implementation for the non-streaming turn entries. When
+    /// `with_hook_banner` is set, the turn_start hook runs synchronously and
+    /// its stdout is folded into the turn's system reminder (same behavior as
+    /// the streaming entry point).
+    async fn run_once_with_optional_hook_banner(
+        &mut self,
+        user_message: &str,
+        print_output: bool,
+    ) -> Result<()> {
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         let input_id = self.add_message(
@@ -37,7 +78,12 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        let _ = self.run_turn(true).await?;
+        // Fire the turn_start hook and fold its stdout into this turn's system
+        // reminder (same as the streaming entry point), so non-streaming
+        // consumers (`jcode run`, ambient cycles, debug exec) also see
+        // hook-emitted context such as alert banners.
+        self.fire_turn_start_hook_into_reminder();
+        self.run_turn(print_output).await?;
         Ok(())
     }
 
@@ -68,6 +114,10 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
+        // Fold turn_start hook stdout into this turn's system reminder so
+        // non-streaming consumers (`jcode run --json`, ambient cycles, swarm
+        // workers) also see hook-emitted context such as alert banners.
+        self.fire_turn_start_hook_into_reminder();
         self.run_turn(false).await
     }
 
@@ -114,8 +164,31 @@ impl Agent {
             );
         }
 
-        self.current_turn_system_reminder =
-            system_reminder.filter(|value| !value.trim().is_empty());
+        // Base reminder from the caller, if any.
+        let mut reminder = system_reminder.filter(|value| !value.trim().is_empty());
+
+        // Fire the turn_start hook first (synchronous so its stdout can be
+        // collected), then fold any hook stdout into this turn's system
+        // reminder so hook-emitted context (e.g. alert markers) is visible to
+        // the model. Hook failure never blocks the turn. Skipped in test
+        // builds (see fire_turn_start_hook_into_reminder).
+        let hook_output = if cfg!(test) {
+            None
+        } else {
+            crate::hooks::run_turn_start_collecting(
+                Some(self.session.id.as_str()),
+                self.working_dir(),
+                "chat",
+            )
+        };
+        if let Some(text) = hook_output {
+            let banner = format!("[HOOK TURN_START]\n{}", text);
+            reminder = Some(match reminder {
+                Some(existing) => format!("{}\n\n{}", existing, banner),
+                None => banner,
+            });
+        }
+        self.current_turn_system_reminder = reminder;
 
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
@@ -123,7 +196,10 @@ impl Agent {
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
-        self.fire_turn_start_hook("chat");
+        // NOTE: no fire_turn_start_hook here. The collecting dispatch above is
+        // the single turn_start dispatch; the legacy stock fire-and-forget
+        // observer ran the hook a SECOND time per turn (side effects executed
+        // twice: double stamp advances, double ntfy pushes). Removed 2026-09-28.
         let result = self.run_turn_streaming_mpsc(event_tx).await;
         self.current_turn_system_reminder = None;
         self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
@@ -167,26 +243,6 @@ impl Agent {
             self.begin_model_usage_turn(&input_id);
         }
         self.session.save()
-    }
-
-    /// Fire the `turn_start` observer hook when a turn begins, before the model
-    /// starts generating (and before the first `pre_tool`). This lets external
-    /// integrations (terminal multiplexers, status bars) detect that the agent
-    /// is actively working during the otherwise-invisible window between prompt
-    /// submission and the first tool call. No-op (without building the payload)
-    /// when the hook is not configured.
-    fn fire_turn_start_hook(&self, source: &str) {
-        if !crate::hooks::hook_configured("turn_start") {
-            return;
-        }
-        let mut event = crate::hooks::HookEvent::new("turn_start")
-            .session_id(self.session.id.clone())
-            .field("MODEL", self.provider_model())
-            .field("SOURCE", source.to_string());
-        if let Some(cwd) = self.working_dir() {
-            event = event.cwd(cwd);
-        }
-        crate::hooks::dispatch_observer(event);
     }
 
     /// Fire the `turn_end` observer hook with turn outcome metadata.

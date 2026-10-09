@@ -186,7 +186,7 @@ pub struct ResourceContent {
 }
 
 /// MCP server configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct McpServerConfig {
     /// Command for stdio servers. Empty for HTTP/SSE servers, which jcode does
     /// not yet support (such entries are skipped at load time).

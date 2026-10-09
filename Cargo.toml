@@ -130,6 +130,7 @@ path = "src/bin/tui_bench.rs"
 required-features = ["dev-bins"]
 
 [dependencies]
+jcode-message-types = { path = "crates/jcode-message-types" }
 # Memory allocator (reduces fragmentation for long-running server)
 tikv-jemallocator = { version = "0.6", features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
 
@@ -179,6 +180,8 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 
 # PDF parsing (behind feature flag)
 jcode-build-meta = { path = "crates/jcode-build-meta" }
+# Memory category enum for `recall` (parses Custom(String) variants correctly).
+jcode-memory-types = { path = "crates/jcode-memory-types" }
 # Tiny leaf helpers (console/env/fs/id) used directly by the cli layer.
 # Presentation layer: the terminal UI (`tui`) + offline replay (`video_export`),
 # compiled as a separate rustc unit. It re-exports the application core

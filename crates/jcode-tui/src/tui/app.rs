@@ -1020,6 +1020,10 @@ pub struct App {
     /// Last session/todo/goal state challenged by the ownership gate. Repeating
     /// the same check cannot resolve an external blocker or stale assessment.
     last_todo_ownership_fingerprint: Option<String>,
+    /// Completed-todos confidence levels at the last completion-confidence
+    /// poke. Unchanged levels after a poke mean the agent re-verified and kept
+    /// its honest scores; nudging again would only re-buy the same answer.
+    last_todo_completion_confidence_fingerprint: Option<String>,
     /// Whether the clean completion handoff has already requested a user-facing
     /// final response for the current todo cycle.
     todo_final_response_requested: bool,

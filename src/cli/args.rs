@@ -335,6 +335,74 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Session(SessionCommand),
 
+    /// Summarize authored work over a time window (sessions + git commits)
+    Digest {
+        /// Time window, e.g. 2h, 1d, 3d, 1w (default: 1d)
+        #[arg(long, default_value = "1d")]
+        since: String,
+
+        /// Only include sessions whose working_dir is under this path
+        #[arg(long)]
+        working_dir: Option<String>,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+
+        /// Skip the git commit scan (sessions only)
+        #[arg(long)]
+        no_git: bool,
+    },
+
+    /// Extract the decision trail (intent-labeled tool calls) from sessions
+    Decisions {
+        /// Time window, e.g. 2h, 1d, 3d, 1w (default: 1d)
+        #[arg(long, default_value = "1d")]
+        since: String,
+
+        /// Only include sessions whose working_dir is under this path
+        #[arg(long)]
+        working_dir: Option<String>,
+
+        /// Output format: tsv (default), text, json
+        #[arg(long, default_value = "tsv")]
+        format: String,
+    },
+
+    /// Watch open PRs: surface failures, merge conflicts, and stale PRs.
+    Pr {
+        /// Repository in owner/repo form (default: 1jehuang/jcode)
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Flag a PR as stale after this many days of inactivity (default: 7)
+        #[arg(long, default_value = "7")]
+        stale_after_days: i64,
+
+        /// Post an ntfy.sh notification when attention is needed
+        #[arg(long)]
+        notify: bool,
+
+        /// Output format: default (human-readable), short, json
+        #[arg(long)]
+        format: Option<String>,
+    },
+
+    /// Reconstruct recent working context: sessions, todos, git, memories
+    Recall {
+        /// Working directory to recall for (default: current directory)
+        #[arg(long)]
+        working_dir: Option<String>,
+
+        /// How many days of sessions to include (default: 3)
+        #[arg(long, default_value = "3")]
+        since_days: i64,
+
+        /// Output format: text (default), json
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
     /// Ambient mode management
     #[command(subcommand)]
     Ambient(AmbientCommand),

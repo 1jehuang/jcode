@@ -442,6 +442,39 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 json,
             } => commands::run_session_rename_command(&session, name.as_deref(), clear, json)?,
         },
+        Some(Command::Digest {
+            since,
+            working_dir,
+            json,
+            no_git,
+        }) => {
+            commands::run_digest_command(&since, working_dir.as_deref(), json, no_git)?;
+        }
+        Some(Command::Decisions {
+            since,
+            working_dir,
+            format,
+        }) => {
+            commands::run_decisions_command(&since, working_dir.as_deref(), &format)?;
+        }
+        Some(Command::Pr {
+            repo,
+            stale_after_days,
+            notify,
+            format,
+        }) => {
+            let repo = repo.as_deref().unwrap_or("1jehuang/jcode");
+            let format = format.as_deref().unwrap_or("default");
+            let code = commands::run_pr_guardian(repo, stale_after_days, notify, format)?;
+            std::process::exit(code);
+        }
+        Some(Command::Recall {
+            working_dir,
+            since_days,
+            format,
+        }) => {
+            commands::run_recall_command(working_dir.as_deref(), since_days, &format)?;
+        }
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;
         }

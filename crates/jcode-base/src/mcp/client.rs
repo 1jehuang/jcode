@@ -42,6 +42,13 @@ pub fn request_timeout_for(config: &McpServerConfig) -> std::time::Duration {
 }
 
 impl McpHandle {
+    /// True once the child's stdout has closed: the reader task saw EOF and no
+    /// reply can ever arrive on this handle. The manager checks this before
+    /// using a cached handle so a dead child is pruned and reconnected.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
     /// Send a request and wait for response
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<JsonRpcResponse> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
@@ -316,6 +323,12 @@ impl McpClient {
     /// Get a shareable handle to this client
     pub fn handle(&self) -> McpHandle {
         self.handle.clone()
+    }
+
+    /// True once the child's stdout has closed: no reply can ever arrive.
+    /// Used by the manager to prune dead connections and reconnect.
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
     }
 
     /// Initialize the MCP connection

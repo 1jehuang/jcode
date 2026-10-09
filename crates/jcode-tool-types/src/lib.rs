@@ -73,7 +73,10 @@ pub fn resolve_tool_name(name: &str) -> &str {
     // Models occasionally preserve that transport namespace when constructing
     // a nested tool call, especially inside `batch`.
     let name = name.strip_prefix("functions.").unwrap_or(name);
+    resolve_tool_name_inner(name)
+}
 
+fn resolve_tool_name_inner(name: &str) -> &str {
     match name {
         "communicate" => "swarm",
         "task" | "task_runner" => "subagent",
@@ -150,5 +153,123 @@ mod tests {
         assert_eq!(resolve_tool_name("ScheduleWakeup"), "schedule");
         assert_eq!(resolve_tool_name("Skill"), "skill_manage");
         assert_eq!(resolve_tool_name("functions.Read"), "read");
+    }
+}
+
+/// Tolerant tool-name resolution for registry misses, shared by the agent
+/// registry. Returns at most one candidate, and only when it is unambiguous:
+///
+/// 1. Separator-insensitive, case-insensitive equality: `Agentgrep` ->
+///    `agentgrep`, `McpCall` -> `mcp_call`, `SkillManage` -> `skill_manage`.
+///    Backing models drift between naming conventions; the alphabet soup is
+///    the same tool.
+/// 2. Unique MCP suffix match: `get_architecture` ->
+///    `mcp__codebase_memory__get_architecture` when exactly one known tool
+///    ends with the normalized query. A bare tool name without the
+///    `mcp__server__` prefix is the second most common mangling.
+///
+/// Ambiguous or no matches return `None` so the caller's corrective error
+/// (with the available-tools list) still reaches the model.
+pub fn fuzzy_resolve_tool<'a, I: IntoIterator<Item = &'a str>>(
+    name: &str,
+    available: I,
+) -> Option<String> {
+    fn normalize(s: &str) -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    }
+    let needle = normalize(name);
+    if needle.is_empty() {
+        return None;
+    }
+    let available: Vec<&str> = available.into_iter().collect();
+
+    // 1. separator/case-insensitive exact match
+    let exact: Vec<&str> = available
+        .iter()
+        .copied()
+        .filter(|candidate| normalize(candidate) == needle)
+        .collect();
+    if exact.len() == 1 {
+        return Some(exact[0].to_string());
+    }
+    if exact.len() > 1 {
+        return None; // ambiguous, let the error guide the model
+    }
+
+    // 2. unique MCP suffix match (only for namespaced MCP tools, so we never
+    // collide with a same-named core tool)
+    let suffix: Vec<&str> = available
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            candidate.starts_with("mcp__") && normalize(candidate).ends_with(&needle)
+        })
+        .collect();
+    if suffix.len() == 1 {
+        return Some(suffix[0].to_string());
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod fuzzy_tests {
+    use super::fuzzy_resolve_tool;
+
+    // Live failure evidence (2026-09/10 session logs): backing models behind
+    // the omni mux emit CamelCase tool names. Each of these burned a failed
+    // round-trip in real sessions before the fallback existed.
+    #[test]
+    fn resolves_camelcase_and_separator_drift() {
+        let available = [
+            "agentgrep",
+            "mcp_call",
+            "mcp_search",
+            "skill_manage",
+            "session_search",
+            "jcode_docs",
+            "ls",
+            "bg",
+            "mcp__codebase_memory__get_architecture",
+            "mcp__serena__get_symbols_overview",
+        ];
+        for (mangled, canonical) in [
+            ("Agentgrep", "agentgrep"),
+            ("McpCall", "mcp_call"),
+            ("McpSearch", "mcp_search"),
+            ("SkillManage", "skill_manage"),
+            ("SessionSearch", "session_search"),
+            ("JcodeDocs", "jcode_docs"),
+            ("Ls", "ls"),
+            ("Bg", "bg"),
+            // bare MCP tool name without the mcp__server__ prefix
+            ("get_architecture", "mcp__codebase_memory__get_architecture"),
+            ("get_symbols_overview", "mcp__serena__get_symbols_overview"),
+        ] {
+            assert_eq!(
+                fuzzy_resolve_tool(mangled, available).as_deref(),
+                Some(canonical),
+                "mangled name {mangled} must resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_suffix_and_unknown_names_stay_unresolved() {
+        let two_with_same_suffix = [
+            "mcp__alpha__get_architecture",
+            "mcp__beta__get_architecture",
+        ];
+        assert_eq!(
+            fuzzy_resolve_tool("get_architecture", two_with_same_suffix),
+            None
+        );
+        let available = ["agentgrep", "bash"];
+        assert_eq!(fuzzy_resolve_tool("ToolSearch", available), None);
+        assert_eq!(fuzzy_resolve_tool("totally_bogus", available), None);
+        assert_eq!(fuzzy_resolve_tool("", available), None);
     }
 }

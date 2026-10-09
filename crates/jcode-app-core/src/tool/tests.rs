@@ -218,6 +218,65 @@ async fn maintainer_feedback_tool_is_registered() {
 }
 
 #[tokio::test]
+async fn fuzzy_resolve_handles_camelcase_and_separator_drift() {
+    // Live failure evidence (2026-09/10 session logs): backing models behind
+    // the omni mux emit CamelCase tool names (Agentgrep, McpCall, SkillManage,
+    // Ls, Bg). The fuzzy fallback must map them to the real registry names so
+    // the call succeeds instead of burning a round-trip on the error.
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let mut tools = registry.tools.read().await.clone();
+    // mcp_call / mcp_search / skill_manage register lazily (MCP activation /
+    // session tools), not in the bare base registry a unit test builds, so
+    // seed them explicitly; the pure mapping logic itself is covered by the
+    // jcode-tool-types suite.
+    for name in ["mcp_call", "mcp_search", "skill_manage"] {
+        let seed = tools.get("agentgrep").expect("agentgrep registered").clone();
+        tools.insert(name.to_string(), seed);
+    }
+    for (mangled, canonical) in [
+        ("Agentgrep", "agentgrep"),
+        ("McpCall", "mcp_call"),
+        ("McpSearch", "mcp_search"),
+        ("SkillManage", "skill_manage"),
+        ("SessionSearch", "session_search"),
+        ("JcodeDocs", "jcode_docs"),
+        ("Ls", "ls"),
+        ("Bg", "bg"),
+    ] {
+        assert_eq!(
+            Registry::fuzzy_resolve_tool(mangled, &tools).as_deref(),
+            Some(canonical),
+            "mangled name {mangled} must resolve"
+        );
+    }
+    // Genuinely unknown names stay unresolved so the corrective error fires.
+    assert_eq!(Registry::fuzzy_resolve_tool("ToolSearch", &tools), None);
+    assert_eq!(Registry::fuzzy_resolve_tool("totally_bogus", &tools), None);
+}
+
+#[tokio::test]
+async fn fuzzy_resolve_mcp_suffix_match_is_unique_only() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    let mut tools = registry.tools.read().await.clone();
+    let seed = tools.get("bash").expect("bash registered").clone();
+    // Two MCP tools sharing a bare suffix: ambiguous, must not resolve.
+    tools.insert("mcp__alpha__get_architecture".into(), seed.clone());
+    tools.insert("mcp__beta__get_architecture".into(), seed.clone());
+    assert_eq!(
+        Registry::fuzzy_resolve_tool("get_architecture", &tools),
+        None
+    );
+    // Unique suffix resolves to the one MCP tool.
+    tools.remove("mcp__beta__get_architecture");
+    assert_eq!(
+        Registry::fuzzy_resolve_tool("get_architecture", &tools).as_deref(),
+        Some("mcp__alpha__get_architecture")
+    );
+}
+
+#[tokio::test]
 async fn test_tool_definitions_are_sorted() {
     // Create registry with mock provider
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);

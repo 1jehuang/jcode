@@ -506,6 +506,20 @@ impl Agent {
             .collect()
     }
 
+    /// Resolve a `/<name> [prompt...]` invocation against the registered
+    /// skills. Returns `None` when the input is not a slash invocation or
+    /// the named skill is not registered, so ordinary slash-prefixed text
+    /// (paths, shell fragments) passes through untouched.
+    pub fn resolve_skill_invocation(&self, input: &str) -> Option<(String, Option<String>)> {
+        let skills = self.current_skills_snapshot();
+        let invocation = skills.resolve_invocation(input)?;
+        skills.get(invocation.name)?;
+        Some((
+            invocation.name.to_string(),
+            invocation.prompt.map(str::to_string),
+        ))
+    }
+
     pub fn new(provider: Arc<dyn Provider>, registry: Registry) -> Self {
         Self::new_with_initial_working_dir(provider, registry, None)
     }

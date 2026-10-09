@@ -568,6 +568,12 @@ impl SkillRegistry {
         self.skills.get(name)
     }
 
+    /// Register (or replace) a skill programmatically. Used by tests and by
+    /// callers that synthesize skills without an on-disk `SKILL.md`.
+    pub fn register_skill(&mut self, skill: Skill) {
+        self.skills.insert(skill.name.clone(), skill);
+    }
+
     /// List all available skills.
     ///
     /// Sorted by skill name so the ordering is deterministic. The backing store
@@ -918,6 +924,20 @@ pub fn endorsed_skills() -> &'static [EndorsedSkill] {
 }
 
 impl Skill {
+    /// Construct a skill from parsed parts. `search_text` is derived from
+    /// `name`, `description`, and `content` the same way the file loader
+    /// derives it, so programmatically registered skills behave identically.
+    pub fn from_parts(name: &str, description: &str, content: &str, path: PathBuf) -> Self {
+        Self {
+            name: name.to_string(),
+            description: description.to_string(),
+            allowed_tools: None,
+            content: content.to_string(),
+            path,
+            search_text: build_skill_search_text(name, description, content),
+        }
+    }
+
     /// Get the full prompt content for this skill
     pub fn get_prompt(&self) -> String {
         format!(

@@ -130,6 +130,13 @@ pub struct ScheduledItem {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+    /// Structural self-rearm (fork, 2026-09-30): when set, `pop_ready` pushes a
+    /// clone back into the queue with `scheduled_for = now + N` minutes and the
+    /// SAME id, so recurring guardians survive even when their cycle is killed
+    /// mid-run (previously re-arm relied on model discipline; two silent
+    /// guardian deaths on 2026-09-24). None = one-shot (existing behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurse_minutes: Option<i64>,
 }
 
 /// Persistent ambient state
@@ -186,6 +193,9 @@ pub struct ScheduleRequest {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+    /// Mirrors `ScheduledItem::recurse_minutes` (fork). None = one-shot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurse_minutes: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------

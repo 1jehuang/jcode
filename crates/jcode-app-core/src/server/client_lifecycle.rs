@@ -189,6 +189,11 @@ struct ProcessingMessage {
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
     active_skill: Option<String>,
+    /// Whether a leading `/skill` in `content` should resolve server-side.
+    /// False for internally generated turns (idle soft-interrupt payloads),
+    /// whose text is not user input and must never be reinterpreted as a
+    /// slash command.
+    resolve_skill: bool,
 }
 
 struct ProcessingState<'a> {
@@ -1280,6 +1285,7 @@ pub(super) async fn handle_client(
                         images,
                         system_reminder,
                         active_skill,
+                        resolve_skill: true,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -1372,6 +1378,9 @@ pub(super) async fn handle_client(
                             images,
                             system_reminder: None,
                             active_skill: None,
+                            // Interrupt payloads are not user input; never
+                            // reinterpret a leading `/name` as a skill.
+                            resolve_skill: false,
                         },
                         &client_session_id,
                         &mut ProcessingState {
@@ -2884,6 +2893,8 @@ pub(super) async fn handle_client(
                     Some(&event_history),
                     Some(&event_counter),
                     Some(&swarm_event_tx),
+                    Some(&swarm_plans),
+                    Some(&swarm_coordinators),
                 )
                 .await;
                 let _ = client_event_tx.send(ServerEvent::CommReportResponse {
@@ -3397,6 +3408,7 @@ async fn start_processing_message(
         images,
         system_reminder,
         active_skill,
+        resolve_skill,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -3425,6 +3437,39 @@ async fn start_processing_message(
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: format!("Skill '{skill_name}' is not installed on the server"),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
+    // Fork: server-side `/<skill> [prompt]` resolution for ACP clients.
+    // The Desktop composer has no skill picker, so a typed `/name` would
+    // otherwise reach the model as plain text. Resolve against the same
+    // registry the CLI repl uses; only registered names are rewritten so
+    // slash-prefixed ordinary text passes through untouched. Must run after
+    // set_remote_active_skill so an explicit client-picked skill wins.
+    // Internally generated turns (idle soft-interrupt payloads) opt out via
+    // resolve_skill=false: their text is not user input.
+    let (content, active_skill) = if active_skill.is_none() && resolve_skill {
+        match agent.lock().await.resolve_skill_invocation(&content) {
+            Some((name, prompt)) => {
+                crate::logging::info(&format!(
+                    "Resolved slash skill invocation from message: skill={name}"
+                ));
+                let prompt = prompt.unwrap_or_else(|| format!("Activate the {name} skill."));
+                (prompt, Some(name))
+            }
+            None => (content, None),
+        }
+    } else {
+        (content, active_skill)
+    };
+    if let Some(name) = active_skill.clone()
+        && !agent.lock().await.set_remote_active_skill(Some(name))
+    {
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: "Resolved skill is not installed on the server".to_string(),
             retry_after_secs: None,
         });
         return;

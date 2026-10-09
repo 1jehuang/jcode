@@ -955,6 +955,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
                 images: Vec::new(),
                 system_reminder: None,
                 active_skill: None,
+                resolve_skill: true,
             },
             "session_guard",
             &mut ProcessingState {
@@ -1056,6 +1057,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
             images: Vec::new(),
             system_reminder: None,
             active_skill: None,
+            resolve_skill: true,
         },
         session_id,
         &mut ProcessingState {
@@ -1181,6 +1183,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
                 images: Vec::new(),
                 system_reminder: Some(continuation.to_string()),
                 active_skill: None,
+                resolve_skill: true,
             },
             session_id,
             &mut ProcessingState {
@@ -1281,6 +1284,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                     images: Vec::new(),
                     system_reminder: None,
                     active_skill: None,
+                    resolve_skill: true,
                 },
                 session_id,
                 &mut ProcessingState {
@@ -2145,4 +2149,65 @@ async fn system_prompt_socket_creation_attach_resume_fork_and_no_leaking() {
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+// ---- Fork: server-side slash-skill resolution for ACP messages ----
+
+async fn agent_with_seeded_skill(name: &str) -> Arc<Mutex<Agent>> {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let skill_lock = registry.skills();
+    skill_lock.try_write().unwrap().register_skill(
+        crate::skill::Skill::from_parts(
+            name,
+            "Test skill for slash resolution",
+            "Body of the test skill.",
+            std::path::PathBuf::from("/tmp/nonexistent/SKILL.md"),
+        ),
+    );
+    Arc::new(Mutex::new(Agent::new(provider, registry)))
+}
+
+#[tokio::test]
+async fn resolve_skill_invocation_matches_registered_skill_with_prompt() {
+    let agent = agent_with_seeded_skill("interrogate").await;
+    let resolved = agent
+        .lock()
+        .await
+        .resolve_skill_invocation("/interrogate review the design");
+    assert_eq!(
+        resolved,
+        Some((
+            "interrogate".to_string(),
+            Some("review the design".to_string())
+        ))
+    );
+}
+
+#[tokio::test]
+async fn resolve_skill_invocation_bare_name_yields_none_prompt() {
+    let agent = agent_with_seeded_skill("interrogate").await;
+    let resolved = agent.lock().await.resolve_skill_invocation("/interrogate");
+    assert_eq!(
+        resolved,
+        Some(("interrogate".to_string(), None))
+    );
+}
+
+#[tokio::test]
+async fn resolve_skill_invocation_ignores_unregistered_names() {
+    let agent = agent_with_seeded_skill("interrogate").await;
+    // Unregistered slash name must pass through untouched (plain text path).
+    assert_eq!(agent.lock().await.resolve_skill_invocation("/nothere hi"), None);
+    // Ordinary slash-prefixed text (path-like) is never a skill.
+    assert_eq!(
+        agent
+            .lock()
+            .await
+            .resolve_skill_invocation("/etc/hosts what is in this file"),
+        None
+    );
+    assert_eq!(agent.lock().await.resolve_skill_invocation("no slash at all"), None);
 }

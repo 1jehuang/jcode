@@ -1416,13 +1416,15 @@ pub(super) async fn update_member_status_with_report(
         event_history,
         event_counter,
         swarm_event_tx,
+        None,
+        None,
     )
     .await
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "member status updates need swarm membership, broadcast state, optional report text, and event history sinks"
+    reason = "member status updates need swarm membership, broadcast state, optional report text, event history sinks, and optional swarm plan/coordinator maps for post-broadcast persistence"
 )]
 pub(super) async fn update_member_status_with_report_tldr(
     session_id: &str,
@@ -1435,6 +1437,8 @@ pub(super) async fn update_member_status_with_report_tldr(
     event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+    swarm_plans: Option<&Arc<RwLock<HashMap<String, VersionedPlan>>>>,
+    swarm_coordinators: Option<&Arc<RwLock<HashMap<String, String>>>>,
 ) {
     let completion_report = normalize_completion_report(completion_report);
     let detail_present = detail.is_some();
@@ -1446,6 +1450,7 @@ pub(super) async fn update_member_status_with_report_tldr(
         old_status,
         _is_headless,
         report_back_to_session_id,
+        report_changed,
     ) = {
         let mut members = swarm_members.write().await;
         if let Some(member) = members.get_mut(session_id) {
@@ -1491,9 +1496,10 @@ pub(super) async fn update_member_status_with_report_tldr(
                 previous_status,
                 is_headless,
                 report_back_to_session_id,
+                report_changed,
             )
         } else {
-            (None, None, false, false, String::new(), false, None)
+            (None, None, false, false, String::new(), false, None, false)
         }
     };
     if let Some(ref id) = swarm_id {
@@ -1543,6 +1549,39 @@ pub(super) async fn update_member_status_with_report_tldr(
         }
 
         broadcast_swarm_status(id, swarm_members, swarms_by_id).await;
+
+        // The completion report must land on disk before the in-memory state
+        // can be reaped. Heartbeats, salvage, removal, and orphan-reparent all
+        // refresh the persisted record, but the CommReport path used to only
+        // touch memory + live broadcasts — so a worker that reported and then
+        // went quiet would lose its report when the idle worker reaper overwrote
+        // its status to `stopped`. Persist once per turn when a new report was
+        // actually recorded, and only when the caller supplied the plan/coordinator
+        // maps needed to build a complete SwarmState snapshot. Status-only
+        // changes (no completion_report) intentionally skip this — the reaper
+        // path is cheap and we do not want heartbeat-class churn to thrash disk.
+        if report_changed
+            && completion_report.is_some()
+            && let (Some(plans), Some(coordinators)) = (swarm_plans, swarm_coordinators)
+        {
+            if plans.read().await.contains_key(id) {
+                let swarm_state = SwarmState {
+                    members: Arc::clone(swarm_members),
+                    swarms_by_id: Arc::clone(swarms_by_id),
+                    plans: Arc::clone(plans),
+                    coordinators: Arc::clone(coordinators),
+                };
+                persist_swarm_state_for(id, &swarm_state).await;
+            } else {
+                let swarm_state = SwarmState {
+                    members: Arc::clone(swarm_members),
+                    swarms_by_id: Arc::clone(swarms_by_id),
+                    plans: Arc::clone(plans),
+                    coordinators: Arc::clone(coordinators),
+                };
+                remove_persisted_swarm_state_for(id, &swarm_state).await;
+            }
+        }
 
         let should_notify_coordinator = status_changed
             && ((status == "completed")
@@ -1809,7 +1848,7 @@ mod tests {
         refresh_swarm_task_staleness, remove_session_from_swarm,
         salvage_assignments_of_dead_member, swarm_ancestors, swarm_is_self_or_ancestor,
         swarm_spawn_depth, touch_swarm_task_progress, update_member_status,
-        update_member_status_with_report,
+        update_member_status_with_report, update_member_status_with_report_tldr,
     };
     use crate::plan::PlanItem;
     use crate::protocol::{NotificationType, ServerEvent};
@@ -3243,6 +3282,122 @@ mod tests {
                     if message.contains("crashed while working")
             )),
             "owner should be notified of the crash, got {owner_events:?}"
+        );
+    }
+
+    /// `Request::CommReport` used to update `latest_completion_report` in
+    /// memory and broadcast `ServerEvent::SwarmStatus` to live clients, but
+    /// never persisted the new report. By the time the idle worker reaper
+    /// overwrote the member's status to `stopped` it was already gone from
+    /// the durable record. The fix routes the post-broadcast refresh through
+    /// `persist_swarm_state_for` when a new completion report is recorded.
+    /// This test asserts that contract end-to-end: status flips to completed
+    /// with a non-empty report, then the on-disk JSON shows the report.
+    struct IsolatedRuntimeDir {
+        _prev_runtime: Option<std::ffi::OsString>,
+        _temp: tempfile::TempDir,
+    }
+
+    impl IsolatedRuntimeDir {
+        fn new() -> Self {
+            let temp = tempfile::TempDir::new().expect("runtime dir");
+            let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+            crate::env::set_var("JCODE_RUNTIME_DIR", temp.path());
+            Self {
+                _prev_runtime: prev_runtime,
+                _temp: temp,
+            }
+        }
+    }
+
+    impl Drop for IsolatedRuntimeDir {
+        fn drop(&mut self) {
+            if let Some(prev) = self._prev_runtime.take() {
+                crate::env::set_var("JCODE_RUNTIME_DIR", prev);
+            } else {
+                crate::env::remove_var("JCODE_RUNTIME_DIR");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn comm_report_persists_completion_report_to_disk() {
+        let runtime = IsolatedRuntimeDir::new();
+        let temp = runtime._temp.path();
+
+        let swarm_id = "swarm-comm-report-persist";
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            HashSet::from(["coord".to_string(), "worker".to_string()]),
+        )])));
+        let mut plan = VersionedPlan::new();
+        plan.replace_items(vec![plan_item("p1", "do the work")]);
+        plan.participants.insert("coord".to_string());
+        plan.participants.insert("worker".to_string());
+        let swarm_plans = Arc::new(RwLock::new(HashMap::from([(swarm_id.to_string(), plan)])));
+        let swarm_coordinators = Arc::new(RwLock::new(HashMap::from([(
+            swarm_id.to_string(),
+            "coord".to_string(),
+        )])));
+
+        let (coord, _coord_rx) = swarm_member("coord", "coordinator", false);
+        let (mut worker, _worker_rx) = swarm_member("worker", "agent", true);
+        // The swarm_member test helper hard-codes swarm_id to "swarm-1" for
+        // convenience, so we override it to match the swarm this test drives.
+        worker.swarm_id = Some(swarm_id.to_string());
+        worker.status = "running".to_string();
+        worker.report_back_to_session_id = Some("coord".to_string());
+        {
+            let mut members = swarm_members.write().await;
+            members.insert("coord".to_string(), coord);
+            members.insert("worker".to_string(), worker);
+        }
+
+        let report = "Implemented the fix; tests passing on this box.";
+        update_member_status_with_report_tldr(
+            "worker",
+            "completed",
+            Some("finished work".to_string()),
+            Some(report.to_string()),
+            None,
+            &swarm_members,
+            &swarms_by_id,
+            None,
+            None,
+            None,
+            Some(&swarm_plans),
+            Some(&swarm_coordinators),
+        )
+        .await;
+
+        let json_path = temp
+            .join("durable-state")
+            .join("swarm")
+            .join(format!("{}.json", swarm_id));
+        let raw = std::fs::read_to_string(&json_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", json_path.display()));
+        let value: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("parse json {}: {e}\nraw: {raw}", json_path.display()));
+
+        let member = value
+            .get("members")
+            .and_then(|m| m.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|m| m.get("session_id").and_then(|s| s.as_str()) == Some("worker"))
+            })
+            .unwrap_or_else(|| panic!("worker member not in persisted json: {raw}"));
+        let persisted_report = member
+            .get("latest_completion_report")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| {
+                panic!("latest_completion_report missing from worker record: {raw}")
+            });
+        assert_eq!(persisted_report, report);
+        assert_eq!(
+            member.get("status").and_then(|v| v.as_str()),
+            Some("completed")
         );
     }
 }

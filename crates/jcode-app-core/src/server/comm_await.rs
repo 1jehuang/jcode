@@ -2,6 +2,7 @@ use super::await_members_state::{
     PersistedAwaitMembersState, all_pending_await_members_including_expired, ensure_pending_state,
     load_state, persist_final_response, request_key, save_state,
 };
+use super::durable_state::now_unix_ms;
 use super::{AwaitMembersRuntime, SwarmEvent, SwarmMember};
 use crate::bus::{Bus, BusEvent, SwarmAwaitCompleted, UiActivity};
 use crate::protocol::{AwaitedMemberStatus, ServerEvent, format_comm_awaited_members_with_reports};
@@ -9,6 +10,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{RwLock, broadcast, mpsc};
+
+/// Fork auto-rearm (2026-09-30): max times a timed-out wait re-arms itself
+/// when its workers show progress. Beyond this, finalize as timeout.
+const MAX_AUTO_REARMS: u32 = 3;
+
+/// Base timeout in ms for a state (caller's original request, default 1h).
+fn base_timeout_ms(state: &PersistedAwaitMembersState) -> u64 {
+    state.base_timeout_secs.unwrap_or(3600).saturating_mul(1000)
+}
 
 pub(super) async fn awaited_member_statuses(
     req_session_id: &str,
@@ -222,7 +232,8 @@ pub(super) async fn spawn_or_resume_await_members(
 
     tokio::spawn(async move {
         let mut event_rx = swarm_event_tx.subscribe();
-        let deadline = deadline_to_instant(state.deadline_unix_ms);
+        let mut state = state;
+        let mut deadline = deadline_to_instant(state.deadline_unix_ms);
 
         loop {
             let member_statuses = awaited_member_statuses(
@@ -270,8 +281,77 @@ pub(super) async fn spawn_or_resume_await_members(
 
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
-                    let summary = timeout_summary(&member_statuses);
-                    finalize_await(&await_members_runtime, &state, false, member_statuses, summary).await;
+                    // Fork auto-rearm (2026-09-30): on timeout, re-arm the wait
+                    // itself instead of finalizing, so a slow-but-alive worker
+                    // does not depend on the coordinator remembering to re-arm.
+                    // Guards: (1) progress gate - no swarm event since the wait
+                    // (re)started means the worker is hung; finalize, don't loop.
+                    // (2) hard cap MAX_AUTO_REARMS. (3) backoff 1x/2x/4x base.
+                    let now_ms = now_unix_ms();
+                    let wait_started_ms = state
+                        .last_progress_ms
+                        .map(|_| state.deadline_unix_ms.saturating_sub(base_timeout_ms(&state)))
+                        .unwrap_or(0);
+                    let saw_progress = state
+                        .last_progress_ms
+                        .map(|p| p > wait_started_ms)
+                        .unwrap_or(false);
+                    let under_cap = state.auto_rearm_count < MAX_AUTO_REARMS;
+                    if saw_progress && under_cap {
+                        let new_count = state.auto_rearm_count + 1;
+                        let base_secs = state.base_timeout_secs.unwrap_or(3600);
+                        let backoff_secs =
+                            (base_secs.saturating_mul(1u64 << (new_count - 1).min(2))).min(3600);
+                        let mut next =
+                            refresh_pending_state(&state).unwrap_or_else(|| state.clone());
+                        next.auto_rearm_count = new_count;
+                        next.base_timeout_secs = Some(base_secs);
+                        next.deadline_unix_ms = now_ms + backoff_secs.saturating_mul(1000);
+                        save_state(&next);
+                        crate::logging::info(&format!(
+                            "await_members auto-rearm {}/{} for key {} (backoff {}s, progress seen)",
+                            new_count, MAX_AUTO_REARMS, key, backoff_secs
+                        ));
+                        // Tell an idle requester the wait is being extended.
+                        // wake:false: this is a status update, not completion.
+                        if next.background {
+                            let notification = format!(
+                                "[await auto-rearm {}/{}] workers still running past timeout; watching {}s more",
+                                new_count, MAX_AUTO_REARMS, backoff_secs
+                            );
+                            Bus::global().publish(BusEvent::SwarmAwaitCompleted(
+                                SwarmAwaitCompleted {
+                                    session_id: next.session_id.clone(),
+                                    completed: false,
+                                    summary: notification.clone(),
+                                    notification,
+                                    notify: next.notify,
+                                    wake: false,
+                                },
+                            ));
+                        }
+                        state = next;
+                        deadline = deadline_to_instant(state.deadline_unix_ms);
+                        continue;
+                    }
+                    let reason = if under_cap {
+                        "no worker progress since wait started (hung-worker guard)"
+                    } else {
+                        "auto-rearm cap reached"
+                    };
+                    let summary = format!("{} ({})", timeout_summary(&member_statuses), reason);
+                    crate::logging::info(&format!(
+                        "await_members timeout finalized for key {}: {}",
+                        key, reason
+                    ));
+                    finalize_await(
+                        &await_members_runtime,
+                        &state,
+                        false,
+                        member_statuses,
+                        summary,
+                    )
+                    .await;
                     return;
                 }
                 event = event_rx.recv() => {
@@ -279,6 +359,23 @@ pub(super) async fn spawn_or_resume_await_members(
                         Ok(event) => {
                             if event.swarm_id.as_deref() != Some(swarm_id.as_str()) {
                                 continue;
+                            }
+                            // Fork auto-rearm progress probe: any swarm event on
+                            // this swarm counts as worker activity. Persisted so
+                            // the timeout branch can distinguish alive-but-slow
+                            // from hung across re-arm rounds. Read-modify-write
+                            // the DISK copy: the in-memory `state` may be stale
+                            // (a duplicate request can have upgraded prefs on
+                            // disk; clobbering them broke background delivery -
+                            // caught by await_upgrade_background test).
+                            let now_ms = now_unix_ms();
+                            let stale = state.last_progress_ms.map(|p| p < now_ms).unwrap_or(true);
+                            if stale {
+                                if let Some(mut latest) = refresh_pending_state(&state) {
+                                    latest.last_progress_ms = Some(now_ms);
+                                    save_state(&latest);
+                                }
+                                state.last_progress_ms = Some(now_ms);
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -436,6 +533,20 @@ pub(super) async fn handle_comm_await_members(
             save_state(&state);
         }
 
+        // Fork auto-rearm: record the caller's base timeout on first arm so
+        // backoff rounds have a stable base. A manual re-arm by the agent
+        // (fresh tool call after a FINALIZED timeout) resets the counters -
+        // the agent has spoken, it wants a fresh wait budget.
+        let requested_base = timeout_secs.unwrap_or(3600);
+        if state.base_timeout_secs.is_none() {
+            state.base_timeout_secs = Some(requested_base);
+            save_state(&state);
+        } else if state.auto_rearm_count > 0 && state.final_response.is_some() {
+            state.auto_rearm_count = 0;
+            state.base_timeout_secs = Some(requested_base);
+            save_state(&state);
+        }
+
         let already_expired = state.deadline_unix_ms
             <= SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -528,6 +639,22 @@ pub(super) async fn handle_comm_await_members(
                 ctx.await_members_runtime.clone(),
             )
             .await;
+        } else {
+            // Fork dedupe fix (2026-09-30): a duplicate await on an ALREADY
+            // active key previously registered its waiter and hung silently
+            // until client timeout if the original watcher never re-read it.
+            // Answer immediately: the original watcher owns this key; the
+            // caller will still receive the completion via respond_to_waiters
+            // (waiter already registered above).
+            let _ = ctx
+                .client_event_tx
+                .send(ServerEvent::CommAwaitMembersResponse {
+                    id,
+                    completed: false,
+                    members: initial_statuses,
+                    summary: "duplicate await deduped: a watcher is already active for this key; completion will arrive when it resolves".to_string(),
+                    background_started: false,
+                });
         }
     } else {
         let _ = ctx.client_event_tx.send(ServerEvent::Error {

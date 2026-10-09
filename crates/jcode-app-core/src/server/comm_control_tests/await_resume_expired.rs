@@ -29,6 +29,9 @@ async fn resume_background_awaits_finalizes_states_expired_while_down() {
             background: true,
             notify: true,
             wake: true,
+            auto_rearm_count: 0,
+            base_timeout_secs: None,
+            last_progress_ms: None,
             final_response: None,
         },
     );
