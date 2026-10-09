@@ -417,6 +417,10 @@ pub(crate) enum OnboardingPhase {
     /// Action-only picker offering the suggested review or a blank new session.
     StartChoice { shown_at: Instant },
     /// Existing prompt-suggestion cards (resting / "No" state).
+    /// Constructed only by the onboarding rehearsal/eval suites
+    /// (tests/onboarding_{golden,eval}.rs); since 4a9be63e7 the production
+    /// flow no longer reaches it, so the non-test lib build sees it dead.
+    #[allow(dead_code)]
     Suggestions,
     /// Flow finished; nothing onboarding-specific to render.
     Done,

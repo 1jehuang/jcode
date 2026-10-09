@@ -966,10 +966,9 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
-        let cached = jcode_base::provider::cached_openai_reasoning_efforts_for_scope(
-            &self.catalog_scope(),
-        )
-        .unwrap_or_default();
+        let cached =
+            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&self.catalog_scope())
+                .unwrap_or_default();
         match self.model_reasoning_efforts.write() {
             Ok(mut efforts) => *efforts = cached,
             Err(poisoned) => *poisoned.into_inner() = cached,
