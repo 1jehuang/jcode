@@ -108,7 +108,9 @@ impl App {
             let duration_ms = (secs.max(0.0) * 1000.0).round() as u64;
             parts.push(Message::format_duration(duration_ms));
         }
-        if let Some(tps) = self.compute_streaming_tps() {
+        if crate::config::config().display.show_tps
+            && let Some(tps) = self.compute_streaming_tps()
+        {
             parts.push(format!("{:.1} tps", tps));
         }
         if self.streaming.streaming_input_tokens > 0 || self.streaming.streaming_output_tokens > 0 {

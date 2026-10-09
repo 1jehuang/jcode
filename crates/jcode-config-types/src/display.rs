@@ -119,6 +119,10 @@ pub struct DisplayConfig {
     pub external_sessions: bool,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Show the streaming tokens/sec row in the info panel and status line
+    /// (default: true). Set false to hide live throughput everywhere.
+    #[serde(default = "default_true")]
+    pub show_tps: bool,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -157,6 +161,7 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             usage_display: "left".to_string(),
+            show_tps: true,
         }
     }
 }
