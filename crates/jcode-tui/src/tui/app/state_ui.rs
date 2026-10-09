@@ -307,6 +307,7 @@ impl App {
                             "system_reminder": pending.system_reminder,
                             "auto_retry": pending.auto_retry,
                             "retry_attempts": pending.retry_attempts,
+                            "overload_attempts": pending.overload_attempts,
                         })
                     })
                 };
@@ -536,6 +537,11 @@ impl App {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u8,
                     retry_at: None,
+                    // Older reload files have no count: start at 0 for those.
+                    overload_attempts: pending
+                        .get("overload_attempts")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u8,
                 });
             let rate_limit_reset = value
                 .get("rate_limit_reset_in_ms")

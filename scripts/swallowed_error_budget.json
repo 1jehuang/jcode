@@ -1992,7 +1992,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/commands.rs": {
-      "dot_ok": 4,
+      "dot_ok": 5,
       "let_underscore": 14,
       "unwrap_or_default": 20
     },

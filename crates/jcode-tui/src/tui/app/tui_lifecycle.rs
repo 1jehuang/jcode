@@ -142,6 +142,65 @@ impl App {
         self.schedule_pending_remote_network_wait_with_force(reason, false)
     }
 
+    /// Hold the in-flight remote turn after the provider reported it is
+    /// overloaded (5xx, 529, "heavy usage, try again in a moment"), then
+    /// resend it. Unlike ordinary failures this also covers turns the user
+    /// typed: the provider will likely take the same request a moment later,
+    /// so making the user resend it by hand is only friction. Bounded by
+    /// [`Self::OVERLOAD_RETRY_MAX_ATTEMPTS`] with a growing delay; after that
+    /// the turn fails as before and the prompt is restored.
+    ///
+    /// When the turn already streamed output or ran tools, a full resend would
+    /// redo that work and append a second answer. The server saved every
+    /// completed step, so the held turn becomes a hidden continuation instead
+    /// and the model resumes where it stopped.
+    pub(super) fn schedule_pending_remote_overload_retry(&mut self, reason: &str) -> bool {
+        let continues_turn = self.remote_turn_streamed_output;
+        let Some(pending) = self.rate_limit_pending_message.as_mut() else {
+            return false;
+        };
+        if pending.overload_attempts >= Self::OVERLOAD_RETRY_MAX_ATTEMPTS {
+            return false;
+        }
+        if continues_turn {
+            pending.content = String::new();
+            pending.images.clear();
+            pending.is_system = true;
+            pending.system_reminder = Some(Self::PROVIDER_ERROR_CONTINUATION.to_string());
+        }
+        pending.auto_retry = true;
+        pending.overload_attempts += 1;
+        let attempt = pending.overload_attempts;
+        let delay_secs = Self::OVERLOAD_RETRY_DELAYS_SECS
+            .get(usize::from(attempt - 1))
+            .copied()
+            .unwrap_or(60);
+        let retry_at = Instant::now() + Duration::from_secs(delay_secs);
+        pending.retry_at = Some(retry_at);
+        self.rate_limit_reset = Some(retry_at);
+        self.status_detail = Some(format!(
+            "provider overloaded; retrying in {delay_secs}s ({attempt}/{})",
+            Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+        ));
+        let first_line = reason.lines().next().unwrap_or(reason).trim();
+        if continues_turn {
+            // The model never saw the reply it was writing when the provider
+            // failed, so it writes it again. Drop the partial copy on screen.
+            self.rollback_streaming_attempt();
+            self.push_display_message(DisplayMessage::system(format!(
+                "⏳ The provider failed mid-turn. Continuing from the last saved step in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+                Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )));
+        } else {
+            self.push_display_message(DisplayMessage::system(format!(
+                "⏳ The provider is overloaded. Retrying automatically in {delay_secs}s (attempt {attempt}/{}). {first_line}",
+                Self::OVERLOAD_RETRY_MAX_ATTEMPTS
+            )));
+        }
+        self.set_status_notice(format!("Provider overloaded; retrying in {delay_secs}s"));
+        true
+    }
+
     /// Hold the in-flight remote turn until the network recovers, then resume it.
     ///
     /// Connectivity failures (DNS, connection reset, no route, transient TLS,
@@ -480,6 +539,7 @@ impl App {
             session_save_pending: false,
             streaming_tool_calls: Vec::new(),
             attempt_committed_assistant_messages: 0,
+            remote_turn_streamed_output: false,
             provider_session_id: None,
             rewind_undo_snapshot: None,
             cancel_requested: false,
@@ -942,6 +1002,7 @@ impl App {
             session_save_pending: false,
             streaming_tool_calls: Vec::new(),
             attempt_committed_assistant_messages: 0,
+            remote_turn_streamed_output: false,
             provider_session_id: None,
             rewind_undo_snapshot: None,
             cancel_requested: false,

@@ -150,6 +150,10 @@ struct PendingRemoteMessage {
     auto_retry: bool,
     retry_attempts: u8,
     retry_at: Option<Instant>,
+    /// Turn-level resends after a provider overload. Kept apart from
+    /// `retry_attempts` so ordinary retries never use up the overload
+    /// schedule. Starts at 0 for every new turn.
+    overload_attempts: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -1063,6 +1067,11 @@ pub struct App {
     // many trailing assistant messages; reset whenever a new API attempt's
     // output starts cleanly or the turn ends.
     attempt_committed_assistant_messages: usize,
+    // Whether the in-flight remote send has streamed any output (text,
+    // reasoning, or a tool call). Reset on each send. A turn that already
+    // showed output is not held for a full overload resend, because the new
+    // answer would be appended to the partial one.
+    remote_turn_streamed_output: bool,
     // Provider-specific session ID for conversation resume
     provider_session_id: Option<String>,
     // One-step undo snapshot captured before the most recent local rewind.
@@ -1789,6 +1798,15 @@ impl Provider for InertRuntimeProvider {
 impl App {
     const AUTO_RETRY_BASE_DELAY_SECS: u64 = 2;
     const AUTO_RETRY_MAX_ATTEMPTS: u8 = 3;
+    /// Turn-level resends after a provider overload (5xx / 529). The stream
+    /// layer already retried several times within seconds, so these waits are
+    /// longer: about 3.5 minutes in total before giving up.
+    const OVERLOAD_RETRY_MAX_ATTEMPTS: u8 = 4;
+    const OVERLOAD_RETRY_DELAYS_SECS: [u64; 4] = [15, 30, 60, 120];
+    /// Hidden reminder sent instead of a full resend when a provider failure
+    /// hits a turn that already streamed output or ran tools. The server saved
+    /// every completed step, so the model can pick up from there.
+    const PROVIDER_ERROR_CONTINUATION: &str = "[The model provider failed mid-turn with a temporary error. Everything up to your last completed tool result is saved; the reply you were writing when it failed was lost. Continue the task from where you left off.]";
     /// Budget for completion-confidence gate nudges per auto-poke cycle.
     /// Observed live: a session that stopped updating its todos was re-nudged
     /// with the same hidden continuation every ~5 seconds indefinitely, one
