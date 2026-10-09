@@ -1,5 +1,5 @@
 use super::{connect_socket, debug_socket_path, socket_path};
-use crate::protocol::{HistoryMessage, Request, ServerEvent, TranscriptMode};
+use crate::protocol::{HistoryMessage, RecentSessionSummary, Request, ServerEvent, TranscriptMode};
 use crate::transport::{ReadHalf, WriteHalf};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -195,6 +195,38 @@ impl Client {
             message: "History response not received".to_string(),
             retry_after_secs: None,
         })
+    }
+
+    pub async fn list_recent_sessions(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<RecentSessionSummary>> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let request = Request::ListRecentSessions { id, limit };
+        let json = serde_json::to_string(&request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        loop {
+            let mut line = String::new();
+            let n = self.reader.read_line(&mut line).await?;
+            if n == 0 {
+                anyhow::bail!("Server disconnected");
+            }
+            match serde_json::from_str(&line)? {
+                ServerEvent::Ack { id: ack_id } if ack_id == id => continue,
+                ServerEvent::RecentSessions {
+                    id: response_id,
+                    sessions,
+                } if response_id == id => return Ok(sessions),
+                ServerEvent::Error {
+                    id: error_id,
+                    message,
+                    ..
+                } if error_id == id => anyhow::bail!(message),
+                _ => continue,
+            }
+        }
     }
 
     pub async fn resume_session(&mut self, session_id: &str) -> Result<u64> {
