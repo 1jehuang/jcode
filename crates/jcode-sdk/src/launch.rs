@@ -167,6 +167,7 @@ impl Drop for LaunchedInstance {
 }
 
 /// Start an isolated daemon and API bridge and return once its socket accepts.
+/// The instance runs the launching binary and never auto-updates, so it stays on that jcode version.
 pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
     let ephemeral = options.jcode_home.is_none();
     let jcode_home = match &options.jcode_home {
@@ -225,6 +226,10 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         .env("JCODE_RUNTIME_DIR", &runtime_dir)
         .env("JCODE_API_SOCKET", &socket_path)
         .env("JCODE_SOCKET", runtime_dir.join("jcode.sock"))
+        // An empty private home always looks out of date, so the updater would
+        // replace and restart the runtime mid-session: the client's turn fails
+        // and the restarted server is orphaned. The shared runtime still updates.
+        .env("JCODE_NO_AUTO_UPDATE", "1")
         .envs(options.env.iter())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -823,6 +828,44 @@ mod tests {
             .insert("JCODE_WAKE_MODE".into(), "internal".into());
         assert!(launch_instance(&options).is_err());
         assert_eq!(fs::read_to_string(captured).unwrap(), "external");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_instances_disable_auto_update() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let binary = sandbox.path().join("capture-env");
+        let captured = sandbox.path().join("auto-update.txt");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' \"${JCODE_NO_AUTO_UPDATE-unset}\" > \"$CAPTURE_PATH\"\nexit 1\n",
+        )
+        .expect("write fake runtime");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("make fake runtime executable");
+
+        let mut options = LaunchOptions {
+            jcode_home: Some(sandbox.path().join("instance")),
+            inherit_logins: false,
+            binary: Some(binary),
+            startup_timeout: Duration::from_secs(2),
+            ..LaunchOptions::default()
+        };
+        options.env.insert(
+            OsString::from("CAPTURE_PATH"),
+            captured.as_os_str().to_owned(),
+        );
+
+        assert!(
+            launch_instance(&options).is_err(),
+            "fake runtime should fail startup"
+        );
+        assert_eq!(
+            fs::read_to_string(captured).expect("captured auto-update setting"),
+            "1"
+        );
     }
 
     #[test]

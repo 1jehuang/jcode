@@ -59,7 +59,7 @@ daemon* socket, which is a different thing.)
 **Embed jcode as an agent engine** (`launch`). Starts a private instance with
 its own state, sessions, and sockets. It cannot see or disturb the jcode the
 user runs in their terminal, and `close()` shuts it down. This is the default
-for applications.
+for applications. Private instances never auto-update: they run the jcode binary that launched them.
 
 ```ts
 const client = await JcodeClient.launch({ workingDir: process.cwd() });

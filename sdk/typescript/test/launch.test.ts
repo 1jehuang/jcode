@@ -268,3 +268,32 @@ test(
     fs.rmSync(sandbox, { recursive: true, force: true });
   },
 );
+
+test(
+  "private instances opt out of auto-update, which would restart them mid-session",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { launchInstance } = await import("../dist/launch.js");
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-sdk-auto-update-test-"));
+    const binary = path.join(sandbox, "capture-env");
+    const captured = path.join(sandbox, "auto-update.txt");
+    fs.writeFileSync(
+      binary,
+      "#!/bin/sh\nprintf '%s' \"${JCODE_NO_AUTO_UPDATE-unset}\" > \"$CAPTURE_PATH\"\nexit 1\n",
+      { mode: 0o700 },
+    );
+
+    await assert.rejects(() =>
+      launchInstance({
+        binary,
+        jcodeHome: path.join(sandbox, "instance"),
+        inheritLogins: false,
+        startupTimeoutMs: 2000,
+        env: { CAPTURE_PATH: captured },
+      }),
+    );
+
+    assert.equal(fs.readFileSync(captured, "utf8"), "1");
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  },
+);
