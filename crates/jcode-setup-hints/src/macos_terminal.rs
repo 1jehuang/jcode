@@ -133,6 +133,13 @@ fn detect_macos_terminal_from_env(env: impl Fn(&str) -> Option<String>) -> MacTe
     let term_program = env("TERM_PROGRAM").unwrap_or_default().to_lowercase();
     let term = env("TERM").unwrap_or_default().to_lowercase();
 
+    // TERM comes from the innermost terminal, while GHOSTTY_* and
+    // KITTY_WINDOW_ID are inherited by anything launched from it, so kitty
+    // opened from a Ghostty shell must be recognised by TERM first.
+    if term.contains("kitty") {
+        return MacTerminalKind::Kitty;
+    }
+
     if env("GHOSTTY_RESOURCES_DIR").is_some()
         || env("GHOSTTY_BIN_DIR").is_some()
         || term_program == "ghostty"
@@ -361,6 +368,31 @@ mod tests {
             MacTerminalKind::Kitty
         );
         assert_eq!(detect(&[("TERM", "xterm-kitty")]), MacTerminalKind::Kitty);
+        // kitty opened from a Ghostty shell inherits Ghostty's env vars.
+        assert_eq!(
+            detect(&[
+                (
+                    "GHOSTTY_RESOURCES_DIR",
+                    "/Applications/Ghostty.app/Contents/Resources/ghostty"
+                ),
+                ("TERM_PROGRAM", "ghostty"),
+                ("KITTY_WINDOW_ID", "1"),
+                ("TERM", "xterm-kitty"),
+            ]),
+            MacTerminalKind::Kitty
+        );
+        // ...and Ghostty opened from kitty still detects as Ghostty.
+        assert_eq!(
+            detect(&[
+                ("KITTY_WINDOW_ID", "1"),
+                (
+                    "GHOSTTY_RESOURCES_DIR",
+                    "/Applications/Ghostty.app/Contents/Resources/ghostty"
+                ),
+                ("TERM", "xterm-ghostty"),
+            ]),
+            MacTerminalKind::Ghostty
+        );
         assert_eq!(detect(&[]), MacTerminalKind::Unknown);
     }
 
