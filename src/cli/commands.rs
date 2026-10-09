@@ -2622,7 +2622,25 @@ async fn run_single_message_with_agent(
     // one-shot exit from looking like a stale-PID crash on the next startup
     // (issue #988).
     agent.mark_closed();
-    result
+    result.map_err(explain_run_failover_prompt)
+}
+
+/// `jcode run` has no countdown and nobody to press Esc, so it never switches
+/// provider on its own after a failover offer. Replace the machine-readable
+/// prompt with plain words: what failed, what was not done, and how to use
+/// the offered route. The command still fails (non-zero exit).
+fn explain_run_failover_prompt(error: anyhow::Error) -> anyhow::Error {
+    let text = crate::util::format_error_chain(&error);
+    let Some(prompt) = crate::provider::parse_failover_prompt_message(&text) else {
+        return error;
+    };
+    anyhow::anyhow!(
+        "{} is {}. jcode run did not resend the prompt anywhere else. {} serves the same model: rerun with --model {} to use it.",
+        prompt.from_label,
+        prompt.reason,
+        prompt.to_label,
+        prompt.to_provider
+    )
 }
 
 fn run_command_auto_poke_enabled() -> bool {

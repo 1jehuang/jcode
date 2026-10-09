@@ -1006,6 +1006,11 @@
       "let_underscore": 0,
       "unwrap_or_default": 2
     },
+    "crates/jcode-base/src/provider/credit_failover.rs": {
+      "dot_ok": 1,
+      "let_underscore": 0,
+      "unwrap_or_default": 0
+    },
     "crates/jcode-base/src/provider/image_clamp.rs": {
       "dot_ok": 4,
       "let_underscore": 0,

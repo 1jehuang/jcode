@@ -342,6 +342,9 @@ struct PreparedTransferSession {
 struct PendingProviderFailover {
     prompt: crate::provider::ProviderFailoverPrompt,
     deadline: Instant,
+    /// Remote sessions only: the failed turn's payload, resent through the
+    /// server once it confirms the switch to `prompt.to_provider`.
+    remote_resend: Option<FallbackResendPayload>,
 }
 
 /// An interactive "switch to the next best model/method and resend" offer shown

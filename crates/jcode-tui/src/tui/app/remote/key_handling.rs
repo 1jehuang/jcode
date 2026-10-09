@@ -435,6 +435,18 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    // A running provider auto-switch countdown: Esc (or any other
+    // non-scroll key) cancels it before anything is sent to the target.
+    if app.pending_provider_failover.is_some() && !app.is_processing {
+        if code == KeyCode::Esc {
+            app.cancel_pending_provider_failover("Provider auto-switch canceled");
+            return Ok(());
+        }
+        if !input::is_scroll_only_key(app, code, modifiers) {
+            app.cancel_pending_provider_failover("Provider auto-switch canceled");
+        }
+    }
+
     // Accept an armed post-error fallback offer: stage the route switch and
     // resend so the remote dispatcher applies it (SetRoute + payload resend).
     // Checked before the merge offer to match the local key-handling order
