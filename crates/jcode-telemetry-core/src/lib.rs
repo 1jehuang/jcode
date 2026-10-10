@@ -1,6 +1,8 @@
 use jcode_logging as logging;
 use jcode_storage as storage;
 mod concurrency;
+mod desktop;
+pub use desktop::{record_desktop_active, record_desktop_update};
 mod lifecycle;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;

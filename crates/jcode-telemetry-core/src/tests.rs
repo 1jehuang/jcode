@@ -1596,3 +1596,111 @@ fn concurrency_crash_lifecycle_does_not_emit_untrusted_legacy_counts() {
     assert!(crash.get("active_sessions_at_start").is_none());
     assert!(crash.get("multi_sessioned").is_none());
 }
+
+fn emitted_events() -> Vec<Value> {
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clone()
+}
+
+#[test]
+fn desktop_active_is_sent_once_per_utc_day_per_version() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    desktop::record_desktop_active_on("0.5.0", "2026-10-10");
+    desktop::record_desktop_active_on("0.5.0", "2026-10-10");
+    let events = emitted_events();
+    assert_eq!(events.len(), 1);
+    let payload = &events[0];
+    assert_eq!(payload["event"], "desktop_active");
+    assert_eq!(payload["version"], "0.5.0");
+    assert_eq!(payload["os"], std::env::consts::OS);
+    assert!(payload["from_version"].is_null());
+    assert!(payload["is_ci"].is_boolean());
+    assert!(payload["schema_version"].is_number());
+    desktop::record_desktop_active_on("0.5.0", "2026-10-11");
+    assert_eq!(emitted_events().len(), 2);
+}
+
+#[test]
+fn desktop_upgrade_is_sent_only_on_version_change() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    desktop::record_desktop_active_on("0.5.0", "2026-10-10");
+    assert!(
+        emitted_events()
+            .iter()
+            .all(|p| p["event"] != "desktop_upgrade")
+    );
+    desktop::record_desktop_active_on("0.6.0", "2026-10-10");
+    let events = emitted_events();
+    let upgrades: Vec<_> = events
+        .iter()
+        .filter(|p| p["event"] == "desktop_upgrade")
+        .collect();
+    assert_eq!(upgrades.len(), 1);
+    assert_eq!(upgrades[0]["from_version"], "0.5.0");
+    assert_eq!(upgrades[0]["version"], "0.6.0");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|p| p["event"] == "desktop_active")
+            .count(),
+        2
+    );
+    desktop::record_desktop_active_on("0.6.0", "2026-10-11");
+    assert_eq!(
+        emitted_events()
+            .iter()
+            .filter(|p| p["event"] == "desktop_upgrade")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn desktop_telemetry_respects_opt_out() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    jcode_core::env::set_var("JCODE_NO_TELEMETRY", "1");
+    record_desktop_active("0.5.0");
+    record_desktop_update("0.5.0", "0.6.0", "portable", "failure", Some("download"));
+    assert!(emitted_events().is_empty());
+}
+
+#[test]
+fn desktop_update_sanitizes_tokens() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    let long = "x".repeat(200);
+    record_desktop_update(
+        "0.5.0",
+        "0.6.0",
+        "Linux Managed",
+        "failure",
+        Some("Verify: /home/user/secret path failed!"),
+    );
+    record_desktop_update("0.5.0", "0.6.0", "portable", "up_to_date", Some(&long));
+    record_desktop_update("0.6.0", "0.6.0", "macos_sparkle", "success", None);
+    let events = emitted_events();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0]["event"], "desktop_update");
+    assert_eq!(events[0]["version"], "0.6.0");
+    assert_eq!(events[0]["from_version"], "0.5.0");
+    assert_eq!(events[0]["install_kind"], "linux_managed");
+    assert_eq!(events[0]["update_outcome"], "failure");
+    assert_eq!(
+        events[0]["update_failure_stage"],
+        "verify_home_user_secret_path_failed"
+    );
+    let stage = events[1]["update_failure_stage"].as_str().unwrap();
+    assert_eq!(stage.len(), 64);
+    assert!(events[2]["update_failure_stage"].is_null());
+    for value in ["Ünïcode/..", "a-b c", "___"] {
+        let token = desktop::sanitize_token(value);
+        assert!(token.len() <= 64);
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        );
+    }
+}

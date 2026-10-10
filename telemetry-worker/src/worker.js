@@ -45,8 +45,13 @@ const CLI_EVENTS = [
   "usage_report",
 ];
 
+// Jcode Desktop fleet events: daily active ping, observed version change, and
+// self-update attempt outcome. `version` is the Desktop version.
+const DESKTOP_EVENTS = ["desktop_active", "desktop_upgrade", "desktop_update"];
+
 const KNOWN_EVENTS = [
   ...CLI_EVENTS,
+  ...DESKTOP_EVENTS,
   ...WEB_EVENTS,
   ...INSTALL_FUNNEL_EVENTS,
   ...SUBSCRIPTION_EVENTS,
@@ -902,6 +907,7 @@ const RETENTION_DAYS = {
   todo_session: 365,
   prompt_submitted: 30,
   telemetry_opt_out: 365,
+  desktop_update: 365,
 };
 
 const PRUNE_BATCH_LIMIT = 10000;
@@ -957,6 +963,18 @@ async function pruneOldEvents(env, options = {}) {
           ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
         } catch (err) {
           console.warn(`install_details prune failed for ${eventType}`, err?.message || err);
+        }
+      }
+      if (eventType === "desktop_update") {
+        try {
+          await env.DB.prepare(
+            `DELETE FROM desktop_update_details WHERE event_id IN (
+               SELECT event_id FROM events
+               WHERE event = ? AND created_at < datetime('now', ?) AND event_id IS NOT NULL
+               LIMIT ?)`
+          ).bind(eventType, cutoff, PRUNE_BATCH_LIMIT).run();
+        } catch (err) {
+          console.warn(`desktop_update_details prune failed`, err?.message || err);
         }
       }
       if (eventType === "todo_session") {
@@ -1155,6 +1173,31 @@ async function insertEvent(env, body) {
       ["from_version", body.from_version || null],
       ...common,
     ].filter(([name]) => columns.has(name)));
+  }
+
+  if (DESKTOP_EVENTS.includes(body.event)) {
+    const inserted = await insertEventRow(env, body, [
+      ["telemetry_id", body.id],
+      ["event", body.event],
+      ["version", body.version],
+      ["os", body.os],
+      ["arch", body.arch],
+      ["from_version", body.event === "desktop_active" ? null : desktopToken(body.from_version, /[^0-9A-Za-z.+_-]/g)],
+      ...common,
+    ].filter(([name]) => columns.has(name)));
+    if (inserted && body.event === "desktop_update" && body.event_id) {
+      try {
+        await insertDynamic(env, "desktop_update_details", [
+          ["event_id", body.event_id],
+          ["install_kind", desktopToken(body.install_kind)],
+          ["update_outcome", desktopToken(body.update_outcome)],
+          ["update_failure_stage", desktopToken(body.update_failure_stage)],
+        ]);
+      } catch (err) {
+        console.warn("desktop_update_details insert failed", err?.message || err);
+      }
+    }
+    return inserted;
   }
 
   if (body.event === "auth_success") {
@@ -1701,6 +1744,19 @@ function commonEventEntries(body, columns) {
     values.push(["ran_from_cargo", boolToInt(body.ran_from_cargo)]);
   }
   return values;
+}
+
+// Desktop sends short tokens only. Re-sanitize server-side so a buggy or
+// hostile client cannot store messages or paths: lowercase [a-z0-9_] (or the
+// given disallowed-char pattern for versions), max 64 chars, null if empty.
+function desktopToken(value, disallowed = null) {
+  if (value == null) return null;
+  let text = String(value).trim();
+  text = disallowed
+    ? text.replace(disallowed, "")
+    : text.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  text = text.slice(0, 64);
+  return text || null;
 }
 
 async function getEventColumns(env) {
