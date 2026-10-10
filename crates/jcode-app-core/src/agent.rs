@@ -610,27 +610,7 @@ impl Agent {
         if agent.session.provider_key.is_none() {
             agent.session.provider_key = agent.provider_key_for_new_session();
         }
-        if let Some(model) = agent.session.model.clone() {
-            let model_request =
-                crate::provider::MultiProvider::model_switch_request_for_session_route(
-                    &model,
-                    agent.session.provider_key.as_deref(),
-                    agent.session.route_api_method.as_deref(),
-                );
-            if let Err(e) = crate::provider::set_model_with_auth_refresh(
-                agent.provider.as_ref(),
-                &model_request,
-            ) {
-                logging::error(&format!(
-                    "Failed to restore session model '{}' via '{}': {}",
-                    model, model_request, e
-                ));
-            } else {
-                agent.reconcile_explicit_provider_pin_route();
-            }
-        } else {
-            agent.session.model = Some(agent.provider_model());
-        }
+        agent.restore_session_model_from_session();
         agent.restore_reasoning_effort_from_session();
         agent.session.ensure_initial_session_context_message();
         agent.sync_memory_dedup_state_from_session();
