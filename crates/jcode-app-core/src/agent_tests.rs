@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::environment::EnvSnapshotDetail;
+use crate::agent::tools::tool_output_to_content_blocks;
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use crate::tool::Registry;
@@ -497,6 +498,115 @@ fn tool_output_to_content_blocks_preserves_labeled_images() {
         }
         other => panic!("expected trailing label text, got {other:?}"),
     }
+}
+
+/// Text-only stub (Provider default `supports_image_input` = false) used to
+/// repro the save/reload image-loss regression: tool results with images are
+/// recorded through the same session-persistence path production turns use.
+struct TextOnlyToolResultProvider;
+
+#[async_trait]
+impl Provider for TextOnlyToolResultProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        unreachable!("TextOnlyToolResultProvider does not complete requests")
+    }
+
+    fn name(&self) -> &str {
+        "text-only-tool-result-stub"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+/// A text-only provider must not strip images from persisted history: the
+/// tool-result blocks written to the session (and reloaded later for the user
+/// and for history rendering) keep the real `ContentBlock::Image`. Only the
+/// outgoing provider request is filtered, at the `MultiProvider` request
+/// chokepoint (`image_clamp::filter_unsupported_outbound_images`), which has
+/// its own tests in jcode-base.
+#[tokio::test]
+async fn text_only_provider_persists_tool_images_for_history() {
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+
+    // Provider trait default: supports_image_input() == false (text-only).
+    let provider: Arc<dyn Provider> = Arc::new(TextOnlyToolResultProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    assert!(
+        !agent.provider.supports_image_input(),
+        "test provider must be text-only for the regression repro"
+    );
+
+    // Streaming save/reload check: a turn that executes an image-producing
+    // tool must leave the image in the saved session, so reloads and
+    // reconnects can rebuild it from history.
+    agent
+        .add_manual_tool_use(
+            "call_1".to_string(),
+            "read".to_string(),
+            serde_json::json!({}),
+        )
+        .expect("record tool use");
+    let output = ToolOutput::new("Image ready").with_labeled_image(
+        "image/png",
+        "ZmFrZQ==",
+        "screenshots/example.png",
+    );
+    agent
+        .add_manual_tool_result("call_1".to_string(), output, 10)
+        .expect("record tool result");
+
+    let persisted = crate::session::Session::load(agent.session_id()).expect("load saved session");
+    let tool_message = persisted
+        .messages
+        .iter()
+        .find(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        })
+        .expect("tool result message must be saved");
+    let tool_blocks = &tool_message.content;
+    assert!(
+        tool_blocks.iter().any(
+            |block| matches!(block, ContentBlock::Image { media_type, data }
+                if media_type == "image/png" && data == "ZmFrZQ==")
+        ),
+        "a text-only provider must still persist tool images into history so \
+         reloads can render them (greptile P1: they vanish on reload otherwise)"
+    );
+    assert!(
+        !tool_blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text, .. }
+                if text.contains("Image output omitted"))
+        }),
+        "the omission note must not replace the image in saved history"
+    );
 }
 
 #[tokio::test]
