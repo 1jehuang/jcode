@@ -29,6 +29,7 @@ impl Config {
 - Prompt up: `{}`
 - Prompt down: `{}`
 - Scroll bookmark: `{}`
+- Jump to bottom: `{}`
 - Auto-poke toggle: `{}`
 - Workspace left: `{}`
 - Workspace down: `{}`
@@ -152,6 +153,7 @@ impl Config {
             self.keybindings.scroll_prompt_up,
             self.keybindings.scroll_prompt_down,
             self.keybindings.scroll_bookmark,
+            self.keybindings.scroll_to_bottom,
             if self.keybindings.auto_poke_toggle.trim().is_empty() {
                 "disabled"
             } else {

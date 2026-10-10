@@ -216,7 +216,12 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
     }
 
     // Multi-binding (comma-separated list) fields.
-    let multi: [(&str, &str, &str); 4] = [
+    let multi: [(&str, &str, &str); 5] = [
+        (
+            "scroll_to_bottom",
+            "Jump to bottom of chat",
+            cfg.scroll_to_bottom.as_str(),
+        ),
         (
             "workspace_left",
             "Move to left workspace",

@@ -2602,6 +2602,10 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
 }
 fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     panel_image_preview::clear_regions();
+    // `draw_messages` republishes the pill rect when it draws one; frames that
+    // skip the chat viewport (overlays, swarm page, collapsed clear) must not
+    // leave a stale clickable rect behind.
+    viewport::set_jump_to_bottom_area(None);
     let area = frame.area().intersection(*frame.buffer_mut().area());
     if area.width == 0 || area.height == 0 {
         return;

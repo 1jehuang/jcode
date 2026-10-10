@@ -2477,7 +2477,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/ui_viewport.rs": {
-      "dot_ok": 3,
+      "dot_ok": 4,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },

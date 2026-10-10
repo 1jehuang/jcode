@@ -738,6 +738,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.scroll_keys.is_to_bottom(code, modifiers) {
+        app.jump_to_chat_bottom();
+        return Ok(());
+    }
+
     if app.scroll_keys.is_bookmark(code, modifiers) {
         app.toggle_scroll_bookmark();
         return Ok(());

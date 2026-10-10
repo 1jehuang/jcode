@@ -61,6 +61,10 @@ scroll_prompt_down = "ctrl+]"
 # Scroll bookmark toggle (stash position, jump to bottom, press again to return)
 scroll_bookmark = "ctrl+g"
 
+# Jump to the bottom of the chat and resume auto-follow (also: click the
+# "Jump to bottom" pill shown while scrolled up). Comma-separate aliases.
+scroll_to_bottom = "ctrl+end, alt+q"
+
 # Auto-poke toggle. Set "" to disable.
 auto_poke_toggle = "ctrl+p"
 
@@ -781,6 +785,11 @@ mod tests {
         let template = Config::default_config_file_contents();
         let config =
             toml::from_str::<Config>(&template).expect("the shipped config template must parse");
+        assert_eq!(
+            config.keybindings.scroll_to_bottom,
+            jcode_config_types::KeybindingsConfig::default().scroll_to_bottom,
+            "the template must list the scroll_to_bottom default"
+        );
         assert_eq!(config.tools.mcp_tools, McpToolsMode::Auto);
         assert_eq!(config.tools.mcp_tools_token_threshold, 8_000);
         assert!(

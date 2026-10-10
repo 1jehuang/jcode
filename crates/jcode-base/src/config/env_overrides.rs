@@ -57,6 +57,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_SCROLL_BOOKMARK_KEY") {
             self.keybindings.scroll_bookmark = v;
         }
+        if let Ok(v) = std::env::var("JCODE_SCROLL_TO_BOTTOM_KEY") {
+            self.keybindings.scroll_to_bottom = v;
+        }
         if let Ok(v) = std::env::var("JCODE_SCROLL_UP_FALLBACK_KEY") {
             self.keybindings.scroll_up_fallback = v;
         }

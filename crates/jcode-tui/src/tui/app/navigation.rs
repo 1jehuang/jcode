@@ -1594,6 +1594,19 @@ impl App {
             finish_mouse_event!(false, "pinned_todos_expand");
         }
 
+        // The "Jump to bottom" pill. Checked before copy-selection so a click
+        // on it never arms a text selection anchor.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.auto_scroll_paused
+            && crate::tui::ui::viewport::jump_to_bottom_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            self.jump_to_chat_bottom();
+            crate::tui::ui::viewport::set_jump_to_bottom_area(None);
+            finish_mouse_event!(false, "jump_to_bottom_pill");
+        }
+
         // A left press in the composer moves the caret first (native text-field
         // behavior), then falls through so the shared copy-selection machinery
         // can arm a drag anchor: click repositions the cursor, drag selects the
