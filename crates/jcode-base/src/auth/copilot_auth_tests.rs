@@ -353,6 +353,7 @@ fn choose_default_model_with_opus() {
             version: String::new(),
             model_picker_enabled: false,
             capabilities: Default::default(),
+            supported_endpoints: None,
         },
         CopilotModelInfo {
             id: "claude-opus-4.6".to_string(),
@@ -361,6 +362,7 @@ fn choose_default_model_with_opus() {
             version: String::new(),
             model_picker_enabled: false,
             capabilities: Default::default(),
+            supported_endpoints: None,
         },
     ];
     assert_eq!(choose_default_model(&models), "claude-opus-4.6");
@@ -375,6 +377,7 @@ fn copilot_models(ids: &[&str]) -> Vec<CopilotModelInfo> {
             version: String::new(),
             model_picker_enabled: true,
             capabilities: Default::default(),
+            supported_endpoints: None,
         })
         .collect()
 }
@@ -414,6 +417,7 @@ fn choose_default_model_realistic_catalog_no_longer_pins_opus_4_6() {
         version: String::new(),
         model_picker_enabled: false,
         capabilities: Default::default(),
+        supported_endpoints: None,
     });
     let chosen = choose_default_model(&models);
     assert_ne!(
@@ -442,6 +446,7 @@ fn choose_default_model_without_opus() {
         version: String::new(),
         model_picker_enabled: false,
         capabilities: Default::default(),
+        supported_endpoints: None,
     }];
     assert_eq!(choose_default_model(&models), "claude-sonnet-4.6");
 }
@@ -455,6 +460,7 @@ fn choose_default_model_with_sonnet_4_only() {
         version: String::new(),
         model_picker_enabled: false,
         capabilities: Default::default(),
+        supported_endpoints: None,
     }];
     assert_eq!(choose_default_model(&models), "claude-sonnet-4");
 }

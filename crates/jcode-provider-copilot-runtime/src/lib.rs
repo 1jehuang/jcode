@@ -57,8 +57,19 @@ pub struct CopilotApiProvider {
     reasoning_effort: Arc<RwLock<Option<String>>>,
     /// Per-model reasoning efforts advertised by the live `/models` catalog.
     model_efforts: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
+    /// Per-model API paths advertised by the live `/models` catalog.
+    model_endpoints: Arc<RwLock<std::collections::HashMap<String, Vec<String>>>>,
+    /// When the live catalog was last requested, by any path.
+    last_catalog_refresh: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     created_at: std::time::Instant,
 }
+
+/// How long a live catalog is trusted before a background refresh. Matches the
+/// OpenAI and Anthropic account catalog TTL.
+const CATALOG_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// Minimum spacing between refresh attempts while only a cached (or no) catalog
+/// is loaded.
+const CATALOG_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl CopilotApiProvider {
     #[cfg(test)]
@@ -87,6 +98,15 @@ impl CopilotApiProvider {
 
     /// Selected effort, only if the model supports that exact level, so
     /// switching models never sends an unsupported level.
+    fn uses_responses_api(&self, model: &str) -> bool {
+        let catalog = self
+            .model_endpoints
+            .read()
+            .map(|endpoints| endpoints.clone())
+            .unwrap_or_default();
+        copilot_model_uses_responses_api(&catalog, model)
+    }
+
     fn effective_reasoning_effort(&self, model: &str) -> Option<String> {
         let effort = self.current_reasoning_effort()?;
         self.efforts_for(model).contains(&effort).then_some(effort)
@@ -115,7 +135,10 @@ impl CopilotApiProvider {
             .filter(|catalog: &PersistedCatalog| !catalog.models.is_empty())
     }
 
-    fn persist_catalog(models: &[String]) {
+    fn persist_catalog(
+        models: &[String],
+        endpoints: &std::collections::HashMap<String, Vec<String>>,
+    ) {
         if models.is_empty() {
             return;
         }
@@ -125,6 +148,7 @@ impl CopilotApiProvider {
         let payload = PersistedCatalog {
             models: models.to_vec(),
             fetched_at_rfc3339: Utc::now().to_rfc3339(),
+            endpoints: endpoints.clone(),
         };
         if let Err(error) = jcode_base::storage::write_json(&path, &payload) {
             jcode_base::logging::warn(&format!(
@@ -140,9 +164,82 @@ impl CopilotApiProvider {
             if let Ok(mut models) = self.fetched_models.try_write() {
                 *models = catalog.models;
             }
+            if let Ok(mut endpoints) = self.model_endpoints.try_write() {
+                *endpoints = catalog.endpoints;
+            }
             if let Ok(mut source) = self.catalog_source.try_write() {
                 *source = CatalogSource::Cached;
             }
+        }
+    }
+
+    /// Refetch the live catalog in the background once it is stale.
+    ///
+    /// The shared server runs non-interactively, so construction only seeds the
+    /// persisted catalog and never fetches; without this, a long-lived daemon
+    /// keeps serving that snapshot and never sees newly released models.
+    fn spawn_catalog_refresh_if_stale(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if !self.claim_catalog_refresh() {
+            return;
+        }
+        let provider = self.shared_clone();
+        handle.spawn(async move {
+            provider.refresh_catalog(false).await;
+        });
+    }
+
+    /// Record a refresh attempt and return true when the catalog is stale and
+    /// no attempt is recent enough to cover it.
+    fn claim_catalog_refresh(&self) -> bool {
+        if std::env::var("JCODE_COPILOT_MODEL").is_ok() {
+            return false;
+        }
+        let grace = std::time::Duration::from_millis(Self::startup_prefetch_grace_ms());
+        if self.created_at.elapsed() < grace {
+            return false;
+        }
+        let live = self
+            .catalog_source
+            .try_read()
+            .is_ok_and(|source| *source == CatalogSource::Live);
+        let interval = if live {
+            CATALOG_REFRESH_INTERVAL
+        } else {
+            CATALOG_RETRY_INTERVAL
+        };
+        let Ok(mut last) = self.last_catalog_refresh.lock() else {
+            return false;
+        };
+        if last.is_some_and(|at| at.elapsed() < interval) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        true
+    }
+
+    /// A handle sharing all state with `self`, for background tasks.
+    fn shared_clone(&self) -> Self {
+        CopilotApiProvider {
+            client: self.client.clone(),
+            model: self.model.clone(),
+            github_token: self.github_token.clone(),
+            bearer_token: self.bearer_token.clone(),
+            fetched_models: self.fetched_models.clone(),
+            catalog_source: self.catalog_source.clone(),
+            session_id: self.session_id.clone(),
+            machine_id: self.machine_id.clone(),
+            init_ready: self.init_ready.clone(),
+            init_done: self.init_done.clone(),
+            premium_mode: self.premium_mode.clone(),
+            user_turn_count: self.user_turn_count.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+            model_efforts: self.model_efforts.clone(),
+            model_endpoints: self.model_endpoints.clone(),
+            last_catalog_refresh: self.last_catalog_refresh.clone(),
+            created_at: self.created_at,
         }
     }
 
@@ -179,6 +276,8 @@ impl CopilotApiProvider {
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reasoning_effort: Arc::new(RwLock::new(None)),
             model_efforts: Arc::new(RwLock::new(Default::default())),
+            model_endpoints: Arc::new(RwLock::new(Default::default())),
+            last_catalog_refresh: Arc::new(std::sync::Mutex::new(None)),
             created_at: std::time::Instant::now(),
         };
         provider.seed_cached_catalog();
@@ -216,6 +315,8 @@ impl CopilotApiProvider {
             user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             reasoning_effort: Arc::new(RwLock::new(None)),
             model_efforts: Arc::new(RwLock::new(Default::default())),
+            model_endpoints: Arc::new(RwLock::new(Default::default())),
+            last_catalog_refresh: Arc::new(std::sync::Mutex::new(None)),
             created_at: std::time::Instant::now(),
         };
         provider.seed_cached_catalog();
@@ -318,6 +419,13 @@ impl CopilotApiProvider {
     /// Call this after construction. Fetches a bearer token and queries /models.
     /// If JCODE_COPILOT_MODEL is set, this is a no-op (user override).
     pub async fn detect_tier_and_set_default(&self) {
+        self.refresh_catalog(true).await;
+    }
+
+    /// Fetch the live catalog. With `select_default`, also replace the
+    /// placeholder default (or a model the catalog no longer serves); the
+    /// background refresh passes false so it never changes a selection.
+    async fn refresh_catalog(&self, select_default: bool) {
         let detect_start = std::time::Instant::now();
         if std::env::var("JCODE_COPILOT_MODEL").is_ok() {
             jcode_base::logging::info(
@@ -325,6 +433,10 @@ impl CopilotApiProvider {
             );
             self.mark_init_done();
             return;
+        }
+
+        if let Ok(mut last) = self.last_catalog_refresh.lock() {
+            *last = Some(detect_start);
         }
 
         let bearer_start = std::time::Instant::now();
@@ -356,6 +468,16 @@ impl CopilotApiProvider {
                         .map(|m| (m.id.clone(), m.reasoning_efforts()))
                         .collect();
                 }
+                if let Ok(mut endpoints) = self.model_endpoints.write() {
+                    // Merge rather than replace: a listing that transiently
+                    // omits a model must not reroute it mid-session.
+                    for m in &models {
+                        let advertised = m.supported_endpoints();
+                        if !advertised.is_empty() {
+                            endpoints.insert(m.id.clone(), advertised);
+                        }
+                    }
+                }
                 let default = copilot_auth::choose_default_model(&models);
                 jcode_base::logging::info(&format!(
                     "Copilot tier detection: bearer={}ms, fetch_models={}ms, total={}ms, {} total, {} picker-enabled, default -> {}. Picker: [{}]. All: [{}]",
@@ -371,7 +493,8 @@ impl CopilotApiProvider {
                 // Only replace the placeholder default (or a model the live
                 // catalog no longer serves). A model the user or session already
                 // chose must survive the periodic tier re-detection.
-                if let Ok(mut m) = self.model.try_write()
+                if select_default
+                    && let Ok(mut m) = self.model.try_write()
                     && (m.as_str() == DEFAULT_MODEL || !all_ids.iter().any(|id| id == m.as_str()))
                 {
                     *m = default;
@@ -392,6 +515,11 @@ impl CopilotApiProvider {
                         .fetched_models
                         .try_read()
                         .map(|models| models.clone())
+                        .unwrap_or_default(),
+                    &self
+                        .model_endpoints
+                        .read()
+                        .map(|endpoints| endpoints.clone())
                         .unwrap_or_default(),
                 );
             }
@@ -937,6 +1065,7 @@ impl Provider for CopilotApiProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         self.wait_for_init().await;
+        self.spawn_catalog_refresh_if_stale();
 
         self.get_bearer_token().await.map_err(|e| {
             jcode_base::logging::warn(&format!(
@@ -952,7 +1081,7 @@ impl Provider for CopilotApiProvider {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let model_for_fingerprint = self.model();
-        let uses_responses_api = copilot_model_uses_responses_api(&model_for_fingerprint);
+        let uses_responses_api = self.uses_responses_api(&model_for_fingerprint);
         let (canonical_payload, fingerprint_input, system_value, built_tools) =
             if uses_responses_api {
                 let mut input = jcode_provider_openai::build_responses_input(messages);
@@ -1022,23 +1151,7 @@ impl Provider for CopilotApiProvider {
 
         let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
 
-        let provider = CopilotApiProvider {
-            client: self.client.clone(),
-            model: self.model.clone(),
-            github_token: self.github_token.clone(),
-            bearer_token: self.bearer_token.clone(),
-            fetched_models: self.fetched_models.clone(),
-            catalog_source: self.catalog_source.clone(),
-            session_id: self.session_id.clone(),
-            machine_id: self.machine_id.clone(),
-            init_ready: self.init_ready.clone(),
-            init_done: self.init_done.clone(),
-            premium_mode: self.premium_mode.clone(),
-            user_turn_count: self.user_turn_count.clone(),
-            reasoning_effort: self.reasoning_effort.clone(),
-            model_efforts: self.model_efforts.clone(),
-            created_at: self.created_at,
-        };
+        let provider = self.shared_clone();
 
         tokio::spawn(async move {
             provider
@@ -1087,6 +1200,7 @@ impl Provider for CopilotApiProvider {
     }
 
     fn available_models_display(&self) -> Vec<String> {
+        self.spawn_catalog_refresh_if_stale();
         if let Ok(models) = self.fetched_models.read()
             && !models.is_empty()
         {
@@ -1152,6 +1266,8 @@ impl Provider for CopilotApiProvider {
             user_turn_count: self.user_turn_count.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
             model_efforts: self.model_efforts.clone(),
+            model_endpoints: self.model_endpoints.clone(),
+            last_catalog_refresh: self.last_catalog_refresh.clone(),
             created_at: self.created_at,
         })
     }

@@ -16,6 +16,8 @@ fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
         user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         reasoning_effort: Arc::new(RwLock::new(None)),
         model_efforts: Arc::new(RwLock::new(Default::default())),
+        model_endpoints: Arc::new(RwLock::new(Default::default())),
+        last_catalog_refresh: Arc::new(std::sync::Mutex::new(None)),
         created_at: std::time::Instant::now(),
     }
 }
@@ -100,14 +102,126 @@ fn non_gpt5_copilot_models_keep_max_tokens() {
 }
 
 #[test]
-fn only_gpt_5_6_family_uses_responses_api() {
-    assert!(copilot_model_uses_responses_api("gpt-5.6-terra"));
-    assert!(copilot_model_uses_responses_api("gpt-5.6-sol"));
-    assert!(copilot_model_uses_responses_api("gpt-5.6-luna"));
-    assert!(!copilot_model_uses_responses_api("gpt-5.4"));
-    assert!(!copilot_model_uses_responses_api("claude-sonnet-4.6"));
+fn responses_api_routing_follows_catalog_endpoints() {
+    let catalog: std::collections::HashMap<String, Vec<String>> = [
+        ("gpt-6-luna", vec!["/responses", "ws:/responses"]),
+        (
+            "gpt-5.4",
+            vec!["/responses", "/chat/completions", "ws:/responses"],
+        ),
+        ("mai-code-1.1-flash", vec!["/responses", "ws:/responses"]),
+        ("claude-opus-5", vec!["/v1/messages", "/chat/completions"]),
+    ]
+    .into_iter()
+    .map(|(id, endpoints)| {
+        (
+            id.to_string(),
+            endpoints.into_iter().map(String::from).collect(),
+        )
+    })
+    .collect();
+    assert!(copilot_model_uses_responses_api(&catalog, "gpt-6-luna"));
+    assert!(copilot_model_uses_responses_api(
+        &catalog,
+        "mai-code-1.1-flash"
+    ));
+    // Chat completions stays the default wherever the catalog offers it.
+    assert!(!copilot_model_uses_responses_api(&catalog, "gpt-5.4"));
+    assert!(!copilot_model_uses_responses_api(&catalog, "claude-opus-5"));
     assert_eq!(copilot_api_path(true), "responses");
     assert_eq!(copilot_api_path(false), "chat/completions");
+}
+
+#[test]
+fn responses_api_routing_guesses_gpt5_and_newer_without_catalog() {
+    let empty = std::collections::HashMap::new();
+    for model in [
+        "gpt-5.6-luna",
+        "gpt-6-luna",
+        "gpt-6.1-sol",
+        "gpt-5.3-codex",
+        "gpt-5-mini",
+    ] {
+        assert!(copilot_model_uses_responses_api(&empty, model), "{model}");
+    }
+    for model in ["gpt-4.1", "gpt-4o", "claude-sonnet-4.6", "gemini-3.7-flash"] {
+        assert!(!copilot_model_uses_responses_api(&empty, model), "{model}");
+    }
+}
+
+#[test]
+fn catalog_supported_endpoints_parse() {
+    let info: copilot_auth::CopilotModelInfo = serde_json::from_value(json!({
+        "id": "gpt-6-luna",
+        "supported_endpoints": ["/responses", "ws:/responses"],
+    }))
+    .unwrap();
+    assert_eq!(
+        info.supported_endpoints(),
+        vec!["/responses", "ws:/responses"]
+    );
+    let bare: copilot_auth::CopilotModelInfo =
+        serde_json::from_value(json!({"id": "gpt-4o", "supported_endpoints": null})).unwrap();
+    assert!(bare.supported_endpoints().is_empty());
+}
+
+#[test]
+fn stale_catalog_refresh_is_claimed_once_per_interval() {
+    let mut provider = make_test_provider(vec!["gpt-6-luna".to_string()]);
+    // Inside the startup grace window nothing is claimed.
+    assert!(!provider.claim_catalog_refresh());
+
+    provider.created_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
+    *provider.catalog_source.write().unwrap() = CatalogSource::Cached;
+    assert!(provider.claim_catalog_refresh());
+    assert!(
+        !provider.claim_catalog_refresh(),
+        "retry interval not elapsed"
+    );
+
+    // A live catalog is trusted for the longer refresh interval.
+    *provider.catalog_source.write().unwrap() = CatalogSource::Live;
+    let past_retry = std::time::Instant::now() - CATALOG_RETRY_INTERVAL * 2;
+    *provider.last_catalog_refresh.lock().unwrap() = Some(past_retry);
+    assert!(!provider.claim_catalog_refresh());
+    let past_refresh = std::time::Instant::now() - CATALOG_REFRESH_INTERVAL * 2;
+    *provider.last_catalog_refresh.lock().unwrap() = Some(past_refresh);
+    assert!(provider.claim_catalog_refresh());
+}
+
+#[test]
+fn cached_catalog_restores_endpoint_routing() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    jcode_base::env::set_var("JCODE_HOME", temp.path());
+
+    let endpoints = [(
+        "mai-code-1.1-flash".to_string(),
+        vec!["/responses".to_string(), "ws:/responses".to_string()],
+    )]
+    .into_iter()
+    .collect();
+    CopilotApiProvider::persist_catalog(&["mai-code-1.1-flash".to_string()], &endpoints);
+
+    // A restarted server routes the cached model before any live fetch.
+    let provider = make_test_provider(Vec::new());
+    assert!(!provider.uses_responses_api("mai-code-1.1-flash"));
+    provider.seed_cached_catalog();
+    assert!(provider.uses_responses_api("mai-code-1.1-flash"));
+
+    match previous_home {
+        Some(home) => jcode_base::env::set_var("JCODE_HOME", home),
+        None => jcode_base::env::remove_var("JCODE_HOME"),
+    }
+
+    // Caches written before endpoints were persisted still load.
+    let legacy: PersistedCatalog = serde_json::from_value(json!({
+        "models": ["gpt-4o"],
+        "fetched_at_rfc3339": "2026-10-01T00:00:00Z",
+    }))
+    .unwrap();
+    assert!(legacy.endpoints.is_empty());
 }
 
 #[test]
