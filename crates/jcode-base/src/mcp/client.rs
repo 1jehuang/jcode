@@ -178,6 +178,7 @@ impl McpClient {
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
+            .env_clear()
             .envs(&env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -504,6 +505,101 @@ done
             disabled: None,
             timeout_secs: None,
         }
+    }
+
+    #[tokio::test]
+    async fn connect_enforces_child_environment() {
+        const CHILD_MARKER: &str = "JCODE_MCP_ENV_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            // Re-run only this test with synthetic inherited values. Never
+            // mutate the concurrent test runner's global process environment.
+            let home = tempfile::tempdir().expect("isolated home");
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        concat!(module_path!(), "::connect_enforces_child_environment")
+                            .trim_start_matches("jcode_base::"),
+                        "--nocapture",
+                    ])
+                    .env_clear()
+                    .env(CHILD_MARKER, "1")
+                    .env("HOME", home.path())
+                    .env("JCODE_HOME", home.path())
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("JCODE_MCP_TEST_ORDINARY", "ordinary-value")
+                    .env("ANTHROPIC_API_KEY", "synthetic-inherited-secret")
+                    .env("AWS_SECRET_ACCESS_KEY", "synthetic-aws-secret")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("isolated test must not hang")
+            .expect("run isolated test");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "isolated test failed:\n{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        for (explicit, credential_check) in [
+            (None, r#"[ "${ANTHROPIC_API_KEY+x}" != x ]"#),
+            (
+                Some("synthetic-configured-secret"),
+                r#"[ "$ANTHROPIC_API_KEY" = synthetic-configured-secret ]"#,
+            ),
+        ] {
+            let mut config = fake_server_config();
+            config.timeout_secs = Some(2);
+            if let Some(value) = explicit {
+                config.env.insert("ANTHROPIC_API_KEY".into(), value.into());
+            }
+            // The actual MCP child checks its environment before completing
+            // the existing initialize/tools-list handshake.
+            config.args[1] = format!(
+                r#"
+{credential_check} || exit 11
+[ "${{AWS_SECRET_ACCESS_KEY+x}}" != x ] || exit 12
+[ "$JCODE_MCP_TEST_ORDINARY" = ordinary-value ] || exit 13
+[ "$PATH" = /usr/bin:/bin ] || exit 14
+{}
+"#,
+                config.args[1]
+            );
+            let mut client = McpClient::connect("env-test".into(), &config)
+                .await
+                .expect("child environment checks and MCP handshake must succeed");
+            assert!(client.server_info().is_some());
+            assert!(client.tools().is_empty());
+            client.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_reports_spawn_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = McpServerConfig {
+            command: dir.path().join("missing-server").to_string_lossy().into(),
+            ..fake_server_config()
+        };
+        let err = McpClient::connect("missing".into(), &config)
+            .await
+            .err()
+            .expect("missing executable must fail to spawn");
+        assert_eq!(
+            err.to_string(),
+            format!("Failed to spawn MCP server: {}", config.command)
+        );
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .expect("I/O error")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[tokio::test]
