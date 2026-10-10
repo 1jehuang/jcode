@@ -93,18 +93,18 @@ impl UnixTransport {
                 ErrorKind::ConnectFailed,
                 match cause.kind() {
                     std::io::ErrorKind::NotFound => format!(
-                        "no harness API socket at {}: the jcode harness is not running. \
-                         Start it with `jcode serve` and `jcode-harness-api-bridge`, or \
-                         connect with ensure_runtime enabled.",
+                        "harness not running (no socket at {}). Start `jcode-harness-api-bridge` \
+                         or connect with ensure_runtime.",
                         path.display()
                     ),
+                    // Also seen briefly while the bridge restarts, so do not
+                    // claim the socket is stale.
                     std::io::ErrorKind::ConnectionRefused => format!(
-                        "{} exists but refuses connections: a previous harness left a \
-                         stale socket behind. Remove it and start the harness again.",
+                        "harness refused the connection at {}. It may be restarting or stopped.",
                         path.display()
                     ),
                     std::io::ErrorKind::PermissionDenied => format!(
-                        "permission denied on {}: the socket belongs to another user.",
+                        "permission denied on {}. The socket belongs to another user.",
                         path.display()
                     ),
                     _ => format!("could not connect to {}: {cause}", path.display()),
