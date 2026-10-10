@@ -163,6 +163,13 @@ def main() -> int:
                 "live_sessions": live, "swarm_members": members,
             }), flush=True)
         if os.path.exists(dbg):
+            # Distinguish retained-but-free allocator pages from live growth.
+            subprocess.run(["sudo", "-n", "gdb", "-p", str(server.pid), "-batch", "-ex",
+                            "call (int)malloc_trim(0)"], capture_output=True)
+            trimmed = mem(server.pid)
+            print(json.dumps({"phase": "after_trim", "rss": trimmed["VmRSS"],
+                              "anon": trimmed["RssAnon"],
+                              "delta_anon_vs_base": trimmed["RssAnon"] - base["RssAnon"]}), flush=True)
             out = Path(root) / "server_memory.json"
             out.write_text(debug(dbg, "server:memory"))
             print(f"server:memory -> {out}")
