@@ -226,6 +226,19 @@ pub enum ApiRequest {
     /// Read safe filesystem metadata for a path under the session root.
     FileStatus { session_id: String, path: String },
 
+    /// Read the session's todo state (todos, plan, goals, deferred gate
+    /// observations, long-session review clock) for client-side auto-poke and
+    /// quality gates. Replies with `TodoState`. Requires `todo_state`.
+    GetTodoState { session_id: String },
+
+    /// Apply the persistent effects of a follow-up decision made with
+    /// `jcode_todo_policy::FollowUpPolicy` (consume the gate observation log,
+    /// mark the long-session review delivered). Replies with `Ok`.
+    AckTodoFollowUp {
+        session_id: String,
+        effects: jcode_todo_policy::TodoEffects,
+    },
+
     /// Switch the session to a different model.
     ///
     /// `model` is an id from `ListModels`, e.g. `claude-opus-5`. A route

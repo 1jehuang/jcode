@@ -350,6 +350,7 @@ where
                 "session_retention",
                 "session_files",
                 "session_fork",
+                "todo_state",
             ]
             .into_iter()
             .map(str::to_string)

@@ -78,6 +78,22 @@ export interface TextMatch {
   preview: string;
 }
 
+/** A session's persisted todo state, as read by the follow-up policy.
+ * Todos, plan, goals, and observations use the runtime's todo schema. */
+export interface TodoSnapshot {
+  todos: Array<Record<string, unknown>>;
+  plan: Record<string, unknown>;
+  goals: Array<Record<string, unknown>>;
+  gate_observations: Array<Record<string, unknown>>;
+  long_session_review_due: boolean;
+}
+
+/** Persistent effects of a follow-up decision. */
+export interface TodoEffects {
+  clear_gate_observations?: boolean;
+  mark_long_session_review_delivered?: boolean;
+}
+
 /** Durable raw provider counts summed over all assistant rounds in one user turn.
  * Missing metrics are unknown, not zero. Cache accounting differs by provider.
  * Restored duration is currently unavailable. */
@@ -184,6 +200,8 @@ export type ApiRequest =
   | { req: "find_files"; session_id: string; query: string; limit?: number }
   | { req: "search_text"; session_id: string; query: string; path?: string; limit?: number }
   | { req: "file_status"; session_id: string; path: string }
+  | { req: "get_todo_state"; session_id: string }
+  | { req: "ack_todo_follow_up"; session_id: string; effects: TodoEffects }
   | { req: "set_model"; session_id: string; model: string }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "compact"; session_id: string }
@@ -389,6 +407,7 @@ export type ApiEvent =
       size?: number;
       modified_ms?: number;
     }
+  | { ev: "todo_state"; session_id: string; state: TodoSnapshot }
   | { ev: "compacted"; session_id: string; message: string }
   | {
       ev: "session_renamed";
@@ -473,6 +492,7 @@ export const KNOWN_EVENT_KINDS = [
   "files",
   "text_matches",
   "file_status",
+  "todo_state",
   "compacted",
   "session_renamed",
 ] as const;
@@ -509,6 +529,8 @@ export const KNOWN_REQUEST_KINDS = [
   "find_files",
   "search_text",
   "file_status",
+  "get_todo_state",
+  "ack_todo_follow_up",
   "set_model",
   "set_reasoning_effort",
   "compact",

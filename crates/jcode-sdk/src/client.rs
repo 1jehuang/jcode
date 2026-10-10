@@ -1179,6 +1179,36 @@ impl JcodeClient {
     }
 
     /// Read safe filesystem metadata for a path under the session root.
+    /// The session's persisted todo state for the auto-poke and quality-gate
+    /// policy. Requires the `todo_state` capability.
+    pub fn todo_state(&self, session_id: &str) -> Result<jcode_todo_policy::TodoSnapshot> {
+        match self
+            .request_ok(ApiRequest::GetTodoState {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::TodoState { state, .. } => Ok(state),
+            other => Err(unexpected("todo_state", &other)),
+        }
+    }
+
+    /// Apply a follow-up decision's persistent effects. A no-op when empty.
+    pub fn ack_todo_follow_up(
+        &self,
+        session_id: &str,
+        effects: jcode_todo_policy::TodoEffects,
+    ) -> Result<()> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        self.request_ok(ApiRequest::AckTodoFollowUp {
+            session_id: session_id.to_string(),
+            effects,
+        })
+        .map(drop)
+    }
+
     pub fn file_status(&self, session_id: &str, path: &str) -> Result<FileStatus> {
         match self
             .request_ok(ApiRequest::FileStatus {

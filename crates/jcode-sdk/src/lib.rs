@@ -167,6 +167,11 @@ pub use jcode_harness_api::{
     SessionEditStats, enrich_sessions_from_edit_stats, enrich_sessions_from_local_edit_stats,
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
 };
+/// Auto-poke and todo quality-gate policy, identical to the TUI's. Fetch a
+/// snapshot with [`JcodeClient::todo_state`], run
+/// [`todo::FollowUpPolicy::decide`] at turn end, send the follow-up, and apply
+/// its effects with [`JcodeClient::ack_todo_follow_up`].
+pub use jcode_todo_policy as todo;
 pub use launch::{
     LaunchOptions, LaunchedInstance, WakeMode, ensure_runtime, inherit_credentials,
     launch_instance, socket_accepts, user_app_config_dir, user_jcode_home, wait_for_socket,

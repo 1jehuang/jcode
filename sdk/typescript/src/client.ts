@@ -34,6 +34,8 @@ import {
   type SessionInfo,
   type SessionToolDefinition,
   type TextMatch,
+  type TodoEffects,
+  type TodoSnapshot,
   type TurnStopReason,
 } from "./protocol.js";
 
@@ -827,6 +829,27 @@ export class JcodeClient extends EventEmitter {
       "text_matches",
     );
     return frame.matches;
+  }
+
+  /** Persisted todo state for client-side auto-poke and quality gates.
+   * Requires the `todo_state` capability. */
+  async todoState(sessionId: string): Promise<TodoSnapshot> {
+    const frame = await this.expectReply(
+      { req: "get_todo_state", session_id: sessionId },
+      "todo_state",
+    );
+    return frame.state;
+  }
+
+  /** Apply a follow-up decision's persistent effects. */
+  async ackTodoFollowUp(sessionId: string, effects: TodoEffects): Promise<void> {
+    if (!effects.clear_gate_observations && !effects.mark_long_session_review_delivered) {
+      return;
+    }
+    await this.expectReply(
+      { req: "ack_todo_follow_up", session_id: sessionId, effects },
+      "ok",
+    );
   }
 
   async fileStatus(sessionId: string, path: string): Promise<FileStatus> {

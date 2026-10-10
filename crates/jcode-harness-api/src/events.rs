@@ -408,6 +408,12 @@ pub enum ApiEvent {
         modified_ms: Option<u64>,
     },
 
+    /// Reply to `GetTodoState`.
+    TodoState {
+        session_id: String,
+        state: jcode_todo_policy::TodoSnapshot,
+    },
+
     /// Reply to `Compact`: compaction was scheduled.
     ///
     /// Compaction is not synchronous. The daemon summarizes at the next safe

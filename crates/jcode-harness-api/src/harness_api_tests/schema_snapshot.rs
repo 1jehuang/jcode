@@ -319,6 +319,16 @@ fn request_roundtrip() {
             session_id: "s1".into(),
             path: "src/lib.rs".into(),
         },
+        ApiRequest::GetTodoState {
+            session_id: "s1".into(),
+        },
+        ApiRequest::AckTodoFollowUp {
+            session_id: "s1".into(),
+            effects: jcode_todo_policy::TodoEffects {
+                clear_gate_observations: true,
+                mark_long_session_review_delivered: false,
+            },
+        },
         ApiRequest::Ping,
     ];
     for req in reqs {

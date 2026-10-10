@@ -4238,3 +4238,60 @@ fn untitled_indexed_sessions_are_named_after_their_first_prompt_once() {
         Some("Rename the sidebar rows")
     );
 }
+
+#[test]
+fn todo_state_is_served_from_the_session_home_and_acked() {
+    let _lock = crate::translate::jcode_home_test_lock();
+    let home = std::env::temp_dir().join(format!("bridge-todo-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join("todos")).unwrap();
+    std::fs::write(
+        home.join("todos/s1.json"),
+        r#"[{"content":"ship","status":"pending","priority":"high","id":"ship"}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("todos/s1-gate-observations.json"),
+        r#"[{"kind":"closed_feedback_loop"}]"#,
+    )
+    .unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    unsafe { std::env::set_var("JCODE_HOME", &home) };
+
+    let mut state = state_with_session();
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "get_todo_state", "id": 90, "session_id": "s1"
+    })));
+    let ApiEvent::TodoState {
+        state: snapshot, ..
+    } = event
+    else {
+        panic!("expected todo state, got {event:?}");
+    };
+    assert_eq!(snapshot.todos.len(), 1);
+    assert_eq!(snapshot.gate_observations.len(), 1);
+
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "ack_todo_follow_up", "id": 91, "session_id": "s1",
+        "effects": {"clear_gate_observations": true}
+    })));
+    assert!(matches!(event, ApiEvent::Ok), "{event:?}");
+    assert!(!home.join("todos/s1-gate-observations.json").exists());
+
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "get_todo_state", "id": 92, "session_id": "../escape"
+    })));
+    assert!(matches!(
+        event,
+        ApiEvent::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("JCODE_HOME", value) },
+        None => unsafe { std::env::remove_var("JCODE_HOME") },
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}

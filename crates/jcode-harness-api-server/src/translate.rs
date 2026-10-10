@@ -1046,6 +1046,41 @@ impl BridgeState {
                     Err((code, message)) => Self::error_reply(api_id, code, &message),
                 }
             }
+            "get_todo_state" => {
+                let session_id = request["session_id"].as_str().unwrap_or_default();
+                match Self::todo_home(session_id) {
+                    Ok(home) => vec![Outbound::Reply(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::TodoState {
+                            session_id: session_id.to_string(),
+                            state: jcode_todo_policy::store::load_snapshot(&home, session_id),
+                        },
+                    ))],
+                    Err((code, message)) => Self::error_reply(api_id, code, &message),
+                }
+            }
+            "ack_todo_follow_up" => {
+                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let effects: jcode_todo_policy::TodoEffects =
+                    match serde_json::from_value(request["effects"].clone()) {
+                        Ok(effects) => effects,
+                        Err(error) => {
+                            return Self::error_reply(
+                                api_id,
+                                ErrorCode::InvalidRequest,
+                                &format!("invalid effects: {error}"),
+                            );
+                        }
+                    };
+                let result = Self::todo_home(session_id).and_then(|home| {
+                    jcode_todo_policy::store::apply_effects(&home, session_id, effects)
+                        .map_err(|error| (ErrorCode::Internal, error.to_string()))
+                });
+                match result {
+                    Ok(()) => vec![Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok))],
+                    Err((code, message)) => Self::error_reply(api_id, code, &message),
+                }
+            }
             "file_status" => {
                 let session_id = request["session_id"].as_str().unwrap_or_default();
                 let relative = request["path"].as_str().unwrap_or_default();
@@ -2691,6 +2726,14 @@ impl BridgeState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64
+    }
+
+    /// Jcode home for a todo-state request, rejecting ids unsafe for a path.
+    fn todo_home(session_id: &str) -> Result<std::path::PathBuf, (ErrorCode, String)> {
+        if !jcode_todo_policy::store::is_safe_session_id(session_id) {
+            return Err((ErrorCode::InvalidRequest, "invalid session_id".to_string()));
+        }
+        Self::jcode_home().ok_or_else(|| (ErrorCode::Internal, "no jcode home".to_string()))
     }
 
     fn jcode_home() -> Option<std::path::PathBuf> {
