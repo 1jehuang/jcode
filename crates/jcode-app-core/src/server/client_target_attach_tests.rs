@@ -73,12 +73,54 @@ async fn live_agent(id: &str, root: &str) -> Arc<Mutex<Agent>> {
     )))
 }
 
+/// Build an absolute path from a `/`-separated fixture path, on any platform.
+///
+/// `required_subscribe_working_dir` rejects a `working_dir` that is not
+/// `Path::is_absolute()`, and that is a deliberate isolation guard rather than
+/// a Windows quirk: a relative working_dir would resolve against whichever
+/// project happened to start the daemon. On Windows a literal like
+/// `/workspace/live` is *not* absolute -- it has a root but no drive prefix, so
+/// `is_absolute()` is false -- so a fixture written with POSIX separators is
+/// rejected by the very guard the test is exercising.
+///
+/// These paths are opaque to the tests: nothing reads them from disk, they only
+/// have to be distinct from each other and absolute. Anchoring a relative
+/// fixture under `temp_dir()` keeps both properties on every platform.
+fn fixture_root(relative: &str) -> String {
+    std::env::temp_dir()
+        .join("jcode-target-attach-fixture")
+        .join(relative.trim_start_matches('/'))
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn fixture_root_is_absolute_on_every_platform() {
+    let root = fixture_root("workspace/live");
+    assert!(
+        Path::new(&root).is_absolute(),
+        "fixture_root must satisfy required_subscribe_working_dir, got {root:?}"
+    );
+    // Distinct fixtures stay distinct, which is what the attach tests compare.
+    assert_ne!(
+        fixture_root("workspace/live"),
+        fixture_root("workspace/stale")
+    );
+    // A leading slash is tolerated rather than silently nesting twice.
+    assert_eq!(
+        fixture_root("/workspace/live"),
+        fixture_root("workspace/live")
+    );
+    // The guard these fixtures exist to satisfy accepts what we build.
+    assert!(required_subscribe_working_dir(Some(&root)).is_ok());
+}
+
 #[tokio::test]
 async fn target_subscribe_uses_live_unsaved_root_without_changing_it() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let id = "session_live_empty_attach";
-    let agent = live_agent(id, "/workspace/live-original").await;
+    let agent = live_agent(id, &fixture_root("/workspace/live-original")).await;
     let sessions = Arc::new(RwLock::new(HashMap::from([(id.into(), agent.clone())])));
     let members = Arc::new(RwLock::new(HashMap::new()));
     let mut request = subscribe(id);
@@ -87,12 +129,10 @@ async fn target_subscribe_uses_live_unsaved_root_without_changing_it() {
         .unwrap();
     assert_eq!(
         initial_subscribe_working_dir(&request).unwrap(),
-        "/workspace/live-original"
+        fixture_root("/workspace/live-original")
     );
-    assert_eq!(
-        agent.lock().await.working_dir(),
-        Some("/workspace/live-original")
-    );
+    let expected = fixture_root("workspace/live-original");
+    assert_eq!(agent.lock().await.working_dir(), Some(expected.as_str()));
     assert!(!crate::session::session_exists(id));
 }
 
@@ -101,7 +141,7 @@ async fn target_subscribe_uses_persisted_root_when_no_live_agent_exists() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let mut session = crate::session::Session::create(None, Some("persisted".into()));
-    session.working_dir = Some("/workspace/persisted-original".into());
+    session.working_dir = Some(fixture_root("/workspace/persisted-original").into());
     session.save().unwrap();
     let mut request = subscribe(&session.id);
     resolve_target_subscribe_working_dir(
@@ -113,7 +153,7 @@ async fn target_subscribe_uses_persisted_root_when_no_live_agent_exists() {
     .unwrap();
     assert_eq!(
         initial_subscribe_working_dir(&request).unwrap(),
-        "/workspace/persisted-original"
+        fixture_root("/workspace/persisted-original")
     );
 }
 
@@ -122,9 +162,9 @@ async fn target_subscribe_live_root_wins_over_stale_persisted_root() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let mut session = crate::session::Session::create(None, Some("persisted".into()));
-    session.working_dir = Some("/workspace/stale".into());
+    session.working_dir = Some(fixture_root("/workspace/stale").into());
     session.save().unwrap();
-    let agent = live_agent(&session.id, "/workspace/live").await;
+    let agent = live_agent(&session.id, &fixture_root("/workspace/live")).await;
     let sessions = Arc::new(RwLock::new(HashMap::from([(session.id.clone(), agent)])));
     let mut request = subscribe(&session.id);
     resolve_target_subscribe_working_dir(
@@ -136,7 +176,7 @@ async fn target_subscribe_live_root_wins_over_stale_persisted_root() {
     .unwrap();
     assert_eq!(
         initial_subscribe_working_dir(&request).unwrap(),
-        "/workspace/live"
+        fixture_root("/workspace/live")
     );
 }
 
@@ -145,7 +185,7 @@ async fn target_subscribe_busy_live_agent_uses_member_root_without_waiting() {
     let _lock = crate::storage::lock_test_env();
     let _home = Home::new();
     let id = "session_busy_empty_attach";
-    let agent = live_agent(id, "/workspace/busy-original").await;
+    let agent = live_agent(id, &fixture_root("/workspace/busy-original")).await;
     let sessions = Arc::new(RwLock::new(HashMap::from([(id.into(), agent.clone())])));
     let (event_tx, _) = mpsc::unbounded_channel();
     let now = std::time::Instant::now();
@@ -155,7 +195,7 @@ async fn target_subscribe_busy_live_agent_uses_member_root_without_waiting() {
             session_id: id.into(),
             event_tx,
             event_txs: HashMap::new(),
-            working_dir: Some("/workspace/busy-original".into()),
+            working_dir: Some(fixture_root("/workspace/busy-original").into()),
             swarm_id: None,
             swarm_enabled: false,
             status: "running".into(),
@@ -185,7 +225,7 @@ async fn target_subscribe_busy_live_agent_uses_member_root_without_waiting() {
     .unwrap();
     assert_eq!(
         initial_subscribe_working_dir(&request).unwrap(),
-        "/workspace/busy-original"
+        fixture_root("/workspace/busy-original")
     );
 }
 
@@ -209,7 +249,7 @@ async fn target_subscribe_unknown_target_never_uses_process_working_dir() {
 async fn target_subscribe_preserves_explicit_directory_and_its_validation() {
     let mut request = subscribe("session_explicit");
     if let Request::Subscribe { working_dir, .. } = &mut request {
-        *working_dir = Some("/workspace/explicit".into());
+        *working_dir = Some(fixture_root("/workspace/explicit").into());
     }
     resolve_target_subscribe_working_dir(
         &mut request,
@@ -220,7 +260,7 @@ async fn target_subscribe_preserves_explicit_directory_and_its_validation() {
     .unwrap();
     assert_eq!(
         initial_subscribe_working_dir(&request).unwrap(),
-        "/workspace/explicit"
+        fixture_root("/workspace/explicit")
     );
     if let Request::Subscribe { working_dir, .. } = &mut request {
         *working_dir = Some("relative".into());
