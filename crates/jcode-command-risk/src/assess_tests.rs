@@ -665,3 +665,37 @@ fn find_output_actions_write_only_their_destinations() {
         assert_eq!(level(command), RiskLevel::Safe, "{command}");
     }
 }
+
+#[test]
+fn issue_1753_substitutions_are_assessed_like_top_level_commands() {
+    for command in [
+        "echo $(rm -rf ~)",
+        "x=$(rm -rf ~)",
+        "echo \"$(rm -rf ~)\"",
+        "echo `rm -rf ~`",
+        "echo \"`rm -rf ~`\"",
+        "cat <<EOF\n$(rm -rf ~)\nEOF",
+        "cat <<EOF\n`rm -rf ~`\nEOF",
+        "echo \"$(echo \"$(rm -rf ~)\")\"",
+        "git commit -m \"$(rm -rf ~)\"",
+    ] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command:?}");
+    }
+}
+
+#[test]
+fn issue_1753_inert_text_stays_safe() {
+    for command in [
+        // The shell does not expand quoted heredocs or single quotes.
+        "cat <<'EOF'\n$(rm -rf ~)\nEOF",
+        "cat <<\"EOF\"\n`rm -rf ~`\nEOF",
+        "echo '$(rm -rf ~)'",
+        "echo '`rm -rf ~`'",
+        // Ordinary substitutions keep running immediately.
+        "echo \"$(git rev-parse HEAD)\"",
+        "echo `date`",
+        "git commit -m \"$(cat <<'EOF'\nfix: thing\n\nrm -rf ~ is mentioned here\nEOF\n)\"",
+    ] {
+        assert!(level(command).runs_immediately(), "{command:?}");
+    }
+}
