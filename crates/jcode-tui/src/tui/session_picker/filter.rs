@@ -374,7 +374,25 @@ impl SessionPicker {
         self.rebuild_items();
     }
 
+    /// Open `/resume` scoped to the current project when it has sessions, so
+    /// a crashed terminal finds its own conversation first. `s` still cycles
+    /// to every session, and a choice made by the user is never overridden.
+    pub fn prefer_current_dir_filter(&mut self) {
+        if self.filter_mode_user_chosen || self.filter_mode != SessionFilterMode::All {
+            return;
+        }
+        let has_match = self.all_session_refs().into_iter().any(|session_ref| {
+            self.session_by_ref(session_ref)
+                .is_some_and(|session| !session.is_debug && self.session_in_current_dir(session))
+        });
+        if has_match {
+            self.filter_mode = SessionFilterMode::CurrentDir;
+            self.rebuild_items();
+        }
+    }
+
     pub(super) fn cycle_filter_mode(&mut self) {
+        self.filter_mode_user_chosen = true;
         self.filter_mode = self.filter_mode.next();
         if self.filter_mode == SessionFilterMode::Active {
             self.refresh_live_presence();
@@ -383,6 +401,7 @@ impl SessionPicker {
     }
 
     pub(super) fn cycle_filter_mode_backwards(&mut self) {
+        self.filter_mode_user_chosen = true;
         self.filter_mode = self.filter_mode.previous();
         if self.filter_mode == SessionFilterMode::Active {
             self.refresh_live_presence();
