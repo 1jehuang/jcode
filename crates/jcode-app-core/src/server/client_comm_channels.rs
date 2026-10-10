@@ -94,6 +94,7 @@ pub(super) async fn handle_comm_channel_members(
                     live_attachments: Some(member.event_txs.len()),
                     status_age_secs: Some(member.last_status_change.elapsed().as_secs()),
                     last_activity_age_secs: crate::session_metrics::last_activity_age_secs(sid),
+                    stalled_secs: super::swarm_watchdog::stalled_for_secs(sid),
                     ..Default::default()
                 })
             })

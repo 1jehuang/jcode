@@ -496,6 +496,15 @@ swarm_spawn_mode = "inline"
 # Env override: JCODE_SWARM_MAX_CONCURRENT_AGENTS
 swarm_max_concurrent_agents = 32
 #
+# Stalled-worker watchdog. A running worker with no streamed tokens, tool
+# events, or task heartbeats for this many seconds (and no tool currently
+# executing) is flagged as stalled in swarm status and its coordinator is
+# notified once. 0 disables it. Set swarm_stall_nudge = true to also send the
+# worker a short nudge message.
+# Env overrides: JCODE_SWARM_STALL_AFTER_SECS, JCODE_SWARM_STALL_NUDGE
+swarm_stall_after_secs = 600
+# swarm_stall_nudge = false
+#
 # Max percentage (1-90) of the chat height the inline swarm gallery band may use.
 # Unset = built-in default (40%). Lower values keep more transcript visible; set
 # near the minimum to collapse the gallery to a thin strip.

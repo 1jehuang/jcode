@@ -321,6 +321,7 @@ pub(super) async fn handle_comm_status(
             live_attachments: Some(member.event_txs.len()),
             status_age_secs: Some(member.last_status_change.elapsed().as_secs()),
             last_activity_age_secs: crate::session_metrics::last_activity_age_secs(&target_session),
+            stalled_secs: super::swarm_watchdog::stalled_for_secs(&target_session),
             joined_age_secs: Some(member.joined_at.elapsed().as_secs()),
             files_touched,
             activity,

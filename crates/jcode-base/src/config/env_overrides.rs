@@ -436,6 +436,18 @@ impl Config {
                 self.agents.swarm_max_concurrent_agents = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_SWARM_STALL_AFTER_SECS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.agents.swarm_stall_after_secs = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_SWARM_STALL_NUDGE") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => self.agents.swarm_stall_nudge = true,
+                "0" | "false" | "no" | "off" => self.agents.swarm_stall_nudge = false,
+                _ => {}
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }

@@ -49,6 +49,7 @@ mod swarm_channels;
 mod swarm_labels;
 mod swarm_mutation_state;
 mod swarm_persistence;
+mod swarm_watchdog;
 mod util;
 
 pub(super) use self::await_members_state::AwaitMembersRuntime;
@@ -1456,6 +1457,30 @@ impl Server {
             let idle_for = std::time::Duration::from_secs(embedding_idle_secs);
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(EMBEDDING_IDLE_CHECK_SECS));
+        // Stalled-worker watchdog (#1703): flag running workers that went
+        // silent with no tool in flight and notify their owner once.
+        if let Some(stall_after) = swarm_watchdog::stall_after() {
+            let wd_swarm_members = Arc::clone(&self.swarm_state.members);
+            let wd_swarm_coordinators = Arc::clone(&self.swarm_state.coordinators);
+            let wd_sessions = Arc::clone(&self.sessions);
+            let wd_soft_interrupt_queues = Arc::clone(&self.soft_interrupt_queues);
+            tokio::spawn(async move {
+                let mut interval =
+                    tokio::time::interval(swarm_watchdog::sweep_interval(stall_after));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    swarm_watchdog::sweep_stalled_workers(
+                        &wd_swarm_members,
+                        &wd_swarm_coordinators,
+                        &wd_sessions,
+                        &wd_soft_interrupt_queues,
+                    )
+                    .await;
+                }
+            });
+        }
+
             loop {
                 interval.tick().await;
                 let unloaded = crate::embedding::maybe_unload_if_idle(idle_for);

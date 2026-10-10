@@ -268,6 +268,10 @@ pub struct AgentInfo {
     /// the agent is actually doing work right now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_age_secs: Option<u64>,
+    /// Set when the stalled-worker watchdog flags this member: seconds it has
+    /// been running with no activity and no tool executing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_secs: Option<u64>,
     /// Live activity (whether processing + current tool name).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<SessionActivitySnapshot>,
@@ -327,6 +331,9 @@ pub struct AgentStatusSnapshot {
     /// or swarm task heartbeats), independent of lifecycle transitions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_age_secs: Option<u64>,
+    /// Seconds stalled, when the stalled-worker watchdog flags this member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_age_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
