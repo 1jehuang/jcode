@@ -618,9 +618,23 @@ fn render_status_spinner_into_buffer(buffer: &Buffer, area: Rect, symbol: &str) 
 }
 
 fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol: &str) {
+    // `area` is the status rect recorded during the last FULL frame draw, so it
+    // can outlive the buffer it was measured in: any resize in between leaves it
+    // pointing at rows this buffer no longer has. ratatui's `set_stringn`
+    // indexes unconditionally and panics on an out-of-range coordinate
+    // (`index outside of buffer`), so intersect with the live buffer first.
+    //
+    // An empty intersection means there is no status cell to patch. Falling
+    // through to the next full frame is correct and silent: this path runs
+    // outside the draw `catch_unwind`, so a panic here escapes to the event
+    // loop instead of being recovered into a fallback frame.
+    let target = area.intersection(buffer.area);
+    if target.width == 0 || target.height == 0 {
+        return;
+    }
     buffer.set_stringn(
-        area.x,
-        area.y,
+        target.x,
+        target.y,
         symbol,
         1,
         // The spinner cell is patched outside the full-frame draw, so apply
@@ -1372,6 +1386,61 @@ mod tests {
         assert!(
             !render_status_spinner_into_buffer(&buffer, area, "⠙"),
             "late overlays own the status cell until the next full frame"
+        );
+    }
+
+    #[test]
+    fn status_spinner_partial_clamps_a_status_area_stale_after_resize() {
+        // The real panic: a full frame recorded the status row at y=1 of a 2-row
+        // terminal, the terminal was then resized to a single row, and the
+        // spinner-only repaint patched the *cached* row without intersecting it
+        // with the current buffer. ratatui's `set_stringn` then indexed (x, 1)
+        // of a buffer whose area is {x: 0, y: 0, width: 80, height: 1}:
+        //
+        //   ratatui-core-0.1.0/src/buffer/buffer.rs:250
+        //   index outside of buffer: area is Rect { x: 0, y: 0, width: 80,
+        //   height: 1 } but index is (1, 1)
+        //
+        // The area comes from `last_status_area()`, which is recorded during a
+        // full draw and outlives the frame it was measured in.
+        let full_frame_area = Rect::new(0, 0, 80, 2);
+        let mut previous_frame = Buffer::empty(full_frame_area);
+        previous_frame.set_string(0, 1, "> ", Style::default());
+        // The recorded status cell holds the activity indicator, so the patch
+        // path is the one taken.
+        previous_frame
+            .cell_mut((1, 1))
+            .expect("status cell")
+            .set_symbol(jcode_tui_style::theme::activity_indicator(
+                0.0,
+                12.0,
+                false,
+            ));
+        let status_area = Rect::new(1, 1, 6, 1);
+
+        // Resized smaller: the current buffer no longer contains that row.
+        let resized_area = Rect::new(0, 0, 80, 1);
+        let mut current = Buffer::empty(resized_area);
+
+        assert!(
+            render_status_spinner_into_buffer(&previous_frame, status_area, "⠙"),
+            "precondition: the stale area is patchable in the previous frame"
+        );
+
+        let patched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render_status_spinner_into_buffer_mut(&mut current, status_area, "⠙");
+        }));
+        assert!(
+            patched.is_ok(),
+            "a stale status area must not panic: ratatui indexes (x, {}) of {:?}",
+            status_area.y,
+            resized_area
+        );
+        // Out of bounds means there is nothing to patch, not a partially
+        // written row: the one-row buffer must be left untouched.
+        assert!(
+            current.cell((1, 1)).is_none(),
+            "the stale row must be skipped entirely, not clamped onto row 0"
         );
     }
 
