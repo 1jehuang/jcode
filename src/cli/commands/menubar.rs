@@ -176,6 +176,18 @@ pub fn ensure_menubar_helper_running() {
         return;
     }
 
+    // Legacy helpers: older jcode builds anchored the singleton lock to
+    // `$HOME`/`$JCODE_HOME`, so a helper started under an overridden HOME holds
+    // a different lock and pid file than ours. Another process's environment is
+    // not reliably readable without private APIs, so we never kill them. The
+    // mitigation is: a normal launch never starts a second helper while any
+    // other `jcode menubar` process of this user is alive. Once the legacy
+    // helper exits (quit from its menu, logout), the next launch starts the
+    // single global one.
+    if other_menubar_helper_alive() {
+        return;
+    }
+
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
@@ -203,6 +215,42 @@ pub fn ensure_menubar_helper_running() {
 #[cfg(not(target_os = "macos"))]
 pub fn ensure_menubar_helper_running() {}
 
+/// True when another process of this uid looks like a `jcode menubar` helper
+/// (see [`menubar_helper_pids`]).
+#[cfg(target_os = "macos")]
+fn other_menubar_helper_alive() -> bool {
+    let uid = unsafe { libc::getuid() };
+    let Ok(output) = std::process::Command::new("/bin/ps")
+        .args(["-U", &uid.to_string(), "-o", "pid=,args="])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    let listing = String::from_utf8_lossy(&output.stdout);
+    !menubar_helper_pids(&listing, std::process::id()).is_empty()
+}
+
+/// Parse `ps -o pid=,args=` output and return pids whose argv is exactly
+/// `<.../jcode*> menubar`, excluding `self_pid`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn menubar_helper_pids(ps_output: &str, self_pid: u32) -> Vec<u32> {
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid: u32 = parts.next()?.parse().ok()?;
+            let exe = parts.next()?;
+            let arg = parts.next()?;
+            if parts.next().is_some() || arg != "menubar" || pid == self_pid {
+                return None;
+            }
+            let name = std::path::Path::new(exe).file_name()?.to_str()?;
+            name.starts_with("jcode").then_some(pid)
+        })
+        .collect()
+}
+
 /// Resolve the directory holding the *global* (per-OS-user) menu bar singleton
 /// state - the "only one helper" lock and the helper pid file.
 ///
@@ -216,7 +264,7 @@ pub fn ensure_menubar_helper_running() {}
 /// real user is unchanged.
 #[cfg(target_os = "macos")]
 fn global_menubar_dir() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
+    let home = real_user_home()?;
     let dir = home.join(".jcode");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir)
@@ -231,8 +279,45 @@ fn running_in_menubar_sandbox() -> bool {
         env_truthy("JCODE_TEST_SESSION"),
         env_truthy("JCODE_TEMP_SERVER"),
         std::env::var_os("JCODE_HOME").as_deref(),
-        dirs::home_dir().map(|home| home.join(".jcode")).as_deref(),
+        std::env::var_os("HOME").as_deref(),
+        real_user_home().as_deref(),
     )
+}
+
+/// Home directory of the current OS user from the passwd database. Unlike
+/// `dirs::home_dir()` this ignores `$HOME`, so test harnesses that override
+/// `HOME` cannot relocate the global menu bar lock. There is deliberately no
+/// `$HOME` fallback: if passwd fails we cannot tell a real HOME from an
+/// override, so the helper is skipped entirely (fail closed).
+#[cfg(target_os = "macos")]
+fn real_user_home() -> Option<std::path::PathBuf> {
+    passwd_home_dir()
+}
+
+#[cfg(any(target_os = "macos", all(unix, test)))]
+fn passwd_home_dir() -> Option<std::path::PathBuf> {
+    passwd_home_dir_for_uid(unsafe { libc::getuid() })
+}
+
+#[cfg(any(target_os = "macos", all(unix, test)))]
+fn passwd_home_dir_for_uid(uid: libc::uid_t) -> Option<std::path::PathBuf> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: all pointers reference live, correctly sized buffers owned here.
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
+    if rc != 0 || result.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir is a NUL-terminated string inside `buf`, which is alive.
+    let dir = unsafe { CStr::from_ptr(pwd.pw_dir) }.to_bytes();
+    if dir.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(dir)))
 }
 
 #[cfg(target_os = "macos")]
@@ -251,17 +336,37 @@ fn env_truthy(key: &str) -> bool {
 ///
 /// - An explicit test/temp marker forces "sandbox".
 /// - A `$JCODE_HOME` that differs from the real `~/.jcode` is a sandbox home.
+/// - A `$HOME` that differs from the passwd home is a sandbox (a process with a
+///   foreign HOME must not own the user's menu bar).
 /// - No override (or an override equal to the real home) is the real user.
 #[cfg(target_os = "macos")]
 fn is_menubar_sandbox(
     test_session: bool,
     temp_server: bool,
     custom_home: Option<&std::ffi::OsStr>,
-    real_jcode_home: Option<&std::path::Path>,
+    env_home: Option<&std::ffi::OsStr>,
+    real_home: Option<&std::path::Path>,
 ) -> bool {
     if test_session || temp_server {
         return true;
     }
+    // passwd lookup failed: no trustworthy home, so no safe global lock
+    // location. Fail closed rather than trusting a possibly overridden $HOME.
+    let Some(real_home) = real_home else {
+        return true;
+    };
+    let real_home = Some(real_home);
+    let normalize =
+        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    if let (Some(env_home), Some(real)) = (env_home, real_home)
+        && !env_home.is_empty()
+        && normalize(std::path::Path::new(env_home)) != normalize(real)
+    {
+        return true;
+    }
+    let real_jcode_home = real_home.map(|home| home.join(".jcode"));
+    let real_jcode_home = real_jcode_home.as_deref();
 
     // No explicit override: the real user's default `~/.jcode`.
     let Some(custom_home) = custom_home else {
@@ -272,8 +377,6 @@ fn is_menubar_sandbox(
         // No real home to compare against: treat any explicit override as a sandbox.
         return true;
     };
-    let normalize =
-        |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     normalize(custom) != normalize(real)
 }
 
@@ -439,7 +542,7 @@ mod macos {
         // to spawn from sandboxes) plus the global singleton lock below, but a
         // stray `jcode menubar` invoked directly inside a test harness should
         // still never realize a status item.
-        if super::env_truthy("JCODE_TEST_SESSION") || super::env_truthy("JCODE_TEMP_SERVER") {
+        if super::running_in_menubar_sandbox() {
             return;
         }
 
@@ -952,27 +1055,31 @@ mod tests {
         use std::ffi::OsStr;
         use std::path::Path;
 
-        let real = Path::new("/Users/me/.jcode");
+        let real = Path::new("/Users/me");
+        let home = Some(OsStr::new("/Users/me"));
 
         // Real user, no override: not a sandbox -> owns the menu bar.
-        assert!(!is_menubar_sandbox(false, false, None, Some(real)));
+        assert!(!is_menubar_sandbox(false, false, None, home, Some(real)));
+        assert!(!is_menubar_sandbox(false, false, None, None, Some(real)));
         // Override equal to the real home is still the real user.
         assert!(!is_menubar_sandbox(
             false,
             false,
             Some(OsStr::new("/Users/me/.jcode")),
+            home,
             Some(real),
         ));
 
         // Explicit test/temp markers force sandbox regardless of home.
-        assert!(is_menubar_sandbox(true, false, None, Some(real)));
-        assert!(is_menubar_sandbox(false, true, None, Some(real)));
+        assert!(is_menubar_sandbox(true, false, None, home, Some(real)));
+        assert!(is_menubar_sandbox(false, true, None, home, Some(real)));
 
         // A throwaway sandbox home (e2e / self-dev / onboarding) is a sandbox.
         assert!(is_menubar_sandbox(
             false,
             false,
             Some(OsStr::new("/private/tmp/jcode-e2e-home-xyz")),
+            home,
             Some(real),
         ));
 
@@ -981,7 +1088,146 @@ mod tests {
             false,
             false,
             Some(OsStr::new("/private/tmp/jcode-e2e-home-xyz")),
+            home,
             None,
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menubar_sandbox_detects_consistent_home_override() {
+        use std::path::Path;
+
+        // HOME and JCODE_HOME both overridden consistently (the harness case
+        // that produced duplicate status items) must be a sandbox.
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_home = tmp.path().join("home");
+        std::fs::create_dir_all(fake_home.join(".jcode")).unwrap();
+        let real = Path::new("/Users/me");
+        assert!(is_menubar_sandbox(
+            false,
+            false,
+            Some(fake_home.join(".jcode").as_os_str()),
+            Some(fake_home.as_os_str()),
+            Some(real),
+        ));
+        // Foreign HOME with no JCODE_HOME override is also a sandbox.
+        assert!(is_menubar_sandbox(
+            false,
+            false,
+            None,
+            Some(fake_home.as_os_str()),
+            Some(real),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menubar_sandbox_accepts_symlinked_real_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join(".jcode")).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(!is_menubar_sandbox(
+            false,
+            false,
+            Some(link.join(".jcode").as_os_str()),
+            Some(link.as_os_str()),
+            Some(&real),
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn menubar_sandbox_fails_closed_without_passwd_home() {
+        use std::ffi::OsStr;
+        // passwd lookup failed (real_home == None): always a sandbox, with or
+        // without HOME / JCODE_HOME overrides, so no helper and no lock split.
+        assert!(is_menubar_sandbox(false, false, None, None, None));
+        assert!(is_menubar_sandbox(
+            false,
+            false,
+            None,
+            Some(OsStr::new("/tmp/x")),
+            None
+        ));
+        assert!(is_menubar_sandbox(
+            false,
+            false,
+            Some(OsStr::new("/tmp/x/.jcode")),
+            Some(OsStr::new("/tmp/x")),
+            None,
+        ));
+    }
+
+    #[test]
+    fn menubar_helper_pids_matches_only_exact_menubar_argv() {
+        let ps = "  100 /Users/me/.local/bin/jcode menubar\n\
+                  101 /Users/me/.jcode/builds/versions/1.2/jcode menubar\n\
+                  102 /Users/me/.local/bin/jcode serve\n\
+                  103 /Users/me/.local/bin/jcode menubar --x\n\
+                  104 /usr/bin/vim menubar\n\
+                  105 /Users/me/.local/bin/jcode menubar\n\
+                  junk\n";
+        assert_eq!(menubar_helper_pids(ps, 105), vec![100, 101]);
+    }
+
+    const PASSWD_PROBE_ENV: &str = "JCODE_MENUBAR_PASSWD_PROBE";
+
+    /// Child-mode helper: a no-op unless spawned with PASSWD_PROBE_ENV set, in
+    /// which case it prints what `passwd_home_dir()` returns under the child's
+    /// overridden HOME.
+    #[cfg(unix)]
+    #[test]
+    fn passwd_home_probe_child() {
+        if std::env::var_os(PASSWD_PROBE_ENV).is_none() {
+            return;
+        }
+        let home = passwd_home_dir().expect("passwd home");
+        println!("PASSWD_HOME={}", home.display());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passwd_home_matches_getpwuid_and_ignores_home_env() {
+        use std::ffi::CStr;
+        use std::os::unix::ffi::OsStrExt;
+        // SAFETY: getpwuid returns a pointer to static storage; read immediately.
+        let expected = unsafe {
+            let pw = libc::getpwuid(libc::getuid());
+            assert!(!pw.is_null());
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+                CStr::from_ptr((*pw).pw_dir).to_bytes(),
+            ))
+        };
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(passwd_home_dir_for_uid(uid).expect("passwd home"), expected);
+
+        // Run the probe in a child with HOME pointing elsewhere. This process's
+        // own HOME is never mutated (tests run in parallel).
+        let fake_home = tempfile::tempdir().unwrap();
+        assert_ne!(fake_home.path(), expected.as_path());
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::commands::menubar::tests::passwd_home_probe_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(PASSWD_PROBE_ENV, "1")
+            .env("HOME", fake_home.path())
+            .output()
+            .expect("spawn probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "probe failed: {stdout}");
+        let got = stdout
+            .lines()
+            .find_map(|line| {
+                let rest = &line[line.find("PASSWD_HOME=")? + "PASSWD_HOME=".len()..];
+                Some(rest.trim_end())
+            })
+            .unwrap_or_else(|| panic!("probe printed no home: {stdout}"));
+        assert_eq!(std::path::Path::new(got), expected.as_path());
     }
 }

@@ -2527,7 +2527,7 @@
       "unwrap_or_default": 9
     },
     "src/cli/commands/menubar.rs": {
-      "dot_ok": 3,
+      "dot_ok": 4,
       "let_underscore": 2,
       "unwrap_or_default": 0
     },
