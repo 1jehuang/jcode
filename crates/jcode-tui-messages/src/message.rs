@@ -14,6 +14,9 @@ pub struct DisplayMessage {
     pub title: Option<String>,
     /// Full tool call data for role="tool" messages.
     pub tool_data: Option<ToolCall>,
+    /// Tool execution duration in milliseconds (from the stored tool
+    /// result). Tool rows render it as a compact duration badge (#1453).
+    pub tool_duration_ms: Option<u64>,
 }
 
 impl DisplayMessage {
@@ -26,6 +29,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -38,6 +42,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -50,6 +55,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -63,6 +69,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Usage".to_string()),
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -76,6 +83,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Overnight".to_string()),
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -91,6 +99,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Todos".to_string()),
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -103,6 +112,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -115,6 +125,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -127,6 +138,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -139,6 +151,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -151,6 +164,7 @@ impl DisplayMessage {
             duration_secs: Some(duration_secs),
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -163,6 +177,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: Some(tool_data),
+            tool_duration_ms: None,
         }
     }
 
@@ -175,6 +190,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -187,6 +203,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -202,6 +219,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -216,6 +234,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -228,6 +247,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: item.tool_data,
+            tool_duration_ms: item.tool_duration_ms,
         }
     }
 
@@ -244,6 +264,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: Some(tool_data),
+            tool_duration_ms: None,
         }
     }
 
@@ -427,6 +448,7 @@ mod tests {
                 intent: None,
                 thought_signature: None,
             }),
+            tool_duration_ms: None,
         }
     }
 
@@ -454,6 +476,7 @@ mod tests {
             content: "done".to_string(),
             tool_calls: vec!["read".to_string()],
             tool_data: None,
+            tool_duration_ms: None,
             stored_index: None,
         };
 

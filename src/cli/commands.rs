@@ -3271,16 +3271,23 @@ fn emit_ndjson_event(
             name,
             output,
             error,
-        } => write_json_line(
-            stdout,
-            &serde_json::json!({
+            duration_ms,
+        } => {
+            // Omit the field when unmeasured so consumers keying on presence
+            // (not on null) keep their old contract; serde cannot express
+            // skip_serializing_if inside json!.
+            let mut event = serde_json::json!({
                 "type": "tool_done",
                 "id": id,
                 "name": name,
                 "output": output,
                 "error": error,
-            }),
-        ),
+            });
+            if let Some(duration_ms) = duration_ms {
+                event["duration_ms"] = serde_json::json!(duration_ms);
+            }
+            write_json_line(stdout, &event)
+        }
         ServerEvent::TokenUsage {
             input,
             output,

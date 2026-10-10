@@ -442,6 +442,7 @@ impl App {
                                                     duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
+                                                    tool_duration_ms: None,
                                                 });
                                                 }
                                             }
@@ -501,6 +502,7 @@ impl App {
                                                     duration_secs: None,
                                                     title: None,
                                                     tool_data: None,
+                                                    tool_duration_ms: None,
                                                 });
                                                 }
                                             }
@@ -514,6 +516,7 @@ impl App {
                                             duration_secs: None,
                                             title: None,
                                             tool_data: None,
+                                            tool_duration_ms: None,
                                         });
                                         // Clear streaming state and continue with new turn
                                         self.clear_streaming_render_state();
@@ -703,6 +706,7 @@ impl App {
                                                 duration_secs: None,
                                                 title: None,
                                                 tool_data: Some(tool.clone()),
+                                                tool_duration_ms: None,
                                             });
 
                                             tool_calls.push(tool);
@@ -1088,6 +1092,7 @@ impl App {
                                             duration_secs: None,
                                             title: Some("Generated image".to_string()),
                                             tool_data: Some(tool_call),
+                                            tool_duration_ms: None,
                                         });
                                         if let Some(image) = crate::message::generated_image_rendered_image(
                                             &id,
@@ -1295,6 +1300,7 @@ impl App {
                         duration_secs: duration,
                         title: None,
                         tool_data: None,
+                        tool_duration_ms: None,
                     });
                     self.push_turn_footer(duration);
                 }
@@ -1312,6 +1318,7 @@ impl App {
                             duration_secs: duration,
                             title: None,
                             tool_data: None,
+                            tool_duration_ms: None,
                         });
                     }
                 }
@@ -1484,6 +1491,7 @@ impl App {
                                                     duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
+                                                    tool_duration_ms: None,
                                                 });
                                                 }
                                             }
@@ -1623,10 +1631,11 @@ impl App {
                 };
 
                 // Update the tool's DisplayMessage with the output
-                let _ = self.replace_latest_tool_display_message(
+                let _ = self.replace_latest_tool_display_message_with_duration(
                     &tc.id,
                     tool_title.clone(),
                     output.clone(),
+                    Some(tool_duration_ms),
                 );
 
                 self.add_provider_message(Message::tool_result_with_duration(

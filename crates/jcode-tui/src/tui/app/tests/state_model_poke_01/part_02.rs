@@ -234,6 +234,7 @@ fn test_removed_pinned_diff_config_renders_inline_without_side_pane() {
                 "content": "fn demo() {}\n"
             }),
             intent: None, thought_signature: None, }),
+        tool_duration_ms: None,
     }];
     app.bump_display_messages_version();
 
@@ -275,6 +276,7 @@ fn test_file_diff_uses_left_splitter_instead_of_rounded_box() {
                 "content": "fn demo() {\n    println!(\"hi\");\n}\n"
             }),
             intent: None, thought_signature: None, }),
+        tool_duration_ms: None,
     }];
     app.bump_display_messages_version();
 
