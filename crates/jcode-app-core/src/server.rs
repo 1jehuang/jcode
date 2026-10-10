@@ -117,6 +117,37 @@ fn idle_monitor_should_start(client_count: usize, has_live_headless_worker: bool
     client_count == 0 && !has_live_headless_worker
 }
 
+/// How this server treats a reload marker written by another process.
+///
+/// `jcode.reload` is one file per runtime dir, shared by every socket. Since
+/// the daemon lock became socket-scoped, a server on a custom socket can start
+/// while the shared daemon is mid-reload, and both marker call sites below
+/// treat a pid mismatch as "stale" and delete it, erasing that daemon's
+/// in-flight `Starting` state and dropping the guard that makes clients wait
+/// while it drains, so they would send work into a daemon about to interrupt
+/// it.
+///
+/// Two production call sites consult this, and missing either leaves the hole
+/// open:
+///
+/// - `clear_reload_marker_if_stale_for_pid` during bind;
+/// - `publish_reload_socket_ready` once the accept loops are live, whose
+///   `state.pid != current_pid` branch also clears.
+///
+/// Note what is *not* restricted: a custom-socket server still reloads itself
+/// (`await_reload_signal` runs on every server), and on Unix the exec keeps
+/// the same pid, so it must still advance its own marker to `SocketReady`.
+/// Suppressing the publish outright left that marker stuck in `Starting` and
+/// the server rejecting messages until it expired. The policy is therefore by
+/// marker owner, not by socket.
+fn reload_marker_policy(socket_path: &std::path::Path) -> reload_state::ForeignMarkerPolicy {
+    if self::socket::is_shared_socket(socket_path) {
+        reload_state::ForeignMarkerPolicy::MayClear
+    } else {
+        reload_state::ForeignMarkerPolicy::Preserve
+    }
+}
+
 async fn has_live_headless_worker(sessions: &SessionAgents, swarm_state: &SwarmState) -> bool {
     let live_sessions: HashSet<String> = sessions.read().await.keys().cloned().collect();
     swarm_state
@@ -603,25 +634,26 @@ use self::state::{
 pub use crate::plan::{SwarmTaskProgress, VersionedPlan};
 
 pub use self::await_members_state::pending_await_members_for_session;
-use self::reload_state::clear_reload_marker_if_stale_for_pid;
 #[cfg(test)]
 pub(crate) use self::reload_state::subscribe_reload_signal_for_tests;
 pub use self::reload_state::{
     ReloadAck, ReloadPhase, ReloadSignal, ReloadState, ReloadWaitStatus, acknowledge_reload_signal,
-    await_reload_handoff, clear_reload_marker, inspect_reload_wait_status,
-    publish_reload_socket_ready, recent_reload_state, reload_marker_active, reload_marker_exists,
-    reload_marker_path, reload_process_alive, reload_state_summary, send_reload_signal,
-    wait_for_reload_ack, wait_for_reload_handoff_event, write_reload_marker, write_reload_state,
+    await_reload_handoff, clear_reload_marker, inspect_reload_wait_status, recent_reload_state,
+    reload_marker_active, reload_marker_exists, reload_marker_path, reload_process_alive,
+    reload_state_summary, send_reload_signal, wait_for_reload_ack, wait_for_reload_handoff_event,
+    write_reload_marker, write_reload_state,
 };
+use self::reload_state::{clear_reload_marker_if_stale_for_pid, publish_reload_socket_ready};
 
 pub use self::lifecycle::configure_temporary_server;
 #[cfg(unix)]
 pub use self::socket::spawn_server_notify;
 #[cfg(unix)]
-use self::socket::{acquire_daemon_lock, mark_close_on_exec};
+use self::socket::{acquire_daemon_lock_for, mark_close_on_exec};
 pub use self::socket::{
-    cleanup_socket_pair, connect_socket, debug_socket_path, has_live_listener, is_server_ready,
-    reap_stale_socket_if_dead, set_socket_path, socket_path, wait_for_server_ready,
+    cleanup_socket_pair, connect_socket, debug_socket_path, default_socket_path, has_live_listener,
+    is_server_ready, is_shared_socket, reap_stale_socket_if_dead, set_socket_path, socket_path,
+    socket_path_is_custom, wait_for_server_ready,
 };
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
@@ -657,6 +689,43 @@ const IDLE_TIMEOUT_SECS: u64 = 300;
 /// comfortably below the default idle threshold so reclamation is prompt and
 /// predictable rather than delayed by another full sampling interval.
 const EMBEDDING_IDLE_CHECK_SECS: u64 = 10;
+
+#[cfg(test)]
+mod reload_marker_scope_tests {
+    use super::reload_marker_policy;
+    use super::reload_state::ForeignMarkerPolicy;
+
+    /// Only the shared socket's server may clear a reload marker owned by
+    /// another process; a custom-socket server preserves it, because clearing
+    /// would erase the shared daemon's in-flight `Starting` state (review of
+    /// #1768). Both the bind-time clear and the socket-ready publish consult
+    /// this. The publish path was missed on the first attempt and reopened
+    /// the hole. The policy says nothing about a server's *own* marker, which
+    /// it must always be free to advance.
+    #[test]
+    fn only_shared_socket_server_may_clear_a_foreign_reload_marker() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+        let runtime_dir = std::fs::canonicalize(temp.path()).expect("canonicalize tempdir");
+        crate::env::set_var("JCODE_RUNTIME_DIR", &runtime_dir);
+
+        assert_eq!(
+            reload_marker_policy(&runtime_dir.join("jcode.sock")),
+            ForeignMarkerPolicy::MayClear
+        );
+        assert_eq!(
+            reload_marker_policy(&runtime_dir.join("run-isolated.sock")),
+            ForeignMarkerPolicy::Preserve
+        );
+
+        if let Some(prev_runtime) = prev_runtime {
+            crate::env::set_var("JCODE_RUNTIME_DIR", prev_runtime);
+        } else {
+            crate::env::remove_var("JCODE_RUNTIME_DIR");
+        }
+    }
+}
 
 #[cfg(test)]
 mod idle_monitor_tests {
@@ -1239,7 +1308,10 @@ impl Server {
 
         // Signal readiness to the spawning client only after the accept loops
         // are live, so a "ready" server can immediately handle requests.
-        publish_reload_socket_ready();
+        //
+        // A custom-socket server publishes its own reload normally; the policy
+        // only stops it from clearing a marker another process owns.
+        publish_reload_socket_ready(reload_marker_policy(&self.socket_path));
         signal_ready_fd();
 
         // Persist auxiliary discovery metadata after the server is already live.
@@ -2305,7 +2377,7 @@ impl Server {
         }
 
         #[cfg(unix)]
-        let _daemon_lock = acquire_daemon_lock()?;
+        let _daemon_lock = acquire_daemon_lock_for(&self.socket_path)?;
 
         if socket_has_live_listener(&self.socket_path).await {
             anyhow::bail!(
@@ -2331,7 +2403,10 @@ impl Server {
 
         // Preserve an in-flight reload marker for exec-based reloads owned by this
         // process, but clear stale markers from unrelated/stale processes.
-        clear_reload_marker_if_stale_for_pid(std::process::id());
+        clear_reload_marker_if_stale_for_pid(
+            std::process::id(),
+            reload_marker_policy(&self.socket_path),
+        );
 
         // Reclaim disk from stale agent scratch work (old cargo target dirs,
         // repo clones) and superseded binaries in builds/versions. This runs in
