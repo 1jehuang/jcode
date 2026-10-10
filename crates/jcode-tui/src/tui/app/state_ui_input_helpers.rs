@@ -197,7 +197,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "/update-rehearsal",
         "Self-dev: run the real updater against a fake local release in a sandbox (Alt+Shift+U)",
     ),
-    RegisteredCommand::public("/resume", "Open session picker"),
+    RegisteredCommand::public(
+        "/resume",
+        "Open session picker (/resume <search> to filter)",
+    ),
     RegisteredCommand::public("/sessions", "Alias for /resume"),
     RegisteredCommand::public("/session", "Alias for /resume"),
     RegisteredCommand::public("/active", "Manage live sessions (working vs ready)"),
