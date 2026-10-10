@@ -66,6 +66,7 @@ impl App {
         }
 
         self.queued_messages = queued_messages;
+        self.queued_commands = restored.queued_commands;
         if self.has_queued_followups() {
             if self.is_remote {
                 // Do not synthesize a processing turn for restored remote follow-ups.
@@ -436,6 +437,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
             upstream_provider: None,
@@ -900,6 +902,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
             upstream_provider: None,

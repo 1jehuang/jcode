@@ -656,6 +656,10 @@ impl crate::tui::TuiState for App {
         &self.queued_messages
     }
 
+    fn queued_commands(&self) -> &[String] {
+        &self.queued_commands
+    }
+
     fn interleave_message(&self) -> Option<&str> {
         self.interleave_message.as_deref()
     }

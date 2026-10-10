@@ -934,6 +934,9 @@ pub struct App {
     should_quit: bool,
     // Message queueing
     queued_messages: Vec<String>,
+    /// Slash (`/...`) and shell (`!...`) commands queued with Ctrl+Enter while
+    /// a turn was running. They run as real commands once the turn ends.
+    queued_commands: Vec<String>,
     hidden_queued_system_messages: Vec<String>,
     current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)

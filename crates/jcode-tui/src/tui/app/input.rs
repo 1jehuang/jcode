@@ -1369,8 +1369,87 @@ pub(super) fn clear_input_for_escape(app: &mut App) {
 }
 
 pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
+    expand_paste_placeholders_with(&app.pasted_contents, input)
+}
+
+pub(super) fn queue_message(app: &mut App) {
+    let prepared = take_prepared_input(app);
+    app.queued_messages.push(prepared.expanded);
+}
+
+/// True for composer text that runs as a client command rather than a prompt:
+/// a slash command (`/compact`) or an input-line shell command (`!ls`).
+pub(super) fn is_queueable_command_input(input: &str) -> bool {
+    let trimmed = input.trim();
+    trimmed.starts_with('/') || extract_input_shell_command(trimmed).is_some()
+}
+
+/// Ctrl+Enter on a slash or shell command while a turn is running: hold the
+/// command and run it as a real command once the turn ends, instead of
+/// running it now. Returns true when the command was queued.
+pub(super) fn try_queue_command(app: &mut App) -> bool {
+    if !app.is_processing() || !is_queueable_command_input(&app.input) {
+        return false;
+    }
+    let raw_input = std::mem::take(&mut app.input);
+    let expanded = expand_paste_placeholders(app, &raw_input);
+    app.pasted_contents.clear();
+    app.cursor_pos = 0;
+    app.clear_input_undo_history();
+    app.reset_tab_completion();
+    // Close any picker preview the command text opened (e.g. `/model`).
+    app.sync_model_picker_preview_from_input();
+    let command = expanded.trim().to_string();
+    app.set_status_notice(format!("Queued {} to run after this turn", command));
+    app.queued_commands.push(command);
+    true
+}
+
+/// The composer state a queued command temporarily displaces while it runs.
+pub(super) struct ComposerDraft {
+    input: String,
+    cursor_pos: usize,
+    pending_images: Vec<(String, String)>,
+    pasted_contents: Vec<String>,
+}
+
+/// Put `command` in the composer so the normal Enter path can run it,
+/// returning whatever the user was drafting so it can be restored afterwards.
+pub(super) fn swap_in_queued_command(app: &mut App, command: String) -> ComposerDraft {
+    app.set_status_notice(format!("Running queued {}", command));
+    let draft = ComposerDraft {
+        input: std::mem::replace(&mut app.input, command),
+        cursor_pos: app.cursor_pos,
+        pending_images: std::mem::take(&mut app.pending_images),
+        pasted_contents: std::mem::take(&mut app.pasted_contents),
+    };
+    app.cursor_pos = app.input.len();
+    draft
+}
+
+/// Restore the user's draft after a queued command ran. A command that left
+/// its own text in the composer (e.g. one that pre-fills input) wins; the
+/// draft then goes to prompt history so Up recalls it instead of losing it.
+pub(super) fn restore_composer_draft(app: &mut App, draft: ComposerDraft) {
+    if draft.input.is_empty() && draft.pending_images.is_empty() {
+        return;
+    }
+    if app.input.is_empty() {
+        app.input = draft.input;
+        app.cursor_pos = draft.cursor_pos.min(app.input.len());
+        app.pending_images = draft.pending_images;
+        app.pasted_contents = draft.pasted_contents;
+        app.sync_model_picker_preview_from_input();
+    } else {
+        let expanded = expand_paste_placeholders_with(&draft.pasted_contents, &draft.input);
+        app.record_prompt_history(&expanded);
+        app.pending_images.extend(draft.pending_images);
+    }
+}
+
+fn expand_paste_placeholders_with(pasted_contents: &[String], input: &str) -> String {
     let mut result = input.to_string();
-    for content in app.pasted_contents.iter().rev() {
+    for content in pasted_contents.iter().rev() {
         let placeholder = paste_placeholder(content);
         if let Some(pos) = result.rfind(&placeholder) {
             result.replace_range(pos..pos + placeholder.len(), content);
@@ -1379,9 +1458,19 @@ pub(super) fn expand_paste_placeholders(app: &mut App, input: &str) -> String {
     result
 }
 
-pub(super) fn queue_message(app: &mut App) {
-    let prepared = take_prepared_input(app);
-    app.queued_messages.push(prepared.expanded);
+/// Run commands queued with Ctrl+Enter in a local (non-remote) session. Stops
+/// as soon as one starts a turn; the rest wait for that turn to end.
+pub(super) fn run_queued_commands_local(app: &mut App) {
+    while !app.is_processing
+        && !app.pending_turn
+        && !app.should_quit
+        && !app.queued_commands.is_empty()
+    {
+        let command = app.queued_commands.remove(0);
+        let draft = swap_in_queued_command(app, command);
+        app.submit_input();
+        restore_composer_draft(app, draft);
+    }
 }
 
 pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
@@ -1421,6 +1510,14 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
             count,
             if count == 1 { "" } else { "s" }
         ));
+    } else if let Some(command) = app.queued_commands.pop() {
+        // Commands are recalled one at a time (newest first): joining several
+        // would turn them into a single malformed command.
+        app.input = command;
+        app.cursor_pos = app.input.len();
+        app.sync_model_picker_preview_from_input();
+        app.set_status_notice("Retrieved queued command for editing");
+        return true;
     }
 
     had_pending
@@ -1959,6 +2056,10 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
 }
 
 pub(super) fn handle_alternate_enter(app: &mut App) {
+    if try_queue_command(app) {
+        return;
+    }
+
     if app.activate_picker_from_preview() {
         return;
     }

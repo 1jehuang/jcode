@@ -112,9 +112,9 @@ pub(super) struct RegistryInputs<'a> {
 /// alternate enter queues; with it on, the roles swap.
 fn alternate_enter_description(queue_mode: bool) -> &'static str {
     if queue_mode {
-        "send now, bypassing queue mode"
+        "send now, bypassing queue mode (/ and ! commands still queue)"
     } else {
-        "queue this message until the turn ends"
+        "queue this message or / ! command until the turn ends"
     }
 }
 

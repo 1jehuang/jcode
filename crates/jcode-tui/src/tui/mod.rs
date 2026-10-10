@@ -441,6 +441,10 @@ pub trait TuiState {
     fn cursor_pos(&self) -> usize;
     fn is_processing(&self) -> bool;
     fn queued_messages(&self) -> &[String];
+    /// Slash/shell commands queued with Ctrl+Enter to run after the turn.
+    fn queued_commands(&self) -> &[String] {
+        &[]
+    }
     fn interleave_message(&self) -> Option<&str>;
     /// Messages sent as soft interrupt but not yet injected (shown in queue preview)
     fn pending_soft_interrupts(&self) -> &[String];

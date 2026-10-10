@@ -95,6 +95,10 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
         app.submit_input();
         needs_redraw = true;
     }
+    if !app.is_processing && !app.pending_queued_dispatch && !app.queued_commands.is_empty() {
+        super::input::run_queued_commands_local(app);
+        needs_redraw = true;
+    }
     let ops = app.stream_buffer.flush();
     if app.apply_stream_ops(ops) {
         needs_redraw = true;

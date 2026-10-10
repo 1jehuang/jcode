@@ -280,7 +280,12 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         return needs_redraw;
     }
 
-    if !app.is_processing && !app.queued_messages.is_empty() {
+    if !app.is_processing && !app.queued_commands.is_empty() {
+        // Commands queued with Ctrl+Enter run before queued prompts. Hand them
+        // to the follow-up dispatcher, which runs them one at a time.
+        app.pending_queued_dispatch = true;
+        needs_redraw = true;
+    } else if !app.is_processing && !app.queued_messages.is_empty() {
         let queued_messages = std::mem::take(&mut app.queued_messages);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
@@ -1544,6 +1549,11 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
+    if !app.queued_commands.is_empty() {
+        run_next_queued_remote_command(app, remote).await;
+        return;
+    }
+
     if let Some(interleave_msg) = app.interleave_message.take() {
         // Carry the staged attachments through. A local revert of #627 had this
         // passing `vec![]`, which silently dropped every image on an interleaved
@@ -1645,6 +1655,26 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             );
             app.hidden_queued_system_messages.insert(0, combined);
         }
+    }
+}
+
+/// Run the oldest command queued with Ctrl+Enter through the same path as a
+/// plain Enter, so it behaves exactly as if the user typed it now. One per
+/// call: if it starts a turn, the rest wait for that turn to end.
+async fn run_next_queued_remote_command(app: &mut App, remote: &mut RemoteConnection) {
+    if app.queued_commands.is_empty() {
+        return;
+    }
+    let command = app.queued_commands.remove(0);
+    crate::logging::info(&format!("Running queued command: {}", command));
+    let draft = input::swap_in_queued_command(app, command.clone());
+    let result = key_handling::submit_remote_enter_input(app, remote).await;
+    input::restore_composer_draft(app, draft);
+    if let Err(error) = result {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Queued command {} failed: {}",
+            command, error
+        )));
     }
 }
 
