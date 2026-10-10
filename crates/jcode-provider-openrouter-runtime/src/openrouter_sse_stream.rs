@@ -19,6 +19,20 @@ fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static 
     "Hint: check network connectivity, DNS/TLS, that the base URL includes the API version (usually /v1), and that the model exists on the provider."
 }
 
+/// Body markers for a guardrail block. OpenRouter answers a blocked prompt with
+/// `{"error":{"message":"Request blocked by content filter: [CREDIT_CARD]"}}`,
+/// and OpenAI-style endpoints report the `content_filter` code.
+fn names_content_filter(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("blocked by content filter") || lower.contains("content_filter")
+}
+
+/// A blocked prompt is neither a credential problem nor transient: the provider
+/// read the text and refused it, so a retry, and any failover lane, resends the
+/// blocked text. Say that instead of sending the user to check a key that was
+/// never the problem (FU-149).
+const CONTENT_FILTER_HINT: &str = "Hint: the provider's content filter blocked this request text, so the API key is not the problem. Retrying, or failing over to another provider, resends the same text and is likely to be blocked again. Remove or rewrite the flagged content and send the request again.";
+
 /// Hint for a request the server answered with an error status. The network
 /// is working (a response came back), so connectivity advice would mislead:
 /// point at the key, the account balance, or the model instead.
@@ -26,6 +40,12 @@ fn http_status_hint(status: u16, api_base: &str, model: &str) -> &'static str {
     let endpoint_hint = local_endpoint_troubleshooting_hint(api_base, model);
     let is_local = !endpoint_hint.starts_with("Hint: check network");
     match status {
+        // A local server is normally handed no hosted key at all (the error
+        // block prints `auth: local endpoint (no auth)`), so blaming the API
+        // key contradicts the evidence directly above the hint.
+        401 | 403 if is_local => {
+            "Hint: the local server refused the request, so the API key of a hosted provider is not the problem. Check the server's own auth and route settings, the base URL path, and - if this server proxies a hosted provider - that provider's key."
+        }
         401 | 403 => {
             "Hint: the provider rejected the API key. Check that the key is valid and allowed to use this model, or switch to another provider with /model."
         }
@@ -252,7 +272,11 @@ async fn stream_response(
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
         let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-        let hint = http_status_hint(status.as_u16(), &api_base, &model);
+        let hint = if names_content_filter(&body) {
+            CONTENT_FILTER_HINT
+        } else {
+            http_status_hint(status.as_u16(), &api_base, &model)
+        };
         return Err(jcode_provider_core::retry_after::error_with_retry_after(
             format!(
                 "OpenAI-compatible chat request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}\n{}",
@@ -482,5 +506,60 @@ mod tests {
         assert!(
             http_status_hint(503, "http://localhost:11434/v1", "llama3.2").contains("ollama serve")
         );
+    }
+
+    /// FU-149: the measured OpenRouter guardrail body must never be reported as
+    /// a rejected API key. Before the fix the hint read "the provider rejected
+    /// the API key" two lines below a body naming a content filter.
+    #[test]
+    fn content_filter_body_is_not_reported_as_a_bad_api_key() {
+        let body = r#"{"error": {"message": "Request blocked by content filter: [CREDIT_CARD]", "code": 403}}"#;
+        assert!(names_content_filter(body));
+        // OpenAI-style code instead of prose.
+        assert!(names_content_filter(
+            r#"{"error":{"code":"content_filter"}}"#
+        ));
+        assert!(!names_content_filter(
+            r#"{"error":{"message":"Forbidden"}}"#
+        ));
+
+        let hint = if names_content_filter(body) {
+            CONTENT_FILTER_HINT
+        } else {
+            http_status_hint(
+                403,
+                "https://openrouter.ai/api/v1",
+                "deepseek/deepseek-v4-flash",
+            )
+        };
+        assert_eq!(hint, CONTENT_FILTER_HINT);
+        assert!(hint.contains("content filter"), "{hint}");
+        assert!(!hint.contains("rejected the API key"), "{hint}");
+        // The actionable instruction is to change the text, not the lane.
+        assert!(hint.contains("Remove or rewrite"), "{hint}");
+    }
+
+    /// A 403 that names no filter still points at the key on a hosted endpoint.
+    #[test]
+    fn plain_403_still_blames_a_hosted_api_key() {
+        assert!(!names_content_filter(
+            r#"{"error":{"message":"Forbidden"}}"#
+        ));
+        let hint = http_status_hint(403, "https://api.example.com/v1", "m");
+        assert!(hint.contains("rejected the API key"), "{hint}");
+    }
+
+    /// FU-149 also measured a local stub answering 403 while the error block
+    /// printed `auth: local endpoint (no auth)`; the hint must not contradict
+    /// that line.
+    #[test]
+    fn local_403_does_not_blame_a_hosted_api_key() {
+        let hint = http_status_hint(403, "http://127.0.0.1:18765/v1", "m");
+        assert!(hint.contains("local server refused"), "{hint}");
+        assert!(!hint.contains("rejected the API key"), "{hint}");
+        // A refused local request gets this advice for every local endpoint: the
+        // Ollama/LM Studio "server is not running" hints would not explain a 403.
+        let ollama = http_status_hint(403, "http://localhost:11434/v1", "llama3.2");
+        assert!(ollama.contains("local server refused"), "{ollama}");
     }
 }
