@@ -1289,16 +1289,26 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return true;
             }
+            // Clamp server hints so a bogus value cannot park the turn for days.
             let reset_duration = retry_after_secs
-                .map(Duration::from_secs)
+                .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
                 .or_else(|| parse_rate_limit_error(&message));
-            if let Some(reset_duration) = reset_duration {
-                app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                if let Some(is_system) = app
+            // A stale reset or a limit that never clears must not resend the
+            // same turn forever. Rate-limit holds share the per-turn retry
+            // budget, which begin_remote_send carries across resends.
+            let rate_limit_retry_exhausted = reset_duration.is_some()
+                && app
                     .rate_limit_pending_message
                     .as_ref()
-                    .map(|pending| pending.is_system)
-                {
+                    .is_some_and(|pending| pending.retry_attempts >= App::AUTO_RETRY_MAX_ATTEMPTS);
+            if let Some(reset_duration) = reset_duration
+                && !rate_limit_retry_exhausted
+            {
+                if let Some(is_system) = app.rate_limit_pending_message.as_mut().map(|pending| {
+                    pending.retry_attempts = pending.retry_attempts.saturating_add(1);
+                    pending.is_system
+                }) {
+                    app.rate_limit_reset = Some(Instant::now() + reset_duration);
                     let rate_limit_line =
                         app.rate_limit_notice_with_nudge(reset_duration.as_secs());
                     app.push_display_message(DisplayMessage::system(rate_limit_line));
@@ -1358,6 +1368,19 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            if rate_limit_retry_exhausted {
+                // Do not fall through to the generic retry or turn-end
+                // auto-poke: either would immediately restart the loop.
+                app.pause_exhausted_auto_resume(
+                    format!(
+                        "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your message is back in the input box. Wait for the limit to reset, check the provider account, or switch with /model.",
+                        App::AUTO_RETRY_MAX_ATTEMPTS
+                    ),
+                    "Paused: provider limit did not clear",
+                );
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                return false;
+            }
             // Connectivity failures (DNS, connection reset, no route, transient
             // TLS, timeouts) are always transient: the request never reached the
             // provider. Hold the turn and resume when the network recovers,
@@ -1370,6 +1393,21 @@ pub(in crate::tui::app) fn handle_server_event(
             if is_connectivity_error
                 && app.schedule_pending_remote_network_wait_with_force(&message, true)
             {
+                return false;
+            }
+            if is_connectivity_error && app.rate_limit_pending_message.is_some() {
+                // The generic connectivity probe can succeed while this
+                // provider's host stays unreachable (for example a DNS
+                // failure for one endpoint). The budget is spent: pause
+                // instead of resending, and keep auto-poke from restarting it.
+                app.pause_exhausted_auto_resume(
+                    format!(
+                        "Connection retry limit reached after {} automatic resumes. Your message is back in the input box. Check the provider endpoint or DNS, then re-send or switch with /model.",
+                        App::AUTO_RETRY_MAX_ATTEMPTS
+                    ),
+                    "Paused: provider connection did not recover",
+                );
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
             // Credential-failure circuit breaker: repeated auth failures mean

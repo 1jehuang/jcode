@@ -146,12 +146,16 @@ impl App {
     /// Hold the in-flight remote turn until the network recovers, then resume it.
     ///
     /// Connectivity failures (DNS, connection reset, no route, transient TLS,
-    /// timeouts) are always transient: the request never reached the provider,
-    /// so resending after the network comes back is both safe and correct. When
-    /// `force` is set we wait regardless of the pending message's `auto_retry`
-    /// flag and promote it to auto-retry so the tick-based resume re-sends it.
-    /// This prevents a transient disconnect from being misclassified as a
-    /// permanent, non-retryable failure that stops auto-poke.
+    /// timeouts) usually recover: the request never reached the provider, so
+    /// resending is safe. When `force` is set (a real provider attempt just
+    /// failed) we wait regardless of the pending message's `auto_retry` flag
+    /// and promote it to auto-retry so the tick-based resume re-sends it.
+    ///
+    /// A provider-specific failure (for example DNS for one host) can persist
+    /// while the generic connectivity probe succeeds, so each forced wait
+    /// consumes one attempt from the per-turn retry budget and returns `false`
+    /// once it is spent. Offline probe re-waits (`force == false`) do not
+    /// consume attempts because no request was sent.
     pub(super) fn schedule_pending_remote_network_wait_with_force(
         &mut self,
         reason: &str,
@@ -160,6 +164,12 @@ impl App {
         let Some(pending) = self.rate_limit_pending_message.as_mut() else {
             return false;
         };
+        if force {
+            if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
+                return false;
+            }
+            pending.retry_attempts = pending.retry_attempts.saturating_add(1);
+        }
         if !pending.auto_retry {
             if force {
                 pending.auto_retry = true;
@@ -169,7 +179,8 @@ impl App {
         }
 
         let plan = crate::network_retry::wait_plan();
-        let retry_at = Instant::now() + Duration::from_secs(5);
+        let retry_at =
+            Instant::now() + Duration::from_secs(5 * u64::from(pending.retry_attempts.max(1)));
         pending.retry_at = Some(retry_at);
         self.rate_limit_reset = Some(retry_at);
         self.status = ProcessingStatus::WaitingForNetwork {
@@ -288,6 +299,20 @@ impl App {
     pub(super) fn clear_pending_remote_retry(&mut self) {
         self.rate_limit_pending_message = None;
         self.rate_limit_reset = None;
+    }
+
+    /// Stop automatically resuming a held turn whose retry budget is spent.
+    ///
+    /// Drops the held resend, disarms auto-poke (which would otherwise start
+    /// the same loop again at turn end), puts the user's prompt back in the
+    /// input box, and explains why the turn paused.
+    pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.clear_pending_remote_retry();
+        super::commands::disable_auto_poke(self);
+        self.overnight_auto_poke = None;
+        self.restore_failed_input_to_box();
+        self.push_display_message(DisplayMessage::system(format!("🛑 {message}")));
+        self.set_status_notice(notice);
     }
 
     /// Track a failed turn for the credential-failure circuit breaker.

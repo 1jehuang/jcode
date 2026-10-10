@@ -366,7 +366,7 @@ fn test_remote_fatal_model_endpoint_error_fails_fast_without_retry_budget() {
 }
 
 #[test]
-fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
+fn test_remote_connectivity_error_waits_for_network_with_bounded_retry_budget() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -402,8 +402,8 @@ fn test_remote_connectivity_error_waits_for_network_without_retry_budget() {
     let pending = app
         .rate_limit_pending_message
         .as_ref()
-        .expect("offline auto-poke should be held for network recovery");
-    assert_eq!(pending.retry_attempts, 0);
+        .expect("provider failure should be held for bounded network recovery");
+    assert_eq!(pending.retry_attempts, 1);
     assert!(app.rate_limit_reset.is_some());
     assert!(matches!(
         app.status,
@@ -466,9 +466,10 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
         .rate_limit_pending_message
         .as_ref()
         .expect("offline turn should be held for network recovery");
-    // Promoted to auto_retry so the tick-based resume re-sends it.
+    // Promoted to auto_retry so the tick-based resume re-sends it, with the
+    // provider failure consuming one attempt rather than looping forever.
     assert!(pending.auto_retry);
-    assert_eq!(pending.retry_attempts, 0);
+    assert_eq!(pending.retry_attempts, 1);
     assert!(app.rate_limit_reset.is_some());
     assert!(matches!(
         app.status,
