@@ -13,6 +13,30 @@ use std::time::{Duration, Instant, SystemTime};
 /// Longest server-requested delay a provider retry loop will honor.
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
+/// Raw `Retry-After` delay in seconds, uncapped, when the header is a plain
+/// delta-seconds value.
+///
+/// [`retry_after`] deliberately clamps to [`MAX_RETRY_AFTER`] so a hostile
+/// upstream cannot stall a turn. That clamp also hides the difference between
+/// "wait a moment" and "this quota window does not reset for days", which a
+/// caller needs in order to stop retrying and fall back to another model.
+///
+/// Observed 2026-09-25: Anthropic answered a Fable request with HTTP 429 and
+/// `retry-after: 236495` (65.7 hours, the weekly quota reset). Clamped to 60s,
+/// jcode slept the full cap on each of 3 attempts and burned ~2 minutes per
+/// turn on a request that could not succeed for days.
+pub fn retry_after_seconds_uncapped(headers: &HeaderMap) -> Option<u64> {
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(value.bytes().fold(0u64, |seconds, byte| {
+        seconds
+            .saturating_mul(10)
+            .saturating_add(u64::from(byte - b'0'))
+    }))
+}
+
 /// Parse a `Retry-After` header as delta-seconds or an HTTP date.
 ///
 /// Numeric values are parsed with saturation and then capped, so even an
