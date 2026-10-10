@@ -2469,6 +2469,7 @@ impl App {
         };
         picker.set_current_dir(current_dir);
         picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+        picker.prefer_current_dir_filter();
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Resume;
         self.set_status_notice(status);
@@ -2557,9 +2558,9 @@ impl App {
             let notice = match self.session_picker_mode {
                 SessionPickerMode::Resume => {
                     if let Some(existing) = self.session_picker_overlay.as_ref() {
-                        existing
-                            .borrow_mut()
-                            .reseed_grouped(server_groups, orphan_sessions);
+                        let mut picker = existing.borrow_mut();
+                        picker.reseed_grouped(server_groups, orphan_sessions);
+                        picker.prefer_current_dir_filter();
                     }
                     "Sessions loaded"
                 }
@@ -2593,6 +2594,7 @@ impl App {
                 let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
                 picker.set_current_dir(self.session.working_dir.clone());
                 picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+                picker.prefer_current_dir_filter();
                 self.session_picker_overlay = Some(RefCell::new(picker));
                 self.set_status_notice("Sessions loaded");
                 true

@@ -16,8 +16,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Label for the first-run suggested review action.
@@ -43,7 +45,7 @@ pub use loading::{
 };
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
-const DEFAULT_SESSION_SCAN_LIMIT: usize = 100;
+const DEFAULT_SESSION_SCAN_LIMIT: usize = 400;
 const MIN_SESSION_SCAN_LIMIT: usize = 50;
 const MAX_SESSION_SCAN_LIMIT: usize = 10_000;
 
@@ -98,6 +100,31 @@ fn normalize_dir(dir: &str) -> String {
     } else {
         stripped.to_string()
     }
+}
+
+fn dir_is_home(dir: &str) -> bool {
+    dirs::home_dir().is_some_and(|home| normalize_dir(&home.to_string_lossy()) == dir)
+}
+
+/// Shared `.git` directory of the repository containing `dir`, resolving
+/// linked worktrees (`.git` file + `commondir`) to the main repository.
+fn git_common_dir(dir: &Path) -> Option<PathBuf> {
+    for ancestor in dir.ancestors() {
+        let dot_git = ancestor.join(".git");
+        if dot_git.is_dir() {
+            return dot_git.canonicalize().ok();
+        }
+        if dot_git.is_file() {
+            let contents = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = ancestor.join(contents.trim().strip_prefix("gitdir:")?.trim());
+            let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+                Ok(rel) => gitdir.join(rel.trim()),
+                Err(_) => gitdir,
+            };
+            return common.canonicalize().ok();
+        }
+    }
+    None
 }
 
 /// Format duration since a time in a human-readable way
@@ -283,6 +310,14 @@ pub struct SessionPicker {
     /// matches this are highlighted so the user can quickly spot sessions from
     /// the same project they are currently in.
     current_dir: Option<String>,
+    /// Git common dir of `current_dir`, so sibling worktrees of the same
+    /// repository count as the current project.
+    current_repo: Option<PathBuf>,
+    /// Memoized current-project answers keyed by normalized session dir.
+    same_project_cache: RefCell<HashMap<String, bool>>,
+    /// Set once the user cycles the filter, so async reloads never replace
+    /// their choice with the automatic current-project default.
+    filter_mode_user_chosen: bool,
     /// Live process presence keyed by session ID (active-pid registry snapshot).
     /// Drives the working/ready badges in the list and the Active filter
     /// membership. Refreshed on load/reseed and periodically while the Active
@@ -341,6 +376,9 @@ impl SessionPicker {
             onboarding_action: None,
             preview_cache: None,
             current_dir: None,
+            current_repo: None,
+            same_project_cache: RefCell::new(HashMap::new()),
+            filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -386,6 +424,9 @@ impl SessionPicker {
             onboarding_action: None,
             preview_cache: None,
             current_dir: None,
+            current_repo: None,
+            same_project_cache: RefCell::new(HashMap::new()),
+            filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -463,6 +504,9 @@ impl SessionPicker {
             onboarding_action: None,
             preview_cache: None,
             current_dir: None,
+            current_repo: None,
+            same_project_cache: RefCell::new(HashMap::new()),
+            filter_mode_user_chosen: false,
             live_presence: std::collections::HashMap::new(),
             live_presence_refreshed_at: None,
             current_session_id: None,
@@ -482,15 +526,39 @@ impl SessionPicker {
     /// share it can be visually highlighted in the list.
     pub fn set_current_dir(&mut self, dir: Option<String>) {
         self.current_dir = dir.map(|d| normalize_dir(&d));
+        self.current_repo = self
+            .current_dir
+            .as_deref()
+            .and_then(|dir| git_common_dir(Path::new(dir)));
+        self.same_project_cache.borrow_mut().clear();
     }
 
-    /// Whether the given session's working directory matches the directory the
-    /// picker was opened from.
+    /// Whether the given session belongs to the project the picker was opened
+    /// from: the same directory, a subdirectory of it, or another worktree of
+    /// the same git repository.
     pub(super) fn session_in_current_dir(&self, session: &SessionInfo) -> bool {
-        match (self.current_dir.as_deref(), session.working_dir.as_deref()) {
-            (Some(current), Some(dir)) => normalize_dir(dir) == current,
-            _ => false,
+        let (Some(current), Some(dir)) =
+            (self.current_dir.as_deref(), session.working_dir.as_deref())
+        else {
+            return false;
+        };
+        let dir = normalize_dir(dir);
+        if dir == current {
+            return true;
         }
+        // Opening `/resume` from $HOME would otherwise claim every session.
+        if !dir_is_home(current) && dir.starts_with(&format!("{current}/")) {
+            return true;
+        }
+        let Some(repo) = self.current_repo.as_ref() else {
+            return false;
+        };
+        if let Some(&hit) = self.same_project_cache.borrow().get(&dir) {
+            return hit;
+        }
+        let hit = git_common_dir(Path::new(&dir)).is_some_and(|common| &common == repo);
+        self.same_project_cache.borrow_mut().insert(dir, hit);
+        hit
     }
 
     /// Record the session the picker was opened from so it can be labeled in
@@ -2484,7 +2552,13 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
         return Ok(None);
     }
 
-    let picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+    let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+    picker.set_current_dir(
+        std::env::current_dir()
+            .ok()
+            .map(|dir| dir.to_string_lossy().into_owned()),
+    );
+    picker.prefer_current_dir_filter();
     picker.run()
 }
 
