@@ -56,21 +56,16 @@ pub(crate) fn effective_https_idle_timeout(request: &Value) -> std::time::Durati
     jcode_base::provider::stream_idle_timeout_for_effort(request_reasoning_effort(request))
 }
 
-/// Effective websocket completion budget in seconds.
+/// Effective websocket idle budget (silence allowed between events after the
+/// first one) in seconds.
 ///
-/// Starts from the built-in default, raised to `[provider]
-/// stream_idle_timeout_secs` when the user configured a larger value so one
-/// transport cannot cut off sooner than another (issue #434), then scaled by the
-/// request's reasoning effort.
+/// Identical to the HTTPS idle budget: `[provider] stream_idle_timeout_secs`
+/// scaled by the request's reasoning effort, so neither transport cuts off
+/// sooner than the other (issue #434). It used to be floored at a fixed 300s,
+/// which made a silent upstream cost 300s on websocket before the HTTPS
+/// fallback even started, versus 180s on HTTPS itself (issue #1759).
 pub(crate) fn effective_ws_completion_timeout_secs(request: &Value) -> u64 {
-    let multiplier = u64::from(
-        jcode_base::provider::stream_idle_timeout_multiplier_for_effort(request_reasoning_effort(
-            request,
-        )),
-    );
-    jcode_provider_openai::websocket_health::WEBSOCKET_COMPLETION_TIMEOUT_SECS
-        .max(jcode_base::provider::stream_idle_timeout().as_secs())
-        .saturating_mul(multiplier)
+    effective_https_idle_timeout(request).as_secs().max(1)
 }
 
 #[cfg(test)]
@@ -197,6 +192,23 @@ mod tests {
                 &serde_json::json!({"reasoning": {"effort": "xhigh"}})
             ) > base
         );
+    }
+
+    #[test]
+    fn ws_idle_budget_matches_https_for_every_effort() {
+        // Issue #1759: a silent upstream used to cost a fixed 300s on
+        // websocket before the HTTPS fallback, on top of HTTPS's own budget.
+        for effort in [None, Some("low"), Some("medium"), Some("high"), Some("max")] {
+            let request = match effort {
+                Some(effort) => serde_json::json!({"reasoning": {"effort": effort}}),
+                None => serde_json::json!({}),
+            };
+            assert_eq!(
+                effective_ws_completion_timeout_secs(&request),
+                effective_https_idle_timeout(&request).as_secs(),
+                "effort {effort:?}"
+            );
+        }
     }
 
     #[test]

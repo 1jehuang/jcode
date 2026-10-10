@@ -43,6 +43,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 mod openai_stream_cancellation;
+mod openai_stream_diagnostics;
 
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
