@@ -21,16 +21,22 @@ pub(super) const IDLE_RECONNECT_GRACE: Duration = Duration::from_secs(30);
 // The last registered event sender remains on the member after it detaches.
 // It is therefore also an ownership witness: an old grace timer must not
 // remove a successor's session even if that successor has disconnected again.
+//
+// A connection can also disconnect before its subscribe registered a swarm
+// member at all (e.g. the window closed while subscribe was in flight). In
+// that case an absent member is the original state, not evidence of a
+// successor. Treating it as replaced made the grace loop return early and
+// skip destructive cleanup, leaking the live Agent for the server's lifetime.
 async fn attachment_was_replaced(
     members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     session_id: &str,
     original: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
+    originally_registered: bool,
 ) -> bool {
-    members
-        .read()
-        .await
-        .get(session_id)
-        .is_none_or(|member| !member.event_tx.same_channel(original))
+    match members.read().await.get(session_id) {
+        Some(member) => !member.event_tx.same_channel(original),
+        None => originally_registered,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +131,10 @@ pub(super) async fn cleanup_client_connection(
     } else {
         false
     };
+    let originally_registered = swarm_members
+        .read()
+        .await
+        .contains_key(client_session_id);
 
     detach_client_attachment(
         client_session_id,
@@ -149,7 +159,13 @@ pub(super) async fn cleanup_client_connection(
         ));
         let deadline = tokio::time::Instant::now() + idle_reconnect_grace;
         loop {
-            if attachment_was_replaced(swarm_members, client_session_id, client_event_tx).await
+            if attachment_was_replaced(
+                swarm_members,
+                client_session_id,
+                client_event_tx,
+                originally_registered,
+            )
+            .await
                 || client_connections
                     .read()
                     .await
@@ -182,7 +198,13 @@ pub(super) async fn cleanup_client_connection(
         .any(|info| info.session_id == client_session_id);
     if successor_connected
         || (allow_reconnect
-            && attachment_was_replaced(swarm_members, client_session_id, client_event_tx).await)
+            && attachment_was_replaced(
+                swarm_members,
+                client_session_id,
+                client_event_tx,
+                originally_registered,
+            )
+            .await)
     {
         crate::logging::info(&format!(
             "Skipping destructive disconnect cleanup for {} because another client is still attached",
