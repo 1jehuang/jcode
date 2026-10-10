@@ -1,0 +1,18 @@
+[package]
+name = "jcode"
+version = "0.0.1"
+edition = "2021"
+description = "Jcode coding agent. This crate reserves the name; install the real binary from https://jcode.sh"
+license = "MIT"
+repository = "https://github.com/1jehuang/jcode"
+homepage = "https://jcode.sh"
+readme = "README.md"
+keywords = ["ai", "agent", "coding", "tui", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "jcode"
+path = "src/main.rs"
+
+# Standalone package, not part of the main jcode workspace.
+[workspace]
