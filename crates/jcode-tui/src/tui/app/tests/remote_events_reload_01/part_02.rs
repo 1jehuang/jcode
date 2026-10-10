@@ -365,6 +365,7 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
             provider_name: Some("mock".to_string()),
             provider_model: Some("mock-model".to_string()),
             subagent_model: None,
+            agent_model_overrides: Default::default(),
             autoreview_enabled: None,
             autojudge_enabled: None,
             available_models: vec![],

@@ -344,6 +344,19 @@ pub enum Request {
         model: Option<String>,
     },
 
+    /// Set routing for a worker role. None clears to the global default.
+    /// With `global`, the server updates its own configuration instead of the
+    /// session, so remote clients never write a default only they can see.
+    #[serde(rename = "set_agent_model")]
+    SetAgentModel {
+        id: u64,
+        target: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        global: bool,
+    },
+
     /// Launch a subagent immediately in the active session.
     #[serde(rename = "run_subagent")]
     RunSubagent {
@@ -901,6 +914,15 @@ pub enum ServerEvent {
     #[serde(rename = "ack")]
     Ack { id: u64 },
 
+    /// Authoritative worker routing after a successful session preference update.
+    #[serde(rename = "agent_models_changed")]
+    AgentModelsChanged {
+        id: u64,
+        session_id: String,
+        #[serde(default)]
+        overrides: std::collections::BTreeMap<String, String>,
+    },
+
     /// Streaming text delta
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
@@ -1400,6 +1422,8 @@ pub enum ServerEvent {
         /// Session-scoped preferred model for subagents.
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent_model: Option<String>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        agent_model_overrides: std::collections::BTreeMap<String, String>,
         /// Session-scoped automatic review toggle.
         #[serde(skip_serializing_if = "Option::is_none")]
         autoreview_enabled: Option<bool>,

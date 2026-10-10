@@ -17,8 +17,8 @@ mod preview;
 #[path = "inline_interactive/preview_request.rs"]
 mod preview_request;
 use helpers::{
-    agent_model_default_summary, agent_model_target_label, catchup_candidates,
-    catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
+    agent_model_default_summary, agent_model_target_label, agent_model_target_slug,
+    catchup_candidates, catchup_queue_position, model_entry_base_name, model_entry_saved_spec,
     openrouter_route_model_id, picker_route_model_spec, picker_route_selection,
     save_agent_model_override,
 };
@@ -316,6 +316,32 @@ fn picker_is_runtime_model_picker(picker: &InlineInteractiveState) -> bool {
             .entries
             .iter()
             .any(|entry| matches!(entry.action, PickerAction::Model))
+}
+
+/// Which `/agents` view is open, if any.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentModelsPickerView {
+    /// The role list (swarm, review, judge, memory, ambient).
+    Targets,
+    /// The model list for one role.
+    Models(crate::tui::AgentModelTarget),
+}
+
+pub(crate) fn agent_models_picker_view(
+    picker: &InlineInteractiveState,
+) -> Option<AgentModelsPickerView> {
+    if picker.kind != PickerKind::Model {
+        return None;
+    }
+    if picker.is_agent_target_picker() {
+        return Some(AgentModelsPickerView::Targets);
+    }
+    picker.entries.iter().find_map(|entry| match entry.action {
+        PickerAction::AgentModelChoice { target, .. } => {
+            Some(AgentModelsPickerView::Models(target))
+        }
+        _ => None,
+    })
 }
 
 fn key_char_eq_ignore_ascii_case(code: KeyCode, expected: char) -> bool {
@@ -3315,6 +3341,27 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
+        // `/agents` pickers: Ctrl+G switches between editing this session and
+        // the global default, then reopens the same view in the other scope.
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && key_char_eq_ignore_ascii_case(code, 'g')
+            && let Some(view) = self
+                .inline_interactive_state
+                .as_ref()
+                .and_then(agent_models_picker_view)
+        {
+            self.agent_models_global_scope = !self.agent_models_global_scope;
+            match view {
+                AgentModelsPickerView::Targets => self.open_agents_picker(),
+                AgentModelsPickerView::Models(target) => self.open_agent_model_picker(target),
+            }
+            self.set_status_notice(if self.agent_models_global_scope {
+                "/agents: editing the global default (all sessions)"
+            } else {
+                "/agents: editing this session only"
+            });
+            return Ok(());
+        }
         match code {
             KeyCode::Esc => {
                 if let Some(ref mut picker) = self.inline_interactive_state
@@ -3631,18 +3678,39 @@ impl App {
                         clear_override,
                     } => {
                         self.inline_interactive_state = None;
-                        let result = if clear_override {
-                            save_agent_model_override(target, None)
+                        let spec = (!clear_override).then(|| model_entry_saved_spec(&entry));
+                        let result = if self.is_remote {
+                            // The server owns both scopes in remote mode: global
+                            // defaults go to its config, not this client's. Only
+                            // AgentModelsChanged confirms persistence. Generic Ack
+                            // is sent by the server before request dispatch.
+                            self.set_status_notice(if self.agent_models_global_scope {
+                                "Applying agent model [global]…"
+                            } else {
+                                "Applying agent model [session]…"
+                            });
+                            return Ok(());
+                        } else if self.agent_models_global_scope {
+                            save_agent_model_override(target, spec.as_deref())
                         } else {
-                            let spec = model_entry_saved_spec(&entry);
-                            save_agent_model_override(target, Some(&spec))
+                            self.session
+                                .set_agent_model_override(agent_model_target_slug(target), spec)
+                                .and_then(|()| self.session.save_prepared())
                         };
                         match result {
                             Ok(()) => {
-                                let label = agent_model_target_label(target);
+                                let label = format!(
+                                    "{} [{}]",
+                                    agent_model_target_label(target),
+                                    if self.agent_models_global_scope {
+                                        "global"
+                                    } else {
+                                        "session"
+                                    }
+                                );
                                 if clear_override {
                                     self.push_display_message(DisplayMessage::system(format!(
-                                        "{} model override cleared. It now inherits `{}`.",
+                                        "{} model override cleared. Using default `{}`.",
                                         label,
                                         agent_model_default_summary(target, self)
                                     )));

@@ -159,6 +159,50 @@ impl Sidecar {
         Self::with_configured_model(configured_model)
     }
 
+    pub fn for_session(session: &crate::session::Session) -> Self {
+        let model = session
+            .effective_agent_model("memory", crate::config::Config::load().agents.memory_model);
+        let inherit = model.as_deref() == Some("inherit");
+        let model = if inherit {
+            session.model.clone()
+        } else {
+            model
+        };
+        if let Some(model) = model.as_deref()
+            && let Some(provider) = crate::provider::active_provider_fork()
+        {
+            let request = if inherit {
+                crate::provider::MultiProvider::model_switch_request_for_session_route(
+                    model,
+                    session.provider_key.as_deref(),
+                    session.route_api_method.as_deref(),
+                )
+            } else {
+                model.to_string()
+            };
+            if crate::provider::set_model_with_auth_refresh(provider.as_ref(), &request).is_ok() {
+                return Self {
+                    client: crate::provider::shared_http_client(),
+                    model: provider.model(),
+                    max_tokens: DEFAULT_MAX_TOKENS,
+                    backend: SidecarBackend::Provider,
+                    provider: Some(provider),
+                    reasoning_override: None,
+                };
+            }
+        }
+        // No live routing provider: retain extraction auto-selection as fallback
+        // for unsupported coordinator models and strip transport prefixes for
+        // the dedicated OpenAI/Claude clients.
+        let model = model.map(|model| {
+            model
+                .split_once(':')
+                .map(|(_, id)| id.to_string())
+                .unwrap_or(model)
+        });
+        Self::with_configured_model(model)
+    }
+
     fn with_configured_model(configured_model: Option<String>) -> Self {
         let (backend, model, provider) = if let Some(model) = configured_model {
             match crate::provider::provider_for_model(&model) {
@@ -1433,6 +1477,72 @@ mod tests {
                 reply: self.reply.clone(),
             })
         }
+    }
+
+    /// Stub that records the model it was switched to.
+    struct SwitchableProvider(std::sync::Mutex<String>);
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for SwitchableProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("no network in tests")
+        }
+
+        fn name(&self) -> &str {
+            "switchable"
+        }
+
+        fn model(&self) -> String {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn set_model(&self, model: &str) -> Result<()> {
+            *self.0.lock().unwrap() = model.to_string();
+            Ok(())
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(SwitchableProvider(std::sync::Mutex::new(self.model())))
+        }
+    }
+
+    /// The local TUI end-of-session path builds its sidecar with
+    /// `for_session`, so a session's `/agents memory` choice must win over the
+    /// global default there too.
+    #[test]
+    fn session_sidecar_uses_session_memory_model_override() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[agents]\nmemory_model = \"global-memory-model\"\n",
+        )
+        .unwrap();
+        crate::provider::set_active_provider(std::sync::Arc::new(SwitchableProvider(
+            std::sync::Mutex::new("coordinator-model".into()),
+        )));
+        let mut session =
+            crate::session::Session::create_with_id("sidecar_memory".into(), None, None);
+        session.save_prepared().unwrap();
+        session
+            .set_agent_model_override("memory", Some("session-memory-model".into()))
+            .unwrap();
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "session-memory-model"
+        );
+        session.set_agent_model_override("memory", None).unwrap();
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "global-memory-model"
+        );
     }
 
     /// With NO OpenAI/Claude credentials, the sidecar must select the live

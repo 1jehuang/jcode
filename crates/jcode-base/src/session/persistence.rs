@@ -375,6 +375,7 @@ impl Session {
         let journal_entries = replay_stats.entries;
         let journal_ms = journal_start.elapsed().as_millis();
         let finalize_start = Instant::now();
+        session.refresh_agent_model_overrides()?;
         session.backfill_prompt_title();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
@@ -460,7 +461,9 @@ impl Session {
 
     pub fn load(session_id: &str) -> Result<Self> {
         let path = session_path(session_id)?;
-        Self::load_from_path(&path)
+        let mut session = Self::load_from_path(&path)?;
+        session.refresh_agent_model_overrides()?;
+        Ok(session)
     }
 
     /// Load only the metadata needed for remote-client startup.
@@ -475,7 +478,9 @@ impl Session {
         // multi-MB sessions, and resume reads this on the first-frame path.
         let bytes = std::fs::read(&path)?;
         let stub: SessionStartupStub = serde_json::from_slice(&bytes)?;
-        Ok(Self::session_from_startup_stub(stub))
+        let mut session = Self::session_from_startup_stub(stub);
+        session.refresh_agent_model_overrides()?;
+        Ok(session)
     }
 
     pub fn load_for_remote_startup(session_id: &str) -> Result<Self> {
@@ -489,6 +494,7 @@ impl Session {
         let snapshot_ms = snapshot_start.elapsed().as_millis();
         let mut session = Self::session_from_remote_startup_snapshot(snapshot);
         dedupe_messages_by_id(&mut session.messages);
+        session.refresh_agent_model_overrides()?;
         let journal_path = session_journal_path_from_snapshot(&path);
         let journal_bytes = file_len_or_zero(&journal_path);
         let journal_start = Instant::now();
@@ -505,6 +511,7 @@ impl Session {
         })?;
         let journal_ms = journal_start.elapsed().as_millis();
         let finalize_start = Instant::now();
+        session.refresh_agent_model_overrides()?;
         session.backfill_prompt_title();
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
@@ -559,6 +566,7 @@ impl Session {
         let _save_guard = SAVES_IN_FLIGHT
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.refresh_agent_model_overrides()?;
         // A session that migrated to another machine (or whose on-disk copy was
         // replaced by a newer returned transcript) must not be overwritten by
         // this stale in-memory copy.

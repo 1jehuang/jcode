@@ -312,6 +312,7 @@ pub(super) async fn handle_get_model_catalog(
         // authoritative. Omitting it falsely turns off /fast status and its badge.
         service_tier,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: Default::default(),
@@ -603,6 +604,9 @@ async fn send_history_from_persisted_session(
         provider_name,
         provider_model,
         subagent_model,
+        agent_model_overrides: crate::session::Session::load_startup_stub(session_id)
+            .map(|session| session.agent_model_overrides)
+            .unwrap_or_default(),
         autoreview_enabled,
         autojudge_enabled,
         available_models: Vec::new(),
@@ -852,6 +856,9 @@ async fn send_history_with_guard(
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
         subagent_model,
+        agent_model_overrides: crate::session::Session::load_startup_stub(session_id)
+            .map(|session| session.agent_model_overrides)
+            .unwrap_or_default(),
         autoreview_enabled,
         autojudge_enabled,
         available_models,

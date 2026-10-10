@@ -185,6 +185,9 @@ pub(super) fn openai_compatible_profile_id_for_route(route: &PickerOption) -> Op
 }
 
 pub(super) fn model_entry_saved_spec(entry: &PickerEntry) -> String {
+    if entry.name == "inherit coordinator" {
+        return "inherit".to_string();
+    }
     let bare_name = model_entry_base_name(entry);
     let route = entry.options.get(entry.selected_option);
     if let Some(route) = route {

@@ -1036,6 +1036,25 @@ pub(in crate::tui::app) fn handle_server_event(
             app.upstream_provider = Some(provider);
             false
         }
+        ServerEvent::AgentModelsChanged {
+            id,
+            session_id,
+            overrides,
+        } => {
+            if app.remote_session_id.as_deref().unwrap_or(&app.session.id) != session_id {
+                return false;
+            }
+            app.session.agent_model_overrides = overrides;
+            if app.pending_agent_model_request_id == Some(id) {
+                app.pending_agent_model_request_id = None;
+                app.set_status_notice(if app.agent_models_global_scope {
+                    "Agent model saved [global on server]"
+                } else {
+                    "Agent model saved [session]"
+                });
+            }
+            true
+        }
         ServerEvent::Ack { id } => {
             let _ = app.acknowledge_pending_soft_interrupt(id);
             false
@@ -1255,10 +1274,19 @@ pub(in crate::tui::app) fn handle_server_event(
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
+            id,
             message,
             retry_after_secs,
             ..
         } => {
+            if app.pending_agent_model_request_id == Some(id) {
+                app.pending_agent_model_request_id = None;
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Session agent model update failed: {message}"
+                )));
+                app.set_status_notice("Agent model update failed");
+                return false;
+            }
             app.refresh_openai_usage_after_quota_error(&message);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
@@ -1590,6 +1618,7 @@ pub(in crate::tui::app) fn handle_server_event(
             provider_name,
             provider_model,
             subagent_model,
+            agent_model_overrides,
             autoreview_enabled,
             autojudge_enabled,
             available_models,
@@ -1799,6 +1828,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.remote_session_facts_provisional = false;
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
+            app.session.agent_model_overrides = agent_model_overrides;
             app.session.autoreview_enabled = autoreview_enabled;
             app.session.autojudge_enabled = autojudge_enabled;
             app.autoreview_enabled =

@@ -643,6 +643,7 @@ fn startup_history(session_id: &str) -> ServerEvent {
         provider_name: None,
         provider_model: None,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         available_models: vec![],

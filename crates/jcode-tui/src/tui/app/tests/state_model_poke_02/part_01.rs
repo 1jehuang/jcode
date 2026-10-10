@@ -1448,7 +1448,7 @@ fn test_agents_command_opens_agent_picker() {
         picker
             .entries
             .iter()
-            .any(|entry| entry.name == "Code review")
+            .any(|entry| entry.name == "Code review [session]")
     );
     assert!(picker.entries.iter().any(|entry| matches!(
         entry.action,
@@ -1530,7 +1530,7 @@ fn test_agent_model_picker_inherit_row_uses_provider_default_when_inherited_mode
             .expect("agent model picker should open");
         let inherit_entry = picker.entries.first().expect("inherit row should exist");
 
-        assert_eq!(inherit_entry.name, "inherit (provider default)");
+        assert_eq!(inherit_entry.name, "use global default [session]");
         assert!(matches!(
             inherit_entry.action,
             crate::tui::PickerAction::AgentModelChoice {
