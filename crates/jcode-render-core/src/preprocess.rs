@@ -732,6 +732,19 @@ fn delimited_content_looks_like_prose(rest: &str, close_delimiter: &str) -> bool
     }) {
         return false;
     }
+    // A single bare token with a run of four or more letters and no LaTeX
+    // command or operator is escaped Markdown brackets around a word, e.g. a
+    // TOML table header like `\[workspace\]` or `\[package.metadata\]`. Real
+    // math would typeset that as an italic product of variables.
+    let trimmed = body.trim();
+    let is_single_word = !trimmed.is_empty()
+        && !trimmed.contains(char::is_whitespace)
+        && trimmed
+            .split(|ch: char| !ch.is_alphabetic())
+            .any(|run| run.chars().count() >= 4);
+    if is_single_word {
+        return true;
+    }
     body.split_whitespace()
         .filter(|word| word.chars().filter(|ch| ch.is_alphabetic()).count() >= 2)
         .count()
@@ -1004,5 +1017,20 @@ mod tests {
             r"$$\text{area} = \pi r^2$$"
         );
         assert_eq!(normalize_latex_math(r"\(x\)"), r"$x$");
+    }
+
+    #[test]
+    fn escaped_single_word_brackets_are_not_math() {
+        for input in [
+            r"the nested directory's own \[workspace\] declaration",
+            r"even though I added \[workspace\] to make this a root",
+            r"set \[package.metadata\] keys",
+            r"see \(optional\) here",
+        ] {
+            assert_eq!(normalize_latex_math(input), input);
+        }
+        assert_eq!(normalize_latex_math(r"\[xy\]"), r"$$xy$$");
+        assert_eq!(normalize_latex_math(r"\[x+y\]"), r"$$x+y$$");
+        assert_eq!(normalize_latex_math(r"\[\alpha\]"), r"$$\alpha$$");
     }
 }
