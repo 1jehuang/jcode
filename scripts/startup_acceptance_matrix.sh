@@ -57,6 +57,12 @@ if [ -n "$resume_id" ]; then
   client="$bin --no-update --socket $sock"
 fi
 kill $(fuser "$rt/jcode-daemon.lock" 2>/dev/null) 2>/dev/null
+# Client-spawned server: a fresh runtime dir with no server running, so the
+# client starts it (first launch after login/reboot).
+srt=$root/spawn-rt; mkdir -p "$srt"; chmod 700 "$srt"
+echo "### $label / client-spawned-server"
+"$repo/scripts/startup_acceptance.sh" "$bin --no-update --socket $srt/jcode.sock" "$root/client-spawned-server" 140 "$repo" XDG_RUNTIME_DIR=$srt JCODE_SOCKET=$srt/jcode.sock || fails=$((fails+1))
+kill $(fuser "$srt/jcode-daemon.lock" 2>/dev/null) 2>/dev/null
 # R7 (server): the History payload never waited on the model catalog for more
 # than its 30ms budget, and MCP names did not build full tool definitions.
 log=$HOME/.jcode/logs/jcode-$(date +%F).log
