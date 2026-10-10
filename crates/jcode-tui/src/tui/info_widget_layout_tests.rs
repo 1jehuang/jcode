@@ -406,3 +406,122 @@ fn stale_anchor_above_shifted_area_is_rehomed_not_drawn_out_of_bounds() {
     );
     assert_placements_sane("shifted area", area1, &second.visible);
 }
+
+/// Content that grows under a resident widget must not make it vanish.
+///
+/// Startup repro: the Overview is placed for {usage, changes}, then History
+/// adds the session row, so its body needs one more line than the slot it is
+/// anchored to. Phase 1 used to keep the stale-height slot, the body no longer
+/// fit, and the Overview rendered nothing for the rest of the session while
+/// still holding the slot (so Phase 2 never re-homed it either).
+#[test]
+fn resident_overview_grows_in_place_when_its_content_grows() {
+    let area = Rect::new(0, 0, 80, 30);
+    let margins = margins_for(40, 30, false);
+    let usage = UsageInfo {
+        provider: UsageProvider::Anthropic,
+        primary_limit_label: Some("5-hour".to_string()),
+        secondary_limit_label: Some("Weekly".to_string()),
+        available: true,
+        ..Default::default()
+    };
+    let git = GitInfo {
+        branch: "master".to_string(),
+        modified: 1,
+        dirty_files: vec![DirtyFile::new('M', "src/main.rs")],
+        dirty_total: 1,
+        ..Default::default()
+    };
+    let before = InfoWidgetData {
+        usage_info: Some(usage),
+        git_info: Some(git),
+        ..Default::default()
+    };
+    let first = calculate_placements_anchored(area, &margins, &before, true, &[]);
+    let overview = first
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("overview placed for usage + changes")
+        .rect;
+
+    let after = InfoWidgetData {
+        session_name: Some("hare".to_string()),
+        ..before.clone()
+    };
+    let second = calculate_placements_anchored(area, &margins, &after, true, &first.anchors);
+    let grown = second
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("overview must stay placed after its content grows")
+        .rect;
+    let needed = crate::tui::info_widget::calculate_widget_height(
+        WidgetKind::Overview,
+        &after,
+        grown.width,
+        30,
+    );
+    assert!(
+        grown.height >= needed,
+        "slot must grow to fit the new body: {grown:?} needs {needed} (was {overview:?})"
+    );
+    assert_eq!(grown.x, overview.x, "resident must not jump sideways");
+    assert_placements_sane("grown overview", area, &second.visible);
+}
+
+/// A resident whose slot is permanently covered by settled content re-homes
+/// right away instead of staying hidden.
+///
+/// Startup repro: the `mcp:` header row arrives with History and lands under
+/// the bottom of the Overview's slot. An idle client draws only a handful of
+/// frames, so the frame-counted hide-in-place backstop never expired and the
+/// Overview stayed invisible for the whole session.
+#[test]
+fn covered_resident_rehomes_immediately_when_content_is_settled() {
+    let area = Rect::new(0, 0, 80, 30);
+    let data = InfoWidgetData {
+        todos: vec![todo("t1", "in_progress"), todo("t2", "pending")],
+        ..Default::default()
+    };
+    let mut margins = margins_for(40, 30, false);
+    let first = calculate_placements_anchored(area, &margins, &data, true, &[]);
+    let anchored = first.visible.first().expect("a widget placed").clone();
+
+    // A settled wide row now covers the anchored slot's first row, with plenty
+    // of free space elsewhere in the margin.
+    margins.right_widths[anchored.rect.y as usize] = 10;
+
+    let settled = calculate_placements_anchored(area, &margins, &data, true, &first.anchors);
+    let rehomed = settled
+        .visible
+        .iter()
+        .find(|p| p.kind == anchored.kind)
+        .unwrap_or_else(|| {
+            panic!(
+                "settled cover must re-home {:?}, not hide it",
+                anchored.kind
+            )
+        });
+    let covered = anchored.rect.y;
+    assert!(
+        !(rehomed.rect.y..rehomed.rect.y + rehomed.rect.height).contains(&covered),
+        "re-homed slot must clear the covered row: {rehomed:?}"
+    );
+    assert_placements_sane("re-homed", area, &settled.visible);
+
+    // While content is churning (streaming / scrolling), it waits in place.
+    margins.content_churning = true;
+    let churning = calculate_placements_anchored(area, &margins, &data, true, &first.anchors);
+    assert!(
+        !churning.visible.iter().any(|p| p.kind == anchored.kind),
+        "churning cover hides in place"
+    );
+    assert!(
+        churning
+            .anchors
+            .iter()
+            .any(|a| a.placement.kind == anchored.kind),
+        "and keeps its anchor to return to"
+    );
+}

@@ -537,6 +537,8 @@ pub fn simulate_scroll_mode(
             right_reliable,
             left_reliable: Vec::new(),
             scroll_top: scroll,
+            // Every simulated frame is mid-scroll.
+            content_churning: true,
         };
         // Greedy mode forgets all anchors each frame, so every frame independently
         // maximizes coverage (the old "fill the biggest pocket now" philosophy).

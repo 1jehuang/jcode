@@ -965,6 +965,11 @@ struct WidgetsState {
     /// of popping back for a few frames (which resizes the bottom chrome and
     /// bounces the transcript).
     swarm_dock_last_engaged: Option<Instant>,
+    /// `scroll_top` of the previous placement pass and when it last changed.
+    /// A scroll moves content under resident widgets just like streaming does,
+    /// so it counts as churn for a short grace period.
+    last_scroll_top: Option<usize>,
+    last_scroll_change: Option<Instant>,
 }
 
 impl Default for WidgetsState {
@@ -977,6 +982,8 @@ impl Default for WidgetsState {
             settlement: super::info_widget_settle::SettlementTracker::default(),
             anchors_area_width: 0,
             swarm_dock_last_engaged: None,
+            last_scroll_top: None,
+            last_scroll_change: None,
         }
     }
 }
@@ -1026,6 +1033,27 @@ pub fn apply_settlement(margins: &mut Margins, area_width: u16) {
         state.anchors_area_width = area_width;
     }
     let settled = state.settlement.observe(margins, area_width);
+    // A scroll moves content under resident widgets just like streaming does,
+    // so it counts as churn for a short grace period after the last change.
+    if state.last_scroll_top != Some(margins.scroll_top) {
+        if state.last_scroll_top.is_some() {
+            state.last_scroll_change = Some(Instant::now());
+        }
+        state.last_scroll_top = Some(margins.scroll_top);
+    }
+    margins.content_churning |= state
+        .last_scroll_change
+        .is_some_and(|at| at.elapsed() < SCROLL_CHURN_GRACE);
+    // Settlement exists to keep new widgets off content that is still
+    // re-rendering. It counts frames, but an idle client draws only one frame
+    // per state change, so a layout change while idle (History adding the
+    // `mcp:` header row) never accumulated the frames to settle: the free
+    // space stayed "unsettled" and the Overview could not be re-homed until
+    // some unrelated activity redrew a few times. When nothing is churning,
+    // the current widths are already final.
+    if !margins.content_churning {
+        return;
+    }
     intersect_widths(&mut margins.right_reliable, &settled.right);
     if margins.centered {
         intersect_widths(&mut margins.left_reliable, &settled.left);
@@ -1071,6 +1099,11 @@ pub fn calculate_placements(
     }
     outcome.visible
 }
+
+/// How long after a scroll the transcript still counts as moving for resident
+/// widgets: a covered slot during or just after a scroll is waited out in
+/// place rather than re-homed.
+const SCROLL_CHURN_GRACE: Duration = Duration::from_millis(1500);
 
 /// How long the inline swarm strip keeps standing down after the SwarmStatus
 /// dock disengages. The dock's placement naturally churns while content
@@ -1175,7 +1208,21 @@ pub(crate) fn calculate_widget_height(
             let inner_h = max_height.saturating_sub(border_height);
             let layout = compute_page_layout(&overview, inner_width, inner_h);
             if layout.max_page_height == 0 {
-                return 0;
+                // Taller than the pocket even as a compact page. Rather than
+                // dropping the Overview (and with it usage limits and changes,
+                // which it merges in place of their own widgets), take the
+                // pocket and let the renderer truncate the compact page. The
+                // sections are ordered by importance, so the tail is what goes.
+                let full = compute_page_layout(&overview, inner_width, u16::MAX);
+                if full.max_page_height == 0
+                    || inner_h
+                        < WidgetKind::Overview
+                            .min_height()
+                            .saturating_sub(border_height)
+                {
+                    return 0;
+                }
+                return max_height;
             }
             layout.max_page_height
         }
@@ -1316,7 +1363,25 @@ fn render_overview_framed(data: &InfoWidgetData, inner: Rect) -> Option<Framed> 
     overview.memory_info = None;
     overview.diagrams.clear();
 
-    let layout = compute_page_layout(&overview, inner.width as usize, inner.height);
+    let mut layout = compute_page_layout(&overview, inner.width as usize, inner.height);
+    if layout.pages.is_empty() {
+        // The slot is shorter than even the compact page (its content grew
+        // after placement and there was no room to grow the slot). Show the
+        // compact page truncated rather than nothing: an anchored widget that
+        // renders empty also keeps its slot, so it would stay invisible.
+        let full = compute_page_layout(&overview, inner.width as usize, u16::MAX);
+        if let Some(compact) = full
+            .pages
+            .iter()
+            .find(|page| page.kind == InfoPageKind::CompactOnly)
+            .copied()
+            .or_else(|| full.pages.first().copied())
+        {
+            layout.pages = vec![compact];
+            layout.max_page_height = inner.height;
+            layout.show_dots = false;
+        }
+    }
     if layout.pages.is_empty() || layout.max_page_height == 0 {
         return None;
     }

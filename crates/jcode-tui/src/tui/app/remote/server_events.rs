@@ -1809,15 +1809,29 @@ pub(in crate::tui::app) fn handle_server_event(
             // was still loading. Replace that loading row as soon as history
             // supplies the authoritative snapshot.
             app.refresh_open_model_picker_after_catalog_update();
-            app.remote_skills = skills;
-            app.invalidate_command_candidates_cache();
-            app.remote_sessions = all_sessions;
-            app.remote_client_count = client_count;
-            app.remote_is_canary = is_canary;
-            app.remote_server_version = server_version;
-            app.remote_server_short_name = server_name.clone();
-            app.remote_server_icon = server_icon.clone();
-            app.remote_server_has_update = server_has_update;
+            // The model-catalog response reuses the History event shape with
+            // every server-identity and session-list field left empty. Applying
+            // those empties wiped the server name/icon/version/canary flag,
+            // skills, and session list for a frame right after startup, so the
+            // header and the Overview session row flickered (`peak hare` ->
+            // `hare`). Only overwrite what the event actually carries; a real
+            // session switch still resets everything.
+            let carries_server_identity =
+                server_name.is_some() || server_version.is_some() || is_canary.is_some();
+            let authoritative = session_changed || carries_server_identity;
+            if authoritative || !skills.is_empty() {
+                app.remote_skills = skills;
+                app.invalidate_command_candidates_cache();
+            }
+            if authoritative {
+                app.remote_sessions = all_sessions;
+                app.remote_client_count = client_count;
+                app.remote_is_canary = is_canary;
+                app.remote_server_version = server_version;
+                app.remote_server_short_name = server_name.clone();
+                app.remote_server_icon = server_icon.clone();
+                app.remote_server_has_update = server_has_update;
+            }
             let history_total_tokens = total_tokens.or_else(|| {
                 token_usage_totals.map(|totals| (totals.input_tokens, totals.output_tokens))
             });
@@ -1863,7 +1877,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.pending_server_reload = true;
                 app.set_status_notice("Server update available");
             }
-            app.remote_server_short_name = server_name;
+            if authoritative {
+                app.remote_server_short_name = server_name;
+            }
             if let Some(icon) = server_icon {
                 app.remote_server_icon = Some(icon);
             }
