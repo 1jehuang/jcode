@@ -930,6 +930,51 @@ impl Agent {
             .collect()
     }
 
+    /// Per-server MCP tool names the session can see, for the client header's
+    /// `mcp:` inventory.
+    ///
+    /// Equivalent to filtering [`Self::tool_names`] for `mcp__*`, but reads only
+    /// registry keys: building full definitions (every schema, sorted, SDK
+    /// overlay applied) just to count names took up to ~40ms on the bootstrap
+    /// History path that gates the client's first settled frame.
+    pub async fn visible_mcp_tool_names(&self) -> Vec<String> {
+        // Mirrors `apply_mcp_tool_exposure`: on the fixed `mcp_search` /
+        // `mcp_call` surface per-server definitions are not exposed.
+        if !self.native_deferred_mcp()
+            && !matches!(self.mcp_tools_mode, crate::config::McpToolsMode::Eager)
+        {
+            return Vec::new();
+        }
+        let sdk = crate::tool::sdk::config(&self.session.id);
+        let enabled: Option<HashSet<String>> = sdk
+            .as_ref()
+            .and_then(|c| c.enabled.as_ref())
+            .map(|names| names.iter().cloned().collect());
+        let allowed = enabled.as_ref().or(self.allowed_tools.as_ref());
+        let sdk_disabled: HashSet<String> = sdk
+            .as_ref()
+            .map(|c| c.disabled.iter().cloned().collect())
+            .unwrap_or_default();
+        let mut names: Vec<String> = self
+            .registry
+            .tool_names()
+            .await
+            .into_iter()
+            .filter(|name| name.starts_with("mcp__"))
+            .filter(|name| allowed.is_none_or(|set| self.registry.tool_is_allowed(set, name)))
+            .filter(|name| {
+                enabled.is_some()
+                    || self.disabled_tools.is_empty()
+                    || !self.registry.tool_is_disabled(&self.disabled_tools, name)
+            })
+            .filter(|name| {
+                sdk_disabled.is_empty() || !self.registry.tool_is_disabled(&sdk_disabled, name)
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Get full tool definitions for debug introspection (bypasses lock)
     pub async fn tool_definitions_for_debug(&self) -> Vec<crate::message::ToolDefinition> {
         if self.session.is_canary {

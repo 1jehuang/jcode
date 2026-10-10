@@ -562,7 +562,7 @@ impl MemoryInfo {
 pub use jcode_tui_mermaid::DiagramInfo;
 
 /// Git repository status for the info widget
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitInfo {
     pub branch: String,
     pub modified: usize,

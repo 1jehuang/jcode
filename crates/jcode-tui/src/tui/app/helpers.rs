@@ -1177,25 +1177,69 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
                 }
                 let stale = cached.clone();
                 *refreshing = true;
-                std::thread::spawn(|| {
-                    let result = gather_git_info_inner();
-                    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                        *guard = Some((Instant::now(), result, false));
-                    }
-                });
+                spawn_git_info_refresh();
                 return stale;
             }
 
             *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
-            std::thread::spawn(|| {
-                let result = gather_git_info_inner();
-                if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                    *guard = Some((Instant::now(), result, false));
-                }
-            });
+            spawn_git_info_refresh();
         }
         None
     }
+}
+
+/// Run the git probe on a background thread and store the result. When the
+/// value changed, wake the UI loop: the probe finishes between frames, and an
+/// idle client otherwise kept showing the stale (or, at startup, empty) branch
+/// and dirty counts until some unrelated event happened to redraw.
+#[cfg(not(test))]
+fn spawn_git_info_refresh() {
+    std::thread::spawn(|| {
+        let result = gather_git_info_inner();
+        let changed = if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+            let changed = guard
+                .as_ref()
+                .is_none_or(|(_, cached, _)| *cached != result);
+            *guard = Some((std::time::Instant::now(), result, false));
+            changed
+        } else {
+            false
+        };
+        if changed {
+            crate::bus::Bus::global().publish(crate::bus::BusEvent::GitInfoRefreshed);
+        }
+    });
+}
+
+/// Start the git probe and give it up to `budget` to land before returning.
+///
+/// Called once just before the first frame. The probe usually finishes in a
+/// couple of tens of milliseconds, so a short bounded wait lets the very first
+/// frame already show the branch, dirty counts, and commits instead of
+/// painting without them and growing a git section ~100ms later. If git is
+/// slow (huge repo, cold cache, network filesystem) the wait times out and the
+/// result arrives through the normal `GitInfoRefreshed` wake.
+pub(crate) fn prime_git_info(budget: Duration) {
+    #[cfg(not(test))]
+    {
+        if crate::tui::is_ssh_remote() {
+            return;
+        }
+        let _ = gather_git_info();
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            let pending = GIT_INFO_CACHE
+                .lock()
+                .ok()
+                .is_some_and(|guard| guard.as_ref().is_some_and(|(_, _, refreshing)| *refreshing));
+            if !pending || std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    #[cfg(test)]
+    let _ = budget;
 }
 
 /// Fetch a session's todos plus its goal-level assessments through the same
@@ -1441,38 +1485,65 @@ pub(crate) fn gather_git_info_inner() -> Option<GitInfo> {
 }
 
 /// Git status for `dir` (or the process working directory when `None`).
+///
+/// The probe gates the branch, dirty counts, and commit widgets on startup,
+/// so it is latency-bound: one `rev-parse` answers "is this a work tree" and
+/// "where is its root" together, then every remaining query is spawned at
+/// once and collected afterwards. Sequentially these took the sum of seven
+/// git processes; concurrently they take roughly the slowest one.
 pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInfo> {
     let git = || {
         let mut cmd = std::process::Command::new("git");
         if let Some(dir) = dir {
             cmd.current_dir(dir);
         }
+        // A background probe must never contend with the user's own git
+        // commands for `index.lock` (status would otherwise opportunistically
+        // refresh and rewrite the index).
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
         cmd
     };
+    let spawn = |args: &[&str]| git().args(args).spawn().ok();
+    let collect = |child: Option<std::process::Child>| {
+        child
+            .and_then(|child| child.wait_with_output().ok())
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
 
-    let in_repo = git()
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .ok()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !in_repo {
+    let probe = collect(spawn(&[
+        "rev-parse",
+        "--is-inside-work-tree",
+        "--show-toplevel",
+    ]))?;
+    let mut probe_lines = probe.lines();
+    if probe_lines.next().map(str::trim) != Some("true") {
         return None;
     }
+    let repo_root = probe_lines
+        .next()
+        .map(str::trim)
+        .filter(|root| !root.is_empty())
+        .map(std::path::PathBuf::from);
 
-    let branch = git()
-        .args(["branch", "--show-current"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let b = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if b.is_empty() { None } else { Some(b) }
-            } else {
-                None
-            }
-        })
+    let branch_child = spawn(&["branch", "--show-current"]);
+    let status_child = spawn(&["status", "--porcelain", "--untracked-files=all"]);
+    let numstat_child = spawn(&["diff", "--numstat", "HEAD"]);
+    let ahead_behind_child = spawn(&["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]);
+    let log_child = spawn(&[
+        "log",
+        "-n",
+        "8",
+        "--shortstat",
+        "--format=%x1e%h%x1f%ct%x1f%s",
+    ]);
+
+    let branch = collect(branch_child)
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty())
         .unwrap_or_else(|| "HEAD".to_string());
 
     let mut modified = 0;
@@ -1480,19 +1551,7 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
     let mut untracked = 0;
     let mut all_files: Vec<crate::tui::info_widget::DirtyFile> = Vec::new();
 
-    let repo_root = git()
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
-
-    if let Ok(output) = git()
-        .args(["status", "--porcelain", "--untracked-files=all"])
-        .output()
-        && output.status.success()
-    {
-        let status = String::from_utf8_lossy(&output.stdout);
+    if let Some(status) = collect(status_child) {
         for line in status.lines() {
             if line.len() < 3 {
                 continue;
@@ -1521,12 +1580,8 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
 
     // Line counts: tracked files from one numstat against HEAD (staged plus
     // unstaged), untracked files by counting their lines.
-    let numstat = git()
-        .args(["diff", "--numstat", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| parse_numstat(&String::from_utf8_lossy(&o.stdout)))
+    let numstat = collect(numstat_child)
+        .map(|text| parse_numstat(&text))
         .unwrap_or_default();
     let mut added_total = 0usize;
     let mut removed_total = 0usize;
@@ -1559,39 +1614,20 @@ pub(crate) fn gather_git_info_in(dir: Option<&std::path::Path>) -> Option<GitInf
     all_files.truncate(10);
     let dirty_files = all_files;
 
-    let (ahead, behind) = git()
-        .args(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                let parts: Vec<&str> = text.split('\t').collect();
-                if parts.len() == 2 {
-                    let a = parts[0].parse::<usize>().unwrap_or(0);
-                    let b = parts[1].parse::<usize>().unwrap_or(0);
-                    Some((a, b))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+    let (ahead, behind) = collect(ahead_behind_child)
+        .and_then(|text| {
+            let parts: Vec<&str> = text.trim().split('\t').collect();
+            (parts.len() == 2).then(|| {
+                (
+                    parts[0].parse::<usize>().unwrap_or(0),
+                    parts[1].parse::<usize>().unwrap_or(0),
+                )
+            })
         })
         .unwrap_or((0, 0));
 
-    let recent_commits = git()
-        .args([
-            "log",
-            "-n",
-            "8",
-            "--shortstat",
-            "--format=%x1e%h%x1f%ct%x1f%s",
-        ])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| parse_recent_commits(&String::from_utf8_lossy(&o.stdout), ahead))
+    let recent_commits = collect(log_child)
+        .map(|text| parse_recent_commits(&text, ahead))
         .unwrap_or_default();
 
     Some(GitInfo {

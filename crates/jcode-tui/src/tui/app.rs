@@ -1240,6 +1240,10 @@ pub struct App {
     /// subscription vs cost-based usage display for remote sessions without
     /// re-deriving it from the provider name.
     remote_resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+    /// Remote model/provider/context/effort/credential were seeded from the
+    /// last launch's `remote_header_hint` and have not yet been confirmed by
+    /// the server. Cleared (and re-derived) when History arrives.
+    remote_session_facts_provisional: bool,
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
     remote_reasoning_effort: Option<String>,

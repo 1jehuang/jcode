@@ -542,6 +542,7 @@ impl App {
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
+            remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
@@ -1005,6 +1006,7 @@ impl App {
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
+            remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
@@ -1360,6 +1362,10 @@ impl App {
     }
 
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        // Kick the background git probe first so its ~20ms of subprocess work
+        // overlaps with the rest of client setup. `run_remote` gives it a short
+        // bounded wait before the first paint.
+        let _ = super::helpers::gather_git_info();
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1399,9 +1405,6 @@ impl App {
         // SSH clients above must use only the remote server's skill metadata.
         app.refresh_skills_snapshot();
         app.apply_remote_header_hint();
-        // Start the background git probe now so the git widgets are ready by
-        // the first frame or two instead of popping in later.
-        let _ = super::helpers::gather_git_info();
 
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))

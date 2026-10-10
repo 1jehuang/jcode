@@ -1736,6 +1736,20 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.swarm_plan_swarm_id = None;
                 remote.reset_call_output_tokens_seen();
             }
+            // Facts seeded from the last launch are only a first-frame guess.
+            // When History reports a different model, drop them so the snapshot
+            // below is applied exactly as on a cold start (including the
+            // context-window lookup that only runs on a model change). When it
+            // is the same model, keep the remembered server-resolved window:
+            // re-deriving it from the static catalog could briefly show a
+            // different value until the resume ModelChanged lands.
+            if app.remote_session_facts_provisional
+                && provider_model.as_deref() != app.remote_provider_model.as_deref()
+            {
+                app.remote_session_facts_provisional = false;
+                app.remote_provider_model = None;
+                app.remote_provider_name = None;
+            }
             let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
                 provider_name,
                 provider_model,
@@ -1743,6 +1757,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 available_model_routes,
             );
             let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            // History is authoritative from here on: a later ModelChanged is a
+            // real switch and must announce itself.
+            app.remote_session_facts_provisional = false;
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
             app.session.autoreview_enabled = autoreview_enabled;
@@ -1768,6 +1785,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.remote_service_tier = service_tier;
             app.remote_compaction_mode = Some(compaction_mode);
+            app.persist_remote_header_hint();
             app.set_side_panel_snapshot(side_panel);
             if history_images_match_retained(&images, &app.remote_side_pane_images) {
                 // The already-retained image set is identical (count + per-image
@@ -2339,8 +2357,11 @@ pub(in crate::tui::app) fn handle_server_event(
                 // The server also re-sends ModelChanged on resume so the client
                 // learns the server-resolved context window. That is not a
                 // user-visible switch, so only announce an actual model change.
-                let model_actually_changed =
-                    app.remote_provider_model.as_deref() != Some(model.as_str());
+                // A first-frame hint is not a model the user switched away from.
+                let had_provisional_facts =
+                    std::mem::take(&mut app.remote_session_facts_provisional);
+                let model_actually_changed = !had_provisional_facts
+                    && app.remote_provider_model.as_deref() != Some(model.as_str());
                 app.update_context_limit_for_model(&model, context_window);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
@@ -2355,6 +2376,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 // previous model's level.
                 app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
+                app.persist_remote_header_hint();
                 if model_actually_changed && !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",

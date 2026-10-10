@@ -674,6 +674,22 @@ impl App {
         // previously known detailed routes in that case; the picker synthesizes
         // fallback routes for any newly appearing models. If the provider
         // identity changed, the old routes are stale and must be dropped.
+        //
+        // A snapshot with neither names nor routes means "catalog not ready"
+        // (History ships without names when the server's catalog build would
+        // delay first paint; `GetModelCatalog` fills it in right after). It
+        // must not wipe the catalog this client already knows.
+        let catalog_absent =
+            snapshot.model_routes.is_empty() && snapshot.available_models.is_empty();
+        if catalog_absent && !provider_name_changed {
+            if provider_meta_changed {
+                self.invalidate_model_picker_cache();
+            }
+            return CatalogReplaceOutcome {
+                provider_meta_changed,
+                catalog_changed: provider_meta_changed,
+            };
+        }
         let names_only = snapshot.model_routes.is_empty() && !snapshot.available_models.is_empty();
         let replace_routes = !names_only || provider_name_changed;
         // Shared-server bus chatter rebroadcasts the catalog frequently (every

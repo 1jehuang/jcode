@@ -649,6 +649,7 @@ pub(super) async fn handle_bus_event(
             true
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
+        Ok(BusEvent::GitInfoRefreshed) => true,
         Ok(BusEvent::UsageReportProgress(progress)) => {
             app.handle_usage_report_progress(progress);
             true
