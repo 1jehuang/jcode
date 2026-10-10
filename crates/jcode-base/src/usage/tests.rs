@@ -797,6 +797,7 @@ fn anthropic_model_scoped_fable_limit_survives_report_cache_roundtrip() {
         .expect("Fable limit should be displayed");
     assert_eq!(fable.usage_percent, 73.0);
     assert_eq!(fable.resets_at.as_deref(), Some("2026-08-10T00:00:00Z"));
+    assert_eq!(fable.window_seconds, Some(7 * 24 * 60 * 60));
 
     let restored = usage_data_from_provider_report(&report);
     assert_eq!(restored.model_scoped, usage.model_scoped);
