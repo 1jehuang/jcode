@@ -179,6 +179,10 @@ emoji = true
 # Usage percentage wording: "left" (default) or "used".
 usage_display = "left"
 
+# Show the streaming tokens/sec row in the info panel and status line
+# (default: true). Set false to hide live throughput everywhere.
+show_tps = true
+
 # Show thinking/reasoning content (default: true)
 show_thinking = true
 

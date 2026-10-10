@@ -815,6 +815,10 @@ fn test_generated_default_config_has_expected_user_defaults() {
         parsed.display.show_thinking,
         "freshly created user config should request model reasoning"
     );
+    assert!(
+        parsed.display.show_tps,
+        "freshly created user config should show streaming tokens/sec"
+    );
     assert_eq!(
         parsed.display.reasoning_display(),
         jcode_config_types::ReasoningDisplayMode::Full,

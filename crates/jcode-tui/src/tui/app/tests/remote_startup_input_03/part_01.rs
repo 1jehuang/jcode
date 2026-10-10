@@ -1,5 +1,6 @@
 #[test]
 fn test_build_turn_footer_combines_compact_duration_with_streaming_stats() {
+    let _env_guard = crate::storage::lock_test_env();
     let mut app = create_test_app();
     app.streaming.streaming_input_tokens = 210_000;
     app.streaming.streaming_output_tokens = 440;
@@ -21,6 +22,76 @@ fn test_build_turn_footer_combines_compact_duration_with_streaming_stats() {
         footer.ends_with("↑210k ↓440"),
         "unexpected footer: {footer}"
     );
+}
+
+#[test]
+fn test_show_tps_disabled_hides_tps_from_status_line_and_info_panel() {
+    let _env_guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[display]\nshow_tps = false\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+
+    let mut app = create_test_app();
+    // Force the state both TPS consumers require: an active stream with
+    // observed output tokens, so `compute_streaming_tps` would return a
+    // value if the gate were open.
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.streaming.streaming_tps_collect_output = true;
+    app.streaming.streaming_tps_observed_output_tokens = 440;
+    app.streaming.streaming_tps_observed_elapsed = Duration::from_secs(220);
+    app.streaming.streaming_output_tokens = 440;
+    app.streaming.streaming_total_output_tokens = 440;
+    // Remote cost-based route (opencode) so the info widget carries usage info;
+    // a local "mock" provider maps to Unknown and yields no usage info.
+    app.is_remote = true;
+    app.remote_provider_name = Some("opencode".to_string());
+    app.remote_provider_model = Some("qwen3-coder".to_string());
+    app.token_accounting.total_input_tokens = 12_000;
+    app.token_accounting.total_output_tokens = 3_400;
+
+    // Status line path: the live feed must stay hidden while disabled.
+    assert_eq!(app.output_tps(), None, "status line TPS must honor show_tps=false");
+    // Sanity: with the same streaming state the computation itself works,
+    // so the None above is the config gate, not a broken fixture.
+    assert!(app.compute_streaming_tps().is_some(), "fixture must produce a TPS value");
+
+    // Info panel path: the usage info is present (cost-based route) but its
+    // live TPS must be None while disabled.
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    let usage = data.usage_info.as_ref().expect("usage info on opencode route");
+    assert!(
+        usage.output_tps.is_none(),
+        "info panel TPS must honor show_tps=false"
+    );
+
+    // And the same fixture with the setting enabled shows both TPS feeds,
+    // proving the disabled assertions above are the gate working.
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[display]\nshow_tps = true\n",
+    )
+    .expect("write config");
+    crate::config::invalidate_config_cache();
+    assert!(app.output_tps().is_some(), "enabled fixture must produce status TPS");
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    let usage = data.usage_info.as_ref().expect("usage info on opencode route");
+    assert!(
+        usage.output_tps.is_some(),
+        "enabled fixture must produce info panel TPS"
+    );
+
+    match prev_home {
+        Some(home) => crate::env::set_var("JCODE_HOME", home),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    crate::config::invalidate_config_cache();
 }
 
 #[test]

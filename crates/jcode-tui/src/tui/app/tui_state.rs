@@ -398,7 +398,9 @@ impl App {
         route: WidgetRouteInfo,
         auth_method: crate::tui::info_widget::AuthMethod,
     ) -> Option<crate::tui::info_widget::UsageInfo> {
-        let output_tps = if matches!(self.status, ProcessingStatus::Streaming) {
+        let output_tps = if matches!(self.status, ProcessingStatus::Streaming)
+            && crate::config::config().display.show_tps
+        {
             self.compute_streaming_tps()
         } else {
             None
@@ -760,6 +762,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn output_tps(&self) -> Option<f32> {
+        if !crate::config::config().display.show_tps {
+            return None;
+        }
         if !self.is_processing || !matches!(self.status, ProcessingStatus::Streaming) {
             return None;
         }
@@ -1557,7 +1562,9 @@ impl crate::tui::TuiState for App {
         let auth_method = self.widget_auth_method(route);
         let usage_info = self.widget_usage_info(route, auth_method);
 
-        let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming) {
+        let tokens_per_second = if matches!(self.status, ProcessingStatus::Streaming)
+            && crate::config::config().display.show_tps
+        {
             self.compute_streaming_tps()
         } else {
             None

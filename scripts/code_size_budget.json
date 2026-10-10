@@ -97,7 +97,7 @@
     "crates/jcode-tui/src/tui/app/state_ui.rs": 2328,
     "crates/jcode-tui/src/tui/app/state_ui_input_helpers.rs": 1829,
     "crates/jcode-tui/src/tui/app/tui_lifecycle.rs": 1482,
-    "crates/jcode-tui/src/tui/app/tui_state.rs": 2516,
+    "crates/jcode-tui/src/tui/app/tui_state.rs": 2523,
     "crates/jcode-tui/src/tui/app/turn.rs": 1738,
     "crates/jcode-tui/src/tui/backend.rs": 2004,
     "crates/jcode-tui/src/tui/info_widget.rs": 2267,
