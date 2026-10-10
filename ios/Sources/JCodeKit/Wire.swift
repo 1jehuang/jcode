@@ -6,7 +6,9 @@ import Foundation
 /// snake_case tags). Only the requests the iOS app uses are modeled; the server
 /// ignores fields it does not expect.
 public enum Request: Equatable, Sendable {
-    case subscribe(id: UInt64, targetSessionID: String?)
+    case subscribe(
+        id: UInt64, targetSessionID: String?, workingDirectory: String?,
+        continueOnDisconnect: Bool)
     case message(id: UInt64, content: String)
     case cancel(id: UInt64)
     case softInterrupt(id: UInt64, content: String, urgent: Bool)
@@ -22,7 +24,7 @@ public enum Request: Equatable, Sendable {
 
     public var id: UInt64 {
         switch self {
-        case let .subscribe(id, _), let .message(id, _), let .cancel(id),
+        case let .subscribe(id, _, _, _), let .message(id, _), let .cancel(id),
             let .softInterrupt(id, _, _), let .cancelSoftInterrupts(id),
             let .ping(id), let .getHistory(id), let .resumeSession(id, _),
             let .setModel(id, _), let .setReasoningEffort(id, _), let .compact(id),
@@ -35,8 +37,12 @@ public enum Request: Equatable, Sendable {
     public func encodedLine() throws -> String {
         var object: [String: Any] = ["id": id]
         switch self {
-        case let .subscribe(_, targetSessionID):
+        case let .subscribe(_, targetSessionID, workingDirectory, continueOnDisconnect):
             object["type"] = "subscribe"
+            object["continue_on_disconnect"] = continueOnDisconnect
+            if let workingDirectory {
+                object["working_dir"] = workingDirectory
+            }
             if let targetSessionID {
                 object["target_session_id"] = targetSessionID
             }
@@ -164,6 +170,7 @@ public enum ServerEvent: Equatable, Sendable {
         public var serverVersion: String?
         public var displayTitle: String?
         public var reasoningEffort: String?
+        public var isProcessing: Bool
 
         public struct TokenTotals: Equatable, Sendable {
             public var input: UInt64
@@ -186,7 +193,8 @@ public enum ServerEvent: Equatable, Sendable {
             allSessions: [String] = [],
             serverVersion: String? = nil,
             displayTitle: String? = nil,
-            reasoningEffort: String? = nil
+            reasoningEffort: String? = nil,
+            isProcessing: Bool = false
         ) {
             self.id = id
             self.sessionID = sessionID
@@ -199,6 +207,7 @@ public enum ServerEvent: Equatable, Sendable {
             self.serverVersion = serverVersion
             self.displayTitle = displayTitle
             self.reasoningEffort = reasoningEffort
+            self.isProcessing = isProcessing
         }
     }
 
@@ -362,7 +371,8 @@ public enum ServerEvent: Equatable, Sendable {
             allSessions: json.stringArray("all_sessions"),
             serverVersion: json.optionalString("server_version"),
             displayTitle: json.optionalString("display_title"),
-            reasoningEffort: json.optionalString("reasoning_effort")
+            reasoningEffort: json.optionalString("reasoning_effort"),
+            isProcessing: json.optionalObject("activity")?.bool("is_processing") ?? false
         )
     }
 }

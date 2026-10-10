@@ -47,12 +47,99 @@ private func encodedObject(_ request: Request) throws -> [String: Any] {
 }
 
 @Test func encodesSubscribeWithTargetSession() throws {
-    let object = try encodedObject(.subscribe(id: 1, targetSessionID: "sess_abc"))
+    let object = try encodedObject(
+        .subscribe(
+            id: 1, targetSessionID: "sess_abc", workingDirectory: nil,
+            continueOnDisconnect: true))
     #expect(object["type"] as? String == "subscribe")
     #expect(object["target_session_id"] as? String == "sess_abc")
+    #expect(object["continue_on_disconnect"] as? Bool == true)
+    #expect(object["working_dir"] == nil)
 
-    let bare = try encodedObject(.subscribe(id: 2, targetSessionID: nil))
+    let bare = try encodedObject(
+        .subscribe(
+            id: 2, targetSessionID: nil, workingDirectory: "/srv/app",
+            continueOnDisconnect: false))
     #expect(bare["target_session_id"] == nil)
+    #expect(bare["continue_on_disconnect"] as? Bool == false)
+    #expect(bare["working_dir"] as? String == "/srv/app")
+}
+
+@Test func workspaceNormalizationRequiresAbsolutePaths() {
+    #expect(Workspace.normalize("  /Users/me/repo/  ") == "/Users/me/repo")
+    #expect(Workspace.normalize("/") == "/")
+    #expect(Workspace.normalize("~/repo") == nil)
+    #expect(Workspace.normalize("repo") == nil)
+    #expect(Workspace.normalize("   ") == nil)
+    #expect(Workspace.displayName("/Users/me/repo") == "repo")
+    #expect(Workspace.displayName("/") == "/")
+}
+
+@Test func selectingWorkspaceKeepsMostRecentFirstWithoutDuplicates() throws {
+    let base = ServerCredential(
+        host: "h", port: 1, token: "t", serverName: "s", serverVersion: "v")
+    #expect(base.activeWorkspace == nil)
+    #expect(base.selectingWorkspace("relative") == nil)
+
+    var credential = try #require(base.selectingWorkspace("/a"))
+    credential = try #require(credential.selectingWorkspace("/b/"))
+    credential = try #require(credential.selectingWorkspace("/a"))
+    #expect(credential.workspaces == ["/a", "/b"])
+    #expect(credential.activeWorkspace == "/a")
+
+    for index in 0..<20 {
+        credential = try #require(credential.selectingWorkspace("/w\(index)"))
+    }
+    #expect(credential.workspaces.count == ServerCredential.maxWorkspaces)
+    #expect(credential.activeWorkspace == "/w19")
+
+    #expect(!credential.forgettingWorkspace("/w19").workspaces.contains("/w19"))
+}
+
+@Test func rePairingKeepsWorkspacesOfTheSameServer() throws {
+    let saved = try #require(
+        ServerCredential(host: "h", port: 1, token: "old", serverName: "s", serverVersion: "v")
+            .selectingWorkspace("/repo"))
+    let other = ServerCredential(host: "x", port: 1, token: "t", serverName: "s", serverVersion: "v")
+    let fresh = ServerCredential(host: "h", port: 1, token: "new", serverName: "s", serverVersion: "v2")
+
+    let merged = fresh.keepingWorkspaces(from: [other, saved])
+    #expect(merged.token == "new")
+    #expect(merged.serverVersion == "v2")
+    #expect(merged.workspaces == ["/repo"])
+
+    let unrelated = ServerCredential(host: "y", port: 2, token: "t", serverName: "s", serverVersion: "v")
+    #expect(unrelated.keepingWorkspaces(from: [saved]).workspaces.isEmpty)
+}
+
+@Test func rapidWorkspacePicksFallBackToLastConfirmed() throws {
+    let confirmed = try #require(
+        ServerCredential(host: "h", port: 1, token: "t", serverName: "s", serverVersion: "v")
+            .selectingWorkspace("/confirmed"))
+    let pickedA = try #require(confirmed.selectingWorkspace("/a"))
+
+    let afterA = ServerCredential.workspaceFallback(pending: nil, current: confirmed)
+    let afterB = ServerCredential.workspaceFallback(pending: afterA, current: pickedA)
+    #expect(afterA.activeWorkspace == "/confirmed")
+    #expect(afterB.activeWorkspace == "/confirmed")
+}
+
+@Test func decodesCredentialsSavedBeforeWorkspaces() throws {
+    let legacy = try JSONEncoder().encode(
+        ServerCredential(
+            host: "h", port: 7643, token: "t", serverName: "s", serverVersion: "v"))
+    var object = try #require(
+        JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+    object.removeValue(forKey: "workspaces")
+    let data = try JSONSerialization.data(withJSONObject: object)
+    let decoded = try JSONDecoder().decode(ServerCredential.self, from: data)
+    #expect(decoded.host == "h")
+    #expect(decoded.workspaces.isEmpty)
+
+    let roundTrip = try JSONDecoder().decode(
+        ServerCredential.self,
+        from: JSONEncoder().encode(try #require(decoded.selectingWorkspace("/x"))))
+    #expect(roundTrip.workspaces == ["/x"])
 }
 
 @Test func encodesControlRequests() throws {
@@ -260,6 +347,19 @@ private func encodedObject(_ request: Request) throws -> [String: Any] {
         return
     }
     #expect(payload.reasoningEffort == "medium")
+}
+
+@Test func historyCarriesProcessingActivity() throws {
+    let busy = #"{"type":"history","id":1,"session_id":"s","messages":[],"activity":{"is_processing":true}}"#
+    let idle = #"{"type":"history","id":1,"session_id":"s","messages":[]}"#
+    guard case let .history(busyPayload) = try ServerEvent.decode(line: busy),
+        case let .history(idlePayload) = try ServerEvent.decode(line: idle)
+    else {
+        Issue.record("expected history events")
+        return
+    }
+    #expect(busyPayload.isProcessing)
+    #expect(!idlePayload.isProcessing)
 }
 
 @Test func malformedLinesThrow() {
