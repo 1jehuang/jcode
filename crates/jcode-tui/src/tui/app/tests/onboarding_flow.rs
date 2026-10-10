@@ -632,7 +632,7 @@ fn import_review_decline_all_falls_back_to_manual_login() {
         // checked we don't spawn an import, the list clears, and the card falls
         // back to the manual-login prompt.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('c')));
         assert!(matches!(
             app.onboarding_phase(),
             Some(OnboardingPhase::Login { import: None })
@@ -1136,7 +1136,9 @@ fn liveness_import_review_decline_all_then_enter_escapes() {
         }
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
+        // Down past the last row focuses Continue; Enter there commits.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('n')));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
         // No async import was spawned (declined all), so we are not stuck on the
         // progress screen; we are on the recovery screen.
@@ -1659,3 +1661,49 @@ fn recent_project_review_falls_back_cleanly_when_no_repo_is_known() {
 }
 
 include!("onboarding_flow_telemetry.rs");
+
+#[test]
+fn import_less_enter_on_row_toggles_instead_of_committing() {
+    use crate::external_auth::ExternalAuthReviewCandidate;
+    use crate::tui::app::onboarding_flow::ImportReview;
+
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.onboarding_flow = None;
+        app.begin_onboarding_flow_at_login();
+        let review = ImportReview::new(vec![
+            ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
+            ExternalAuthReviewCandidate::fixture("Claude", "Claude Code"),
+            ExternalAuthReviewCandidate::fixture("Cursor", "Cursor auth.json"),
+        ])
+        .unwrap();
+        if let Some(flow) = app.onboarding_flow.as_mut() {
+            flow.phase = OnboardingPhase::Login {
+                import: Some(review),
+            };
+        }
+        // Summary -> Import less.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
+        // Move to the second row and press Enter: it must only deselect it.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
+        match app.onboarding_phase() {
+            Some(OnboardingPhase::Login {
+                import: Some(review),
+            }) => {
+                assert!(review.choosing, "still on the Import less list");
+                assert_eq!(review.checked, vec![true, false, true]);
+                // The auto-commit countdown is paused while choosing.
+                let mut stale = review.clone();
+                stale.shown_at = std::time::Instant::now()
+                    - crate::tui::app::onboarding_flow::DECISION_TIMEOUT
+                    - std::time::Duration::from_secs(1);
+                assert!(!stale.timed_out());
+            }
+            other => panic!("Enter on a row must not leave the import list: {other:?}"),
+        }
+        assert!(app.onboarding_import_in_progress.is_none());
+        assert!(app.session_picker_overlay.is_none());
+    });
+}

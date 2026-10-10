@@ -1401,8 +1401,10 @@ fn tier8_metrics() -> Tier8Metrics {
         if let Some(flow) = app.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::Login { import: Some(review) };
         }
-        // Uncheck the only login with 'n', then commit the (empty) list.
+        // Uncheck the only login with 'n', then commit the (empty) list from
+        // the Continue pill (Enter on a row only toggles that row).
         app.handle_onboarding_continue_prompt_key(KeyCode::Char('n'));
+        app.handle_onboarding_continue_prompt_key(KeyCode::Up);
         app.handle_onboarding_continue_prompt_key(KeyCode::Enter);
         // The import list must not still be the active prompt.
         !matches!(

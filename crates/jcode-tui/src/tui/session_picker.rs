@@ -20,6 +20,9 @@ use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::time::Duration;
 
+/// Label for the first-run suggested review action.
+const ONBOARDING_REVIEW_LABEL: &str = "Find bugs in my most active repo";
+
 pub use jcode_tui_session_picker::{
     PickerItem, PreviewMessage, ResumeTarget, ServerGroup, SessionFilterMode, SessionInfo,
     SessionSource,
@@ -2093,8 +2096,37 @@ impl SessionPicker {
         frame.render_widget(Paragraph::new(preview_lines), header_area);
     }
 
-    /// Render the suggested first-run prompt as the primary centered action,
-    /// with the current-directory session kept secondary in the bottom-right.
+    /// Label for the blank-session onboarding action, naming the directory
+    /// the new session will start in (home abbreviated to `~`).
+    fn onboarding_start_new_label(&self) -> String {
+        let dir = self
+            .current_dir
+            .as_deref()
+            .map(str::to_string)
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.display().to_string())
+            });
+        match dir {
+            Some(dir) => {
+                let shown = match dirs::home_dir().map(|h| h.display().to_string()) {
+                    Some(home) if dir == home => "~".to_string(),
+                    Some(home) => match dir.strip_prefix(&home) {
+                        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+                        _ => dir,
+                    },
+                    None => dir,
+                };
+                format!("New session in {shown}")
+            }
+            None => "New session in the current directory".to_string(),
+        }
+    }
+
+    /// Render the first-run choice: the welcome copy, then the two actions
+    /// side by side with an "or" between them. When the row is too narrow,
+    /// the actions stack vertically with the "or" on its own line.
     fn render_onboarding_band(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
             return;
@@ -2137,7 +2169,7 @@ impl SessionPicker {
             frame.render_widget(prompt, prompt_area);
         }
 
-        let action_line = |label: &'static str, selected: bool| {
+        let action_spans = |label: &str, selected: bool| -> Vec<Span<'static>> {
             let (cap_style, body_style) = if selected {
                 (
                     Style::default().fg(accent),
@@ -2152,42 +2184,60 @@ impl SessionPicker {
                     Style::default().fg(rgb(170, 174, 182)).bg(rgb(58, 62, 70)),
                 )
             };
-            Line::from(vec![
+            vec![
                 Span::styled("\u{25D6}", cap_style),
                 Span::styled(format!(" {label} "), body_style),
                 Span::styled("\u{25D7}", cap_style),
-            ])
+            ]
         };
 
         let review_selected = self.onboarding_review_recent_project_highlighted();
-        frame.render_widget(
-            Paragraph::new(action_line(
-                "Find bugs in my most active repo",
-                review_selected,
-            ))
-            .alignment(Alignment::Center),
-            Rect {
-                x: inner.x,
-                y: review_y,
-                width: inner.width,
-                height: 1,
-            },
-        );
-
         let start_selected = self.onboarding_start_new_highlighted();
-        frame.render_widget(
-            Paragraph::new(action_line(
-                "Start in the current directory",
-                start_selected,
-            ))
-            .alignment(Alignment::Right),
-            Rect {
-                x: inner.x,
-                y: inner.y + inner.height.saturating_sub(1),
-                width: inner.width,
-                height: 1,
-            },
-        );
+        let review = action_spans(ONBOARDING_REVIEW_LABEL, review_selected);
+        let start_label = self.onboarding_start_new_label();
+        let start = action_spans(&start_label, start_selected);
+        let or_span = || Span::styled("or", Style::default().fg(rgb(130, 134, 142)));
+
+        let width_of = |spans: &[Span<'static>]| -> u16 {
+            spans.iter().map(|s| s.width() as u16).sum()
+        };
+        // "<review>   or   <start>"
+        let side_by_side_width = width_of(&review) + 8 + width_of(&start);
+        let row = |y: u16| Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        };
+
+        if side_by_side_width <= inner.width {
+            let mut spans = review;
+            spans.push(Span::raw("   "));
+            spans.push(or_span());
+            spans.push(Span::raw("   "));
+            spans.extend(start);
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)).alignment(Alignment::Center),
+                row(review_y),
+            );
+        } else {
+            let max_y = inner.y + inner.height.saturating_sub(1);
+            let lines = [
+                Line::from(review),
+                Line::from(vec![or_span()]),
+                Line::from(start),
+            ];
+            for (i, line) in lines.into_iter().enumerate() {
+                let y = review_y + i as u16;
+                if y > max_y {
+                    break;
+                }
+                frame.render_widget(
+                    Paragraph::new(line).alignment(Alignment::Center),
+                    row(y),
+                );
+            }
+        }
     }
 
     pub fn render(&mut self, frame: &mut Frame) {

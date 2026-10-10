@@ -1349,88 +1349,88 @@ fn onboarding_banner_offers_review_then_new_session() {
     assert!(picker.onboarding_review_recent_project_highlighted());
 }
 
-#[test]
-fn onboarding_banner_renders_prompt_and_both_action_rows() {
-    let mut picker = SessionPicker::new(Vec::new());
-    picker.activate_onboarding_banner(vec![
-        Line::from("Welcome to jcode"),
-        Line::from("Choose how to begin."),
-    ]);
-
-    let backend = ratatui::backend::TestBackend::new(120, 40);
+fn render_onboarding_picker_lines(picker: &mut SessionPicker, width: u16, height: u16) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     terminal
         .draw(|frame| picker.render(frame))
         .expect("render onboarding picker");
-
     let buffer = terminal.backend().buffer().clone();
-    let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
-    let lines = (0..buffer.area.height)
+    (0..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
+fn onboarding_test_picker() -> SessionPicker {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/srv/projects/demo".to_string()));
+    picker.activate_onboarding_banner(vec![
+        Line::from("Welcome to jcode"),
+        Line::from("Choose how to begin."),
+    ]);
+    picker
+}
+
+#[test]
+fn onboarding_banner_renders_actions_side_by_side_with_or() {
+    let mut picker = onboarding_test_picker();
+    let lines = render_onboarding_picker_lines(&mut picker, 120, 40);
+    let text = lines.join("\n");
+
+    assert!(text.contains("Welcome to jcode"), "{lines:#?}");
     assert!(
-        text.contains("Welcome to jcode"),
-        "onboarding prompt should render in the banner: {text:?}"
+        !text.contains("Start in the current directory"),
+        "old start label must be gone: {lines:#?}"
     );
-    assert!(
-        text.contains("Start in the current directory"),
-        "start-new row should render in the banner: {text:?}"
-    );
-    assert!(
-        text.contains("Find bugs in my most active repo"),
-        "suggested-review row should render in the banner: {text:?}"
-    );
-    assert!(
-        !text.contains("Sessions"),
-        "resume chrome must be absent: {text:?}"
-    );
+    assert!(!text.contains("Sessions"), "resume chrome must be absent: {lines:#?}");
     assert!(
         !text.contains('╭') && !text.contains('╰') && !text.contains('│'),
         "onboarding choice should not render an outer boundary: {lines:#?}"
     );
 
+    let row = lines
+        .iter()
+        .position(|line| line.contains("Find bugs in my most active repo"))
+        .expect("review action");
+    let line = &lines[row];
+    let review_x = line.find("Find bugs in my most active repo").unwrap();
+    let or_x = line.find(" or ").expect("'or' between the actions on the same row");
+    let start_x = line
+        .find("New session in /srv/projects/demo")
+        .expect("start action names the directory, on the same row");
+    assert!(review_x < or_x && or_x < start_x, "{lines:#?}");
+
     let welcome_y = lines
         .iter()
         .position(|line| line.contains("Welcome to jcode"))
-        .expect("welcome row");
+        .unwrap();
+    assert!(welcome_y < row, "{lines:#?}");
+    assert!(row.abs_diff(lines.len() / 2) <= 1, "actions vertically centered: {lines:#?}");
+}
+
+#[test]
+fn onboarding_banner_stacks_actions_when_narrow() {
+    let mut picker = onboarding_test_picker();
+    let lines = render_onboarding_picker_lines(&mut picker, 50, 30);
+
     let review_y = lines
         .iter()
         .position(|line| line.contains("Find bugs in my most active repo"))
-        .expect("review row");
+        .expect("review action");
+    let or_y = lines
+        .iter()
+        .position(|line| line.trim() == "or")
+        .expect("'or' on its own line");
     let start_y = lines
         .iter()
-        .position(|line| line.contains("Start in the current directory"))
-        .expect("start-new row");
-    let review_x = lines[review_y]
-        .find("Find bugs in my most active repo")
-        .expect("review column");
-    let start_x = lines[start_y]
-        .find("Start in the current directory")
-        .expect("start-new column");
-
-    assert!(
-        welcome_y < review_y,
-        "welcome copy should introduce the centered suggested prompt: {lines:#?}"
-    );
-    assert!(
-        review_y.abs_diff(buffer.area.height as usize / 2) <= 1,
-        "suggested prompt should be vertically centered: {lines:#?}"
-    );
-    assert!(
-        review_x < 50,
-        "suggested prompt should span the visual center: {lines:#?}"
-    );
-    let width = buffer.area.width as usize;
-    let start_end = lines[start_y].trim_end().chars().count();
-    assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x > width / 2 && start_end + 4 >= width,
-        "blank-session action should stay secondary in the bottom-right: {lines:#?}"
-    );
+        .position(|line| line.contains("New session in /srv/projects/demo"))
+        .expect("start action");
+    assert_eq!(or_y, review_y + 1, "{lines:#?}");
+    assert_eq!(start_y, review_y + 2, "{lines:#?}");
 }
 
 #[test]

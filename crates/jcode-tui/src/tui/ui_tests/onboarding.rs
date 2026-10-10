@@ -41,17 +41,17 @@ fn onboarding_state() -> TestState {
 }
 
 #[test]
-fn onboarding_welcome_shows_telemetry_title_and_suggestions() {
+fn onboarding_welcome_shows_title_and_suggestions_without_telemetry_blurb() {
     let state = onboarding_state();
     let text = render_onboarding(&state, 80, 30);
 
     assert!(
-        text.contains("anonymous usage statistics"),
-        "telemetry notice should be rendered:\n{text}"
+        !text.contains("anonymous usage statistics"),
+        "first page should not carry the telemetry blurb:\n{text}"
     );
     assert!(
-        text.contains("JCODE_NO_TELEMETRY=1"),
-        "telemetry opt-out hint should be rendered:\n{text}"
+        !text.contains("JCODE_NO_TELEMETRY=1"),
+        "first page should not carry the telemetry opt-out hint:\n{text}"
     );
     assert!(
         text.contains("Welcome to jcode onboarding"),

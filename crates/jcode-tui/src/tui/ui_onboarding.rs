@@ -5,16 +5,14 @@
 //! unauthenticated / new user, or `/onboarding-preview`).
 //!
 //! Layout, top to bottom, vertically centered in the chat area:
-//!   1. Grayed telemetry notice header.
-//!   2. "Welcome to jcode onboarding" title.
-//!   3. The login / getting-started prompt with suggestions.
+//!   1. "Welcome to jcode onboarding" title.
+//!   2. The login / getting-started prompt.
 
 use super::dim_color;
 use crate::tui::TuiState;
 use crate::tui::color_support::rgb;
 use ratatui::{prelude::*, widgets::Paragraph};
 
-const TELEMETRY_LINES: u16 = 4;
 const GAP: u16 = 1;
 
 /// Accent color for the welcome title.
@@ -150,7 +148,10 @@ fn import_summary_pills_line(
         focused == Pill::ImportLess,
     ));
     spans.push(Span::raw("   "));
-    spans.extend(lozenge_pill_spans("Telemetry", focused == Pill::Telemetry));
+    spans.extend(lozenge_pill_spans(
+        "Telemetry settings",
+        focused == Pill::Telemetry,
+    ));
     Line::from(spans).alignment(align)
 }
 
@@ -344,32 +345,6 @@ fn import_two_column_lines(prompt: &crate::tui::LoginImportPrompt) -> Vec<Line<'
     }
 
     out
-}
-
-/// Grayed telemetry notice shown at the very top of the onboarding screen.
-fn telemetry_header_lines(width: u16) -> Vec<Line<'static>> {
-    let align = Alignment::Center;
-    let dim = Style::default().fg(dim_color());
-    let lines = vec![
-        "jcode collects anonymous usage statistics (version, OS, session",
-        "activity, and crash reasons). No code, prompts, or personal data.",
-        "Change anytime: /telemetry (or export JCODE_NO_TELEMETRY=1)",
-    ];
-    lines
-        .into_iter()
-        .map(|text| {
-            // Truncate defensively on very narrow terminals.
-            let text = if (text.chars().count() as u16) > width.saturating_sub(2) {
-                text.chars()
-                    .take(width.saturating_sub(3) as usize)
-                    .collect::<String>()
-                    + "…"
-            } else {
-                text.to_string()
-            };
-            Line::from(Span::styled(text, dim)).alignment(align)
-        })
-        .collect()
 }
 
 /// Welcome title line, rendered above the phase body.
@@ -661,7 +636,10 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
 /// Draw the full onboarding welcome screen into `area`.
 ///
 /// Vertical structure (top to bottom):
-///   telemetry header, gap, title, keyboard hint, gap, phase body.
+///   title, keyboard hint, gap, phase body.
+///
+/// Telemetry is not explained up front: the "Telemetry settings" pill on the
+/// import summary owns that, which keeps the first page clean.
 pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     if area.width < 4 || area.height < 6 {
         // Too small for the full treatment: fall back to a minimal welcome.
@@ -671,31 +649,28 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
         return;
     }
 
-    let telemetry = telemetry_header_lines(area.width);
     let body = welcome_body_lines(app);
-    let telemetry_h = (telemetry.len() as u16).min(TELEMETRY_LINES);
     let body_h = body.len() as u16;
     const TITLE_H: u16 = 1;
     const HINT_H: u16 = 1;
 
     // The title/hint block is dropped first when the area is short so the
     // phase body (the actionable part) always fits.
-    let show_title_block = area.height > telemetry_h + TITLE_H + HINT_H + body_h + GAP * 2;
+    let show_title_block = area.height > TITLE_H + HINT_H + body_h + GAP;
 
     let used = if show_title_block {
-        telemetry_h + GAP + TITLE_H + HINT_H + GAP + body_h
+        TITLE_H + HINT_H + GAP + body_h
     } else {
-        telemetry_h + GAP + body_h
+        body_h
     };
     let pad_top = area.height.saturating_sub(used) / 2;
 
-    let mut constraints = vec![Constraint::Length(pad_top), Constraint::Length(telemetry_h)];
+    let mut constraints = vec![Constraint::Length(pad_top)];
     if show_title_block {
-        constraints.push(Constraint::Length(GAP));
         constraints.push(Constraint::Length(TITLE_H));
         constraints.push(Constraint::Length(HINT_H));
+        constraints.push(Constraint::Length(GAP));
     }
-    constraints.push(Constraint::Length(GAP));
     constraints.push(Constraint::Length(body_h));
     constraints.push(Constraint::Min(0));
 
@@ -704,27 +679,19 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
         .constraints(constraints)
         .split(area);
 
-    // chunks[0] = top pad, [1] = telemetry, then optional gap/title/hint, gap, body.
-    frame.render_widget(
-        Paragraph::new(telemetry).alignment(Alignment::Center),
-        chunks[1],
-    );
-
-    let mut idx = 2;
+    // chunks[0] = top pad, then optional title/hint/gap, then body.
+    let mut idx = 1;
     if show_title_block {
-        idx += 1; // skip gap chunk
         frame.render_widget(
             Paragraph::new(welcome_title_line()).alignment(Alignment::Center),
             chunks[idx],
         );
-        idx += 1; // title -> hint
         frame.render_widget(
             Paragraph::new(keyboard_hint_line()).alignment(Alignment::Center),
-            chunks[idx],
+            chunks[idx + 1],
         );
-        idx += 1; // hint -> gap
+        idx += 3; // title, hint, gap
     }
-    idx += 1; // skip gap chunk
     frame.render_widget(
         Paragraph::new(body).alignment(Alignment::Center),
         chunks[idx],

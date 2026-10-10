@@ -23,18 +23,20 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
 
-        // The page opens defaulted to "Send everything".
+        // The page opens defaulted to "No prompts or transcripts".
         match app.onboarding_phase() {
             Some(OnboardingPhase::Login {
                 import: Some(review),
-            }) => assert_eq!(review.telemetry, Some(TelemetryLevel::Everything)),
+            }) => assert_eq!(review.telemetry, Some(TelemetryLevel::NoContent)),
             other => panic!("expected telemetry page open, got {other:?}"),
         }
         // The import countdown is paused while the page is open, so the screen
         // cannot commit the import out from under the user.
         assert!(!app.onboarding_flow.as_ref().unwrap().decision_timed_out());
 
-        // Enter commits "Send everything": usage on, content sharing on.
+        // Up to "Send everything", then Enter commits it: usage on, content
+        // sharing on.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Up));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
         if !crate::telemetry::opt_out_forced_by_env() {
             assert!(crate::telemetry::is_enabled());
@@ -92,9 +94,9 @@ fn telemetry_page_send_nothing_disables_telemetry_and_esc_goes_back() {
             assert!(crate::telemetry::is_enabled());
         }
 
-        // Reopen, walk down to "Send nothing", commit.
+        // Reopen (lands on "No prompts or transcripts"), step down to
+        // "Send nothing", commit.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Char('t')));
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Down));
         // In the dependency build used by this crate, telemetry-core is not
         // compiled with cfg(test), so the in-app opt-out event would otherwise
