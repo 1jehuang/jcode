@@ -1000,6 +1000,16 @@ pub(super) fn draw_messages(
             let total_height = region.height;
             let image_end = region.end_line;
             let is_fit = region.render == jcode_tui_messages::ImageRegionRender::Fit;
+            // Scale fit images into the exact box layout reserved for them
+            // (`region.width` cols x `region.height` rows). Fitting into the
+            // full content width instead let the rounded-up row count upscale
+            // the picture a few cells wider than the margin carve assumed, so
+            // it drew over info widgets docked beside it.
+            let fit_cols = if region.width == 0 {
+                content_area.width
+            } else {
+                region.width.min(content_area.width)
+            };
 
             if let Some(native_latex) = crate::tui::markdown::handterm_native_latex_for_hash(hash) {
                 // Native math writes real terminal cells rather than an overlay,
@@ -1038,7 +1048,7 @@ pub(super) fn draw_messages(
             // the ones actually on screen get decoded/scaled, and a cold image
             // schedules background prep instead of stalling this frame.
             let fit_ready = if is_fit && image_end > scroll && abs_idx < visible_end {
-                super::inline_image_ui::ensure_drawable(hash, content_area.width, total_height)
+                super::inline_image_ui::ensure_drawable(hash, fit_cols, total_height)
             } else {
                 true
             };
@@ -1073,7 +1083,7 @@ pub(super) fn draw_messages(
                                 hash,
                                 image_area,
                                 frame.buffer_mut(),
-                                content_area.width,
+                                fit_cols,
                                 total_height,
                                 0,
                                 centered,
@@ -1130,7 +1140,7 @@ pub(super) fn draw_messages(
                                 hash,
                                 image_area,
                                 frame.buffer_mut(),
-                                content_area.width,
+                                fit_cols,
                                 total_height,
                                 skip_rows,
                                 centered,
@@ -1191,7 +1201,12 @@ pub(super) fn draw_messages(
                 if on_screen {
                     continue;
                 }
-                super::inline_image_ui::prefetch(region.hash, content_area.width, region.height);
+                let fit_cols = if region.width == 0 {
+                    content_area.width
+                } else {
+                    region.width.min(content_area.width)
+                };
+                super::inline_image_ui::prefetch(region.hash, fit_cols, region.height);
             }
         }
     }

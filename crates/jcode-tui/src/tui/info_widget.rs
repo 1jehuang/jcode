@@ -1285,6 +1285,28 @@ pub fn render_all(frame: &mut Frame, placements: &[WidgetPlacement], data: &Info
     }
 }
 
+/// Shrink a text widget's box so its bottom border hugs the rendered body.
+/// The slot can be taller than the body (Overview reserves its tallest page,
+/// and resident slots never shrink), which used to leave blank rows inside the
+/// border. The top edge stays put so the widget does not jump.
+fn tight_rects(rect: Rect, inner: Rect, body_lines: usize) -> (Rect, Rect) {
+    let body = (body_lines.min(inner.height as usize)) as u16;
+    if body == 0 || body >= inner.height {
+        return (rect, inner);
+    }
+    let trim = inner.height - body;
+    (
+        Rect {
+            height: rect.height - trim,
+            ..rect
+        },
+        Rect {
+            height: body,
+            ..inner
+        },
+    )
+}
+
 /// Render a single widget at its placement
 fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &InfoWidgetData) {
     let rect = placement.rect;
@@ -1310,6 +1332,7 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
         let Some(framed) = render_overview_framed(data, inner) else {
             return;
         };
+        let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
         frame.render_widget(framed.apply(block, rect.width), rect);
         frame.render_widget(Paragraph::new(framed.lines), inner);
         return;
@@ -1332,6 +1355,7 @@ fn render_single_widget(frame: &mut Frame, placement: &WidgetPlacement, data: &I
     if framed.is_empty() {
         return;
     }
+    let (rect, inner) = tight_rects(rect, inner, framed.lines.len());
     frame.render_widget(framed.apply(block, rect.width), rect);
     frame.render_widget(Paragraph::new(framed.lines), inner);
 }
@@ -2215,5 +2239,29 @@ fn format_event_for_expanded(
             ("📋", format!("{} memories", count), rgb(140, 140, 150))
         }
         _ => ("·", String::new(), rgb(100, 100, 110)),
+    }
+}
+
+#[cfg(test)]
+mod tight_rect_tests {
+    use super::tight_rects;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn border_hugs_shorter_body() {
+        let rect = Rect::new(10, 5, 30, 12);
+        let inner = Rect::new(11, 6, 28, 10);
+        let (outer, body) = tight_rects(rect, inner, 4);
+        assert_eq!(outer, Rect::new(10, 5, 30, 6));
+        assert_eq!(body, Rect::new(11, 6, 28, 4));
+    }
+
+    #[test]
+    fn full_or_overflowing_body_keeps_slot() {
+        let rect = Rect::new(0, 0, 30, 12);
+        let inner = Rect::new(1, 1, 28, 10);
+        assert_eq!(tight_rects(rect, inner, 10), (rect, inner));
+        assert_eq!(tight_rects(rect, inner, 25), (rect, inner));
+        assert_eq!(tight_rects(rect, inner, 0), (rect, inner));
     }
 }
