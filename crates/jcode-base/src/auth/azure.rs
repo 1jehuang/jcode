@@ -8,6 +8,7 @@ pub const ENV_FILE: &str = "azure-openai.env";
 pub const ENDPOINT_ENV: &str = "AZURE_OPENAI_ENDPOINT";
 pub const API_KEY_ENV: &str = "AZURE_OPENAI_API_KEY";
 pub const MODEL_ENV: &str = "AZURE_OPENAI_MODEL";
+pub const REASONING_EFFORT_ENV: &str = "AZURE_OPENAI_REASONING_EFFORT";
 pub const USE_ENTRA_ENV: &str = "AZURE_OPENAI_USE_ENTRA";
 pub const COGNITIVE_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
 
@@ -35,6 +36,10 @@ pub fn load_endpoint() -> Option<String> {
 
 pub fn load_model() -> Option<String> {
     load_env_value_from_env_or_config(MODEL_ENV, ENV_FILE)
+}
+
+pub fn load_reasoning_effort() -> Option<String> {
+    load_env_value_from_env_or_config(REASONING_EFFORT_ENV, ENV_FILE)
 }
 
 pub fn has_api_key() -> bool {
