@@ -214,7 +214,13 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         .unwrap_or_else(|| PathBuf::from("jcode"));
     let mut command = Command::new(&binary);
     command
-        .args([OsStr::new("api-bridge"), OsStr::new("--api-socket")])
+        // `--no-update` turns off the bridge's own background update check, which
+        // also runs for source builds.
+        .args([
+            OsStr::new("--no-update"),
+            OsStr::new("api-bridge"),
+            OsStr::new("--api-socket"),
+        ])
         .arg(&socket_path)
         .current_dir(
             options
@@ -226,9 +232,11 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         .env("JCODE_RUNTIME_DIR", &runtime_dir)
         .env("JCODE_API_SOCKET", &socket_path)
         .env("JCODE_SOCKET", runtime_dir.join("jcode.sock"))
-        // An empty private home always looks out of date, so the updater would
-        // replace and restart the runtime mid-session: the client's turn fails
-        // and the restarted server is orphaned. The shared runtime still updates.
+        // An empty private home always looks out of date, so the release updater
+        // would replace and restart the runtime mid-session: the client's turn fails
+        // and the restarted server is orphaned. The variable is inherited by every
+        // jcode process the instance spawns (argv is not), so it keeps the release
+        // auto-installer off in those too. The shared runtime still updates.
         .env("JCODE_NO_AUTO_UPDATE", "1")
         .envs(options.env.iter())
         .stdin(Stdio::null())
@@ -840,7 +848,7 @@ mod tests {
         let captured = sandbox.path().join("auto-update.txt");
         fs::write(
             &binary,
-            "#!/bin/sh\nprintf '%s' \"${JCODE_NO_AUTO_UPDATE-unset}\" > \"$CAPTURE_PATH\"\nexit 1\n",
+            "#!/bin/sh\nprintf '%s|%s' \"${JCODE_NO_AUTO_UPDATE-unset}\" \"$*\" > \"$CAPTURE_PATH\"\nexit 1\n",
         )
         .expect("write fake runtime");
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
@@ -863,8 +871,11 @@ mod tests {
             "fake runtime should fail startup"
         );
         assert_eq!(
-            fs::read_to_string(captured).expect("captured auto-update setting"),
-            "1"
+            fs::read_to_string(captured).expect("captured bridge invocation"),
+            format!(
+                "1|--no-update api-bridge --api-socket {}",
+                sandbox.path().join("instance/run/jcode-api.sock").display()
+            )
         );
     }
 
