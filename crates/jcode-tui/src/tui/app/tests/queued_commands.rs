@@ -149,6 +149,57 @@ fn test_remote_ctrl_enter_queues_command_and_runs_it_after_turn() {
 }
 
 #[test]
+fn test_remote_queued_command_still_runs_after_interrupt() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(9);
+    app.queued_commands.push("/help".to_string());
+
+    app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
+    assert!(!app.is_processing);
+    app.pending_queued_dispatch = false;
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+
+    assert!(app.queued_commands.is_empty());
+    assert!(app.help_scroll.is_some());
+}
+
+#[test]
+fn test_remote_tick_arms_dispatch_for_idle_queued_command() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.queued_commands.push("/help".to_string());
+    rt.block_on(remote::handle_tick(&mut app, &mut remote));
+    assert!(app.pending_queued_dispatch, "an idle client must not strand it");
+}
+
+#[test]
+fn test_remote_clear_drops_queued_commands() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.queued_commands.push("/compact".to_string());
+    app.input = "/clear".to_string();
+    app.cursor_pos = app.input.len();
+    let _ = rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote));
+
+    assert!(app.queued_commands.is_empty());
+}
+
+#[test]
 fn test_remote_queued_commands_run_before_queued_prompts() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

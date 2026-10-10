@@ -56,6 +56,18 @@ pub(super) async fn process_turn_with_input(
         return;
     }
 
+    // Commands queued with Ctrl+Enter run before queued prompts, matching the
+    // remote dispatcher. If one starts its own turn, the prompts wait for it.
+    if !app.queued_commands.is_empty() {
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        super::input::run_queued_commands_local(app);
+        if app.pending_turn || app.is_processing {
+            finish_turn(app);
+            return;
+        }
+    }
+
     app.process_queued_messages(terminal, event_stream).await;
     finish_turn(app);
 }

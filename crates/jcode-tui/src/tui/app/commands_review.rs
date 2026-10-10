@@ -322,6 +322,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.swarm_plan_version = None;
     app.swarm_plan_swarm_id = None;
     app.queued_messages.clear();
+    app.queued_commands.clear();
     app.pasted_contents.clear();
     app.pending_images.clear();
     app.clear_inline_image_state();
