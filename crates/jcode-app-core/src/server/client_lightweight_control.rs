@@ -32,6 +32,7 @@ use crate::protocol::{Request, ServerEvent};
 use crate::provider::Provider;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
@@ -56,6 +57,172 @@ pub(super) fn parse_swarm_spawn_mode(
         },
         None => Some(None),
     }
+}
+
+/// Extract the session_id from a Comm* request that carries one, so the
+/// lightweight control path can ensure swarm membership before dispatching.
+/// Returns None for requests that do not reference a swarm session.
+fn comm_request_session_id(request: &Request) -> Option<&str> {
+    match request {
+        Request::CommShare { session_id, .. }
+        | Request::CommRead { session_id, .. }
+        | Request::CommMessage { from_session: session_id, .. }
+        | Request::CommList { session_id, .. }
+        | Request::CommListChannels { session_id, .. }
+        | Request::CommListSwarms { session_id, .. }
+        | Request::CommSetSwarmLabel { session_id, .. }
+        | Request::CommChannelMembers { session_id, .. }
+        | Request::CommProposePlan { session_id, .. }
+        | Request::CommApprovePlan { session_id, .. }
+        | Request::CommRejectPlan { session_id, .. }
+        | Request::CommSeedGraph { session_id, .. }
+        | Request::CommExpandNode { session_id, .. }
+        | Request::CommCompleteNode { session_id, .. }
+        | Request::CommInjectGap { session_id, .. }
+        | Request::CommSpawn { session_id, .. }
+        | Request::CommListModels { session_id, .. }
+        | Request::CommStop { session_id, .. }
+        | Request::CommAssignRole { session_id, .. }
+        | Request::CommSummary { session_id, .. }
+        | Request::CommStatus { session_id, .. }
+        | Request::CommReport { session_id, .. }
+        | Request::CommPlanStatus { session_id, .. }
+        | Request::CommReadContext { session_id, .. }
+        | Request::CommResyncPlan { session_id, .. }
+        | Request::CommAssignTask { session_id, .. }
+        | Request::CommAssignNext { session_id, .. }
+        | Request::CommTaskControl { session_id, .. }
+        | Request::CommSubscribeChannel { session_id, .. }
+        | Request::CommUnsubscribeChannel { session_id, .. }
+        | Request::CommAwaitMembers { session_id, .. } => Some(session_id),
+        _ => None,
+    }
+}
+
+/// Ensure a session referenced by a lightweight Comm* request has a
+/// SwarmMember entry. Headless `jcode run` sessions are in-process agents
+/// whose session_id was never registered on the server (no Subscribe ever
+/// happened), so every swarm lookup returns "Not in a swarm" (#1748).
+/// Auto-registering here makes the swarm tool work for any lightweight
+/// client without changing the transport or requiring a Subscribe frame.
+async fn ensure_lightweight_swarm_member(
+    session_id: &str,
+    sessions: &SessionAgents,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+) {
+    if !crate::config::config().features.swarm {
+        return;
+    }
+
+    // Fast path: already registered (the normal TUI/attached case).
+    if swarm_members.read().await.contains_key(session_id) {
+        return;
+    }
+
+    // A session hosted by this server owns its membership through
+    // Subscribe. If it has none, that is deliberate (for example swarm was
+    // disabled for it), so do not grant membership behind its back.
+    if sessions.read().await.contains_key(session_id) {
+        return;
+    }
+
+    // Only register sessions that really exist on disk. A headless `jcode
+    // run` saves its session before the first turn, so its stub is present
+    // by the time any tool runs. Unknown ids (typos, stale ids, arbitrary
+    // strings) keep the historical "Not in a swarm" answer instead of
+    // minting a phantom member.
+    //
+    // Recover the caller's working directory from that stub too. Do NOT use
+    // the request's working_dir: CommSpawn's is the WORKER's directory, not
+    // the caller's: caching it on the caller would make subsequent spawns
+    // without an override inherit the wrong project.
+    let Ok(stub) = crate::session::Session::load_startup_stub(session_id) else {
+        return;
+    };
+    let working_dir = stub.working_dir.map(PathBuf::from);
+
+    let swarm_id = super::util::swarm_id_for_session(session_id);
+    let now = std::time::Instant::now();
+
+    // Create a dedicated event channel for the member with a lifecycle-owned
+    // drain task, mirroring create_headless_session's pattern: the channel
+    // stays open for as long as the member exists in swarm_members. Without
+    // the drain task, dropping the receiver would close the channel
+    // immediately, and a shared-swarm root replacement would treat the
+    // still-running coordinator as unreachable (review: "Live coordinator
+    // gets replaced"). When the member is removed (comm stop / daemon
+    // shutdown), dropping the last sender closes the channel and the drain
+    // task exits naturally.
+    //
+    // KNOWN LIMITATION (design follow-up): the drain task keeps the channel
+    // open after the headless caller exits, so the member stays "ready". In
+    // a shared swarm (JCODE_SWARM_ID), a later root's spawn may defer to
+    // the exited coordinator. The proper fix requires a session-exit hook
+    // (mark/remove the auto-registered member when the in-process `jcode run`
+    // session reaches its terminal state): connection close is NOT a valid
+    // proxy (it only proves one request finished, not that the session
+    // exited). Tracked as a follow-up; the single-caller case (the primary
+    // use case: headless run + swarm spawn) works correctly.
+    let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    tokio::spawn(async move {
+        while member_event_rx.recv().await.is_some() {
+            // Drain events to keep the channel alive
+        }
+    });
+
+    let mut members = swarm_members.write().await;
+    // Re-check under the write lock: another request may have registered
+    // this session while we were waiting.
+    if members.contains_key(session_id) {
+        return;
+    }
+    members.insert(
+        session_id.to_string(),
+        SwarmMember {
+            session_id: session_id.to_string(),
+            event_tx: member_event_tx,
+            event_txs: HashMap::new(),
+            working_dir: working_dir.clone(),
+            swarm_id: swarm_id.clone(),
+            swarm_enabled: true,
+            status: "ready".to_string(),
+            detail: None,
+            task_label: None,
+            friendly_name: None,
+            report_back_to_session_id: None,
+            latest_completion_report: None,
+            role: "agent".to_string(),
+            joined_at: now,
+            last_status_change: now,
+            is_headless: true,
+            output_tail: None,
+            todo_progress: None,
+            todo_items: Vec::new(),
+            runtime: crate::protocol::SwarmMemberRuntime::default(),
+        },
+    );
+    drop(members);
+
+    if let Some(swarm_id) = swarm_id {
+        let mut swarms = swarms_by_id.write().await;
+        swarms
+            .entry(swarm_id)
+            .or_insert_with(HashSet::new)
+            .insert(session_id.to_string());
+    }
+
+    crate::logging::event_info(
+        "SWARM_LIFECYCLE",
+        vec![
+            ("phase", "lightweight_member_registered".to_string()),
+            ("session_id", session_id.to_string()),
+            (
+                "working_dir_recovered",
+                working_dir.is_some().to_string(),
+            ),
+        ],
+    );
 }
 
 pub(super) struct LightweightControlContext<'a> {
@@ -137,6 +304,15 @@ pub(super) async fn handle_lightweight_control_request(
             }
         }
     });
+
+    // Auto-register the session referenced by a Comm* request as a swarm
+    // member. Headless `jcode run` agents are in-process and never Subscribe,
+    // so their session_id has no SwarmMember entry on the server and every
+    // swarm action fails with "Not in a swarm" (#1748). Registering here makes
+    // the swarm tool work for lightweight clients without a Subscribe frame.
+    if let Some(session_id) = comm_request_session_id(&request) {
+        ensure_lightweight_swarm_member(session_id, sessions, swarm_members, swarms_by_id).await;
+    }
 
     match request {
         // Scheduled delivery opens a one-shot connection and names the target
@@ -926,4 +1102,90 @@ pub(super) async fn handle_lightweight_control_request(
     drop(client_event_tx);
     let _ = event_handle.await;
     Ok(())
+}
+
+#[cfg(test)]
+mod lightweight_swarm_member_tests {
+    use super::*;
+
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _temp: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+
+    fn isolated_home() -> HomeGuard {
+        let lock = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        HomeGuard {
+            prev,
+            _temp: temp,
+            _lock: lock,
+        }
+    }
+
+    type Members = Arc<RwLock<HashMap<String, SwarmMember>>>;
+    type Swarms = Arc<RwLock<HashMap<String, HashSet<String>>>>;
+
+    fn empty_state() -> (SessionAgents, Members, Swarms) {
+        (
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+        )
+    }
+
+    /// Issue #1748 bug 2: a headless `jcode run` session persisted on disk but
+    /// never subscribed must become a swarm member on its first Comm* request,
+    /// with the caller's own working directory.
+    #[tokio::test]
+    async fn persisted_headless_session_is_registered_with_its_working_dir() {
+        let _home = isolated_home();
+        let session_id = "session_headless_run_1748";
+        let mut session =
+            crate::session::Session::create_with_id(session_id.to_string(), None, None);
+        session.working_dir = Some("/tmp/project-a".to_string());
+        session.save_prepared().expect("save session");
+
+        let (sessions, members, swarms) = empty_state();
+        ensure_lightweight_swarm_member(session_id, &sessions, &members, &swarms).await;
+
+        let members = members.read().await;
+        let member = members.get(session_id).expect("member registered");
+        assert!(member.is_headless);
+        assert_eq!(
+            member.working_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/project-a"))
+        );
+        let swarm_id = member.swarm_id.clone().expect("swarm id");
+        assert!(
+            swarms
+                .read()
+                .await
+                .get(&swarm_id)
+                .is_some_and(|ids| ids.contains(session_id))
+        );
+    }
+
+    /// Unknown ids keep answering "Not in a swarm" rather than minting a
+    /// phantom member for any string a client sends.
+    #[tokio::test]
+    async fn unknown_session_is_not_registered() {
+        let _home = isolated_home();
+        let (sessions, members, swarms) = empty_state();
+        ensure_lightweight_swarm_member("no-such-session", &sessions, &members, &swarms).await;
+        assert!(members.read().await.is_empty());
+        assert!(swarms.read().await.is_empty());
+    }
 }
