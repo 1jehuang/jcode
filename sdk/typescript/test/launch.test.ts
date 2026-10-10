@@ -279,7 +279,7 @@ test(
     const captured = path.join(sandbox, "auto-update.txt");
     fs.writeFileSync(
       binary,
-      "#!/bin/sh\nprintf '%s' \"${JCODE_NO_AUTO_UPDATE-unset}\" > \"$CAPTURE_PATH\"\nexit 1\n",
+      "#!/bin/sh\nprintf '%s|%s' \"${JCODE_NO_AUTO_UPDATE-unset}\" \"$*\" > \"$CAPTURE_PATH\"\nexit 1\n",
       { mode: 0o700 },
     );
 
@@ -293,7 +293,10 @@ test(
       }),
     );
 
-    assert.equal(fs.readFileSync(captured, "utf8"), "1");
+    assert.equal(
+      fs.readFileSync(captured, "utf8"),
+      `1|--no-update api-bridge --api-socket ${path.join(sandbox, "instance", "run", "jcode-api.sock")}`,
+    );
     fs.rmSync(sandbox, { recursive: true, force: true });
   },
 );

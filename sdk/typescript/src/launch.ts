@@ -555,7 +555,9 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
 
   const child = spawn(
     binary,
-    ["api-bridge", "--api-socket", socketPath],
+    // `--no-update` turns off the bridge's own update check, which also runs for
+    // source builds.
+    ["--no-update", "api-bridge", "--api-socket", socketPath],
     {
       cwd: options.workingDir ?? process.cwd(),
       env: {
@@ -564,9 +566,11 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
         JCODE_RUNTIME_DIR: runtimeDir,
         JCODE_API_SOCKET: socketPath,
         JCODE_SOCKET: path.join(runtimeDir, "jcode.sock"),
-        // An empty private home always looks out of date, so the updater would
-        // replace and restart the runtime mid-session: the client's turn fails
-        // and the restarted server is orphaned. The shared runtime still updates.
+        // An empty private home always looks out of date, so the release updater
+        // would replace and restart the runtime mid-session: the client's turn fails
+        // and the restarted server is orphaned. The variable is inherited by every
+        // jcode process the instance spawns (argv is not), so it keeps the release
+        // auto-installer off in those too. The shared runtime still updates.
         JCODE_NO_AUTO_UPDATE: "1",
         ...options.env,
         ...(options.swarmModel === undefined
