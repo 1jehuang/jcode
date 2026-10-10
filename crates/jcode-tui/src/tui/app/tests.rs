@@ -60,8 +60,12 @@ include!("tests/merge_command.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
+
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
+
+include!("tests/cache_countdown_beeps.rs");
+
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![

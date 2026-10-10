@@ -301,6 +301,10 @@ persist_memory_injections = false
 # (avoidable) reason: system prompt, tool set, or message prefix changed. These
 # should essentially never happen and indicate a prefix-cache bug.
 kv_cache_miss_notices = true
+# Terminal beep warnings before the KV-cache expires.
+# 0 = disabled; 1 = beep 1 min before; 2 = beep at 2 and 1 min; 3 = all three.
+# Only fires for providers with a published TTL (Anthropic, OpenRouter).
+cache_countdown_beeps = 1
 # Update channel: "stable" (releases only) or "main" (latest commits on push)
 # Set to "main" for bleeding edge updates every time code is pushed
 update_channel = "stable"

@@ -1198,6 +1198,19 @@ pub struct FeatureConfig {
     pub kv_cache_miss_notices: bool,
     /// Update channel: "stable" (releases only) or "main" (latest commits)
     pub update_channel: UpdateChannel,
+    /// Terminal beep warnings before the KV-cache TTL expires.
+    ///
+    /// Controls how many minutes of lead time the countdown-beep feature covers:
+    ///
+    /// - `0` — disabled; no beeps are ever emitted.
+    /// - `1` — 1 beep at 1 minute remaining.
+    /// - `2` — 1 beep at 2 minutes remaining, 2 beeps at 1 minute remaining.
+    /// - `3` — 1 beep at 3 min, 2 beeps at 2 min, 3 beeps at 1 min remaining.
+    ///
+    /// Values above 3 are clamped to 3. Only applies to providers with a known
+    /// cache TTL (Anthropic, OpenRouter); providers that don't publish a TTL
+    /// (Copilot, Cursor) are always silent regardless of this setting.
+    pub cache_countdown_beeps: u8,
 }
 
 impl Default for FeatureConfig {
@@ -1212,6 +1225,7 @@ impl Default for FeatureConfig {
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
             update_channel: UpdateChannel::default(),
+            cache_countdown_beeps: 1,
         }
     }
 }

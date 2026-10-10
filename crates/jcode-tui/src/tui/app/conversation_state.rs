@@ -404,6 +404,7 @@ impl App {
         self.kv_cache.cache_generation = self.kv_cache.cache_generation.wrapping_add(1);
         self.kv_cache.kv_cache_baseline = None;
         self.kv_cache.cold_cache_warned_baseline_completed_at = None;
+        self.kv_cache.beep_milestones_fired = 0;
         self.provider_session_id = None;
         self.session.provider_session_id = None;
         self.context_warning_shown = false;

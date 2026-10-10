@@ -801,6 +801,11 @@ struct KvCacheState {
     /// for the same cold period. A newly completed call refreshes the
     /// baseline's `completed_at`, which re-arms the warning automatically.
     cold_cache_warned_baseline_completed_at: Option<Instant>,
+    /// Bitmask of countdown beep milestones already fired for the current
+    /// cache baseline. Bit 0 = 3-min warning (1 beep), bit 1 = 2-min (2
+    /// beeps), bit 2 = 1-min (3 beeps). Reset when the baseline is refreshed
+    /// so a new cache write re-arms all three countdowns.
+    beep_milestones_fired: u8,
 }
 
 /// Where a cold-cache warning is being surfaced from, so the copy can say
@@ -2016,6 +2021,80 @@ impl App {
         self.push_cold_cache_warning_for_baseline(&baseline, ColdCacheWarningTrigger::IdleExpiry)
     }
 
+
+    /// Emit countdown beeps as the prompt cache approaches expiry.
+    ///
+    /// Fires while the session is idle (not processing):
+    ///   - 1 BEL when 3 minutes remain  (bit 0)  -- level 3 only
+    ///   - 1 BEL when 2 minutes remain  (bit 1)  -- level 2+
+    ///   - 1 BEL when 1 minute remains  (bit 2)  -- level 1+
+    ///
+    /// Each milestone fires at most once per cache baseline write; a new
+    /// completed turn re-arms all three.
+    pub(super) fn maybe_emit_cache_countdown_beeps(&mut self) {
+        if self.is_processing {
+            return;
+        }
+        // Respect the user's configured warning window. 0 = feature disabled.
+        let max_warning_minutes = crate::config::config()
+            .features
+            .cache_countdown_beeps
+            .min(3);
+        if max_warning_minutes == 0 {
+            return;
+        }
+        // Use the session-validated baseline (rejects stale or compacted baselines).
+        let Some(baseline) = self.kv_cache_baseline_for_current_session() else {
+            return;
+        };
+        // Use the retention that was active when the request started, not the
+        // current provider setting -- they may differ after a route change.
+        let Some(ttl_secs) = baseline.cache_ttl_secs else {
+            return;
+        };
+        let elapsed = baseline.completed_at.elapsed().as_secs();
+        let remaining = ttl_secs.saturating_sub(elapsed);
+
+        // Milestones: 3-min, 2-min, 1-min (only while cache is still warm).
+        // Each fires at most once per baseline (bitmask gates re-firing).
+        // Only milestones within the configured warning window are eligible.
+        struct Milestone {
+            bit: u8,
+            threshold_secs: u64,
+            /// Minutes before expiry this milestone represents (1, 2, or 3).
+            minutes: u8,
+        }
+        let milestones = [
+            Milestone { bit: 0b001, threshold_secs: 180, minutes: 3 },
+            Milestone { bit: 0b010, threshold_secs: 120, minutes: 2 },
+            Milestone { bit: 0b100, threshold_secs:  60, minutes: 1 },
+        ];
+
+        let mut beeps_to_emit: usize = 0;
+        for m in &milestones {
+            if m.minutes <= max_warning_minutes
+                && remaining <= m.threshold_secs
+                && remaining > 0
+                && (self.kv_cache.beep_milestones_fired & m.bit) == 0
+            {
+                self.kv_cache.beep_milestones_fired |= m.bit;
+                // The first armed milestone emits 1 beep; each closer milestone
+                // adds one more (3-min=1, 2-min=2, 1-min=3 at level 3).
+                // For suspension catch-up where several milestones fire at once,
+                // use the loudest count so we don't over-beep.
+                let count = (max_warning_minutes - m.minutes + 1) as usize;
+                beeps_to_emit = beeps_to_emit.max(count);
+            }
+        }
+
+        if beeps_to_emit > 0 {
+            let beep_str = "\x07".repeat(beeps_to_emit);
+            let mut stdout = std::io::stdout().lock();
+            let _ = std::io::Write::write_all(&mut stdout, beep_str.as_bytes());
+            let _ = std::io::Write::flush(&mut stdout);
+        }
+    }
+
     /// Push the cold-cache transcript warning if `baseline`'s TTL has expired
     /// and this cold period has not been warned about yet. Returns true when
     /// a warning was pushed.
@@ -2123,6 +2202,7 @@ impl App {
                 upstream_provider: request.upstream_provider,
                 signature: request.signature,
             });
+            self.kv_cache.beep_milestones_fired = 0;
             return true;
         }
 
@@ -2169,6 +2249,7 @@ impl App {
             upstream_provider: request.upstream_provider,
             signature: request.signature,
         });
+        self.kv_cache.beep_milestones_fired = 0;
         true
     }
 
