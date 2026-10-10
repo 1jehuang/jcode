@@ -562,12 +562,12 @@ mod debug_execution_tests {
     use std::sync::Arc;
     use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
-    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    fn lock_env() -> jcode_base::storage::TestEnvGuard {
         crate::storage::lock_test_env()
     }
 
     struct EnvVarGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+        _lock: jcode_base::storage::TestEnvGuard,
         key: &'static str,
         previous: Option<OsString>,
     }
