@@ -300,6 +300,10 @@ struct PendingModelPickerLoad {
     request_id: u64,
     signature: ModelPickerCacheSignature,
     picker_started: Instant,
+    /// When this load feeds an agent-model sub-picker (Ctrl+S in /model),
+    /// the completion path must re-tag the rebuilt picker with this target
+    /// instead of leaving the ordinary model picker behind.
+    agent_target: Option<crate::tui::AgentModelTarget>,
     receiver: mpsc::Receiver<anyhow::Result<ModelPickerRoutesResult>>,
 }
 

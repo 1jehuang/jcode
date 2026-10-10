@@ -4,7 +4,7 @@
     "crates/jcode-app-core/src/agent_tests.rs": 3198,
     "crates/jcode-app-core/src/server/client_lifecycle_tests.rs": 2193,
     "crates/jcode-app-core/src/server/comm_control_tests/dag_e2e.rs": 1332,
-    "crates/jcode-app-core/src/server/comm_session_tests.rs": 1415,
+    "crates/jcode-app-core/src/server/comm_session_tests.rs": 1445,
     "crates/jcode-app-core/src/server/provider_control_tests.rs": 1426,
     "crates/jcode-app-core/src/server/swarm_persistence_tests.rs": 1300,
     "crates/jcode-app-core/src/tool/bash_tests.rs": 1293,
@@ -32,8 +32,8 @@
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_01/part_01.rs": 2056,
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_04.rs": 2708,
     "crates/jcode-tui/src/tui/app/tests/remote_events_reload_05.rs": 1204,
-    "crates/jcode-tui/src/tui/app/tests/remote_startup_input_02/part_01.rs": 2303,
-    "crates/jcode-tui/src/tui/app/tests/remote_startup_input_03/part_01.rs": 1325,
+    "crates/jcode-tui/src/tui/app/tests/remote_startup_input_02/part_01.rs": 2635,
+    "crates/jcode-tui/src/tui/app/tests/remote_startup_input_03/part_01.rs": 1329,
     "crates/jcode-tui/src/tui/app/tests/scroll_copy_01/part_01.rs": 1583,
     "crates/jcode-tui/src/tui/app/tests/scroll_copy_02/part_01.rs": 1580,
     "crates/jcode-tui/src/tui/app/tests/scroll_copy_02/part_02.rs": 1591,
@@ -49,6 +49,7 @@
     "crates/jcode-tui/src/tui/ui_tests/prepare.rs": 1342,
     "crates/jcode-tui/src/tui/ui_tests/tools.rs": 1530,
     "src/cli/commands_tests.rs": 1744,
+    "src/cli/provider_init_tests.rs": 1254,
     "tests/e2e/test_support/mod.rs": 1433
   },
   "version": 1
