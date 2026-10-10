@@ -2381,11 +2381,8 @@ impl SessionPicker {
             })?;
             if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
-                    Event::Key(key) => {
-                        if key.kind != KeyEventKind::Press {
-                            continue;
-                        }
-
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        let key = jcode_tui_core::korean_input::normalize_key_event(key);
                         match self.handle_overlay_key(key.code, key.modifiers)? {
                             OverlayAction::Continue => {}
                             OverlayAction::Close => break Ok(None),

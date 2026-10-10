@@ -415,6 +415,7 @@ fn apply_terminal_event(
             Ok(false)
         }
         Some(Ok(Event::Key(key))) => {
+            let key = jcode_tui_core::korean_input::normalize_key_event(key);
             crate::tui::ui::note_key_event_read();
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
