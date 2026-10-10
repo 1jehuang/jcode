@@ -242,23 +242,37 @@ fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
     let bytes = line.as_bytes();
     let mut found = Vec::new();
     let mut index = 0;
-    let mut quote = None;
+    // Quote state per command-substitution level. `"$(cat <<'EOF'` opens a
+    // new shell context inside the double quotes, so a heredoc declared there
+    // is real and its body must still be stripped.
+    let mut quotes: Vec<Option<u8>> = vec![None];
 
     while index + 1 < bytes.len() {
         let byte = bytes[index];
+        let quote = *quotes.last().expect("quote stack is never empty");
+        if quote != Some(b'\'') && byte == b'$' && bytes[index + 1] == b'(' {
+            quotes.push(None);
+            index += 2;
+            continue;
+        }
+        if quote.is_none() && byte == b')' && quotes.len() > 1 {
+            quotes.pop();
+            index += 1;
+            continue;
+        }
         if let Some(end) = quote {
             if byte == b'\\' && end == b'"' {
                 index += 2;
                 continue;
             }
             if byte == end {
-                quote = None;
+                *quotes.last_mut().expect("quote stack is never empty") = None;
             }
             index += 1;
             continue;
         }
         if matches!(byte, b'\'' | b'"') {
-            quote = Some(byte);
+            *quotes.last_mut().expect("quote stack is never empty") = Some(byte);
             index += 1;
             continue;
         }

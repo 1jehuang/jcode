@@ -32,6 +32,22 @@ fn tab_stripping_and_escaped_delimiters_are_supported() {
     }
 }
 
+#[test]
+fn heredoc_declared_inside_command_substitution_is_found() {
+    assert_eq!(
+        heredoc_delimiters("gh api x -f body=\"$(cat <<'EOF'"),
+        vec![("EOF".to_string(), false)]
+    );
+    assert_eq!(
+        heredoc_delimiters("echo \"$(printf ')' ; cat <<-END"),
+        vec![("END".to_string(), true)]
+    );
+    // Single quotes suppress `$(`, so this `<<` is literal text.
+    assert!(heredoc_delimiters("echo '$(cat <<EOF'").is_empty());
+    // A closed substitution restores the outer double-quote context.
+    assert!(heredoc_delimiters("echo \"$(date) <<EOF\"").is_empty());
+}
+
 fn texts(command: &str) -> Vec<String> {
     tokenize(command).into_iter().map(|t| t.text).collect()
 }
