@@ -655,9 +655,15 @@ fn answering_no_on_continue_prompt_lands_on_regular_session() {
             };
         }
         app.onboarding_answer_continue(false);
-        // "No" lands on the regular new-session screen: no starter prompts.
+        // "No" finishes the flow and lands on the regular new-session screen.
+        // Assert the rendered body, not `suggestion_prompts()` /
+        // `onboarding_welcome_active()`: both read `AuthStatus::check_fast()`, so
+        // the old assertion could only pass on a machine with credentials.
         assert!(!app.onboarding_flow_active());
-        assert!(app.suggestion_prompts().is_empty() || !app.onboarding_welcome_active());
+        assert!(matches!(
+            app.onboarding_welcome_kind(),
+            crate::tui::OnboardingWelcomeKind::Suggestions
+        ));
         // No session picker overlay opened on the "No" path.
         assert!(app.session_picker_overlay.is_none());
     });

@@ -1819,7 +1819,7 @@ fn test_local_speed_cycle_walks_standard_fast_ultrafast_and_clamps() {
         }),
     };
 
-    let mut press = |app: &mut App, code| {
+    let press = |app: &mut App, code| {
         app.handle_key(code, KeyModifiers::ALT).unwrap();
         (tier.lock().unwrap().clone(), app.status_notice().unwrap_or_default())
     };

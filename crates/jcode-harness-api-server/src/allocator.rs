@@ -40,11 +40,12 @@ pub fn trim() {
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0);
     let last = LAST_TRIM_MS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) >= MIN_TRIM_INTERVAL_MS
+    let due = now.saturating_sub(last) >= MIN_TRIM_INTERVAL_MS
         && LAST_TRIM_MS
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-    {
+            .is_ok();
+    // The trim itself only exists on glibc; elsewhere this is just the gate.
+    if due {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         // SAFETY: malloc_trim is thread-safe and only releases free pages.
         unsafe {

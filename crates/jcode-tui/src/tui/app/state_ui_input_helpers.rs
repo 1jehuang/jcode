@@ -1,6 +1,5 @@
 use super::*;
 use crate::tui::core;
-use std::path::PathBuf;
 
 #[derive(Clone, Copy)]
 struct RegisteredCommand {

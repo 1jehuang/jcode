@@ -1,4 +1,3 @@
-#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::{Tool, ToolContext, ToolOutput};
 use crate::bus::{Bus, BusEvent, TodoEvent};
 use crate::todo::{
@@ -963,6 +962,7 @@ impl Tool for TodoTool {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 

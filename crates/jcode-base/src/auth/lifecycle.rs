@@ -497,6 +497,12 @@ fn preferred_model_rank(orders: &[&'static [&'static str]], model: &str) -> usiz
     usize::MAX
 }
 
+/// Memo table for [`normalized_preference_order`]: slice address + length to
+/// the shared normalized order. Named so the static's type stays readable
+/// (clippy `type_complexity`).
+type NormalizedPreferenceCache =
+    std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>;
+
 /// `order` with every id passed through [`normalize_model_for_preference`],
 /// memoized per curated list. Ranking a catalog compares every catalog model
 /// against every curated id; re-normalizing the curated side each time made a
@@ -504,9 +510,8 @@ fn preferred_model_rank(orders: &[&'static [&'static str]], model: &str) -> usiz
 /// Curated orders are `&'static` constants, so the slice address identifies
 /// them.
 fn normalized_preference_order(order: &'static [&'static str]) -> std::sync::Arc<Vec<String>> {
-    static CACHE: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>,
-    > = std::sync::LazyLock::new(Default::default);
+    static CACHE: std::sync::LazyLock<NormalizedPreferenceCache> =
+        std::sync::LazyLock::new(Default::default);
     let key = (order.as_ptr() as usize, order.len());
     if let Ok(cache) = CACHE.lock()
         && let Some(hit) = cache.get(&key)

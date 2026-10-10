@@ -1,4 +1,3 @@
-#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::discover_secrets::contains_recognizable_secret;
 use super::{Tool, ToolContext, ToolExecutionMode, ToolOutput};
 use anyhow::Result;
@@ -1836,6 +1835,7 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
