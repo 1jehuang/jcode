@@ -255,6 +255,18 @@ fn create_openrouter_spec_capture_test_app() -> (App, StdArc<StdMutex<Vec<String
 }
 
 #[test]
+fn temp_home_restores_env_after_caught_panic() {
+    const KEYS: [&str; 2] = ["JCODE_HOME", "JCODE_NAMED_PROVIDER_PROFILE"];
+    // Hold the env lock throughout and fabricate nothing, so no parallel test
+    // can observe a probe value. A leaked temp `JCODE_HOME` still differs.
+    let _guard = crate::storage::lock_test_env();
+    let before = KEYS.map(std::env::var_os);
+    let caught = std::panic::catch_unwind(|| with_temp_jcode_home_locked(|| panic!("probe")));
+    assert!(caught.is_err());
+    assert_eq!(KEYS.map(std::env::var_os), before);
+}
+
+#[test]
 fn local_add_provider_message_does_not_retain_local_provider_copy() {
     let mut app = create_test_app();
     app.add_provider_message(Message::user("hello"));
@@ -443,12 +455,46 @@ impl Drop for EnvRestoreGuard {
 
 fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     let _guard = crate::storage::lock_test_env();
+    with_temp_jcode_home_locked(f)
+}
+
+/// Body of [`with_temp_jcode_home`] for callers already holding the env lock.
+fn with_temp_jcode_home_locked<T>(f: impl FnOnce() -> T) -> T {
+    // Restores env and process-global caches on drop, so a caught panic in `f`
+    // cannot leave `JCODE_HOME` pointing at the deleted temp dir.
+    struct RestoreTestEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for RestoreTestEnv {
+        fn drop(&mut self) {
+            crate::auth::claude::set_active_account_override(None);
+            crate::auth::codex::set_active_account_override(None);
+            crate::auth::AuthStatus::invalidate_cache();
+            crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
+            for (key, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => crate::env::set_var(key, value),
+                    None => crate::env::remove_var(key),
+                }
+            }
+            // Drop any config loaded from the temp home so it cannot leak into
+            // the next test, which is process-global state shared across this suite.
+            crate::config::invalidate_config_cache();
+        }
+    }
+
     let temp = tempfile::tempdir().expect("tempdir");
-    let _env_guard = EnvRestoreGuard::capture(["JCODE_HOME"]);
-    crate::env::set_var("JCODE_HOME", temp.path());
     // Preserve inherited telemetry opt-out env. In this crate telemetry-core is
     // a dependency, so cfg(test) does not stub its HTTP delivery path; inherited
     // opt-out must keep blocking delivery for tests that exercise onboarding.
+    // A parent jcode session exports its named provider profile to child
+    // processes. Running the suite from inside one must not decide whether
+    // built-in OpenAI-compatible profiles count as configured.
+    let _restore = RestoreTestEnv(
+        ["JCODE_HOME", "JCODE_NAMED_PROVIDER_PROFILE"]
+            .map(|key| (key, std::env::var_os(key)))
+            .into(),
+    );
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
@@ -457,16 +503,7 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     crate::config::invalidate_config_cache();
     clear_persisted_test_ui_state();
 
-    let result = f();
-
-    crate::auth::claude::set_active_account_override(None);
-    crate::auth::codex::set_active_account_override(None);
-    crate::auth::AuthStatus::invalidate_cache();
-    crate::tui::app::helpers::clear_ambient_info_cache_for_tests();
-    // Drop any config loaded from the temp home so it cannot leak into the next
-    // test, which is process-global state shared across this suite.
-    crate::config::invalidate_config_cache();
-    result
+    f()
 }
 
 /// Run `f` in a hermetic `JCODE_HOME` with reasoning display pinned to
