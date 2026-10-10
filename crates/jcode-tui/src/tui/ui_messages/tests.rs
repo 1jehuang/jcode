@@ -1699,7 +1699,8 @@ fn render_assistant_message_truncates_tool_calls_to_single_line() {
         tool_data: None,
     };
 
-    let lines = render_assistant_message(&msg, 20, crate::config::DiffDisplayMode::Off);
+    let lines =
+        render_assistant_message_with_tool_summary(&msg, 20, crate::config::DiffDisplayMode::Off);
     assert_eq!(extract_line_text(&lines[1]), "");
     let tool_lines: Vec<String> = lines
         .iter()
@@ -1745,7 +1746,8 @@ fn render_assistant_message_centers_single_line_tool_summary() {
         tool_data: None,
     };
 
-    let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
+    let lines =
+        render_assistant_message_with_tool_summary(&msg, 28, crate::config::DiffDisplayMode::Off);
     assert_eq!(extract_line_text(&lines[1]), "");
     let tool_lines: Vec<String> = lines
         .iter()
@@ -1791,13 +1793,46 @@ fn render_assistant_message_without_body_does_not_add_extra_blank_line_before_to
         tool_data: None,
     };
 
-    let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
+    let lines =
+        render_assistant_message_with_tool_summary(&msg, 28, crate::config::DiffDisplayMode::Off);
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert_eq!(rendered.len(), 1, "rendered={rendered:?}");
     assert!(rendered[0].contains("tool:"), "rendered={rendered:?}");
 
     crate::tui::markdown::set_center_code_blocks(saved);
+}
+
+#[test]
+fn transcript_assistant_message_omits_tool_summary_restored_from_history() {
+    // History restore fills `tool_calls`, live turns do not. The transcript
+    // must look the same either way, so no `tool:` line in the chat view.
+    let restored = DisplayMessage {
+        role: "assistant".to_string(),
+        content: "Formatting touched 2 extra files.".to_string(),
+        tool_calls: vec!["bash".to_string(), "todo".to_string()],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    };
+    let live = DisplayMessage {
+        tool_calls: Vec::new(),
+        ..restored.clone()
+    };
+    let render = |msg: &DisplayMessage| -> Vec<String> {
+        render_assistant_message(msg, 80, crate::config::DiffDisplayMode::Off)
+            .iter()
+            .map(extract_line_text)
+            .collect()
+    };
+    let restored_lines = render(&restored);
+    assert!(
+        restored_lines
+            .iter()
+            .all(|line| !line.contains("tool:") && !line.contains("tools:")),
+        "{restored_lines:?}"
+    );
+    assert_eq!(restored_lines, render(&live));
 }
 
 #[test]

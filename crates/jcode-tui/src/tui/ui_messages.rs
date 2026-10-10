@@ -79,10 +79,34 @@ fn render_single_line_system_notice(
     Some(lines)
 }
 
+/// Assistant message as shown in the chat transcript.
+///
+/// Restored history fills `tool_calls` with the turn's tool names, while live
+/// turns leave it empty. The transcript already renders a full row per tool
+/// right below, so the `tool: bash` summary line would only appear after a
+/// reload and duplicate those rows. Leave it out here and keep it for the
+/// session picker preview, which has no separate tool rows to lean on.
 pub(crate) fn render_assistant_message(
     msg: &DisplayMessage,
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
+) -> Vec<Line<'static>> {
+    render_assistant_message_body(msg, width, false)
+}
+
+/// Assistant message with the compact `tool:`/`tools:` summary line appended.
+pub(crate) fn render_assistant_message_with_tool_summary(
+    msg: &DisplayMessage,
+    width: u16,
+    _diff_mode: crate::config::DiffDisplayMode,
+) -> Vec<Line<'static>> {
+    render_assistant_message_body(msg, width, true)
+}
+
+fn render_assistant_message_body(
+    msg: &DisplayMessage,
+    width: u16,
+    include_tool_summary: bool,
 ) -> Vec<Line<'static>> {
     let centered = markdown::center_code_blocks();
     let wrap_width = centered_wrap_width(width, centered, 96);
@@ -94,7 +118,7 @@ pub(crate) fn render_assistant_message(
     if centered {
         markdown::recenter_structured_blocks_for_display(&mut lines, width as usize);
     }
-    if !msg.tool_calls.is_empty() {
+    if include_tool_summary && !msg.tool_calls.is_empty() {
         if lines.iter().any(|line| {
             line.spans
                 .iter()
