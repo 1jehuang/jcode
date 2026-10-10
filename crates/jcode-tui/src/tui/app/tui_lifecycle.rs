@@ -1404,7 +1404,6 @@ impl App {
         // metadata once so autocomplete works before the first History event.
         // SSH clients above must use only the remote server's skill metadata.
         app.refresh_skills_snapshot();
-        app.apply_remote_header_hint();
 
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -1435,6 +1434,9 @@ impl App {
         }
 
         app.resume_session_id = resume_session;
+        // After `resume_session_id`: the hint needs to know whether this is a
+        // new session (configured effort applies) or a resumed one.
+        app.apply_remote_header_hint();
         app
     }
 

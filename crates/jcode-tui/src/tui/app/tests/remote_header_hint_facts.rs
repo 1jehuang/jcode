@@ -81,3 +81,37 @@ fn model_changed_after_facts_are_confirmed_is_announced() {
     assert_eq!(app.display_messages.len(), before + 1);
     assert_eq!(app.context_limit, 200_000);
 }
+
+#[test]
+fn configured_route_seeds_first_frame_facts_without_a_hint() {
+    // No remembered hint (first launch, or the hint described another model):
+    // the configured route alone fixes the provider, the pinned credential,
+    // and the static window of a known model. Before, the raw route id leaked
+    // into the status line as `Oauth:claude Opus 5.5` next to a 200k window.
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_MODEL");
+    crate::env::set_var("JCODE_MODEL", "claude-oauth:claude-opus-5-5");
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_provider_model = None;
+    app.remote_provider_name = None;
+    app.apply_configured_route_facts();
+    match prev {
+        Some(v) => crate::env::set_var("JCODE_MODEL", v),
+        None => crate::env::remove_var("JCODE_MODEL"),
+    }
+
+    assert_eq!(app.remote_provider_model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(app.remote_provider_name.as_deref(), Some("claude"));
+    assert_eq!(app.context_limit, 1_000_000);
+    assert_eq!(
+        app.remote_resolved_credential,
+        Some(jcode_provider_core::ResolvedCredential::Oauth)
+    );
+    assert!(app.remote_session_facts_provisional);
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(
+        data.auth_method,
+        crate::tui::info_widget::AuthMethod::AnthropicOAuth
+    );
+}

@@ -65,7 +65,7 @@ impl App {
             .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("unknown"))
     }
 
-    fn configured_remote_provider_hint(&self) -> Option<String> {
+    pub(super) fn configured_remote_provider_hint(&self) -> Option<String> {
         if crate::tui::is_ssh_remote() {
             return None;
         }

@@ -83,6 +83,7 @@ impl App {
             self.remote_is_canary = Some(true);
         }
         let Some(hint) = read_hint() else {
+            self.apply_configured_route_facts();
             return;
         };
         if self.mcp_server_names.is_empty() {
@@ -91,6 +92,74 @@ impl App {
         if let Some(session) = hint.session {
             self.apply_session_facts_hint(session);
         }
+        if !self.remote_session_facts_provisional {
+            self.apply_configured_route_facts();
+        }
+    }
+
+    /// No usable hint: derive what we can from the route the launch is
+    /// configured to use (`claude-oauth:claude-opus-5-5`). Without this the
+    /// raw route id leaked into the status line (`Oauth:claude Opus 5.5`) next
+    /// to a generic 200k window until History arrived. The provider, the
+    /// explicitly pinned credential, and the static context window for a
+    /// known model are all determined by the route itself. Effort is left
+    /// unknown: only the server knows the session's effort.
+    pub(super) fn apply_configured_route_facts(&mut self) {
+        if self.remote_provider_model.is_some() {
+            return;
+        }
+        let Some(model) = self.effective_remote_provider_model() else {
+            return;
+        };
+        // Route-qualified id (`claude-oauth:claude-opus-5-5`, the config
+        // default) or a bare one (`claude-opus-5-5`, what a resumed session
+        // stores). For a bare id the session's provider key, then the
+        // configured default provider, supply the route.
+        let configured_provider = self
+            .session
+            .provider_key
+            .clone()
+            .or_else(|| self.configured_remote_provider_hint());
+        let qualified;
+        let model = if jcode_provider_core::selection::explicit_model_provider_prefix(model.trim())
+            .is_some()
+        {
+            model.trim()
+        } else {
+            let Some(provider) = configured_provider.as_deref() else {
+                return;
+            };
+            qualified = format!("{}:{}", provider.trim(), model.trim());
+            qualified.as_str()
+        };
+        let Some((provider, prefix, bare)) =
+            jcode_provider_core::selection::explicit_model_provider_prefix(model)
+        else {
+            return;
+        };
+        let bare = bare.trim();
+        if bare.is_empty() {
+            return;
+        }
+        let provider_key = jcode_provider_core::selection::provider_key(provider);
+        let Some(context_limit) =
+            crate::provider::context_limit_for_model_with_provider(bare, Some(provider_key))
+        else {
+            return;
+        };
+        self.set_context_limit_and_sync_budget(context_limit);
+        self.remote_provider_name = Some(provider_key.to_string());
+        self.remote_provider_model = Some(bare.to_string());
+        self.remote_resolved_credential =
+            jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix)
+                .map(|route| route.resolved_credential());
+        // A brand-new session starts at the configured per-family effort, so
+        // that is known too. A resumed session keeps whatever it last used,
+        // which only the server knows.
+        if self.resume_session_id.is_none() {
+            self.remote_reasoning_effort = self.remote_reasoning_effort_hint();
+        }
+        self.remote_session_facts_provisional = true;
     }
 
     /// Apply remembered session facts, but only when they describe the model
