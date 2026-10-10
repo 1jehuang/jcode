@@ -2099,15 +2099,11 @@ impl SessionPicker {
     /// Label for the blank-session onboarding action, naming the directory
     /// the new session will start in (home abbreviated to `~`).
     fn onboarding_start_new_label(&self) -> String {
-        let dir = self
-            .current_dir
-            .as_deref()
-            .map(str::to_string)
-            .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .map(|p| p.display().to_string())
-            });
+        let dir = self.current_dir.as_deref().map(str::to_string).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        });
         match dir {
             Some(dir) => {
                 let shown = match dirs::home_dir().map(|h| h.display().to_string()) {
@@ -2198,9 +2194,8 @@ impl SessionPicker {
         let start = action_spans(&start_label, start_selected);
         let or_span = || Span::styled("or", Style::default().fg(rgb(130, 134, 142)));
 
-        let width_of = |spans: &[Span<'static>]| -> u16 {
-            spans.iter().map(|s| s.width() as u16).sum()
-        };
+        let width_of =
+            |spans: &[Span<'static>]| -> u16 { spans.iter().map(|s| s.width() as u16).sum() };
         // "<review>   or   <start>"
         let side_by_side_width = width_of(&review) + 8 + width_of(&start);
         let row = |y: u16| Rect {
@@ -2232,10 +2227,7 @@ impl SessionPicker {
                 if y > max_y {
                     break;
                 }
-                frame.render_widget(
-                    Paragraph::new(line).alignment(Alignment::Center),
-                    row(y),
-                );
+                frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), row(y));
             }
         }
     }

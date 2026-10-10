@@ -1349,7 +1349,11 @@ fn onboarding_banner_offers_review_then_new_session() {
     assert!(picker.onboarding_review_recent_project_highlighted());
 }
 
-fn render_onboarding_picker_lines(picker: &mut SessionPicker, width: u16, height: u16) -> Vec<String> {
+fn render_onboarding_picker_lines(
+    picker: &mut SessionPicker,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     terminal
@@ -1386,7 +1390,10 @@ fn onboarding_banner_renders_actions_side_by_side_with_or() {
         !text.contains("Start in the current directory"),
         "old start label must be gone: {lines:#?}"
     );
-    assert!(!text.contains("Sessions"), "resume chrome must be absent: {lines:#?}");
+    assert!(
+        !text.contains("Sessions"),
+        "resume chrome must be absent: {lines:#?}"
+    );
     assert!(
         !text.contains('╭') && !text.contains('╰') && !text.contains('│'),
         "onboarding choice should not render an outer boundary: {lines:#?}"
@@ -1398,7 +1405,9 @@ fn onboarding_banner_renders_actions_side_by_side_with_or() {
         .expect("review action");
     let line = &lines[row];
     let review_x = line.find("Find bugs in my most active repo").unwrap();
-    let or_x = line.find(" or ").expect("'or' between the actions on the same row");
+    let or_x = line
+        .find(" or ")
+        .expect("'or' between the actions on the same row");
     let start_x = line
         .find("New session in /srv/projects/demo")
         .expect("start action names the directory, on the same row");
@@ -1409,7 +1418,10 @@ fn onboarding_banner_renders_actions_side_by_side_with_or() {
         .position(|line| line.contains("Welcome to jcode"))
         .unwrap();
     assert!(welcome_y < row, "{lines:#?}");
-    assert!(row.abs_diff(lines.len() / 2) <= 1, "actions vertically centered: {lines:#?}");
+    assert!(
+        row.abs_diff(lines.len() / 2) <= 1,
+        "actions vertically centered: {lines:#?}"
+    );
 }
 
 #[test]
@@ -2612,7 +2624,9 @@ fn onboarding_start_label_marks_home_directory() {
     picker.activate_onboarding_banner(vec![Line::from("Welcome to jcode")]);
     let lines = render_onboarding_picker_lines(&mut picker, 120, 40);
     assert!(
-        lines.iter().any(|line| line.contains("New session in ~ (home)")),
+        lines
+            .iter()
+            .any(|line| line.contains("New session in ~ (home)")),
         "home directory should read '~ (home)': {lines:#?}"
     );
 }
