@@ -732,17 +732,16 @@ fn delimited_content_looks_like_prose(rest: &str, close_delimiter: &str) -> bool
     }) {
         return false;
     }
-    // A single bare token with a run of four or more letters and no LaTeX
-    // command or operator is escaped Markdown brackets around a word, e.g. a
-    // TOML table header like `\[workspace\]` or `\[package.metadata\]`. Real
-    // math would typeset that as an italic product of variables.
-    let trimmed = body.trim();
-    let is_single_word = !trimmed.is_empty()
-        && !trimmed.contains(char::is_whitespace)
-        && trimmed
+    // A single-line body with any run of four or more letters and no LaTeX
+    // command or operator is escaped Markdown brackets around words, e.g. a
+    // TOML table header like `\[workspace\]`, or a placeholder like
+    // `\[pasted N lines\]`. Real math would typeset that as an italic product
+    // of variables. Multiline `\[ ... \]` blocks stay math.
+    if !body.contains('\n')
+        && body
             .split(|ch: char| !ch.is_alphabetic())
-            .any(|run| run.chars().count() >= 4);
-    if is_single_word {
+            .any(|run| run.chars().count() >= 4)
+    {
         return true;
     }
     body.split_whitespace()
@@ -1026,6 +1025,8 @@ mod tests {
             r"even though I added \[workspace\] to make this a root",
             r"set \[package.metadata\] keys",
             r"see \(optional\) here",
+            r"collapsed into a placeholder like \[pasted N lines\] by jcode",
+            r"\[image 1\]",
         ] {
             assert_eq!(normalize_latex_math(input), input);
         }
