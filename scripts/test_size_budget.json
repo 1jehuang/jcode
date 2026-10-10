@@ -10,7 +10,7 @@
     "crates/jcode-app-core/src/tool/bash_tests.rs": 1293,
     "crates/jcode-app-core/src/tool/communicate_tests.rs": 1887,
     "crates/jcode-app-core/src/tool/selfdev/tests.rs": 1443,
-    "crates/jcode-app-core/src/tool/tests.rs": 1941,
+    "crates/jcode-app-core/src/tool/tests.rs": 1944,
     "crates/jcode-base/src/config_tests.rs": 1752,
     "crates/jcode-base/src/live_tests.rs": 3087,
     "crates/jcode-base/src/provider/tests.rs": 1336,
