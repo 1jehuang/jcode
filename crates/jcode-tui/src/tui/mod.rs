@@ -127,6 +127,24 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
 ///
 /// Returns whether the requests were written, not whether the terminal supports them.
 pub fn enable_keyboard_enhancement() -> bool {
+    if cfg!(windows) {
+        // Crossterm reads Win32 key events on Windows and cannot decode Kitty
+        // CSI-u reports. Do not enable a protocol the input backend cannot
+        // parse. Reset any flags left by an earlier run; a focus-regain write
+        // can set these without pushing a matching stack entry (issue #1064).
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout();
+        if let Err(error) = stdout.write_all(b"\x1b[=0u").and_then(|()| stdout.flush()) {
+            crate::logging::warn(&format!(
+                "failed to reset stale Kitty keyboard flags: {error}"
+            ));
+        }
+        crate::logging::info(
+            "Keyboard enhancement request: SKIPPED (Windows input cannot decode CSI-u; stale flags reset)",
+        );
+        return false;
+    }
+
     let result = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux()).is_ok();
     crate::logging::info(&format!(
         "Keyboard enhancement request: {}",
@@ -218,10 +236,13 @@ pub(crate) fn reapply_terminal_modes_to(
 
 pub(crate) fn reapply_configured_terminal_modes_after_focus() {
     let policy = crate::perf::tui_policy();
+    // Focus regain writes Kitty's set sequence directly. Windows crossterm
+    // cannot decode the resulting CSI-u key events, so never re-arm that mode.
+    let keyboard_enhanced = policy.enable_keyboard_enhancement && !cfg!(windows);
     if let Err(error) = reapply_terminal_modes_after_focus_to(
         &mut std::io::stdout(),
         policy.enable_mouse_capture,
-        policy.enable_keyboard_enhancement,
+        keyboard_enhanced,
     ) {
         crate::logging::warn(&format!("failed to reapply terminal modes: {error}"));
     }
