@@ -2641,6 +2641,7 @@ fn onboarding_start_label_marks_home_directory() {
     );
 }
 
+#[test]
 fn start_search_on_loading_picker_survives_reseed_with_results() {
     // The real flow for `/sessions <query>` with no cached session list:
     // the picker is created in the loading state, the query is set, and the
