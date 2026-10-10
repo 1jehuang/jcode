@@ -115,3 +115,29 @@ fn configured_route_seeds_first_frame_facts_without_a_hint() {
         crate::tui::info_widget::AuthMethod::AnthropicOAuth
     );
 }
+
+#[test]
+fn new_session_route_facts_ignore_ambient_active_provider_env() {
+    // A client launched from inside another jcode (or after an earlier test
+    // activated a provider) inherits `JCODE_ACTIVE_PROVIDER`. That must not
+    // outrank the configured `JCODE_PROVIDER` for a brand-new session.
+    let _guard = crate::storage::lock_test_env();
+    let saved: Vec<_> = ["JCODE_MODEL", "JCODE_PROVIDER", "JCODE_ACTIVE_PROVIDER"]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+    crate::env::set_var("JCODE_MODEL", "gpt-5.4");
+    crate::env::set_var("JCODE_PROVIDER", "openai");
+    crate::env::set_var("JCODE_ACTIVE_PROVIDER", "copilot");
+
+    let app = App::new_for_remote(None);
+    let provider = crate::tui::TuiState::provider_name(&app);
+
+    for (key, value) in saved {
+        match value {
+            Some(value) => crate::env::set_var(key, value),
+            None => crate::env::remove_var(key),
+        }
+    }
+    assert_eq!(provider, "openai");
+}

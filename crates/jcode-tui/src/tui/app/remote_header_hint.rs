@@ -113,13 +113,19 @@ impl App {
         };
         // Route-qualified id (`claude-oauth:claude-opus-5-5`, the config
         // default) or a bare one (`claude-opus-5-5`, what a resumed session
-        // stores). For a bare id the session's provider key, then the
-        // configured default provider, supply the route.
-        let configured_provider = self
-            .session
-            .provider_key
-            .clone()
-            .or_else(|| self.configured_remote_provider_hint());
+        // stores). For a bare id a resumed session's stored provider key, then
+        // the configured default provider, supply the route. A brand-new
+        // session's provider key is only derived from this client process's
+        // ambient env (`JCODE_ACTIVE_PROVIDER` inherited from a parent jcode,
+        // for example), which says nothing about the route this launch is
+        // configured to use, so it must not outrank `JCODE_PROVIDER`/config.
+        let session_provider = self
+            .resume_session_id
+            .as_ref()
+            .and_then(|_| self.session.provider_key.clone());
+        let configured_provider = session_provider
+            .or_else(|| self.configured_remote_provider_hint())
+            .or_else(|| self.session.provider_key.clone());
         let qualified;
         let model = if jcode_provider_core::selection::explicit_model_provider_prefix(model.trim())
             .is_some()

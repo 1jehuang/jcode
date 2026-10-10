@@ -656,8 +656,16 @@ fn answering_no_on_continue_prompt_lands_on_regular_session() {
         }
         app.onboarding_answer_continue(false);
         // "No" lands on the regular new-session screen: no starter prompts.
+        // The only welcome body left is the unauthenticated "log in" hint,
+        // which appears on hosts without credentials (CI runners).
         assert!(!app.onboarding_flow_active());
-        assert!(app.suggestion_prompts().is_empty() || !app.onboarding_welcome_active());
+        assert!(
+            app.suggestion_prompts()
+                .iter()
+                .all(|(_, prompt)| prompt == "/login"),
+            "{:?}",
+            app.suggestion_prompts()
+        );
         // No session picker overlay opened on the "No" path.
         assert!(app.session_picker_overlay.is_none());
     });

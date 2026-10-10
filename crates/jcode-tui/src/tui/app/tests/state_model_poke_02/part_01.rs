@@ -626,8 +626,31 @@ fn test_is_scroll_only_key_detects_navigation_inputs() {
 #[test]
 fn test_alt_g_opens_and_closes_commit_log_overlay() {
     let mut app = create_test_app();
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    app.session.working_dir = Some(repo.to_string_lossy().to_string());
+    // Build a throwaway repo with several commits. CI checks out with
+    // `fetch-depth: 1`, so the jcode checkout itself has a single commit and
+    // scrolling down one row would clamp back to 0.
+    let repo = tempfile::tempdir().expect("tempdir");
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args([
+                "-c",
+                "user.name=jcode test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    for n in 0..3 {
+        git(&["commit", "-q", "--allow-empty", "-m", &format!("commit {n}")]);
+    }
+    app.session.working_dir = Some(repo.path().to_string_lossy().to_string());
     let diff_mode_before = app.diff_mode;
 
     assert!(super::input::handle_navigation_shortcuts(
