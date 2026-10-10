@@ -2601,3 +2601,18 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
         "no search means no highlight color in preview"
     );
 }
+
+#[test]
+fn onboarding_start_label_marks_home_directory() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some(home.display().to_string()));
+    picker.activate_onboarding_banner(vec![Line::from("Welcome to jcode")]);
+    let lines = render_onboarding_picker_lines(&mut picker, 120, 40);
+    assert!(
+        lines.iter().any(|line| line.contains("New session in ~ (home)")),
+        "home directory should read '~ (home)': {lines:#?}"
+    );
+}

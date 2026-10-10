@@ -2111,7 +2111,7 @@ impl SessionPicker {
         match dir {
             Some(dir) => {
                 let shown = match dirs::home_dir().map(|h| h.display().to_string()) {
-                    Some(home) if dir == home => "~".to_string(),
+                    Some(home) if dir == home => "~ (home)".to_string(),
                     Some(home) => match dir.strip_prefix(&home) {
                         Some(rest) if rest.starts_with('/') => format!("~{rest}"),
                         _ => dir,
