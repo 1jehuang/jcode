@@ -42,6 +42,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+mod openai_stream_cancellation;
+
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = jcode_provider_core::DEFAULT_OPENAI_MODEL;
@@ -506,6 +508,25 @@ async fn ensure_persistent_ws_is_healthy(
     state: &mut PersistentWsState,
     verbose: bool,
 ) -> Result<PersistentWsHealth, String> {
+    // Include ping readiness/flush and server-ping replies in the same budget.
+    // Otherwise a background keepalive can hold the state mutex indefinitely.
+    tokio::time::timeout(
+        Duration::from_millis(WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS),
+        persistent_ws_healthcheck(state, verbose),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "healthcheck timeout after {}ms",
+            WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS
+        )
+    })?
+}
+
+async fn persistent_ws_healthcheck(
+    state: &mut PersistentWsState,
+    verbose: bool,
+) -> Result<PersistentWsHealth, String> {
     let response_idle_for = state.last_response_completed_at.elapsed();
     if persistent_ws_idle_requires_reconnect(response_idle_for) {
         jcode_base::logging::info(&format!(
@@ -639,10 +660,11 @@ fn spawn_persistent_ws_keepalive_with_interval(
                 return;
             };
             let mut guard = persistent_ws.lock().await;
-            let Some(state) = guard.as_mut() else {
+            let Some(mut state) = guard.take() else {
                 return;
             };
             if state.connected_at != connection_started_at {
+                *guard = Some(state);
                 return;
             }
 
@@ -688,8 +710,8 @@ fn spawn_persistent_ws_keepalive_with_interval(
             // used before foreground reuse while holding the state mutex. This
             // keeps one reader at a time and gives server control frames a
             // bounded opportunity to be processed.
-            match ensure_persistent_ws_is_healthy(state, false).await {
-                Ok(PersistentWsHealth::Healthy) => {}
+            match ensure_persistent_ws_is_healthy(&mut state, false).await {
+                Ok(PersistentWsHealth::Healthy) => *guard = Some(state),
                 Ok(PersistentWsHealth::Reconnect {
                     reset_reason,
                     detail,
@@ -966,10 +988,9 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
-        let cached = jcode_base::provider::cached_openai_reasoning_efforts_for_scope(
-            &self.catalog_scope(),
-        )
-        .unwrap_or_default();
+        let cached =
+            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&self.catalog_scope())
+                .unwrap_or_default();
         match self.model_reasoning_efforts.write() {
             Ok(mut efforts) => *efforts = cached,
             Err(poisoned) => *poisoned.into_inner() = cached,

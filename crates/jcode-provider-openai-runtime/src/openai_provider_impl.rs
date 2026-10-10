@@ -1,3 +1,4 @@
+use super::openai_stream_cancellation::while_consumer_open;
 use super::openai_stream_runtime::{
     stream_response, stream_response_websocket_persistent, try_persistent_ws_continuation,
 };
@@ -281,15 +282,21 @@ impl Provider for OpenAIProvider {
                     // from the top, which must roll the partial output back.
                     let (attempt_tx, attempt_guard) =
                         jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
-                    let continuation_result = try_persistent_ws_continuation(
-                        &persistent_ws,
-                        &credentials,
-                        &request,
-                        &input,
-                        input_item_count,
-                        &attempt_tx,
+                    let continuation_result = while_consumer_open(
+                        &tx,
+                        try_persistent_ws_continuation(
+                            &persistent_ws,
+                            &credentials,
+                            &request,
+                            &input,
+                            input_item_count,
+                            &attempt_tx,
+                        ),
                     )
                     .await;
+                    let Some(continuation_result) = continuation_result else {
+                        return;
+                    };
                     drop(attempt_tx);
                     let saw_output = attempt_guard.finish().await;
 
@@ -362,6 +369,9 @@ impl Provider for OpenAIProvider {
                 let mut next_retry_delay = None;
 
                 for attempt in 0..MAX_RETRIES {
+                    if tx.is_closed() {
+                        return;
+                    }
                     if attempt > 0 {
                         emit_connection_phase(
                             &tx,
@@ -378,7 +388,12 @@ impl Provider for OpenAIProvider {
                             RETRY_BASE_DELAY_MS,
                             next_retry_delay.take(),
                         );
-                        tokio::time::sleep(delay).await;
+                        if while_consumer_open(&tx, tokio::time::sleep(delay))
+                            .await
+                            .is_none()
+                        {
+                            return;
+                        }
                         jcode_base::logging::info(&format!(
                             "Retrying OpenAI API request (attempt {}/{})",
                             attempt + 1,
@@ -503,6 +518,9 @@ impl Provider for OpenAIProvider {
                         .await
                     };
                     let saw_output = attempt_guard.finish().await;
+                    if tx.is_closed() {
+                        return;
+                    }
 
                     match result {
                         Ok(()) => {
@@ -581,20 +599,10 @@ impl Provider for OpenAIProvider {
                                     cooldown.as_secs()
                                 ));
                             }
-                            // Clear persistent state on fallback
-                            {
-                                let mut guard = persistent_ws.lock().await;
-                                *guard = None;
-                            }
-                            log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Warn,
-                                "persistent_state_reset",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("reason", "fallback_to_https".to_string()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                ],
-                            );
+                            // A failed fresh attempt never published its socket.
+                            // Persistent reuse already invalidates under its own
+                            // lock. Clearing here could erase a replacement
+                            // connection successfully published by another turn.
                             last_error = Some(error);
                             continue;
                         }
@@ -701,6 +709,9 @@ impl Provider for OpenAIProvider {
                 }
             };
 
+            // Transport waits observe consumer closure. Do not cancel this
+            // entire future: an OAuth refresh must finish its rotated-token
+            // persistence and in-memory commit even if its consumer leaves.
             let result = AssertUnwindSafe(stream_task).catch_unwind().await;
 
             if let Err(panic_payload) = result {
