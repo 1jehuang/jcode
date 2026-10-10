@@ -1755,7 +1755,7 @@ impl SessionPicker {
                     rendered_messages += 1;
                 }
                 "assistant" => {
-                    let md_lines = super::ui::render_assistant_message_with_tool_summary(
+                    let md_lines = super::ui::render_assistant_message(
                         &display_msg,
                         assistant_width,
                         crate::config::DiffDisplayMode::Off,

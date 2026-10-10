@@ -1861,7 +1861,11 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
                         assert!(row.starts_with(text), "preview must be flush left: {row:?}");
                     }
-                    for text in ["list item", "code sample", "tool:"] {
+                    assert!(
+                        rows.iter().all(|row| !row.contains("tool:")),
+                        "preview must not show a tool-name summary line: {rows:?}"
+                    );
+                    for text in ["list item", "code sample"] {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
                         assert!(
                             row.chars().take_while(|c| *c == ' ').count() <= 2,
@@ -1922,8 +1926,14 @@ fn test_preview_structured_messages_stay_left_aligned() {
                 "preview must restore chat context"
             );
             let cache = picker.preview_cache.as_ref().unwrap();
+            assert!(
+                cache
+                    .wrapped_lines
+                    .iter()
+                    .all(|line| !line_text(line).contains("tool:")),
+                "preview must not show a tool-name summary line"
+            );
             for needle in [
-                "tool:",
                 "Verify structured preview alignment",
                 "Reviewing the weak points",
                 "Check structured preview alignment",
