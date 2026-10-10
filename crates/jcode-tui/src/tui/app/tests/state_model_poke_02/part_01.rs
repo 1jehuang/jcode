@@ -184,6 +184,8 @@ fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
 fn test_mouse_scroll_events_are_classified_as_scroll_only() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::File;
+    // The File diff pane is only drawn once an edit exists to show.
+    app.display_edit_tool_message_count = 1;
 
     crate::tui::ui::record_layout_snapshot(
         Rect::new(0, 0, 40, 20),

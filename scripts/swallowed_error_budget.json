@@ -3,7 +3,7 @@
   "totals_by_pattern": {
     "dot_ok": 1402,
     "let_underscore": 1359,
-    "unwrap_or_default": 906
+    "unwrap_or_default": 907
   },
   "tracked_files": {
     "crates/jcode-app-core/src/agent.rs": {
@@ -2114,7 +2114,7 @@
     "crates/jcode-tui/src/tui/app/navigation.rs": {
       "dot_ok": 2,
       "let_underscore": 0,
-      "unwrap_or_default": 2
+      "unwrap_or_default": 3
     },
     "crates/jcode-tui/src/tui/app/onboarding_flow.rs": {
       "dot_ok": 1,

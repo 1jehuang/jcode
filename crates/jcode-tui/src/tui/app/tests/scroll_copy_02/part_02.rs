@@ -771,6 +771,427 @@ fn test_mouse_click_in_main_chat_switches_focus_from_side_panel() {
 }
 
 #[test]
+fn test_side_panel_header_close_hides_without_deleting_page() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    let close_column = pane.right() - 2;
+    assert_eq!(
+        terminal.backend().buffer()[(close_column, pane.y)].symbol(),
+        "x"
+    );
+    let header = (pane.x..pane.right())
+        .map(|x| {
+            terminal.backend().buffer()[(x, pane.y)]
+                .symbol()
+                .to_string()
+        })
+        .collect::<String>();
+    assert!(!header.contains("fullscre"), "clipped header: {header}");
+
+    let redraw = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: close_column,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(!redraw);
+    assert!(app.side_panel.focused_page().is_none());
+    assert_eq!(app.side_panel.pages[0].id, "plan");
+    assert_eq!(app.status_notice(), Some("Side panel: OFF".to_string()));
+
+    app.set_side_panel_snapshot(test_side_panel_snapshot("plan", "Updated plan"));
+    assert!(app.side_panel.focused_page().is_none());
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::ALT)
+        .unwrap();
+    assert_eq!(app.side_panel.focused_page().unwrap().title, "Updated plan");
+}
+
+#[test]
+fn test_side_command_repeated_close_preserves_selected_document() {
+    with_temp_jcode_home(|| {
+        for format in [
+            crate::side_panel::SidePanelPageFormat::Markdown,
+            crate::side_panel::SidePanelPageFormat::Pdf,
+        ] {
+            let mut app = create_test_app();
+            app.side_panel = test_side_panel_snapshot("first", "First");
+            let mut selected = app.side_panel.pages[0].clone();
+            selected.id = "selected".to_string();
+            selected.title = "Selected".to_string();
+            selected.format = format;
+            selected.content = "```mermaid\ngraph TD\nA --> B\n```".to_string();
+            if format == crate::side_panel::SidePanelPageFormat::Pdf {
+                selected.pdf_data = Some("JVBERi0xLjQK".to_string());
+            }
+            app.side_panel.pages.push(selected.clone());
+            app.side_panel.focused_page_id = Some(selected.id.clone());
+            for _ in 0..3 {
+                for command in ["/side", "/side off", "/side off"] {
+                    app.input = command.to_string();
+                    app.submit_input();
+                    assert!(app.side_panel.focused_page().is_none());
+                    assert!(app.side_panel_user_hidden);
+                    assert_eq!(app.last_side_panel_focus_id.as_deref(), Some("selected"));
+                }
+                let mut update = app.side_panel.clone();
+                update.focused_page_id = Some("first".to_string());
+                app.set_side_panel_snapshot(update);
+                assert!(app.side_panel.focused_page().is_none());
+                app.input = "/side".to_string();
+                app.submit_input();
+                assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("selected"));
+                assert_eq!(app.side_panel.focused_page().unwrap(), &selected);
+                assert_eq!(app.side_panel.pages.len(), 2);
+                assert!(!app.side_panel_user_hidden);
+                app.input = "/side on".to_string();
+                app.submit_input();
+                assert!(!app.side_panel_fullscreen, "on must be idempotent");
+            }
+        }
+    });
+}
+
+#[test]
+fn test_side_panel_app_refresh_stays_closed_and_reopens_current_selection() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        for (command, page_id) in [
+            ("/splitview on", "split_view"),
+            ("/observe on", "observe"),
+            ("/todos on", "session_todos"),
+        ] {
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.input = "/side off".to_string();
+            app.submit_input();
+            app.push_display_message(DisplayMessage::assistant("new live content"));
+            app.refresh_split_view_if_needed();
+            app.observe_tool_call(&crate::message::ToolCall {
+                id: "side-refresh".to_string(),
+                name: "read".to_string(),
+                input: serde_json::json!({"file_path": "AGENTS.md"}),
+                intent: None,
+                thought_signature: None,
+            });
+            app.refresh_todos_view_if_needed();
+            assert!(
+                app.side_panel.focused_page().is_none(),
+                "refresh reopened {page_id}"
+            );
+            assert_eq!(app.last_side_panel_focus_id.as_deref(), Some(page_id));
+            app.input = "/side on".to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            app.input = "/side off".to_string();
+            app.submit_input();
+            app.input = command.to_string();
+            app.submit_input();
+            assert_eq!(app.side_panel.focused_page_id.as_deref(), Some(page_id));
+            assert!(
+                !app.side_panel_user_hidden,
+                "explicit app command should reveal"
+            );
+        }
+    });
+}
+
+#[test]
+fn test_remote_side_command_reopens_after_keyboard_close() {
+    let mut app = create_test_app();
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    for _ in 0..3 {
+        for _ in 0..2 {
+            rt.block_on(app.handle_remote_key(KeyCode::Char('m'), KeyModifiers::ALT, &mut remote))
+                .unwrap();
+        }
+        assert!(app.side_panel.focused_page().is_none());
+        app.input = "/side".to_string();
+        rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+            .unwrap();
+        assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+        assert!(!app.side_panel_fullscreen);
+    }
+}
+
+#[test]
+fn test_side_panel_button_close_stays_closed_after_split_view_refresh() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+    app.input = "/splitview on".to_string();
+    app.submit_input();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+    for _ in 0..3 {
+        render_and_snap(&app, &mut terminal);
+        let pane = crate::tui::ui::last_layout_snapshot()
+            .unwrap()
+            .diff_pane_area
+            .unwrap();
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: pane.right() - 2,
+            row: pane.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        app.push_display_message(DisplayMessage::assistant("new content while closed"));
+        app.refresh_split_view_if_needed();
+        assert!(app.side_panel.focused_page().is_none());
+        render_and_snap(&app, &mut terminal);
+        assert!(
+            crate::tui::ui::last_layout_snapshot()
+                .unwrap()
+                .diff_pane_area
+                .is_none()
+        );
+        app.input = "/side".to_string();
+        app.submit_input();
+        assert_eq!(
+            app.side_panel.focused_page_id.as_deref(),
+            Some("split_view")
+        );
+        assert!(
+            app.side_panel
+                .focused_page()
+                .unwrap()
+                .content
+                .contains("new content while closed")
+        );
+    }
+}
+
+#[test]
+fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, _) = make_edit_badge_test_app(30);
+    // The File diff cache is process-global and keyed by path and message
+    // index. Sibling tests render shorter `demo.txt` edits at the same index,
+    // so use a path of our own to always render this 30-line diff.
+    if let Some(tool) = app.display_messages[1].tool_data.as_mut() {
+        tool.input["file_path"] = serde_json::json!("side-close-file-diff.txt");
+    }
+    app.bump_display_messages_version();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(app.diff_pane_visible(), "File diff should remain visible");
+    assert!(app.diff_pane_focus, "visible File diff should retain focus");
+    render_and_snap(&app, &mut terminal);
+    app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+        .unwrap();
+    assert!(
+        app.diff_pane_scroll > 0,
+        "j should still scroll the File diff"
+    );
+    app.input = "/side".to_string();
+    app.submit_input();
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    assert!(app.diff_pane_focus);
+}
+
+#[test]
+fn test_side_panel_close_in_file_mode_without_edits_returns_focus_to_chat() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.diff_pane_focus = true;
+    assert_eq!(app.display_edit_tool_message_count, 0);
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: pane.right() - 2,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::last_layout_snapshot()
+            .unwrap()
+            .diff_pane_area
+            .is_none(),
+        "no right pane should remain without edits"
+    );
+    assert!(
+        !app.diff_pane_focus,
+        "focus must not stay on an invisible File diff pane"
+    );
+}
+
+#[test]
+fn test_fullscreen_side_panel_header_close_restores_chat() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+    app.side_panel_fullscreen = true;
+    app.diff_pane_focus = true;
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+    let close_column = pane.right() - 2;
+    assert_eq!(
+        terminal.backend().buffer()[(close_column, pane.y)].symbol(),
+        "x"
+    );
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: close_column,
+        row: pane.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.side_panel.focused_page().is_none());
+    assert!(!app.side_panel_fullscreen);
+    assert!(!app.diff_pane_focus);
+}
+
+#[test]
+fn test_side_panel_close_in_file_mode_without_edits_restores_composer() {
+    let _render_lock = scroll_render_test_lock();
+    for close_with_button in [true, false] {
+        let mut app = create_test_app();
+        app.diagram_mode = crate::config::DiagramDisplayMode::None;
+        app.diagram_pane_enabled = false;
+        app.diff_mode = crate::config::DiffDisplayMode::File;
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        app.diff_pane_focus = true;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+        render_and_snap(&app, &mut terminal);
+        if close_with_button {
+            let pane = crate::tui::ui::last_layout_snapshot()
+                .unwrap()
+                .diff_pane_area
+                .unwrap();
+            app.handle_mouse_event(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: pane.right() - 2,
+                row: pane.y,
+                modifiers: KeyModifiers::empty(),
+            });
+        } else {
+            app.input = "/side off".to_string();
+            app.submit_input();
+        }
+        assert!(!app.diff_pane_visible());
+        assert!(
+            !app.diff_pane_focus,
+            "invisible pane must not capture input"
+        );
+        render_and_snap(&app, &mut terminal);
+        assert!(
+            crate::tui::ui::last_layout_snapshot()
+                .unwrap()
+                .diff_pane_area
+                .is_none()
+        );
+        app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
+            .unwrap();
+        assert_eq!(app.input, "j", "normal typing must reach the composer");
+        app.input = "/side on".to_string();
+        app.submit_input();
+        assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
+    }
+}
+
+#[test]
+fn test_drag_release_over_side_panel_close_does_not_hide_page() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.side_panel = test_side_panel_snapshot("plan", "Plan");
+
+    let backend = ratatui::backend::TestBackend::new(80, 16);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    render_and_snap(&app, &mut terminal);
+    let pane = crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .unwrap();
+
+    for (kind, column, row) in [
+        (
+            MouseEventKind::Down(MouseButton::Left),
+            pane.x + 5,
+            pane.y + 2,
+        ),
+        (
+            MouseEventKind::Drag(MouseButton::Left),
+            pane.right() - 2,
+            pane.y,
+        ),
+        (
+            MouseEventKind::Up(MouseButton::Left),
+            pane.right() - 2,
+            pane.y,
+        ),
+    ] {
+        app.handle_mouse_event(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    assert!(app.side_panel.focused_page().is_some());
+}
+
+#[test]
 fn test_mouse_click_in_input_switches_focus_from_side_panel() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();

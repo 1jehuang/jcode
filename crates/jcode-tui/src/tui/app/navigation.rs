@@ -531,7 +531,9 @@ impl App {
     }
 
     pub(super) fn diff_pane_visible(&self) -> bool {
-        self.diff_mode.has_side_pane() || self.side_panel.focused_page().is_some()
+        !self.swarm_panel_full_page
+            && (self.side_panel.focused_page().is_some()
+                || (self.diff_mode.is_file() && self.display_edit_tool_message_count > 0))
     }
 
     pub(super) fn set_diff_pane_focus(&mut self, focus: bool) {
@@ -1180,17 +1182,7 @@ impl App {
                 self.set_status_notice(format!("Side panel: {title} (fullscreen)"));
                 return;
             }
-            self.side_panel_fullscreen = false;
-            crate::tui::clear_side_panel_render_caches();
-            self.last_side_panel_focus_id = self.side_panel.focused_page_id.clone();
-            self.side_panel.focused_page_id = None;
-            self.side_panel_user_hidden = true;
-            self.side_panel_explicit_hidden = true;
-            if !self.diff_pane_visible() {
-                self.set_diff_pane_focus(false);
-            }
-            self.sync_diagram_fit_context();
-            self.set_status_notice("Side panel: OFF");
+            self.hide_side_panel();
             return;
         }
 
@@ -1218,6 +1210,43 @@ impl App {
             .map(|page| format!("Side panel: {}", page.title))
             .unwrap_or_else(|| "Side panel: ON".to_string());
         self.set_status_notice(status);
+    }
+
+    pub(super) fn handle_side_command(&mut self, input: &str) -> bool {
+        let mut words = input.split_whitespace();
+        if words.next() != Some("/side") {
+            return false;
+        }
+        let arg = words.next().unwrap_or_default();
+        if words.next().is_some() {
+            self.set_status_notice("Usage: /side [on|off]");
+            return true;
+        }
+        match arg {
+            "off" => self.hide_side_panel(),
+            "on" if self.side_panel.focused_page().is_some() => {}
+            "" if self.side_panel.focused_page().is_some() => self.hide_side_panel(),
+            "" | "on" => self.toggle_side_panel(),
+            _ => self.set_status_notice("Usage: /side [on|off]"),
+        }
+        true
+    }
+
+    fn hide_side_panel(&mut self) {
+        self.side_panel_fullscreen = false;
+        crate::tui::clear_side_panel_render_caches();
+        if let Some(id) = self.side_panel.focused_page_id.clone() {
+            self.last_side_panel_focus_id = Some(id);
+        }
+        self.side_panel.focused_page_id = None;
+        self.side_panel_user_hidden = true;
+        self.side_panel_explicit_hidden = true;
+        // Keep focus only when the File diff pane stays on screen.
+        if !self.diff_pane_visible() {
+            self.set_diff_pane_focus(false);
+        }
+        self.sync_diagram_fit_context();
+        self.set_status_notice("Side panel: OFF");
     }
 
     fn notify_no_side_panel_pages(&mut self) {
@@ -1565,6 +1594,15 @@ impl App {
             if let Some(diff_area) = layout.diff_pane_area {
                 over_diff_pane =
                     super::super::layout_utils::point_in_rect(mouse.column, mouse.row, diff_area);
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    && self.side_panel.focused_page().is_some()
+                    && super::super::ui::side_panel_close_area(diff_area).is_some_and(|area| {
+                        super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+                    })
+                {
+                    self.hide_side_panel();
+                    finish_mouse_event!(false, "side_panel_close");
+                }
             }
             if diagram_available && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if on_diagram_border {

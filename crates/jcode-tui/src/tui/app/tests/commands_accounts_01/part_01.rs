@@ -922,6 +922,44 @@ fn test_maybe_show_catchup_after_history_adds_brief_page_and_marks_seen() {
 }
 
 #[test]
+fn test_catchup_brief_reveals_side_panel_the_user_hid() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.side_panel = test_side_panel_snapshot("plan", "Plan");
+        // The user dismissed the panel before opening Catch Up.
+        assert!(app.handle_side_command("/side off"));
+        assert!(app.side_panel.focused_page_id.is_none());
+
+        let mut target = Session::create(None, Some("hidden catchup".to_string()));
+        target.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "Check the release notes.".to_string(),
+                cache_control: None,
+            }],
+        );
+        target.mark_closed();
+        target.save().expect("save catchup session");
+        let target_id = target.id.clone();
+
+        app.begin_in_flight_catchup_resume(PendingCatchupResume {
+            target_session_id: target_id.clone(),
+            source_session_id: Some(app.session.id.clone()),
+            queue_position: None,
+            show_brief: true,
+        });
+        app.maybe_show_catchup_after_history(&target_id);
+
+        assert_eq!(
+            app.side_panel.focused_page_id.as_deref(),
+            Some("catchup"),
+            "an explicit Catch Up must show its brief"
+        );
+        assert!(!app.side_panel_user_hidden);
+    });
+}
+
+#[test]
 fn test_help_topic_shows_observe_command_details() {
     let mut app = create_test_app();
     app.input = "/help observe".to_string();
