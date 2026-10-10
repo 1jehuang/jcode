@@ -560,7 +560,7 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
             };
             swarms_by_id
                 .entry(member_swarm_id.clone())
-                .or_insert_with(HashSet::new)
+                .or_default()
                 .insert(member_session_id.clone());
             members.insert(member_session_id, member);
         }
