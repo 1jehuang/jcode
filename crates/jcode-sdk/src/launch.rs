@@ -207,6 +207,10 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         return Err(error);
     }
 
+    // A caller-supplied home may already register a daemon for this runtime
+    // directory. Record it so a failed launch never stops a daemon it did not start.
+    let registered_before = registered_daemon_pid(&jcode_home, &runtime_dir);
+
     let binary = options
         .binary
         .clone()
@@ -296,7 +300,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
                 // The daemon is a separate process the bridge spawned, so the bridge
                 // exiting does not stop it. Stop it before joining stderr: a daemon
                 // that inherited the pipe would keep the reader blocked.
-                stop_instance_daemon(&jcode_home, &runtime_dir);
+                stop_daemon_started_by_failed_launch(&jcode_home, &runtime_dir, registered_before);
                 if let Some(reader) = stderr_reader.take() {
                     let _ = reader.join();
                 }
@@ -312,7 +316,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
             }
             Ok(None) => {}
             Err(cause) => {
-                stop_instance_daemon(&jcode_home, &runtime_dir);
+                stop_daemon_started_by_failed_launch(&jcode_home, &runtime_dir, registered_before);
                 terminate_child(&mut child);
                 cleanup_on_error();
                 return Err(Error::new(ErrorKind::StartupFailed, cause.to_string()));
@@ -321,7 +325,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         std::thread::sleep(Duration::from_millis(50));
     }
 
-    stop_instance_daemon(&jcode_home, &runtime_dir);
+    stop_daemon_started_by_failed_launch(&jcode_home, &runtime_dir, registered_before);
     terminate_child(&mut child);
     if let Some(reader) = stderr_reader.take() {
         let _ = reader.join();
@@ -600,9 +604,35 @@ fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
 
 #[cfg(unix)]
 fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
-    let Some(pid) = read_daemon_pid(home, runtime_dir) else {
-        return;
-    };
+    if let Some(pid) = read_daemon_pid(home, runtime_dir) {
+        stop_daemon_pid(pid);
+    }
+}
+
+/// Pid of a daemon already registered for this runtime directory before the
+/// launch started. A failed launch must not stop that daemon.
+#[cfg(unix)]
+fn registered_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
+    read_daemon_pid(home, runtime_dir)
+}
+
+/// Stop the daemon a failed launch registered. A daemon that was already
+/// registered before the launch belongs to someone else and is left alone.
+#[cfg(unix)]
+fn stop_daemon_started_by_failed_launch(
+    home: &Path,
+    runtime_dir: &Path,
+    registered_before: Option<i32>,
+) {
+    if let Some(pid) = read_daemon_pid(home, runtime_dir)
+        && Some(pid) != registered_before
+    {
+        stop_daemon_pid(pid);
+    }
+}
+
+#[cfg(unix)]
+fn stop_daemon_pid(pid: i32) {
     signal_process_group(pid, libc::SIGTERM);
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
@@ -616,6 +646,19 @@ fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
     while Instant::now() < deadline && process_exists(pid) {
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[cfg(not(unix))]
+fn registered_daemon_pid(_home: &Path, _runtime_dir: &Path) -> Option<i32> {
+    None
+}
+
+#[cfg(not(unix))]
+fn stop_daemon_started_by_failed_launch(
+    _home: &Path,
+    _runtime_dir: &Path,
+    _registered_before: Option<i32>,
+) {
 }
 
 #[cfg(not(unix))]
@@ -861,110 +904,169 @@ mod tests {
         assert!(!home.exists(), "ephemeral instance home survived Drop");
     }
 
-    /// Kills a stand-in daemon still running when the test ends, so a failed
-    /// assertion does not leak a process.
-    #[cfg(unix)]
-    struct KillOnDrop(i32);
+    /// A daemon owned by the test. Its reaper thread reaps the child as soon as it
+    /// exits, so a stopped daemon is never left as a zombie that still answers
+    /// `kill(pid, 0)`. The reaper runs on its own thread because `launch_instance`
+    /// stops daemons synchronously, before it returns to the test.
+    struct StandInDaemon {
+        pid: i32,
+        exited: std::sync::mpsc::Receiver<()>,
+    }
 
-    #[cfg(unix)]
-    impl Drop for KillOnDrop {
+    impl StandInDaemon {
+        fn spawn() -> Self {
+            let mut child = Command::new("sleep")
+                .arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("stand-in daemon");
+            let pid = child.id() as i32;
+            let (exited_tx, exited) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    match child.try_wait() {
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        Ok(Some(_)) => break,
+                        // Never leak the stand-in, even when nothing stopped it.
+                        _ => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                    }
+                }
+                let _ = exited_tx.send(());
+            });
+            Self { pid, exited }
+        }
+
+        fn is_running(&self) -> bool {
+            matches!(
+                self.exited.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            )
+        }
+
+        fn wait_for_exit(&self, timeout: Duration) -> bool {
+            self.exited.recv_timeout(timeout).is_ok()
+        }
+    }
+
+    impl Drop for StandInDaemon {
         fn drop(&mut self) {
-            if process_exists(self.0) {
-                // SAFETY: the pid was read from this test's own fake runtime.
+            if self.is_running() {
+                // SAFETY: the reaper has not reaped the child yet, so this pid still names it.
                 unsafe {
-                    libc::kill(self.0, libc::SIGKILL);
+                    libc::kill(self.pid, libc::SIGKILL);
                 }
             }
         }
     }
 
-    /// Launch an ephemeral instance whose fake `jcode` starts a stand-in daemon
-    /// registered in `servers.json`, then runs `bridge_tail`. Returns the launch
-    /// result and a guard for the stand-in daemon.
-    #[cfg(unix)]
-    fn launch_with_stand_in_daemon(
-        bridge_tail: &str,
+    /// Registers the stand-in daemon for this runtime, as a real bridge's daemon would.
+    const REGISTER_DAEMON: &str = r#"printf '{"x":{"socket":"%s","pid":%s}}' "$JCODE_RUNTIME_DIR/jcode.sock" "$DAEMON_PID" > "$JCODE_HOME/servers.json""#;
+
+    /// Launch a fake `jcode` whose body is `script`; `DAEMON_PID` names `daemon`.
+    fn launch_with_fake_runtime(
+        sandbox: &Path,
+        script: &str,
+        daemon: &StandInDaemon,
+        jcode_home: Option<PathBuf>,
         startup_timeout: Duration,
-    ) -> (Result<LaunchedInstance>, KillOnDrop) {
+    ) -> Result<LaunchedInstance> {
         use std::os::unix::fs::PermissionsExt;
 
-        let sandbox = tempfile::tempdir().expect("sandbox");
-        let binary = sandbox.path().join("fake-jcode");
-        let captured = sandbox.path().join("daemon-pid.txt");
-        // The daemon is backgrounded inside a command substitution so it is
-        // reparented rather than left as a zombie child of the bridge, and it
-        // does not hold the bridge's stderr pipe open.
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\n\
-                 daemon=$(sleep 30 </dev/null >/dev/null 2>&1 & echo $!)\n\
-                 printf '%s' \"$daemon\" > \"$CAPTURE_PATH\"\n\
-                 printf '{{\"x\":{{\"socket\":\"%s\",\"pid\":%s}}}}' \"$JCODE_RUNTIME_DIR/jcode.sock\" \"$daemon\" > \"$JCODE_HOME/servers.json\"\n\
-                 {bridge_tail}\n"
-            ),
-        )
-        .expect("write fake runtime");
+        let binary = sandbox.join("fake-jcode");
+        fs::write(&binary, format!("#!/bin/sh\n{script}\n")).expect("write fake runtime");
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
             .expect("make fake runtime executable");
-
         let mut options = LaunchOptions {
-            jcode_home: None,
+            jcode_home,
             inherit_logins: false,
             binary: Some(binary),
             startup_timeout,
             ..LaunchOptions::default()
         };
         options.env.insert(
-            OsString::from("CAPTURE_PATH"),
-            captured.as_os_str().to_owned(),
+            OsString::from("DAEMON_PID"),
+            OsString::from(daemon.pid.to_string()),
         );
-        let result = launch_instance(&options);
-        let pid = fs::read_to_string(&captured)
-            .expect("fake runtime recorded its daemon pid")
-            .trim()
-            .parse()
-            .expect("daemon pid is an integer");
-        (result, KillOnDrop(pid))
+        launch_instance(&options)
     }
 
-    #[cfg(unix)]
-    fn process_exits_within(pid: i32, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        while process_exists(pid) {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        true
-    }
-
-    #[cfg(unix)]
     #[test]
     fn failed_startup_stops_daemon_when_jcode_exits() {
-        let (result, daemon) = launch_with_stand_in_daemon("exit 1", Duration::from_secs(5));
-        let error = result
-            .err()
-            .expect("a runtime that exits should fail startup");
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let daemon = StandInDaemon::spawn();
+        let error = launch_with_fake_runtime(
+            sandbox.path(),
+            &format!("{REGISTER_DAEMON}\nexit 1"),
+            &daemon,
+            None,
+            Duration::from_secs(5),
+        )
+        .err()
+        .expect("a runtime that exits should fail startup");
         assert_eq!(error.kind, ErrorKind::StartupFailed);
         assert!(
-            process_exits_within(daemon.0, Duration::from_secs(2)),
+            daemon.wait_for_exit(Duration::from_secs(2)),
             "daemon registered by the failed runtime survived startup failure"
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn failed_startup_stops_daemon_when_socket_never_appears() {
-        let (result, daemon) = launch_with_stand_in_daemon("exec sleep 30", Duration::from_secs(2));
-        let error = result
-            .err()
-            .expect("a runtime without an API socket should time out");
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let daemon = StandInDaemon::spawn();
+        let error = launch_with_fake_runtime(
+            sandbox.path(),
+            &format!("{REGISTER_DAEMON}\nexec sleep 30"),
+            &daemon,
+            None,
+            Duration::from_secs(2),
+        )
+        .err()
+        .expect("a runtime without an API socket should time out");
         assert_eq!(error.kind, ErrorKind::StartupTimeout);
         assert!(
-            process_exits_within(daemon.0, Duration::from_secs(2)),
+            daemon.wait_for_exit(Duration::from_secs(2)),
             "daemon registered by the timed-out runtime survived startup failure"
+        );
+    }
+
+    #[test]
+    fn failed_startup_leaves_a_daemon_registered_before_the_launch_running() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let home = sandbox.path().join("instance");
+        let runtime_dir = home.join("run");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let daemon = StandInDaemon::spawn();
+        // A caller-supplied home can already register a daemon from an earlier run.
+        let registry = serde_json::json!({
+            "x": {
+                "socket": runtime_dir.join("jcode.sock").display().to_string(),
+                "pid": daemon.pid,
+            }
+        });
+        fs::write(home.join("servers.json"), registry.to_string()).expect("registry");
+        let error = launch_with_fake_runtime(
+            sandbox.path(),
+            "exit 1",
+            &daemon,
+            Some(home),
+            Duration::from_secs(5),
+        )
+        .err()
+        .expect("a runtime that exits should fail startup");
+        assert_eq!(error.kind, ErrorKind::StartupFailed);
+        assert!(
+            daemon.is_running(),
+            "failed launch stopped a daemon it did not start"
         );
     }
 }
