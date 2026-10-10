@@ -241,8 +241,8 @@ mod tests {
         age(&busy_dir, 30 * DAY);
         age(&scratch.join("busy"), 30 * DAY);
 
-        let report =
-            prune_stale_scratch_in(scratch, SystemTime::now(), 7 * DAY, &[busy_dir.clone()]);
+        let busy_dirs = std::slice::from_ref(&busy_dir);
+        let report = prune_stale_scratch_in(scratch, SystemTime::now(), 7 * DAY, busy_dirs);
 
         assert!(busy_dir.exists());
         assert!(report.removed.is_empty());
