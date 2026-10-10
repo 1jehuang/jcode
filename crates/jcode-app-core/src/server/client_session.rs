@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::client_state::{handle_get_history, spawn_model_prefetch_update};
+use super::swarm::notify_owner_of_unrestored_idle_workers;
 use super::{
     ClientConnectionInfo, ClientDebugState, FileTouchService, SessionInterruptQueues, SwarmEvent,
     SwarmMember, SwarmState, VersionedPlan, broadcast_swarm_status, fanout_live_client_event,
@@ -890,6 +891,19 @@ pub(super) async fn handle_subscribe(
     // plan graph immediately instead of waiting for the next plan mutation.
     send_swarm_plan_to_session(client_session_id, swarm_members, swarm_plans).await;
 
+    // Issue #1651: tell a reattaching owner about idle headless workers the
+    // last restart stopped, instead of leaving them to be found by polling.
+    notify_owner_of_unrestored_idle_workers(
+        client_session_id,
+        &SwarmState {
+            members: Arc::clone(swarm_members),
+            swarms_by_id: Arc::clone(swarms_by_id),
+            plans: Arc::clone(swarm_plans),
+            coordinators: Arc::clone(swarm_coordinators),
+        },
+    )
+    .await;
+
     // Tell the client which session it is bound to. Local clients learn this
     // from their own launch state, but a remote client (gateway/WebSocket) has
     // no other source, and without it a dropped connection cannot reattach:
@@ -922,25 +936,128 @@ async fn subscribe_should_mark_ready(
         .is_none_or(|member| member.status != "running")
 }
 
+/// Outcome of moving a temporary connection member onto a resumed session id.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct SwarmMemberRename {
+    /// Swarm the temporary (pre-resume) member belonged to.
+    pub old_swarm_id: Option<String>,
+    /// Swarm the resumed session belongs to after the rename.
+    pub new_swarm_id: Option<String>,
+    /// A foreign swarm the persisted member wrongly claimed before healing.
+    pub healed_swarm_id: Option<String>,
+}
+
+/// Pick the swarm a resumed session should belong to.
+///
+/// A persisted member for the resumed session is authoritative: it records the
+/// swarm the session actually joined. Without one, a temporary member's
+/// session-derived swarm id (`session:<temp id>`) names a throwaway swarm, so
+/// it is re-derived for the resumed id. An explicitly shared swarm id (e.g.
+/// `JCODE_SWARM_ID`) is kept as is.
+///
+/// Older builds stored the temporary swarm id on the resumed member itself, so
+/// a persisted root member (no spawn owner) can claim `session:<other id>`.
+/// Such a member never joined that swarm: it is healed back to its own
+/// session-scoped swarm.
+fn resumed_member_swarm_id(
+    old_session_id: &str,
+    new_session_id: &str,
+    temporary_swarm_id: Option<&str>,
+    existing: Option<(Option<&str>, bool)>,
+) -> Option<String> {
+    if let Some((existing_swarm_id, has_spawn_owner)) = existing {
+        let own_default = super::util::default_swarm_id_for_session(new_session_id);
+        let claims_foreign_session_swarm = existing_swarm_id.is_some_and(|swarm_id| {
+            swarm_id.starts_with("session:") && Some(swarm_id) != own_default.as_deref()
+        });
+        if claims_foreign_session_swarm && !has_spawn_owner {
+            return swarm_id_for_session(new_session_id);
+        }
+        return existing_swarm_id.map(str::to_string);
+    }
+    let temporary_swarm_id = temporary_swarm_id?;
+    if super::util::default_swarm_id_for_session(old_session_id).as_deref()
+        == Some(temporary_swarm_id)
+    {
+        swarm_id_for_session(new_session_id)
+    } else {
+        Some(temporary_swarm_id.to_string())
+    }
+}
+
 async fn rename_swarm_member_session(
     old_session_id: &str,
     new_session_id: &str,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
     swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
-) {
+) -> SwarmMemberRename {
+    if old_session_id == new_session_id {
+        let members = swarm_members.read().await;
+        let swarm_id = members
+            .get(new_session_id)
+            .and_then(|member| member.swarm_id.clone());
+        return SwarmMemberRename {
+            old_swarm_id: swarm_id.clone(),
+            new_swarm_id: swarm_id,
+            healed_swarm_id: None,
+        };
+    }
     // Never hold both swarm maps at once. Coordinator cleanup reads them in the
     // opposite order, so retaining the member write guard while waiting for the
     // swarm map can permanently deadlock reconnects and every later subscribe.
-    let renamed_swarm_id = {
+    let rename = {
         let mut members = swarm_members.write().await;
-        let renamed_swarm_id = members.remove(old_session_id).and_then(|mut member| {
-            let swarm_id = member.swarm_id.clone();
-            member.session_id = new_session_id.to_string();
-            member.status = "ready".to_string();
-            member.detail = None;
-            members.insert(new_session_id.to_string(), member);
-            swarm_id
-        });
+        let mut rename = SwarmMemberRename::default();
+        if let Some(mut temporary) = members.remove(old_session_id) {
+            rename.old_swarm_id = temporary.swarm_id.clone();
+            // Issue #1650: a session restored from durable swarm state already
+            // has a member recording its own swarm, role and spawn owner.
+            // Overwriting it with the temporary connection member attributed
+            // the resumed session to the temporary swarm, so every reconnect
+            // left another `session:<temp>` swarm naming it as a member.
+            let existing = members.get(new_session_id).map(|member| {
+                (
+                    member.swarm_id.as_deref(),
+                    member.report_back_to_session_id.is_some(),
+                )
+            });
+            let new_swarm_id = resumed_member_swarm_id(
+                old_session_id,
+                new_session_id,
+                temporary.swarm_id.as_deref(),
+                existing,
+            );
+            if let Some(existing) = members.get_mut(new_session_id) {
+                if existing.swarm_enabled {
+                    if existing.swarm_id != new_swarm_id {
+                        rename.healed_swarm_id = existing.swarm_id.clone();
+                    }
+                    existing.swarm_id = new_swarm_id.clone();
+                }
+                existing.status = "ready".to_string();
+                existing.detail = None;
+                if existing.friendly_name.is_none() {
+                    existing.friendly_name = temporary.friendly_name.take();
+                }
+            } else {
+                temporary.session_id = new_session_id.to_string();
+                temporary.status = "ready".to_string();
+                temporary.detail = None;
+                temporary.swarm_id = if temporary.swarm_enabled {
+                    new_swarm_id.clone()
+                } else {
+                    None
+                };
+                members.insert(new_session_id.to_string(), temporary);
+            }
+            rename.new_swarm_id = members
+                .get(new_session_id)
+                .and_then(|member| member.swarm_id.clone());
+        } else {
+            rename.new_swarm_id = members
+                .get(new_session_id)
+                .and_then(|member| member.swarm_id.clone());
+        }
 
         // Keep the spawn tree intact across the rename: children that reported
         // back to the old session id must follow it.
@@ -949,16 +1066,33 @@ async fn rename_swarm_member_session(
                 member.report_back_to_session_id = Some(new_session_id.to_string());
             }
         }
-        renamed_swarm_id
+        rename
     };
 
-    if let Some(swarm_id) = renamed_swarm_id {
-        let mut swarms = swarms_by_id.write().await;
-        if let Some(swarm) = swarms.get_mut(&swarm_id) {
-            swarm.remove(old_session_id);
-            swarm.insert(new_session_id.to_string());
+    let mut swarms = swarms_by_id.write().await;
+    if let Some(old_swarm_id) = rename.old_swarm_id.as_ref()
+        && let Some(swarm) = swarms.get_mut(old_swarm_id)
+    {
+        swarm.remove(old_session_id);
+        if swarm.is_empty() {
+            swarms.remove(old_swarm_id);
         }
     }
+    // The resumed session belongs to exactly one swarm. Drop it from every
+    // other swarm index entry so no persisted swarm keeps reporting it.
+    swarms.retain(|swarm_id, session_ids| {
+        if rename.new_swarm_id.as_deref() != Some(swarm_id.as_str()) {
+            session_ids.remove(new_session_id);
+        }
+        !session_ids.is_empty()
+    });
+    if let Some(new_swarm_id) = rename.new_swarm_id.as_ref() {
+        swarms
+            .entry(new_swarm_id.clone())
+            .or_default()
+            .insert(new_session_id.to_string());
+    }
+    rename
 }
 
 pub(super) async fn handle_reload(
@@ -1633,8 +1767,13 @@ pub(super) async fn handle_resume_session(
                 }
             }
 
-            rename_swarm_member_session(&old_session_id, &session_id, swarm_members, swarms_by_id)
-                .await;
+            let rename = rename_swarm_member_session(
+                &old_session_id,
+                &session_id,
+                swarm_members,
+                swarms_by_id,
+            )
+            .await;
             remove_session_channel_subscriptions(
                 &old_session_id,
                 channel_subscriptions,
@@ -1642,13 +1781,49 @@ pub(super) async fn handle_resume_session(
             )
             .await;
             file_touch.clear_session(&old_session_id).await;
+            let abandoned_swarm_id = rename
+                .old_swarm_id
+                .clone()
+                .filter(|old| rename.new_swarm_id.as_ref() != Some(old));
             {
                 let mut coordinators = swarm_coordinators.write().await;
+                // The temporary connection's own swarm is abandoned on resume.
+                // Renaming its coordinator entry would make the resumed session
+                // coordinate a swarm it never joined (issue #1650).
+                if let Some(abandoned) = abandoned_swarm_id.as_ref()
+                    && coordinators.get(abandoned) == Some(&old_session_id)
+                {
+                    coordinators.remove(abandoned);
+                }
                 for coordinator in coordinators.values_mut() {
                     if *coordinator == old_session_id {
                         *coordinator = session_id.clone();
                     }
                 }
+            }
+            if let Some(healed) = rename.healed_swarm_id.as_ref() {
+                remove_plan_participant(healed, &session_id, swarm_plans).await;
+                let mut coordinators = swarm_coordinators.write().await;
+                if coordinators.get(healed) == Some(&session_id) {
+                    coordinators.remove(healed);
+                }
+            }
+            if let Some(abandoned) = abandoned_swarm_id.as_ref() {
+                remove_plan_participant(abandoned, &old_session_id, swarm_plans).await;
+            }
+            for stale_swarm_id in abandoned_swarm_id
+                .iter()
+                .chain(rename.healed_swarm_id.iter())
+                .filter(|stale| rename.new_swarm_id.as_ref() != Some(*stale))
+            {
+                let swarm_state = SwarmState {
+                    members: Arc::clone(swarm_members),
+                    swarms_by_id: Arc::clone(swarms_by_id),
+                    plans: Arc::clone(swarm_plans),
+                    coordinators: Arc::clone(swarm_coordinators),
+                };
+                persist_swarm_state_for(stale_swarm_id, &swarm_state).await;
+                broadcast_swarm_status(stale_swarm_id, swarm_members, swarms_by_id).await;
             }
             update_member_status(
                 &session_id,
@@ -1725,6 +1900,18 @@ pub(super) async fn handle_resume_session(
             // clears its plan snapshot on session change, so without this the
             // plan graph would stay blank until the next plan mutation.
             send_swarm_plan_to_session(&session_id, swarm_members, swarm_plans).await;
+            // Issue #1651: a resumed owner learns which idle headless workers
+            // the last restart stopped.
+            notify_owner_of_unrestored_idle_workers(
+                &session_id,
+                &SwarmState {
+                    members: Arc::clone(swarm_members),
+                    swarms_by_id: Arc::clone(swarms_by_id),
+                    plans: Arc::clone(swarm_plans),
+                    coordinators: Arc::clone(swarm_coordinators),
+                },
+            )
+            .await;
             // Report the restored route for the same reason: a resuming client
             // never saw a ModelChanged, so it would keep budgeting the session
             // from its own inert provider and fall back to the generic 200K

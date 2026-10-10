@@ -515,3 +515,5 @@ mod clear_tests;
 mod reload_tests;
 #[path = "client_session_tests/resume.rs"]
 mod resume_tests;
+#[path = "client_session_tests/swarm_attribution.rs"]
+mod swarm_attribution_tests;

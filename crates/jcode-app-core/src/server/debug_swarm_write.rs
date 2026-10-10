@@ -164,7 +164,12 @@ pub(super) async fn maybe_handle_swarm_write_command(
             if let Some(member_ids) = swarms.get(&swarm_id) {
                 let mut sent_count = 0;
                 for member_id in member_ids {
-                    if let Some(member) = members.get(member_id) {
+                    // Only deliver to sessions whose own record names this
+                    // swarm, never to a stale index entry (issue #1650).
+                    if let Some(member) = members
+                        .get(member_id)
+                        .filter(|member| member.swarm_id.as_deref() == Some(swarm_id.as_str()))
+                    {
                         let notification = ServerEvent::Notification {
                             from_session: current_session.clone(),
                             from_name: from_name.clone(),

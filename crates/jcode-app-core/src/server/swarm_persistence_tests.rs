@@ -1230,3 +1230,71 @@ async fn stale_remove_cannot_delete_fresh_snapshot_or_restore_backup() {
         "restart must restore the fresh incarnation, not its stale backup"
     );
 }
+
+#[test]
+fn member_listed_in_several_snapshots_loads_only_into_its_newest_swarm() {
+    // Issue #1650: older builds moved a resumed session into another swarm
+    // without rewriting the previous snapshot, so several persisted swarms of
+    // finished sessions each named one live session as their member.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let _env = test_env(&dir);
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let member_in = |swarm_id: &str| SwarmMember {
+        session_id: "session-blowfish".to_string(),
+        event_tx: event_tx.clone(),
+        event_txs: HashMap::new(),
+        working_dir: None,
+        swarm_id: Some(swarm_id.to_string()),
+        swarm_enabled: true,
+        status: "ready".to_string(),
+        detail: None,
+        friendly_name: Some("blowfish".to_string()),
+        report_back_to_session_id: None,
+        latest_completion_report: None,
+        role: "agent".to_string(),
+        joined_at: Instant::now(),
+        last_status_change: Instant::now(),
+        is_headless: false,
+        output_tail: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime: crate::protocol::SwarmMemberRuntime::default(),
+        task_label: None,
+    };
+    let now = now_unix_ms();
+    for (swarm_id, age_ms) in [
+        ("session:session-rooster", 30_000u64),
+        ("session:session-ox", 20_000),
+        ("session:session-blowfish", 1_000),
+    ] {
+        let state = PersistedSwarmState {
+            swarm_id: swarm_id.to_string(),
+            plan: None,
+            coordinator_session_id: None,
+            members: vec![to_persisted_member(&member_in(swarm_id), now)],
+            updated_at_unix_ms: now - age_ms,
+        };
+        storage::write_json_fast(&state_path(swarm_id), &state).expect("write snapshot");
+    }
+
+    let loaded = load_runtime_state();
+    assert_eq!(
+        loaded
+            .members
+            .get("session-blowfish")
+            .and_then(|member| member.swarm_id.as_deref()),
+        Some("session:session-blowfish")
+    );
+    assert_eq!(
+        loaded.swarms_by_id.keys().collect::<Vec<_>>(),
+        vec!["session:session-blowfish"],
+        "superseded snapshots must not keep reporting the session"
+    );
+
+    // The superseded snapshots are rewritten so the duplicate is gone on disk.
+    let rooster = storage::read_json::<PersistedSwarmState>(&state_path("session:session-rooster"));
+    assert!(rooster.is_err() || rooster.is_ok_and(|state| state.members.is_empty()));
+    let reloaded = load_runtime_state();
+    assert_eq!(reloaded.swarms_by_id.len(), 1);
+}

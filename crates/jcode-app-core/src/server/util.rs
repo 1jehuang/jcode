@@ -412,7 +412,7 @@ pub(crate) fn swarm_id_for_session(session_id: &str) -> Option<String> {
     default_swarm_id_for_session(session_id)
 }
 
-fn default_swarm_id_for_session(session_id: &str) -> Option<String> {
+pub(super) fn default_swarm_id_for_session(session_id: &str) -> Option<String> {
     if session_id.trim().is_empty() {
         None
     } else {

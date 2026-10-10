@@ -725,6 +725,41 @@ mod debug_execution_tests {
     }
 
     #[tokio::test]
+    async fn resolve_debug_session_never_defaults_to_a_dead_current_session() {
+        // Issue #1650: the recorded current session can be a temporary id a
+        // client abandoned by resuming another session.
+        let agent = test_agent().await;
+        let live_id = {
+            let agent = agent.lock().await;
+            agent.session_id().to_string()
+        };
+        let sessions = Arc::new(RwLock::new(HashMap::from([(
+            live_id.clone(),
+            agent.clone(),
+        )])));
+        let current = Arc::new(RwLock::new("session_ox_dead".to_string()));
+
+        let (resolved_id, resolved_agent) = resolve_debug_session(&sessions, &current, None)
+            .await
+            .expect("a sole live session is the default");
+        assert_eq!(resolved_id, live_id);
+        assert!(Arc::ptr_eq(&resolved_agent, &agent));
+
+        let other = test_agent().await;
+        let other_id = {
+            let agent = other.lock().await;
+            agent.session_id().to_string()
+        };
+        sessions.write().await.insert(other_id.clone(), other);
+        let err = match resolve_debug_session(&sessions, &current, None).await {
+            Ok((id, _)) => panic!("ambiguous default resolved to {id}"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("session_ox_dead"), "{err}");
+        assert!(err.contains(&live_id) && err.contains(&other_id), "{err}");
+    }
+
+    #[tokio::test]
     async fn resolve_debug_session_errors_for_unknown_or_missing_session() {
         let agent_a = test_agent().await;
         let id_a = {

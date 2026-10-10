@@ -96,6 +96,14 @@ pub(super) struct LoadedSwarmRuntimeState {
     pub swarms_by_id: HashMap<String, HashSet<String>>,
 }
 
+/// Recovery note on an idle headless worker that a server restart stopped.
+/// No headless process survives a restart (issue #1651).
+pub(super) const IDLE_WORKER_NOT_RESTORED_NOTE: &str =
+    "idle worker not restored after server restart";
+/// Suffix appended once the worker's owner has been told it was stopped, so
+/// the notice is delivered exactly once even across further restarts.
+pub(super) const OWNER_NOTIFIED_NOTE: &str = "owner notified";
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PersistedSwarmState {
     swarm_id: String,
@@ -361,7 +369,7 @@ fn recover_member_status(
             append_recovery_detail(
                 detail,
                 if is_headless {
-                    "idle worker not restored after server restart"
+                    IDLE_WORKER_NOT_RESTORED_NOTE
                 } else {
                     "client not attached after server restart"
                 },
@@ -455,7 +463,7 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
     let mut plans = HashMap::new();
     let mut coordinators = HashMap::new();
     let mut members = HashMap::new();
-    let mut swarms_by_id = HashMap::new();
+    let mut swarms_by_id: HashMap<String, HashSet<String>> = HashMap::new();
     let loaded_at_unix_ms = now_unix_ms();
     let terminal_retention = super::swarm::swarm_terminal_member_retention();
     let plan_retention = dormant_plan_retention();
@@ -463,6 +471,14 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
     let mut pruned_dormant_plans = 0usize;
     let mut pruned_members_by_swarm: HashMap<String, HashSet<String>> = HashMap::new();
     let mut pruned_plan_swarms: HashSet<String> = HashSet::new();
+    // Issue #1650: a session may appear in several snapshots when an older
+    // build moved it between swarms without rewriting the previous snapshot
+    // (a resumed session kept its temporary `session:<temp>` swarm id). Only
+    // the newest record is the member's real swarm. Track which snapshot
+    // provided each member so stale duplicates do not attribute it to
+    // swarms it no longer belongs to.
+    let mut member_source: HashMap<String, (u64, String)> = HashMap::new();
+    let mut superseded_member_swarms: HashSet<String> = HashSet::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -509,6 +525,26 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
                 continue;
             };
             let member_session_id = member.record.session_id.clone();
+            if let Some((existing_updated_at, existing_swarm_id)) =
+                member_source.get(&member_session_id).cloned()
+            {
+                if existing_updated_at >= state.updated_at_unix_ms {
+                    superseded_member_swarms.insert(member_swarm_id.clone());
+                    continue;
+                }
+                if let Some(session_ids) = swarms_by_id.get_mut(&existing_swarm_id) {
+                    session_ids.remove(&member_session_id);
+                    if session_ids.is_empty() {
+                        swarms_by_id.remove(&existing_swarm_id);
+                    }
+                }
+                members.remove(&member_session_id);
+                superseded_member_swarms.insert(existing_swarm_id);
+            }
+            member_source.insert(
+                member_session_id.clone(),
+                (state.updated_at_unix_ms, member_swarm_id.clone()),
+            );
             let Some(member) = from_persisted_member(
                 member,
                 state.updated_at_unix_ms,
@@ -546,6 +582,7 @@ pub(super) fn load_runtime_state() -> LoadedSwarmRuntimeState {
     let rewritten_swarms: HashSet<String> = pruned_members_by_swarm
         .keys()
         .chain(pruned_plan_swarms.iter())
+        .chain(superseded_member_swarms.iter())
         .cloned()
         .collect();
     for swarm_id in &rewritten_swarms {
