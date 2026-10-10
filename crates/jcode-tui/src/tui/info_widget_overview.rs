@@ -1,6 +1,6 @@
 use super::info_widget::{
-    InfoWidgetData, UsageProvider, changes_section_height, is_traceworthy_memory_event,
-    model_info_height,
+    InfoWidgetData, OVERVIEW_COMMITS_MAX_ROWS, OVERVIEW_SWARM_MAX_ROWS, UsageProvider,
+    changes_section_height, commits_has_data, is_traceworthy_memory_event, model_info_height,
 };
 
 pub(crate) const MAX_TODO_LINES: usize = 12;
@@ -144,6 +144,47 @@ fn compact_kv_cache_height(data: &InfoWidgetData) -> u16 {
     if data.cache_hit_info.is_some() { 1 } else { 0 }
 }
 
+/// Overview rows used by the Compaction section, mirroring [`render_sections`].
+fn compact_compaction_height(data: &InfoWidgetData) -> u16 {
+    u16::from(data.compaction_info.is_some())
+}
+
+/// Overview rows used by the Commits section, mirroring [`render_sections`].
+/// Must mirror `render_commits_compact` exactly: header + shown commits +
+/// overflow row.
+fn compact_commits_height(data: &InfoWidgetData) -> u16 {
+    let Some(info) = data.git_info.as_ref() else {
+        return 0;
+    };
+    if !commits_has_data(info) || info.recent_commits.is_empty() {
+        return 0;
+    }
+    let rows = OVERVIEW_COMMITS_MAX_ROWS.min(info.recent_commits.len());
+    let overflow = u16::from(info.recent_commits.len() > rows);
+    1 + rows as u16 + overflow
+}
+
+/// Overview rows used by the Swarm section, mirroring [`render_sections`].
+/// Must mirror `render_swarm_compact` exactly: header + shown agents +
+/// overflow row + plan meter.
+fn compact_swarm_height(data: &InfoWidgetData) -> u16 {
+    let Some(info) = data.swarm_info.as_ref() else {
+        return 0;
+    };
+    let members = info.managed_members.len();
+    if members == 0 {
+        return 0;
+    }
+    let rows = members.min(OVERVIEW_SWARM_MAX_ROWS);
+    let overflow = u16::from(members > rows);
+    let plan = u16::from(
+        info.plan_progress
+            .map(|(_, _, total)| total > 0)
+            .unwrap_or(false),
+    );
+    1 + rows as u16 + overflow + plan
+}
+
 /// Overview height. Status-line facts (model identity, context %, branch and
 /// counts) are not sections here, only the detail behind them.
 fn compact_overview_height(data: &InfoWidgetData) -> u16 {
@@ -153,7 +194,10 @@ fn compact_overview_height(data: &InfoWidgetData) -> u16 {
         + compact_background_height(data)
         + compact_usage_height(data)
         + compact_kv_cache_height(data)
+        + compact_compaction_height(data)
         + changes_section_height(data)
+        + compact_commits_height(data)
+        + compact_swarm_height(data)
 }
 
 fn expanded_todos_height(data: &InfoWidgetData) -> u16 {

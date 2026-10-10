@@ -577,3 +577,135 @@ fn plan_meter(done: u32, running: u32, total: u32) -> Line<'static> {
         ),
     ])
 }
+
+/// Overview Swarm section: a compact projection of the swarm dock. One row
+/// per agent (attention first), a header line carrying the same
+/// `N/M active` headline, and a trailing plan-meter line when a plan is
+/// active. Mirrors [`compact_swarm_height`].
+pub(super) fn render_swarm_compact(info: &SwarmInfo, width: usize) -> Vec<Line<'static>> {
+    use jcode_tui_render::swarm_gallery::{status_accent, status_glyph};
+    let members = &info.managed_members;
+    if members.is_empty() {
+        return Vec::new();
+    }
+
+    let mut order: Vec<&SwarmMemberStatus> = members.iter().collect();
+    order.sort_by(|a, b| {
+        dock_status_rank(&a.status)
+            .cmp(&dock_status_rank(&b.status))
+            .then_with(|| {
+                let coord = |m: &SwarmMemberStatus| m.role.as_deref() != Some("coordinator");
+                coord(a).cmp(&coord(b))
+            })
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+
+    let active = members
+        .iter()
+        .filter(|m| jcode_tui_render::swarm_gallery::is_active_status(&m.status))
+        .count();
+    let attention = members
+        .iter()
+        .filter(|m| dock_is_attention(&m.status))
+        .count();
+
+    let shown = &order[..order.len().min(OVERVIEW_SWARM_MAX_ROWS)];
+
+    let mut lines = Vec::with_capacity(shown.len() + 2);
+
+    // Header: `Swarm N/M active ⚠K`, same headline the dock border carries.
+    let mut header = vec![
+        Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
+        Span::styled(
+            format!("Swarm {}/{} active", active, members.len()),
+            Style::default().fg(rgb(180, 180, 190)).bold(),
+        ),
+    ];
+    if attention > 0 {
+        header.push(Span::styled(
+            format!("  ⚠ {attention}"),
+            Style::default().fg(rgb(255, 170, 80)).bold(),
+        ));
+    }
+    lines.push(Line::from(header));
+
+    for member in shown {
+        let accent = status_accent(&member.status);
+        let glyph = status_glyph(&member.status, info.spinner_frame);
+        let name = swarm_member_label(member);
+        let star = if member.role.as_deref() == Some("coordinator") {
+            "★ "
+        } else {
+            ""
+        };
+        let detail = dock_activity(member);
+        let right = match member.todo_progress {
+            Some((done, total)) if total > 0 && !dock_is_finished(&member.status) => {
+                format!("{done}/{total}")
+            }
+            _ => member
+                .status_age_secs
+                .and_then(|s| {
+                    let age = jcode_tui_render::swarm_gallery::humanize_age(s);
+                    (age != "now").then_some(age)
+                })
+                .unwrap_or_default(),
+        };
+        let fixed = 2
+            + UnicodeWidthStr::width(star)
+            + UnicodeWidthStr::width(name.as_str())
+            + 2
+            + if right.is_empty() {
+                0
+            } else {
+                UnicodeWidthStr::width(right.as_str()) + 1
+            };
+        let activity_w = width.saturating_sub(fixed);
+        let activity = if activity_w >= 4 {
+            truncate_smart(&detail, activity_w)
+        } else {
+            String::new()
+        };
+        let mut spans = vec![
+            Span::styled(format!("{glyph} "), Style::default().fg(accent)),
+            Span::styled(star.to_string(), Style::default().fg(rgb(255, 200, 100))),
+            Span::styled(name, Style::default().fg(rgb(210, 210, 220))),
+            Span::raw("  "),
+        ];
+        let activity_len = UnicodeWidthStr::width(activity.as_str());
+        spans.push(Span::styled(
+            activity,
+            Style::default().fg(rgb(160, 160, 170)),
+        ));
+        if !right.is_empty() && activity_w >= 4 {
+            let pad = activity_w.saturating_sub(activity_len) + 1;
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(right, Style::default().fg(rgb(120, 120, 130))));
+        }
+        let line = Line::from(spans);
+        lines.push(if line.width() <= width {
+            line
+        } else {
+            frame::fit(&line, width).unwrap_or_default()
+        });
+    }
+
+    let hidden = order.len().saturating_sub(OVERVIEW_SWARM_MAX_ROWS);
+    if hidden > 0 {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  +{hidden} more"),
+            Style::default().fg(rgb(110, 110, 125)),
+        )]));
+    }
+
+    if let Some((done, running, total)) = info.plan_progress
+        && total > 0
+    {
+        lines.push(plan_meter(done, running, total));
+    }
+
+    lines
+}
+
+/// Agents the overview Swarm section lists before collapsing the rest.
+pub(crate) const OVERVIEW_SWARM_MAX_ROWS: usize = 3;

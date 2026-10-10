@@ -288,7 +288,7 @@ fn todo_and_background_contention_prioritizes_todos_without_overlap() {
 }
 
 /// (b) When Overview is shown, its mergeable widgets (todos, background,
-/// swarm, ...) must not also place standalone.
+/// swarm, commits, ...) must not also place standalone.
 #[test]
 fn overview_suppresses_mergeable_widgets_under_contention() {
     let data = contended_data();

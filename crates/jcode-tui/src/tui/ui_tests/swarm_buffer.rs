@@ -329,15 +329,21 @@ fn swarm_strip_stands_down_through_dock_blinks() {
         "no dock engagement yet: strip should be free to show"
     );
 
-    // Dock places: strip stands down.
+    // Dock places: strip stands down. The Overview dock folds the swarm
+    // rows in (SwarmStatus is a mergeable section of it), so the standalone
+    // SwarmStatus dock stays suppressed and Overview carries the strip's job.
     let placed = calculate_placements(messages_area, &wide_margins, &data);
     assert!(
-        placed.iter().any(|p| p.kind == WidgetKind::SwarmStatus),
-        "dock should place with a wide free margin"
+        placed.iter().any(|p| p.kind == WidgetKind::Overview),
+        "overview dock should place with a wide free margin"
+    );
+    assert!(
+        !placed.iter().any(|p| p.kind == WidgetKind::SwarmStatus),
+        "standalone swarm dock stays merged into the overview"
     );
     assert!(
         swarm_strip_stands_down_for_dock(),
-        "strip must stand down while the dock shows"
+        "strip must stand down while the overview dock shows the swarm rows"
     );
 
     // Full-draw integration: with the dock engaged, ui::draw omits the strip
@@ -382,7 +388,9 @@ fn swarm_strip_stands_down_through_dock_blinks() {
     calculate_placements(messages_area, &wide_margins, &data);
     let blink = calculate_placements(messages_area, &covered_margins, &data);
     assert!(
-        blink.iter().all(|p| p.kind != WidgetKind::SwarmStatus),
+        blink
+            .iter()
+            .all(|p| p.kind != WidgetKind::Overview && p.kind != WidgetKind::SwarmStatus),
         "covered margin must hide the dock this frame"
     );
     assert!(
@@ -406,12 +414,104 @@ fn swarm_strip_stands_down_through_dock_blinks() {
         !swarm_strip_stands_down_for_dock(),
         "strip should be free to return once the dock is genuinely gone"
     );
+
+    // An overview without swarm data must NOT stand the strip down: only the
+    // overview's swarm section carries the strip's job.
+    let mut no_swarm = data.clone();
+    no_swarm
+        .swarm_info
+        .as_mut()
+        .expect("swarm info")
+        .managed_members
+        .clear();
+    // Keep a non-swarm section (runtime) so the overview still has a
+    // reason to place; the point is that its swarm section is what gates
+    // the strip.
+    no_swarm.queue_mode = Some(true);
+    no_swarm.model = Some("gpt-test".to_string());
+    let placed = calculate_placements(messages_area, &wide_margins, &no_swarm);
+    assert!(
+        placed.iter().any(|p| p.kind == WidgetKind::Overview),
+        "overview should still place without swarm data"
+    );
+    assert!(
+        !swarm_strip_stands_down_for_dock(),
+        "swarm strip must stay up when the overview carries no swarm rows"
+    );
 }
 
-/// The swarm dock widget renders the compact summary at the cell level:
+#[test]
+fn swarm_strip_stands_down_while_anchored_overview_stays_covered() {
+    // Greptile P2 ("Swarm strip returns too early"): while a wide transcript
+    // line covers the anchored Overview for longer than the 2s linger, only
+    // the retained anchor still proves the overview owns the swarm rows. The
+    // strip must keep standing down through the whole cover, or it pops back
+    // mid-cover and bounces the transcript when the overview reappears.
+    let _lock = viewport_snapshot_test_lock();
+    use crate::tui::info_widget::{
+        WidgetKind, calculate_placements, swarm_strip_stands_down_for_dock,
+    };
+    crate::tui::info_widget::clear_widget_placements_for_tests();
+
+    let coordinator = strip_member("s0", "researcher", "running");
+    let data = crate::tui::info_widget::InfoWidgetData {
+        swarm_info: Some(crate::tui::info_widget::SwarmInfo {
+            managed_members: vec![coordinator, strip_member("s1", "reviewer", "running")],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let messages_area = Rect::new(0, 0, 120, 26);
+    let wide_margins = crate::tui::info_widget::Margins {
+        right_widths: vec![44; 26],
+        ..Default::default()
+    };
+    let covered_margins = crate::tui::info_widget::Margins {
+        right_widths: vec![0; 26],
+        // Upstream (d9ec5f674) only retains a covered anchor while the
+        // transcript is still churning: settled content re-homes the widget
+        // right away. The greptile scenario was a wide streaming line parked
+        // over the anchored Overview, so the covered frames must model churn.
+        content_churning: true,
+        ..Default::default()
+    };
+
+    // Engage: overview places with swarm rows, strip stands down.
+    let placed = calculate_placements(messages_area, &wide_margins, &data);
+    assert!(placed.iter().any(|p| p.kind == WidgetKind::Overview));
+    assert!(swarm_strip_stands_down_for_dock());
+
+    // Covered frames keep arriving far past the 2s linger window (the 32-frame
+    // loop in the blink test never actually waits out the timer; this one
+    // does). The anchor is still retained, so engagement must survive.
+    std::thread::sleep(std::time::Duration::from_millis(2200));
+    for _ in 0..4 {
+        let covered = calculate_placements(messages_area, &covered_margins, &data);
+        assert!(
+            covered
+                .iter()
+                .all(|p| p.kind != WidgetKind::Overview && p.kind != WidgetKind::SwarmStatus),
+            "covered margin must hide the dock these frames"
+        );
+    }
+    assert!(
+        swarm_strip_stands_down_for_dock(),
+        "a retained overview anchor keeps the strip down past the linger window"
+    );
+
+    // Sanity: when the cover genuinely tears the dock down (widget pass
+    // skipped), the strip is free again.
+    crate::tui::info_widget::note_widget_pass_skipped();
+    assert!(
+        !swarm_strip_stands_down_for_dock(),
+        "strip should be free once the anchored overview is genuinely gone"
+    );
+}
+
+/// The overview dock widget renders the compact swarm rows at the cell level:
 /// place it through the real `calculate_placements` + `render_all` path into
-/// a TestBackend and assert the summary + progress bar landed inside the
-/// placement rect.
+/// a TestBackend and assert the summary + member rows landed inside the
+/// placement rect (the standalone SwarmStatus dock is merged into Overview).
 #[test]
 fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
     let _lock = viewport_snapshot_test_lock();
@@ -443,13 +543,13 @@ fn swarm_dock_widget_full_render_writes_agent_rows_in_margin() {
                 crate::tui::info_widget::calculate_placements(messages_area, &margins, &data);
             dock_rect = placements
                 .iter()
-                .find(|p| p.kind == crate::tui::info_widget::WidgetKind::SwarmStatus)
+                .find(|p| p.kind == crate::tui::info_widget::WidgetKind::Overview)
                 .map(|p| p.rect);
             crate::tui::info_widget::render_all(frame, &placements, &data);
         })
         .expect("dock widget render should not panic");
 
-    let rect = dock_rect.expect("SwarmStatus dock should be placed with a wide free margin");
+    let rect = dock_rect.expect("Overview dock should be placed with a wide free margin");
     let rows = buffer_rows(&terminal);
     let dock_text: String = rows[rect.y as usize..(rect.y + rect.height) as usize]
         .iter()
