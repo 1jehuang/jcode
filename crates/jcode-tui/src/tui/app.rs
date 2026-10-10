@@ -55,6 +55,8 @@ mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
 mod commands;
+mod commit_log;
+pub(crate) use commit_log::CommitLogOverlay;
 mod commands_cloud;
 mod commands_colors;
 mod commands_desktop;
@@ -629,6 +631,7 @@ pub(super) enum MouseScrollTarget {
     HelpOverlay,
     ChangelogOverlay,
     ModelStatusOverlay,
+    CommitLogOverlay,
     /// The right-hand preview pane of the /resume session picker overlay.
     SessionPickerPreview,
 }
@@ -1358,7 +1361,7 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
-    // Diff display mode (toggle with Alt+G)
+    // Diff display mode (cycle with /diff)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     pub(crate) centered: bool,
@@ -1709,6 +1712,8 @@ pub struct App {
     help_scroll: Option<usize>,
     model_status_scroll: Option<usize>,
     model_status_content: String,
+    /// Commit log overlay (None = not visible)
+    commit_log_overlay: Option<commit_log::CommitLogOverlay>,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,

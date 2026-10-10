@@ -135,6 +135,91 @@ pub(super) fn draw_changelog_overlay(
     frame.render_widget(Paragraph::new(visible_lines), inner);
 }
 
+pub(super) fn draw_commit_log_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    overlay: &crate::tui::app::CommitLogOverlay,
+) {
+    clear_area(frame, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" Commit log: {} ", overlay.title))
+        .title_bottom(Line::from(Span::styled(
+            " j/k move, d/u page, g/G top/bottom, c copy hash, q/Esc close ",
+            Style::default().fg(dim_color()),
+        )));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if let Some(error) = &overlay.error {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {error}"),
+                Style::default().fg(rgb(240, 110, 110)),
+            ))),
+            inner,
+        );
+        return;
+    }
+    if overlay.entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " No commits yet.",
+                Style::default().fg(dim_color()),
+            ))),
+            inner,
+        );
+        return;
+    }
+
+    let height = inner.height as usize;
+    let selected = overlay.scroll.min(overlay.entries.len() - 1);
+    // Keep the selected row roughly centered once it moves past the middle.
+    let start = selected
+        .saturating_sub(height / 2)
+        .min(overlay.entries.len().saturating_sub(height));
+
+    let hash_style = Style::default().fg(rgb(200, 180, 120));
+    let date_style = Style::default().fg(dim_color());
+    let author_style = Style::default().fg(rgb(130, 170, 230));
+    let refs_style = Style::default()
+        .fg(accent_color())
+        .add_modifier(Modifier::BOLD);
+    let subject_style = Style::default().fg(rgb(220, 220, 230));
+    let selected_bg = rgb(45, 50, 65);
+
+    let lines: Vec<Line<'static>> = overlay
+        .entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(index, entry)| {
+            let mut spans = vec![
+                Span::styled(format!(" {} ", entry.hash), hash_style),
+                Span::styled(format!("{} ", entry.date), date_style),
+                Span::styled(format!("{} ", entry.author), author_style),
+            ];
+            if !entry.refs.is_empty() {
+                spans.push(Span::styled(format!("({}) ", entry.refs), refs_style));
+            }
+            spans.push(Span::styled(entry.subject.clone(), subject_style));
+            let line = Line::from(spans);
+            if index == selected {
+                line.style(Style::default().bg(selected_bg))
+            } else {
+                line
+            }
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, app: &dyn TuiState) {
     clear_area(frame, area);
 
@@ -518,9 +603,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     lines.push(key_entry("[ / ]", "Zoom diagram (when focused)"));
     lines.push(key_entry("+ / -", "Resize diagram pane"));
     lines.push(key_entry(
-        &format!("{} / /diff", alt("G")),
+        "/diff",
         "Cycle diff mode (Off/Inline/Pinned/File)",
     ));
+    lines.push(key_entry(&alt("G"), "Show the project's git commit log"));
     lines.push(key_entry("Shift+Tab", "Cycle favorited models"));
     lines.push(key_entry("Ctrl+O", "Set default model (in /model picker)"));
     lines.push(key_entry(

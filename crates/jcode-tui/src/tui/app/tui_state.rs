@@ -1961,6 +1961,10 @@ impl crate::tui::TuiState for App {
             .map(|scroll| (scroll, self.model_status_content.as_str()))
     }
 
+    fn commit_log_overlay(&self) -> Option<&crate::tui::app::CommitLogOverlay> {
+        self.commit_log_overlay.as_ref()
+    }
+
     fn session_picker_overlay(
         &self,
     ) -> Option<&RefCell<crate::tui::session_picker::SessionPicker>> {

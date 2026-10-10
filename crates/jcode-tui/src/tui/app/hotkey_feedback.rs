@@ -166,6 +166,11 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         "cycle the diff display mode",
     );
     push(
+        inputs.toggles.commit_log.binding().cloned(),
+        "commit_log",
+        "show the project commit log",
+    );
+    push(
         inputs.toggles.info_widget.binding().cloned(),
         "info_widget_toggle",
         "toggle the info widget",
@@ -1201,6 +1206,7 @@ mod tests {
                 toggles.typing_scroll_lock.binding(),
             ),
             ("diff_mode_cycle", toggles.diff_mode_cycle.binding()),
+            ("commit_log", toggles.commit_log.binding()),
             ("info_widget_toggle", toggles.info_widget.binding()),
             ("swarm_panel_focus", toggles.swarm_panel_focus.binding()),
         ];

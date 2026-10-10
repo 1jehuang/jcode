@@ -93,6 +93,9 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_DIFF_MODE_CYCLE_KEY") {
             self.keybindings.diff_mode_cycle = v;
         }
+        if let Ok(v) = std::env::var("JCODE_COMMIT_LOG_KEY") {
+            self.keybindings.commit_log = v;
+        }
         if let Ok(v) = std::env::var("JCODE_INFO_WIDGET_TOGGLE_KEY") {
             self.keybindings.info_widget_toggle = v;
         }

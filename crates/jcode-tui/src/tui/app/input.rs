@@ -2233,6 +2233,11 @@ pub(super) fn handle_navigation_shortcuts(
         return true;
     }
 
+    if app.toggle_keys.commit_log.matches(code, modifiers) {
+        app.toggle_commit_log_overlay();
+        return true;
+    }
+
     if app.toggle_keys.diff_mode_cycle.matches(code, modifiers) {
         app.diff_mode = app.diff_mode.cycle();
         if !app.diff_pane_visible() {
@@ -2251,13 +2256,16 @@ pub(super) fn is_scroll_only_key(app: &App, code: KeyCode, modifiers: KeyModifie
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if app.toggle_keys.commit_log.matches(code, modifiers) {
+        return false;
+    }
+
     if app.scroll_keys.scroll_amount(code, modifiers).is_some()
         || app.scroll_keys.prompt_jump(code, modifiers).is_some()
         || App::ctrl_side_panel_ratio_preset(&code, modifiers).is_some()
         || App::ctrl_prompt_rank(&code, modifiers).is_some()
         || app.scroll_keys.is_bookmark(code, modifiers)
-        || (modifiers.contains(KeyModifiers::ALT)
-            && matches!(code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'g')))
+        || app.toggle_keys.diff_mode_cycle.matches(code, modifiers)
     {
         return true;
     }
@@ -2696,6 +2704,8 @@ pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<
         if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
             app.close_panel_image_preview();
         }
+    } else if app.commit_log_overlay.is_some() {
+        app.handle_commit_log_key(code)?;
     } else if app.changelog_scroll.is_some() {
         app.handle_changelog_key(code)?;
     } else if app.help_scroll.is_some() {

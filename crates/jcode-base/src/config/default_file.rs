@@ -82,7 +82,10 @@ copy_selection_toggle = "alt+y"
 diagram_pane_toggle = "alt+t"
 diagram_pane_visibility_toggle = "alt+shift+m"
 typing_scroll_lock_toggle = "alt+s"
-diff_mode_cycle = "alt+g"
+# Cycle the diff display mode (unbound by default; /diff does the same).
+diff_mode_cycle = ""
+# Show the git commit log of the project you are in.
+commit_log = "alt+g"
 info_widget_toggle = "alt+i"
 # Focus the inline swarm panel (list of agents this session manages). Press
 # again to cycle agents. While focused: alt+↑/↓ select, alt+o pops the agent

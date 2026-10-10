@@ -748,6 +748,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.toggle_keys.commit_log.matches(code, modifiers) {
+        app.toggle_commit_log_overlay();
+        return Ok(());
+    }
+
     if app.toggle_keys.diff_mode_cycle.matches(code, modifiers) {
         app.diff_mode = app.diff_mode.cycle();
         if !app.diff_pane_visible() {

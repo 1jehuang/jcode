@@ -604,7 +604,8 @@ fn test_is_scroll_only_key_detects_navigation_inputs() {
         KeyModifiers::empty()
     ));
 
-    assert!(super::input::is_scroll_only_key(
+    // Alt+G opens the commit log overlay, which needs a full redraw.
+    assert!(!super::input::is_scroll_only_key(
         &app,
         KeyCode::Char('g'),
         KeyModifiers::ALT
@@ -620,6 +621,29 @@ fn test_is_scroll_only_key_detects_navigation_inputs() {
         KeyCode::Enter,
         KeyModifiers::empty()
     ));
+}
+
+#[test]
+fn test_alt_g_opens_and_closes_commit_log_overlay() {
+    let mut app = create_test_app();
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    app.session.working_dir = Some(repo.to_string_lossy().to_string());
+    let diff_mode_before = app.diff_mode;
+
+    assert!(super::input::handle_navigation_shortcuts(
+        &mut app,
+        KeyCode::Char('g'),
+        KeyModifiers::ALT
+    ));
+    assert_eq!(app.diff_mode, diff_mode_before, "Alt+G no longer cycles diffs");
+    let overlay = app.commit_log_overlay.as_ref().expect("overlay opens");
+    assert!(overlay.error.is_none(), "{:?}", overlay.error);
+    assert!(!overlay.entries.is_empty());
+
+    app.handle_commit_log_key(KeyCode::Char('j')).unwrap();
+    assert_eq!(app.commit_log_overlay.as_ref().unwrap().scroll, 1);
+    app.handle_commit_log_key(KeyCode::Esc).unwrap();
+    assert!(app.commit_log_overlay.is_none());
 }
 
 #[test]

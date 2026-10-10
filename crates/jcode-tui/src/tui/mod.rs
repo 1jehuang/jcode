@@ -807,6 +807,10 @@ pub trait TuiState {
     fn model_status_overlay(&self) -> Option<(usize, &str)> {
         None
     }
+    /// Project commit log overlay (None = not showing)
+    fn commit_log_overlay(&self) -> Option<&app::CommitLogOverlay> {
+        None
+    }
     /// Session picker overlay for /resume command
     fn session_picker_overlay(&self) -> Option<&std::cell::RefCell<session_picker::SessionPicker>>;
     /// Login picker overlay for /login command

@@ -971,6 +971,7 @@ impl App {
                 });
                 true
             }
+            MouseScrollTarget::CommitLogOverlay => self.scroll_commit_log_overlay(direction),
             MouseScrollTarget::ModelStatusOverlay => {
                 let Some(current) = self.model_status_scroll else {
                     return false;
@@ -1434,6 +1435,20 @@ impl App {
                 self.close_panel_image_preview();
             }
             finish_mouse_event!(false, "panel_image_preview");
+        }
+
+        if self.commit_log_overlay.is_some() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.enqueue_mouse_scroll(MouseScrollTarget::CommitLogOverlay, -1);
+                    finish_mouse_event!(true, "commit_log_overlay_scroll_up");
+                }
+                MouseEventKind::ScrollDown => {
+                    self.enqueue_mouse_scroll(MouseScrollTarget::CommitLogOverlay, 1);
+                    finish_mouse_event!(true, "commit_log_overlay_scroll_down");
+                }
+                _ => finish_mouse_event!(false, "commit_log_overlay_non_scroll"),
+            }
         }
 
         if self.changelog_scroll.is_some() {

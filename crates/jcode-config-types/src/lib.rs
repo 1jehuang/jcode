@@ -1065,8 +1065,10 @@ pub struct KeybindingsConfig {
     pub diagram_pane_visibility_toggle: String,
     /// Toggle typing scroll lock (default: "alt+s")
     pub typing_scroll_lock_toggle: String,
-    /// Cycle inline diff display mode (default: "alt+g")
+    /// Cycle inline diff display mode (default: unbound; use /diff)
     pub diff_mode_cycle: String,
+    /// Show the git commit log of the current project (default: "alt+g")
+    pub commit_log: String,
     /// Toggle the info widget (default: "alt+i")
     pub info_widget_toggle: String,
     /// Show/dismiss the session todo list as an inline card in the chat
@@ -1128,7 +1130,8 @@ impl Default for KeybindingsConfig {
             diagram_pane_toggle: get("diagram_pane_toggle", "alt+t"),
             diagram_pane_visibility_toggle: get("diagram_pane_visibility_toggle", "alt+shift+m"),
             typing_scroll_lock_toggle: get("typing_scroll_lock_toggle", "alt+s"),
-            diff_mode_cycle: get("diff_mode_cycle", "alt+g"),
+            diff_mode_cycle: get("diff_mode_cycle", ""),
+            commit_log: get("commit_log", "alt+g"),
             info_widget_toggle: get("info_widget_toggle", "alt+i"),
             todo_card_toggle: get("todo_card_toggle", "alt+x"),
             swarm_panel_focus: get("swarm_panel_focus", "alt+n"),

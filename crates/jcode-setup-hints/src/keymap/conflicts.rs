@@ -192,6 +192,11 @@ pub fn jcode_bindings(cfg: &KeybindingsConfig) -> Vec<JcodeBinding> {
             cfg.diff_mode_cycle.as_str(),
         ),
         (
+            "commit_log",
+            "Show project commit log",
+            cfg.commit_log.as_str(),
+        ),
+        (
             "info_widget_toggle",
             "Toggle info widget",
             cfg.info_widget_toggle.as_str(),
