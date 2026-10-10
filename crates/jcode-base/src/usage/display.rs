@@ -170,6 +170,64 @@ pub fn format_reset_time(timestamp: &str) -> String {
     }
 }
 
+const HOUR_SECONDS: u64 = 60 * 60;
+const DAY_SECONDS: u64 = 24 * HOUR_SECONDS;
+
+/// Length of a quota window, inferred from the label the provider reported.
+///
+/// Anthropic uses fixed `5-hour`/`Weekly` labels; OpenAI derives labels from
+/// the window length it reports (`5-hour`, `7-day`, `Monthly`, ...). Anything
+/// unrecognised (notably Codex `Spark`) yields `None`, and the caller keeps the
+/// reset countdown instead of an elapsed percentage.
+pub fn window_seconds_for_label(label: &str) -> Option<u64> {
+    let normalized = label.trim().to_ascii_lowercase();
+    let normalized = normalized.trim_end_matches(" window").trim();
+    match normalized {
+        "weekly" => return Some(7 * DAY_SECONDS),
+        "daily" => return Some(DAY_SECONDS),
+        "monthly" => return Some(30 * DAY_SECONDS),
+        _ => {}
+    }
+    if let Some(hours) = normalized.strip_suffix("-hour") {
+        return hours
+            .parse::<u64>()
+            .ok()
+            .and_then(|h| h.checked_mul(HOUR_SECONDS));
+    }
+    if let Some(days) = normalized.strip_suffix("-day") {
+        return days
+            .parse::<u64>()
+            .ok()
+            .and_then(|d| d.checked_mul(DAY_SECONDS));
+    }
+    None
+}
+
+/// How much of a rolling quota window has already elapsed, as a percentage.
+///
+/// Derived from the window's reset timestamp and its total length: a window
+/// resetting in 30 minutes with a 5-hour length is 90% elapsed. Returns `None`
+/// when the timestamp cannot be parsed or the window length is unknown, so
+/// callers can fall back to the reset countdown.
+pub fn window_elapsed_percent(resets_at: &str, window_seconds: u64) -> Option<u8> {
+    if window_seconds == 0 {
+        return None;
+    }
+    let reset = parse_reset_timestamp(resets_at)?;
+    let remaining = reset
+        .signed_duration_since(chrono::Utc::now())
+        .num_seconds();
+    if remaining <= 0 {
+        return Some(100);
+    }
+    let remaining = (remaining as u64).min(window_seconds);
+    let elapsed = window_seconds - remaining;
+    // Widened so provider-supplied window lengths near u64::MAX cannot overflow.
+    let percent =
+        (u128::from(elapsed) * 100 + u128::from(window_seconds) / 2) / u128::from(window_seconds);
+    Some(percent.min(100) as u8)
+}
+
 pub fn format_usage_bar(percent: f32, width: usize) -> String {
     let filled = ((percent / 100.0) * width as f32).round() as usize;
     let filled = filled.min(width);
@@ -178,4 +236,77 @@ pub fn format_usage_bar(percent: f32, width: usize) -> String {
     // Right-align the number so the `%` (and any "· resets" suffix) lines up
     // across rows with different percentages.
     format!("{} {:>3.0}%", bar, percent)
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::{DAY_SECONDS, HOUR_SECONDS, window_elapsed_percent, window_seconds_for_label};
+
+    const FIVE_HOURS: u64 = 5 * 60 * 60;
+    const SEVEN_DAYS: u64 = 7 * 24 * 60 * 60;
+
+    fn resets_in(seconds: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339()
+    }
+
+    #[test]
+    fn elapsed_percent_tracks_how_far_the_window_has_run() {
+        let half = window_elapsed_percent(&resets_in(FIVE_HOURS as i64 / 2), FIVE_HOURS)
+            .expect("parsable reset");
+        assert!((49..=51).contains(&half), "expected ~50%, got {half}");
+
+        let nearly_done =
+            window_elapsed_percent(&resets_in(30 * 60), FIVE_HOURS).expect("parsable reset");
+        assert!(
+            (89..=91).contains(&nearly_done),
+            "expected ~90%, got {nearly_done}"
+        );
+
+        let weekly =
+            window_elapsed_percent(&resets_in(32 * 60 * 60), SEVEN_DAYS).expect("parsable reset");
+        assert!((80..=82).contains(&weekly), "expected ~81%, got {weekly}");
+    }
+
+    #[test]
+    fn elapsed_percent_saturates_and_rejects_unusable_input() {
+        assert_eq!(
+            window_elapsed_percent(&resets_in(-60), FIVE_HOURS),
+            Some(100)
+        );
+        // A reset further out than the window itself means it just restarted.
+        assert_eq!(
+            window_elapsed_percent(&resets_in(FIVE_HOURS as i64 * 2), FIVE_HOURS),
+            Some(0)
+        );
+        assert_eq!(window_elapsed_percent("not-a-timestamp", FIVE_HOURS), None);
+        assert_eq!(window_elapsed_percent(&resets_in(60), 0), None);
+    }
+
+    #[test]
+    fn elapsed_percent_survives_huge_provider_windows() {
+        assert_eq!(
+            window_elapsed_percent(&resets_in(60 * 60), u64::MAX),
+            Some(100)
+        );
+        assert_eq!(
+            window_elapsed_percent(&resets_in(60 * 60), u64::MAX / 100 + 1),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn window_lengths_are_inferred_from_provider_labels() {
+        assert_eq!(window_seconds_for_label("5-hour"), Some(5 * HOUR_SECONDS));
+        assert_eq!(
+            window_seconds_for_label("5-hour window"),
+            Some(5 * HOUR_SECONDS)
+        );
+        assert_eq!(window_seconds_for_label("Weekly"), Some(7 * DAY_SECONDS));
+        assert_eq!(window_seconds_for_label("7-day"), Some(7 * DAY_SECONDS));
+        assert_eq!(window_seconds_for_label("Monthly"), Some(30 * DAY_SECONDS));
+        // Codex Spark has no advertised window length, so it keeps a countdown.
+        assert_eq!(window_seconds_for_label("Spark"), None);
+        assert_eq!(window_seconds_for_label("99999999999999999-hour"), None);
+        assert_eq!(window_seconds_for_label("99999999999999999-day"), None);
+    }
 }

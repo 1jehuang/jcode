@@ -80,6 +80,7 @@ fn reset_hint_uses_allowed_flag_over_rounded_percent_or_hard_limit_flag() {
         name: "5-hour".into(),
         usage_ratio: 1.0,
         resets_at: None,
+        window_seconds: None,
     });
     usage
         .openai_reset_credits
@@ -109,6 +110,7 @@ fn reset_hint_without_allowed_flag_requires_full_ordinary_window_or_hard_limit()
             name: "5-hour".into(),
             usage_ratio: ratio,
             resets_at: None,
+            window_seconds: None,
         });
         assert!(!usage.banked_reset_available_for_account(Some("work")));
     }
@@ -128,6 +130,7 @@ fn expired_window_never_suggests_reset_in_raw_or_display_snapshot() {
         name: "5-hour".into(),
         usage_ratio: 1.0,
         resets_at: Some("2000-01-01T00:00:00Z".into()),
+        window_seconds: None,
     });
     assert!(!usage.banked_reset_available_for_account(Some("work")));
     let snapshot = usage.display_snapshot();

@@ -914,6 +914,7 @@ mod tests {
                     name: "5h".to_string(),
                     usage_percent: 92.0,
                     resets_at: Some("2020-01-01T00:00:00Z".to_string()),
+                    window_seconds: None,
                 }],
                 extra_info: vec![("plan".to_string(), "max".to_string())],
                 hard_limit_reached: false,
@@ -944,16 +945,19 @@ mod tests {
                     name: "Included".to_string(),
                     usage_percent: 27.0,
                     resets_at: None,
+                    window_seconds: None,
                 },
                 jcode_usage_types::UsageLimit {
                     name: "Auto".to_string(),
                     usage_percent: 29.0,
                     resets_at: None,
+                    window_seconds: None,
                 },
                 jcode_usage_types::UsageLimit {
                     name: "API".to_string(),
                     usage_percent: 2.0,
                     resets_at: None,
+                    window_seconds: None,
                 },
             ],
             ..Default::default()

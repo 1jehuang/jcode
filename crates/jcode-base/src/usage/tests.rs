@@ -66,6 +66,7 @@ fn test_openai_usage_data_becomes_stale_when_reset_time_has_passed() {
             name: "5-hour".to_string(),
             usage_ratio: 0.42,
             resets_at: Some("2020-01-01T00:00:00Z".to_string()),
+            window_seconds: None,
         }),
         fetched_at: Some(Instant::now()),
         ..Default::default()
@@ -105,11 +106,13 @@ fn test_openai_usage_data_display_snapshot_clears_passed_reset_window() {
             name: "5-hour".to_string(),
             usage_ratio: 0.88,
             resets_at: Some("2020-01-01T00:00:00Z".to_string()),
+            window_seconds: None,
         }),
         seven_day: Some(OpenAIUsageWindow {
             name: "7-day".to_string(),
             usage_ratio: 0.31,
             resets_at: Some("3020-01-01T00:00:00Z".to_string()),
+            window_seconds: None,
         }),
         hard_limit_reached: true,
         fetched_at: Some(Instant::now()),
@@ -143,6 +146,7 @@ fn test_provider_usage_cache_is_not_fresh_after_reset_boundary() {
             name: "5-hour window".to_string(),
             usage_percent: 100.0,
             resets_at: Some("2020-01-01T00:00:00Z".to_string()),
+            window_seconds: None,
         }],
         ..Default::default()
     };
@@ -201,16 +205,19 @@ fn test_classify_openai_limits_recognizes_five_weekly_and_spark() {
             name: "Codex 5h".to_string(),
             usage_percent: 25.0,
             resets_at: Some("2026-01-01T00:00:00Z".to_string()),
+            window_seconds: None,
         },
         UsageLimit {
             name: "Codex 1w".to_string(),
             usage_percent: 50.0,
             resets_at: Some("2026-01-07T00:00:00Z".to_string()),
+            window_seconds: None,
         },
         UsageLimit {
             name: "Codex Spark".to_string(),
             usage_percent: 75.0,
             resets_at: Some("2026-01-02T00:00:00Z".to_string()),
+            window_seconds: None,
         },
     ];
 
@@ -234,11 +241,13 @@ fn test_classify_openai_limits_does_not_duplicate_weekly_window() {
             name: "Codex weekly".to_string(),
             usage_percent: 25.0,
             resets_at: Some("2026-01-07T00:00:00Z".to_string()),
+            window_seconds: None,
         },
         UsageLimit {
             name: "Codex 7-day window".to_string(),
             usage_percent: 50.0,
             resets_at: Some("2026-01-14T00:00:00Z".to_string()),
+            window_seconds: None,
         },
     ];
 
@@ -317,6 +326,7 @@ fn test_classify_openai_limits_treats_usage_limit_values_as_percent() {
         name: "5-hour window".to_string(),
         usage_percent: 0.06,
         resets_at: None,
+        window_seconds: None,
     }];
 
     let classified = openai_helpers::classify_openai_limits(&limits);
@@ -337,6 +347,7 @@ fn test_usage_data_from_provider_report_treats_usage_limit_values_as_percent() {
             name: "5-hour window".to_string(),
             usage_percent: 0.06,
             resets_at: None,
+            window_seconds: None,
         }],
         ..Default::default()
     };
@@ -394,16 +405,19 @@ fn test_usage_data_from_provider_report_maps_limits_and_extra_usage() {
                 name: "5-hour window".to_string(),
                 usage_percent: 25.0,
                 resets_at: Some("2026-01-01T00:00:00Z".to_string()),
+                window_seconds: None,
             },
             UsageLimit {
                 name: "7-day window".to_string(),
                 usage_percent: 50.0,
                 resets_at: Some("2026-01-07T00:00:00Z".to_string()),
+                window_seconds: None,
             },
             UsageLimit {
                 name: "7-day Opus window".to_string(),
                 usage_percent: 75.0,
                 resets_at: Some("2026-01-08T00:00:00Z".to_string()),
+                window_seconds: None,
             },
         ],
         extra_info: vec![(
@@ -456,6 +470,7 @@ fn test_openai_usage_data_from_provider_report_preserves_hard_limit_flag() {
             name: "5-hour window".to_string(),
             usage_percent: 100.0,
             resets_at: None,
+            window_seconds: None,
         }],
         ..Default::default()
     };
@@ -473,6 +488,7 @@ fn test_openai_snapshot_treats_hard_limit_flag_as_exhausted() {
             name: "5-hour window".to_string(),
             usage_ratio: 1.0,
             resets_at: Some("2026-01-01T00:00:00Z".to_string()),
+            window_seconds: None,
         }),
         ..Default::default()
     };
@@ -781,6 +797,7 @@ fn anthropic_model_scoped_fable_limit_survives_report_cache_roundtrip() {
         .expect("Fable limit should be displayed");
     assert_eq!(fable.usage_percent, 73.0);
     assert_eq!(fable.resets_at.as_deref(), Some("2026-08-10T00:00:00Z"));
+    assert_eq!(fable.window_seconds, Some(7 * 24 * 60 * 60));
 
     let restored = usage_data_from_provider_report(&report);
     assert_eq!(restored.model_scoped, usage.model_scoped);
