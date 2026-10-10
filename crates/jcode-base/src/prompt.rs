@@ -947,6 +947,82 @@ fn same_canonical_path(first: &Path, second: &Path) -> bool {
     }
 }
 
+/// Maximum nesting depth for `@path` imports inside instruction files.
+const AGENTS_MD_IMPORT_MAX_DEPTH: usize = 5;
+
+/// Expand `@path` import lines in an instruction file, following the Claude Code
+/// convention: a line whose trimmed text is `@<path>` is replaced by that file's
+/// contents. Paths may be absolute, `~/`-relative, or relative to the importing
+/// file's directory. Lines inside fenced code blocks are left alone, imports
+/// nest up to `AGENTS_MD_IMPORT_MAX_DEPTH`, cycles are skipped, and a line whose
+/// target cannot be read is kept verbatim so nothing is silently dropped.
+fn expand_agents_md_imports(content: &str, source: &Path) -> String {
+    let mut seen = Vec::new();
+    if let Ok(canonical) = std::fs::canonicalize(source) {
+        seen.push(canonical);
+    }
+    expand_agents_md_imports_inner(content, source, 0, &mut seen)
+}
+
+fn resolve_agents_md_import(raw: &str, source: &Path) -> Option<std::path::PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains(char::is_whitespace) {
+        return None;
+    }
+    let path = if let Some(rest) = raw.strip_prefix("~/") {
+        crate::storage::user_home_path(rest).ok()?
+    } else {
+        let candidate = Path::new(raw);
+        if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            source.parent().unwrap_or(Path::new(".")).join(candidate)
+        }
+    };
+    Some(path)
+}
+
+fn expand_agents_md_imports_inner(
+    content: &str,
+    source: &Path,
+    depth: usize,
+    seen: &mut Vec<std::path::PathBuf>,
+) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut in_fence = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        let import = (!in_fence && depth < AGENTS_MD_IMPORT_MAX_DEPTH)
+            .then(|| trimmed.strip_prefix('@'))
+            .flatten()
+            .and_then(|raw| resolve_agents_md_import(raw, source))
+            .and_then(|path| {
+                let canonical = std::fs::canonicalize(&path).ok()?;
+                if seen.contains(&canonical) {
+                    return None;
+                }
+                let text = std::fs::read_to_string(&canonical).ok()?;
+                Some((canonical, text))
+            });
+        match import {
+            Some((canonical, text)) => {
+                seen.push(canonical.clone());
+                let expanded = expand_agents_md_imports_inner(&text, &canonical, depth + 1, seen);
+                out.push_str(expanded.trim_end());
+                out.push('\n');
+            }
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
 fn load_agents_md_files_from_dirs(
     project_dir: &Path,
     global_agents_md: Option<&Path>,
@@ -958,6 +1034,7 @@ fn load_agents_md_files_from_dirs(
     let load_file = |path: &Path, label: &str| -> Option<(String, usize)> {
         if path.exists() {
             std::fs::read_to_string(path).ok().map(|content| {
+                let content = expand_agents_md_imports(&content, path);
                 let raw_size = content.len();
                 let formatted = format!("# {}\n\n{}", label, content.trim());
                 (formatted, raw_size)

@@ -897,3 +897,64 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
         }
     });
 }
+
+#[test]
+fn agents_md_expands_at_path_imports() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let shared_dir = tempfile::TempDir::new().unwrap();
+    let shared = shared_dir.path().join("governance.md");
+    std::fs::write(&shared, "shared governance rule").unwrap();
+    std::fs::write(project_dir.path().join("notes.md"), "relative note").unwrap();
+    std::fs::write(
+        project_dir.path().join("AGENTS.md"),
+        format!("intro\n@{}\n@notes.md\noutro", shared.display()),
+    )
+    .unwrap();
+
+    let (content, _) = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let content = content.expect("project instructions");
+
+    assert!(content.contains("shared governance rule"));
+    assert!(content.contains("relative note"));
+    assert!(!content.contains(&format!("@{}", shared.display())));
+    assert!(!content.contains("@notes.md"));
+    assert!(content.find("intro").unwrap() < content.find("shared governance rule").unwrap());
+    assert!(content.find("relative note").unwrap() < content.find("outro").unwrap());
+}
+
+#[test]
+fn agents_md_imports_keep_missing_fenced_and_inline_lines() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(project_dir.path().join("real.md"), "should not appear").unwrap();
+    std::fs::write(
+        project_dir.path().join("AGENTS.md"),
+        "@missing.md\n```\n@real.md\n```\nmention @real.md inline\n@not a path",
+    )
+    .unwrap();
+
+    let (content, _) = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let content = content.expect("project instructions");
+
+    assert!(content.contains("@missing.md"));
+    assert!(content.contains("```\n@real.md\n```"));
+    assert!(content.contains("mention @real.md inline"));
+    assert!(content.contains("@not a path"));
+    assert!(!content.contains("should not appear"));
+}
+
+#[test]
+fn agents_md_imports_stop_on_cycles() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(project_dir.path().join("a.md"), "alpha\n@b.md").unwrap();
+    std::fs::write(project_dir.path().join("b.md"), "beta\n@a.md\n@AGENTS.md").unwrap();
+    std::fs::write(project_dir.path().join("AGENTS.md"), "root\n@a.md").unwrap();
+
+    let (content, _) = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let content = content.expect("project instructions");
+
+    assert_eq!(content.matches("alpha").count(), 1);
+    assert_eq!(content.matches("beta").count(), 1);
+    assert_eq!(content.matches("root").count(), 1);
+    assert!(content.contains("@a.md"));
+    assert!(content.contains("@AGENTS.md"));
+}
