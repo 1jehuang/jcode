@@ -1142,7 +1142,6 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
     if crate::tui::is_ssh_remote() {
         return None;
     }
-    use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(5);
 

@@ -504,9 +504,9 @@ fn preferred_model_rank(orders: &[&'static [&'static str]], model: &str) -> usiz
 /// Curated orders are `&'static` constants, so the slice address identifies
 /// them.
 fn normalized_preference_order(order: &'static [&'static str]) -> std::sync::Arc<Vec<String>> {
-    static CACHE: std::sync::LazyLock<
-        std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>,
-    > = std::sync::LazyLock::new(Default::default);
+    type OrderCache =
+        std::sync::Mutex<std::collections::HashMap<(usize, usize), std::sync::Arc<Vec<String>>>>;
+    static CACHE: std::sync::LazyLock<OrderCache> = std::sync::LazyLock::new(Default::default);
     let key = (order.as_ptr() as usize, order.len());
     if let Ok(cache) = CACHE.lock()
         && let Some(hit) = cache.get(&key)

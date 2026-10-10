@@ -416,7 +416,10 @@ pub(crate) enum OnboardingPhase {
     },
     /// Action-only picker offering the suggested review or a blank new session.
     StartChoice { shown_at: Instant },
-    /// Existing prompt-suggestion cards (resting / "No" state).
+    /// Legacy prompt-suggestion cards state. The live flow no longer enters it
+    /// (it lands on the regular new-session screen instead), but replay, golden
+    /// and onboarding-graph fixtures still exercise it.
+    #[cfg_attr(not(test), allow(dead_code))]
     Suggestions,
     /// Flow finished; nothing onboarding-specific to render.
     Done,

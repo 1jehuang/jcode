@@ -8,7 +8,7 @@ const COMMIT_LOG_LIMIT: usize = 500;
 
 /// One commit row in the overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CommitLogEntry {
+pub struct CommitLogEntry {
     pub hash: String,
     pub date: String,
     pub author: String,
@@ -18,7 +18,7 @@ pub(crate) struct CommitLogEntry {
 
 /// State of the open commit log overlay.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CommitLogOverlay {
+pub struct CommitLogOverlay {
     pub scroll: usize,
     /// Repository label shown in the title (repo root plus branch).
     pub title: String,
