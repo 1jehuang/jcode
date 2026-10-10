@@ -1303,30 +1303,28 @@ pub(in crate::tui::app) fn handle_server_event(
                     .is_some_and(|pending| pending.retry_attempts >= App::AUTO_RETRY_MAX_ATTEMPTS);
             if let Some(reset_duration) = reset_duration
                 && !rate_limit_retry_exhausted
-            {
-                if let Some(is_system) = app.rate_limit_pending_message.as_mut().map(|pending| {
+                && let Some(is_system) = app.rate_limit_pending_message.as_mut().map(|pending| {
                     pending.retry_attempts = pending.retry_attempts.saturating_add(1);
                     pending.is_system
-                }) {
-                    app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                    let rate_limit_line =
-                        app.rate_limit_notice_with_nudge(reset_duration.as_secs());
-                    app.push_display_message(DisplayMessage::system(rate_limit_line));
-                    if is_system {
-                        app.set_status_notice("Rate limited; queued system retry");
-                    } else {
-                        app.set_status_notice("Rate limited; queued retry");
-                    }
-                    app.is_processing = false;
-                    app.status = ProcessingStatus::Idle;
-                    app.stream_message_ended = false;
-                    app.processing_started = None;
-                    app.clear_visible_turn_started();
-                    app.current_message_id = None;
-                    remote.clear_pending();
-                    remote.reset_call_output_tokens_seen();
-                    return false;
+                })
+            {
+                app.rate_limit_reset = Some(Instant::now() + reset_duration);
+                let rate_limit_line = app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                app.push_display_message(DisplayMessage::system(rate_limit_line));
+                if is_system {
+                    app.set_status_notice("Rate limited; queued system retry");
+                } else {
+                    app.set_status_notice("Rate limited; queued retry");
                 }
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                app.stream_message_ended = false;
+                app.processing_started = None;
+                app.clear_visible_turn_started();
+                app.current_message_id = None;
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+                return false;
             }
             let is_failover_prompt =
                 crate::provider::parse_failover_prompt_message(&message).is_some();
