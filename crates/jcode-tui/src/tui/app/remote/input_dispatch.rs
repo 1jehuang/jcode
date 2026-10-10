@@ -360,6 +360,7 @@ pub(in crate::tui::app) fn finish_remote_split_launch(app: &mut App) {
 }
 
 fn set_transcript_input(app: &mut App, text: String) {
+    app.clear_input_selection();
     app.input_typing_undo = None;
     app.input = text;
     app.cursor_pos = app.input.len();

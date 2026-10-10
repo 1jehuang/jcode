@@ -2589,11 +2589,39 @@ pub(super) fn draw_input(
         );
     }
 
+    // Highlight the editable composer selection (double/triple click, drag,
+    // Shift+arrows). It is a byte range into the input, mapped onto each
+    // wrapped row so it follows soft wraps and multi-line drafts.
+    let input_selection = app.input_selection_range();
+    if let Some((sel_start, sel_end)) = input_selection {
+        let sel_start = crate::tui::core::byte_offset_to_char_index(input_text, sel_start);
+        let sel_end = crate::tui::core::byte_offset_to_char_index(input_text, sel_end);
+        let segments = wrap_input_segments(input_text, line_width);
+        for rel in 0..visible_input_rows {
+            let Some(segment) = segments.get(scroll_offset + rel) else {
+                continue;
+            };
+            let lo = sel_start.max(segment.start_char);
+            let hi = sel_end.min(segment.end_char);
+            if lo >= hi {
+                continue;
+            }
+            if let Some(line) = lines.get_mut(suggestions_offset + rel) {
+                let start_col = prompt_len + cursor_col_for_segment(segment, lo);
+                let end_col = prompt_len + cursor_col_for_segment(segment, hi);
+                *line = highlight_line_selection(line, start_col, end_col);
+            }
+        }
+    }
+
     // Highlight an active copy selection over the composer text, mirroring the
     // chat/side-pane selection rendering. Columns are selection-space (typed
-    // text only), so shift them right by the prompt width for display.
+    // text only), so shift them right by the prompt width for display. While a
+    // mouse drag is mirrored into the editable selection above, that one wins
+    // so the composer never shows two competing highlights.
     if let Some(range) = app.copy_selection_range().filter(|range| {
-        range.start.pane == crate::tui::CopySelectionPane::Input
+        input_selection.is_none()
+            && range.start.pane == crate::tui::CopySelectionPane::Input
             && range.end.pane == crate::tui::CopySelectionPane::Input
     }) {
         let (start, end) = if (range.start.abs_line, range.start.column)

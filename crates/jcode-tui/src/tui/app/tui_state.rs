@@ -2005,6 +2005,10 @@ impl crate::tui::TuiState for App {
         self.normalized_copy_selection()
     }
 
+    fn input_selection_range(&self) -> Option<(usize, usize)> {
+        self.input_selection()
+    }
+
     fn copy_selection_status(&self) -> Option<crate::tui::CopySelectionStatus> {
         if !self.copy_selection_mode {
             return None;
