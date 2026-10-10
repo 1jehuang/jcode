@@ -40,11 +40,15 @@ def wait_for(path: str, timeout: float) -> bool:
     return False
 
 
-def open_session(sock_path: str, cwd: str, abrupt: bool = False) -> socket.socket:
+def open_session(sock_path: str, cwd: str, abrupt: bool = False, realistic: bool = False) -> socket.socket:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(sock_path)
     req = {"type": "subscribe", "id": 1, "working_dir": cwd}
     s.sendall((json.dumps(req) + "\n").encode())
+    if realistic:
+        # Follow-up requests a TUI sends right after attaching.
+        for i, kind in enumerate(("get_history", "get_model_catalog", "state", "ping"), start=2):
+            s.sendall((json.dumps({"type": kind, "id": i}) + "\n").encode())
     if abrupt:
         # Close while subscribe is still in flight, like a window closed
         # immediately after spawning.
@@ -62,6 +66,8 @@ def open_session(sock_path: str, cwd: str, abrupt: bool = False) -> socket.socke
             break
         buf += chunk
         if b'"type":"done"' in buf or b'"type":"history"' in buf:
+            if realistic:
+                time.sleep(0.5)
             break
     return s
 

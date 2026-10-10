@@ -18,6 +18,21 @@ struct ProviderInputSnapshot {
 static PROVIDER_INPUT_BASELINES: LazyLock<Mutex<HashMap<String, ProviderInputSnapshot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Baselines are keyed per session and hold one hash per message, but nothing
+/// removes them when a session closes. A long-lived server therefore grew
+/// this map without bound. Baselines only matter for cache-hit diagnostics on
+/// the next request, so drop any that are older than the longest provider
+/// prompt-cache TTL, and only scan once the map is large enough to matter.
+const BASELINE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+const BASELINE_PRUNE_THRESHOLD: usize = 64;
+
+fn prune_stale_baselines(baselines: &mut HashMap<String, ProviderInputSnapshot>) {
+    if baselines.len() < BASELINE_PRUNE_THRESHOLD {
+        return;
+    }
+    baselines.retain(|_, snapshot| snapshot.captured_at.elapsed() < BASELINE_MAX_AGE);
+}
+
 pub fn stable_hash_str(value: &str) -> u64 {
     let digest = Sha256::digest(value.as_bytes());
     let mut bytes = [0_u8; 8];
@@ -102,7 +117,11 @@ pub fn log_provider_canonical_input(
 
     let previous = PROVIDER_INPUT_BASELINES
         .lock()
-        .map(|mut baselines| baselines.insert(key, snapshot))
+        .map(|mut baselines| {
+            let previous = baselines.insert(key, snapshot);
+            prune_stale_baselines(&mut baselines);
+            previous
+        })
         .ok()
         .flatten();
 
@@ -190,6 +209,30 @@ mod tests {
     fn prefix_matching_detects_changed_prefix() {
         assert!(!prefix_matches(&[1, 9, 3], &[1, 2]));
         assert_eq!(common_prefix_len(&[1, 9, 3], &[1, 2]), 1);
+    }
+
+    #[test]
+    fn stale_baselines_are_pruned_once_map_is_large() {
+        let snapshot = |age: std::time::Duration| ProviderInputSnapshot {
+            request_hash: 0,
+            item_hashes: vec![1, 2, 3],
+            item_hashes_hash: 0,
+            system_hash: None,
+            tools_hash: None,
+            captured_at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now),
+        };
+        let old = BASELINE_MAX_AGE + std::time::Duration::from_secs(1);
+        let mut small: HashMap<String, ProviderInputSnapshot> =
+            HashMap::from([("old".to_string(), snapshot(old))]);
+        prune_stale_baselines(&mut small);
+        assert_eq!(small.len(), 1, "small maps are not scanned");
+
+        let mut large: HashMap<String, ProviderInputSnapshot> = (0..BASELINE_PRUNE_THRESHOLD)
+            .map(|i| (format!("old{i}"), snapshot(old)))
+            .collect();
+        large.insert("fresh".into(), snapshot(std::time::Duration::ZERO));
+        prune_stale_baselines(&mut large);
+        assert_eq!(large.keys().collect::<Vec<_>>(), vec!["fresh"]);
     }
 
     #[test]
