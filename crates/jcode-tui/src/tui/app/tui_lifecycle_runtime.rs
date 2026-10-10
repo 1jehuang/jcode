@@ -642,10 +642,10 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             app.cursor_pos = 0;
             app.clear_input_undo_history();
             app.follow_chat_bottom();
-            app.force_full_redraw = true;
+            app.request_full_repaint();
             app.set_status_notice("Onboarding preview: on");
         } else {
-            app.force_full_redraw = true;
+            app.request_full_repaint();
             app.set_status_notice("Onboarding preview: off");
         }
         return true;
