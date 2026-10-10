@@ -7,9 +7,14 @@
 //! `FAB_BROWSER` set, which the bridge CLI uses to pick that browser's host.
 
 use super::*;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 fn runtime_dir() -> PathBuf {
-    storage::runtime_dir()
+    // Match the bridge CLI, which does not use JCODE_RUNTIME_DIR or TMPDIR.
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
 fn session_socket_path(name: &str) -> PathBuf {
@@ -24,9 +29,12 @@ fn is_session_alive(name: &str) -> bool {
     let pid_path = session_pid_path(name);
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path)
         && let Ok(pid) = pid_str.trim().parse::<u32>()
+        && pid > 0
+        && pid <= i32::MAX as u32
         && platform::is_process_running(pid)
     {
-        return session_socket_path(name).exists();
+        #[cfg(unix)]
+        return std::os::unix::net::UnixStream::connect(session_socket_path(name)).is_ok();
     }
     false
 }
@@ -44,6 +52,29 @@ pub fn ensure_browser_session_for(session_id: &str, browser: Option<&str>) -> Op
         return Some(session_name);
     }
 
+    // Only calls for the same daemon should wait for its startup.
+    static STARTUP_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let startup_lock = {
+        let mut locks = STARTUP_LOCKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&session_name).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(Mutex::new(()));
+            locks.insert(session_name.clone(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    let _guard = startup_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if is_session_alive(&session_name) {
+        return Some(session_name);
+    }
+
     let bin = browser_binary_path();
     if !bin.exists() {
         return None;
@@ -53,12 +84,32 @@ pub fn ensure_browser_session_for(session_id: &str, browser: Option<&str>) -> Op
     // bridge supports it. Older bridge CLIs reject --bind-window, so probe the
     // command surface instead of paying for a known-failing process launch on
     // every browser action.
-    if browser_supports_bind_window(&bin)
-        && let Some(name) = spawn_browser_session(&bin, &session_name, browser, true)
+    spawn_browser_session(
+        &bin,
+        &session_name,
+        browser,
+        browser_supports_bind_window(&bin),
+    )
+}
+
+/// Keep process startup, socket checks, and lock waits off async workers.
+pub async fn ensure_browser_session_for_async(
+    session_id: &str,
+    browser: Option<&str>,
+) -> Option<String> {
+    let session_id = session_id.to_owned();
+    let browser = browser.map(str::to_owned);
+    match tokio::task::spawn_blocking(move || {
+        ensure_browser_session_for(&session_id, browser.as_deref())
+    })
+    .await
     {
-        return Some(name);
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("[browser] Session startup worker failed: {}", error);
+            None
+        }
     }
-    spawn_browser_session(&bin, &session_name, browser, false)
 }
 
 fn browser_supports_bind_window(bin: &std::path::Path) -> bool {
@@ -102,14 +153,8 @@ fn spawn_browser_session(
                 }
                 if let Ok(Some(status)) = child.try_wait() {
                     eprintln!(
-                        "[browser] session '{}' exited before startup with status {}{}",
-                        session_name,
-                        status,
-                        if bind_window {
-                            " (retrying without --bind-window)"
-                        } else {
-                            ""
-                        }
+                        "[browser] session '{}' exited before startup with status {}",
+                        session_name, status
                     );
                     return None;
                 }
@@ -150,3 +195,7 @@ fn sanitize_session_name(session_id: &str) -> String {
         .take(64)
         .collect()
 }
+
+#[cfg(all(test, unix))]
+#[path = "browser_session_tests.rs"]
+mod tests;
