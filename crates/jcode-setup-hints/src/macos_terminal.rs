@@ -148,22 +148,23 @@ fn detect_macos_terminal_from_env(env: impl Fn(&str) -> Option<String>) -> MacTe
         return MacTerminalKind::Ghostty;
     }
 
-    // kitty does not set TERM_PROGRAM; it identifies itself via
-    // KITTY_WINDOW_ID and TERM=xterm-kitty.
-    if env("KITTY_WINDOW_ID").is_some() || term_program == "kitty" || term.contains("kitty") {
-        return MacTerminalKind::Kitty;
-    }
-
     match term_program.as_str() {
         "iterm.app" => MacTerminalKind::Iterm2,
         "apple_terminal" => MacTerminalKind::AppleTerminal,
         "wezterm" => MacTerminalKind::WezTerm,
         "vscode" => MacTerminalKind::Vscode,
+        "kitty" => MacTerminalKind::Kitty,
         _ => {
+            // kitty sets no TERM_PROGRAM. KITTY_WINDOW_ID is inherited by
+            // terminals launched from kitty, so it only counts once the
+            // current terminal has not identified itself by TERM_PROGRAM or
+            // TERM (it still covers tmux inside kitty, where TERM is rewritten).
             if term.contains("alacritty") {
                 MacTerminalKind::Alacritty
             } else if term.contains("warp") {
                 MacTerminalKind::Warp
+            } else if env("KITTY_WINDOW_ID").is_some() {
+                MacTerminalKind::Kitty
             } else {
                 MacTerminalKind::Unknown
             }
@@ -367,6 +368,14 @@ mod tests {
             detect(&[("KITTY_WINDOW_ID", "1"), ("TERM", "tmux-256color")]),
             MacTerminalKind::Kitty
         );
+        assert_eq!(
+            detect(&[
+                ("KITTY_WINDOW_ID", "1"),
+                ("TERM_PROGRAM", "tmux"),
+                ("TERM", "tmux-256color"),
+            ]),
+            MacTerminalKind::Kitty
+        );
         assert_eq!(detect(&[("TERM", "xterm-kitty")]), MacTerminalKind::Kitty);
         // kitty opened from a Ghostty shell inherits Ghostty's env vars.
         assert_eq!(
@@ -392,6 +401,28 @@ mod tests {
                 ("TERM", "xterm-ghostty"),
             ]),
             MacTerminalKind::Ghostty
+        );
+        // WezTerm or iTerm2 opened from kitty inherits KITTY_WINDOW_ID but
+        // sets its own TERM_PROGRAM, which must win.
+        assert_eq!(
+            detect(&[
+                ("KITTY_WINDOW_ID", "1"),
+                ("TERM_PROGRAM", "WezTerm"),
+                ("TERM", "xterm-256color"),
+            ]),
+            MacTerminalKind::WezTerm
+        );
+        assert_eq!(
+            detect(&[
+                ("KITTY_WINDOW_ID", "1"),
+                ("TERM_PROGRAM", "iTerm.app"),
+                ("TERM", "xterm-256color"),
+            ]),
+            MacTerminalKind::Iterm2
+        );
+        assert_eq!(
+            detect(&[("KITTY_WINDOW_ID", "1"), ("TERM", "alacritty")]),
+            MacTerminalKind::Alacritty
         );
         assert_eq!(detect(&[]), MacTerminalKind::Unknown);
     }
