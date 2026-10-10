@@ -379,6 +379,20 @@ impl Session {
         session.reset_persist_state(path.exists());
         session.reset_provider_messages_cache();
         session.mark_memory_profile_dirty();
+        // Sessions written before tool screenshots were bounded (#1680) can
+        // hold hundreds of MB of old inline images. Decay them now so the next
+        // save rewrites a compact snapshot.
+        let decayed_tool_images = session.decay_old_tool_images();
+        if decayed_tool_images > 0 {
+            crate::logging::event_info(
+                "SESSION_PERSISTENCE",
+                vec![
+                    ("phase", "tool_images_decayed_on_load".to_string()),
+                    ("session_id", session.id.clone()),
+                    ("images", decayed_tool_images.to_string()),
+                ],
+            );
+        }
         if replay_stats.is_corrupt() {
             session.schedule_checkpoint_after_corrupt_journal(&journal_path);
         }
