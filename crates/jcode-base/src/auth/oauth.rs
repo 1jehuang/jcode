@@ -1201,14 +1201,26 @@ pub fn save_openai_tokens_for_account(tokens: &OAuthTokens, label: &str) -> Resu
     Ok(())
 }
 
+/// End-to-end budget for one OpenAI token refresh exchange: connection,
+/// request upload, response headers, and the full response body. The token
+/// endpoint normally answers in well under a second. The shared HTTP client
+/// only bounds connection setup, so without this a server that accepts the
+/// request and then withholds headers or stalls mid-body would block the
+/// refresh (and every caller queued behind the per-account refresh lock)
+/// indefinitely.
+pub const OPENAI_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Refresh OpenAI/Codex OAuth tokens
 pub async fn refresh_openai_tokens(refresh_token: &str) -> Result<OAuthTokens> {
-    match crate::auth::codex::active_account_label() {
-        Some(label) => refresh_openai_tokens_for_account(refresh_token, &label).await,
-        // External token (not stored in jcode auth): nothing on disk to
-        // coordinate against, refresh directly.
-        None => refresh_openai_tokens_inner(refresh_token, None).await,
-    }
+    // External token (not stored in jcode auth) has no label: nothing on disk
+    // to coordinate against, refresh directly.
+    refresh_openai_tokens_at(
+        openai::TOKEN_URL,
+        OPENAI_REFRESH_TIMEOUT,
+        refresh_token,
+        crate::auth::codex::active_account_label(),
+    )
+    .await
 }
 
 /// Stored OpenAI tokens for `label`, expressed as [`OAuthTokens`].
@@ -1235,50 +1247,105 @@ pub async fn refresh_openai_tokens_for_account(
     refresh_token: &str,
     label: &str,
 ) -> Result<OAuthTokens> {
-    let observed_refresh = refresh_token.to_string();
-    let label = label.to_string();
-    // A token the provider already rejected as unrecoverable cannot start
-    // working again. Fail fast so callers fall through to their fallback
-    // instead of paying a doomed round-trip on every catalog sweep and turn.
-    crate::auth::refresh_state::ensure_refresh_allowed(
-        "openai",
+    refresh_openai_tokens_at(
+        openai::TOKEN_URL,
+        OPENAI_REFRESH_TIMEOUT,
         refresh_token,
-        "Run `jcode login --provider openai` to mint a fresh token.",
-    )?;
-    crate::auth::refresh_coordinator::single_flight(
-        format!("openai:{label}"),
-        {
-            let label = label.clone();
-            move || stored_openai_tokens(&label)
-        },
-        {
-            let observed = observed_refresh.clone();
-            move |stored: &OAuthTokens| {
-                stored.refresh_token != observed
-                    && crate::auth::refresh_coordinator::expiry_is_fresh(stored.expires_at)
-            }
-        },
-        move |stored: Option<OAuthTokens>| async move {
-            // Prefer the newest stored refresh token over the caller's
-            // possibly stale observation.
-            let token = stored
-                .map(|tokens| tokens.refresh_token)
-                .filter(|token| !token.is_empty())
-                .unwrap_or(observed_refresh);
-            refresh_openai_tokens_inner(&token, Some(&label)).await
-        },
+        Some(label.to_string()),
     )
     .await
 }
 
-async fn refresh_openai_tokens_inner(
+/// Run a refresh transaction so that dropping the caller cannot interrupt it.
+///
+/// OpenAI rotates refresh tokens. Once the token endpoint has been asked to
+/// rotate, cancelling between "rotated tokens received" and "rotated tokens
+/// persisted" would leave only the now-dead refresh token on disk. The
+/// transaction therefore runs as its own task: the caller may stop waiting,
+/// but the task finishes persistence (and releases the per-account refresh
+/// lock) on its own. It is not an unbounded detached task: its only network
+/// wait is capped by the refresh deadline, and the remaining work is local.
+pub async fn run_refresh_transaction<T, F>(transaction: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = Result<T>> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle
+            .spawn(transaction)
+            .await
+            .map_err(|err| anyhow::anyhow!("OAuth token refresh task failed: {err}"))?,
+        Err(_) => transaction.await,
+    }
+}
+
+async fn refresh_openai_tokens_at(
+    token_url: &str,
+    timeout: Duration,
     refresh_token: &str,
-    label: Option<&str>,
+    label: Option<String>,
 ) -> Result<OAuthTokens> {
-    let result: Result<OAuthTokens> = async {
-        let client = crate::provider::shared_http_client();
-        let resp = client
-            .post(openai::TOKEN_URL)
+    if label.is_some() {
+        // A token the provider already rejected as unrecoverable cannot start
+        // working again. Fail fast so callers fall through to their fallback
+        // instead of paying a doomed round-trip on every catalog sweep and turn.
+        crate::auth::refresh_state::ensure_refresh_allowed(
+            "openai",
+            refresh_token,
+            "Run `jcode login --provider openai` to mint a fresh token.",
+        )?;
+    }
+    let token_url = token_url.to_string();
+    let observed_refresh = refresh_token.to_string();
+    // The per-account single-flight lock lives inside the transaction task, so
+    // a cancelled caller cannot release it while a rotation is still in
+    // flight and let a second refresh race with the same refresh token.
+    run_refresh_transaction(async move {
+        let Some(label) = label else {
+            return refresh_openai_tokens_inner(&token_url, timeout, &observed_refresh, None).await;
+        };
+        crate::auth::refresh_coordinator::single_flight(
+            format!("openai:{label}"),
+            {
+                let label = label.clone();
+                move || stored_openai_tokens(&label)
+            },
+            {
+                let observed = observed_refresh.clone();
+                move |stored: &OAuthTokens| {
+                    stored.refresh_token != observed
+                        && crate::auth::refresh_coordinator::expiry_is_fresh(stored.expires_at)
+                }
+            },
+            move |stored: Option<OAuthTokens>| async move {
+                // Prefer the newest stored refresh token over the caller's
+                // possibly stale observation.
+                let token = stored
+                    .map(|tokens| tokens.refresh_token)
+                    .filter(|token| !token.is_empty())
+                    .unwrap_or(observed_refresh);
+                refresh_openai_tokens_inner(&token_url, timeout, &token, Some(&label)).await
+            },
+        )
+        .await
+    })
+    .await
+}
+
+/// POST the refresh grant and read the complete response within `timeout`.
+///
+/// Errors never include the request body, tokens, or the success response.
+async fn request_openai_token_refresh(
+    token_url: &str,
+    timeout: Duration,
+    refresh_token: &str,
+) -> Result<OAuthTokens> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let headers_received = AtomicBool::new(false);
+    let exchange = async {
+        let resp = crate::provider::shared_http_client()
+            .post(token_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(format!(
                 "grant_type=refresh_token&client_id={}&refresh_token={}",
@@ -1286,31 +1353,71 @@ async fn refresh_openai_tokens_inner(
                 urlencoding::encode(refresh_token)
             ))
             .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let text = resp.text().await?;
-            anyhow::bail!("OpenAI token refresh failed: {}", text);
+            .await
+            .map_err(|err| anyhow::anyhow!("OpenAI token refresh request failed: {err}"))?;
+        headers_received.store(true, Ordering::SeqCst);
+        let status = resp.status();
+        let body = resp.bytes().await.map_err(|err| {
+            anyhow::anyhow!("OpenAI token refresh response body failed (status {status}): {err}")
+        })?;
+        anyhow::Ok((status, body))
+    };
+    let (status, body) = match tokio::time::timeout(timeout, exchange).await {
+        Ok(result) => result?,
+        Err(_) => {
+            let phase = if headers_received.load(Ordering::SeqCst) {
+                "response body"
+            } else {
+                "response headers"
+            };
+            // The server may already have rotated the refresh token. The
+            // stored token is left untouched: if it was rotated, the next
+            // refresh is rejected and recorded as terminal, instead of being
+            // guessed at or reset here.
+            anyhow::bail!(
+                "OpenAI token refresh timed out after {}s waiting for {phase}; \
+                 the remote rotation outcome is unknown",
+                timeout.as_secs_f32()
+            );
         }
+    };
 
-        #[derive(Deserialize)]
-        struct TokenResponse {
-            access_token: String,
-            refresh_token: String,
-            expires_in: i64,
-            id_token: Option<String>,
-        }
+    if !status.is_success() {
+        anyhow::bail!(
+            "OpenAI token refresh failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
 
-        let tokens: TokenResponse = resp.json().await?;
-        let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        access_token: String,
+        refresh_token: String,
+        expires_in: i64,
+        id_token: Option<String>,
+    }
 
-        let oauth_tokens = OAuthTokens {
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-            expires_at,
-            id_token: tokens.id_token,
-            scopes: Vec::new(),
-        };
+    // serde_json errors report only a position, never the credential body.
+    let tokens: TokenResponse = serde_json::from_slice(&body)
+        .map_err(|err| anyhow::anyhow!("OpenAI token refresh returned malformed JSON: {err}"))?;
+    let expires_at = chrono::Utc::now().timestamp_millis() + (tokens.expires_in * 1000);
+    Ok(OAuthTokens {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at,
+        id_token: tokens.id_token,
+        scopes: Vec::new(),
+    })
+}
+
+async fn refresh_openai_tokens_inner(
+    token_url: &str,
+    timeout: Duration,
+    refresh_token: &str,
+    label: Option<&str>,
+) -> Result<OAuthTokens> {
+    let result: Result<OAuthTokens> = async {
+        let oauth_tokens = request_openai_token_refresh(token_url, timeout, refresh_token).await?;
 
         if let Some(label) = label {
             save_openai_tokens_for_account(&oauth_tokens, label)?;

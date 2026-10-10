@@ -57,7 +57,36 @@ pub(super) async fn force_refresh_openai_token(
     credentials: &Arc<RwLock<CodexCredentials>>,
     refresh_token: &str,
 ) -> anyhow::Result<String> {
-    let refreshed = oauth::refresh_openai_tokens(refresh_token).await?;
+    // Rotation, persistence, and the in-memory commit form one transaction.
+    // It runs as its own task so a cancelled caller (dropped stream, aborted
+    // turn) cannot strand rotated tokens on disk while this provider keeps the
+    // consumed refresh token in memory. The network wait inside is bounded by
+    // `oauth::OPENAI_REFRESH_TIMEOUT`.
+    let refresh_token = refresh_token.to_string();
+    refresh_and_commit_openai_tokens(credentials, async move {
+        oauth::refresh_openai_tokens(&refresh_token).await
+    })
+    .await
+}
+
+/// Run `refresh` (rotation plus persistence) and the in-memory commit as one
+/// task that survives cancellation of the caller.
+pub(super) async fn refresh_and_commit_openai_tokens(
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    refresh: impl std::future::Future<Output = anyhow::Result<oauth::OAuthTokens>> + Send + 'static,
+) -> anyhow::Result<String> {
+    let credentials = Arc::clone(credentials);
+    oauth::run_refresh_transaction(async move {
+        let refreshed = refresh.await?;
+        Ok(commit_refreshed_openai_tokens(&credentials, refreshed).await)
+    })
+    .await
+}
+
+async fn commit_refreshed_openai_tokens(
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    refreshed: oauth::OAuthTokens,
+) -> String {
     let mut tokens = credentials.write().await;
     let account_id = tokens.account_id.clone();
     let id_token = refreshed
@@ -74,7 +103,7 @@ pub(super) async fn force_refresh_openai_token(
         expires_at: Some(refreshed.expires_at),
     };
 
-    Ok(new_access_token)
+    new_access_token
 }
 
 /// Stream the response from OpenAI API
@@ -1804,6 +1833,75 @@ pub(super) fn is_retryable_error(error_str: &str) -> bool {
 #[cfg(test)]
 mod stream_runtime_tests {
     use super::*;
+
+    fn dummy_credentials() -> Arc<RwLock<CodexCredentials>> {
+        Arc::new(RwLock::new(CodexCredentials {
+            access_token: "at_old".into(),
+            refresh_token: "rt_old".into(),
+            id_token: None,
+            account_id: Some("acct_dummy".into()),
+            expires_at: Some(1),
+        }))
+    }
+
+    fn rotated_tokens() -> oauth::OAuthTokens {
+        oauth::OAuthTokens {
+            access_token: "at_new".into(),
+            refresh_token: "rt_new".into(),
+            expires_at: 42,
+            id_token: None,
+            scopes: Vec::new(),
+        }
+    }
+
+    /// Issue #1757: once rotation has started, a cancelled caller must not
+    /// leave the consumed refresh token in memory.
+    #[tokio::test]
+    async fn refresh_commit_survives_caller_cancellation() {
+        let credentials = dummy_credentials();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let caller_credentials = Arc::clone(&credentials);
+        let caller = tokio::spawn(async move {
+            refresh_and_commit_openai_tokens(&caller_credentials, async move {
+                started_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                Ok(rotated_tokens())
+            })
+            .await
+        });
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        release_tx.send(()).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while credentials.read().await.refresh_token != "rt_new" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("rotated tokens must be committed in memory after caller cancellation");
+        let creds = credentials.read().await;
+        assert_eq!(creds.access_token, "at_new");
+        assert_eq!(creds.account_id.as_deref(), Some("acct_dummy"));
+        assert_eq!(creds.expires_at, Some(42));
+    }
+
+    #[tokio::test]
+    async fn refresh_failure_leaves_in_memory_credentials_untouched() {
+        let credentials = dummy_credentials();
+        let err = refresh_and_commit_openai_tokens(&credentials, async {
+            anyhow::bail!("OpenAI token refresh timed out after 30s waiting for response headers")
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+        let creds = credentials.read().await;
+        assert_eq!(creds.access_token, "at_old");
+        assert_eq!(creds.refresh_token, "rt_old");
+    }
+
 
     #[test]
     fn unauthorized_triggers_token_refresh() {
