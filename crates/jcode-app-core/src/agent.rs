@@ -12,6 +12,7 @@ mod provider;
 mod response_recovery;
 mod status;
 mod streaming;
+mod tool_markup_recovery;
 mod tools;
 mod turn_execution;
 mod turn_loops;

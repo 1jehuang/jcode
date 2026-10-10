@@ -1,4 +1,4 @@
-use super::response_recovery::MalformedToolCallInfo;
+use super::response_recovery::{MalformedToolCallInfo, TextToolRecovery};
 use super::*;
 
 /// Largest byte index `<= index` that is a UTF-8 char boundary in `text`.
@@ -148,6 +148,7 @@ impl Agent {
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
         let mut consecutive_malformed_tool_rounds = 0u32;
+        let mut unparsed_tool_markup_nudges = 0u32;
 
         loop {
             // Never open a new provider request after a cancel. Several paths
@@ -1308,29 +1309,32 @@ impl Agent {
             }
 
             let had_tool_calls_before = !tool_calls.is_empty();
-            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+            let text_tool_recovery =
+                self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
-            if !had_tool_calls_before
-                && !tool_calls.is_empty()
-                && let Some(tc) = tool_calls.last()
-                && tc.id.starts_with("fallback_text_call_")
-            {
+            if !had_tool_calls_before && text_tool_recovery == TextToolRecovery::Recovered {
                 let _ = event_tx.send(ServerEvent::TextReplace {
                     text: text_content.clone(),
                 });
-                let _ = event_tx.send(ServerEvent::ToolStart {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                });
-                tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
-                let _ = event_tx.send(ServerEvent::ToolInput {
-                    id: Some(tc.id.clone()),
-                    delta: tc.input.to_string(),
-                });
-                let _ = event_tx.send(ServerEvent::ToolExec {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                });
+                // Markup envelopes can carry several calls, so announce each.
+                for tc in tool_calls
+                    .iter()
+                    .filter(|tc| tc.id.starts_with("fallback_text_call_"))
+                {
+                    let _ = event_tx.send(ServerEvent::ToolStart {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                    });
+                    tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
+                    let _ = event_tx.send(ServerEvent::ToolInput {
+                        id: Some(tc.id.clone()),
+                        delta: tc.input.to_string(),
+                    });
+                    let _ = event_tx.send(ServerEvent::ToolExec {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                    });
+                }
             }
 
             // Add assistant message to history
@@ -1431,6 +1435,26 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                // The model printed a tool call as markup we could not parse
+                // (issue #1702): say so visibly and ask it to re-issue the
+                // call natively instead of silently ending the turn.
+                if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && let Some(notice) = self.maybe_nudge_unparsed_tool_markup(
+                        &text_tool_recovery,
+                        stop_reason.as_deref(),
+                        &mut unparsed_tool_markup_nudges,
+                    )?
+                {
+                    let _ = event_tx.send(ServerEvent::SoftInterruptInjected {
+                        content: notice,
+                        display_role: Some("system".to_string()),
+                        point: "B".to_string(),
+                        tools_skipped: None,
+                        client_ids: Vec::new(),
+                    });
+                    continue;
+                }
                 if saw_message_end
                     && !self.is_graceful_shutdown()
                     && self.maybe_reconsider_fable_guardrail(
