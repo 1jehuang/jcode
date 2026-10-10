@@ -57,4 +57,17 @@ if [ -n "$resume_id" ]; then
   client="$bin --no-update --socket $sock"
 fi
 kill $(fuser "$rt/jcode-daemon.lock" 2>/dev/null) 2>/dev/null
+# R7 (server): the History payload never waited on the model catalog for more
+# than its 30ms budget, and MCP names did not build full tool definitions.
+log=$HOME/.jcode/logs/jcode-$(date +%F).log
+since=$(stat -c %Y "$root/serve.log")
+max_models=$(awk -v s="$(date -d @"$since" '+%F %T')" 'substr($0,2,19) >= s' "$log" \
+  | grep -o 'send_history prep: .*' | sed -E 's/.*models=([0-9]+)ms.*/\1/' | sort -n | tail -1)
+max_tools=$(awk -v s="$(date -d @"$since" '+%F %T')" 'substr($0,2,19) >= s' "$log" \
+  | grep -o 'send_history prep: .*' | sed -E 's/.*tool_names=([0-9]+)ms.*/\1/' | sort -n | tail -1)
+if [ -n "$max_models" ] && [ "$max_models" -le 40 ]; then
+  echo "R7   PASS  History catalog wait max ${max_models}ms (budget 30ms), mcp names max ${max_tools}ms"
+else
+  echo "R7   FAIL  History catalog wait max ${max_models:-?}ms"; fails=$((fails+1))
+fi
 echo "### $label: $fails scenario(s) with a FAIL"

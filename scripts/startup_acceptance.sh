@@ -40,6 +40,18 @@ tmux send-keys -t "$sess" h i
 sleep 0.4
 tmux capture-pane -p -t "$sess" > "$out/zz_typed"
 tmux send-keys -t "$sess" BSpace BSpace
+sleep 0.3
+# R6 probe: the inline model picker (opens while typing `/model`) must list
+# real models after startup. History may ship without the catalog, in which
+# case GetModelCatalog has to fill it in. Do not press Enter: that would
+# select the highlighted route and switch models.
+tmux send-keys -t "$sess" -l "/model"
+sleep 1.5
+tmux capture-pane -p -t "$sess" > "$out/zz_model_picker"
+tmux send-keys -t "$sess" Escape
+sleep 0.2
+tmux send-keys -t "$sess" C-u
+sleep 0.2
 tmux kill-session -t "$sess"
 
 # Overscroll line: the last non-empty row that has the context gauge.
@@ -75,4 +87,21 @@ else
   report R4 N/A ""
 fi
 echo "frames: $(echo $frames | wc -w)  first=$first  last=$last"
+# R5: inside a git repo the first frame already carries the branch.
+if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  branch=$(git -C "$cwd" branch --show-current)
+  if [ -n "$first" ] && ovs "$out/$first" | grep -q " $branch "; then
+    report R5 PASS "branch '$branch' on first frame"
+  else report R5 FAIL "branch '$branch' missing on first frame"; fi
+else
+  if [ -n "$first" ] && ! ovs "$out/$first" | grep -qE ' (master|main) '; then
+    report R5 PASS "no branch outside a repo"
+  else report R5 FAIL "branch shown outside a repo"; fi
+fi
+# R6: model picker lists models (Claude or GPT rows) and a non-trivial catalog.
+picker_rows=$(grep -cE 'Opus|Sonnet|GPT|Haiku|Fable' "$out/zz_model_picker")
+more=$(grep -oE '\+[0-9]+ more' "$out/zz_model_picker" | tail -1 | tr -dc 0-9)
+if [ "$picker_rows" -ge 3 ] && [ "${more:-0}" -ge 10 ]; then
+  report R6 PASS "model picker shows $picker_rows rows +${more} more"
+else report R6 FAIL "model picker rows=$picker_rows more=${more:-0}"; fi
 exit $fail
