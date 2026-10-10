@@ -4267,6 +4267,7 @@ dependencies = [
  "image",
  "jcode-plan",
  "jcode-tui-workspace",
+ "libc",
  "mermaid-rs-renderer",
  "ratatui",
  "ratatui-image",
