@@ -66,7 +66,10 @@ fn comm_request_session_id(request: &Request) -> Option<&str> {
     match request {
         Request::CommShare { session_id, .. }
         | Request::CommRead { session_id, .. }
-        | Request::CommMessage { from_session: session_id, .. }
+        | Request::CommMessage {
+            from_session: session_id,
+            ..
+        }
         | Request::CommList { session_id, .. }
         | Request::CommListChannels { session_id, .. }
         | Request::CommListSwarms { session_id, .. }
@@ -217,10 +220,7 @@ async fn ensure_lightweight_swarm_member(
         vec![
             ("phase", "lightweight_member_registered".to_string()),
             ("session_id", session_id.to_string()),
-            (
-                "working_dir_recovered",
-                working_dir.is_some().to_string(),
-            ),
+            ("working_dir_recovered", working_dir.is_some().to_string()),
         ],
     );
 }

@@ -131,10 +131,7 @@ pub(super) async fn cleanup_client_connection(
     } else {
         false
     };
-    let originally_registered = swarm_members
-        .read()
-        .await
-        .contains_key(client_session_id);
+    let originally_registered = swarm_members.read().await.contains_key(client_session_id);
 
     detach_client_attachment(
         client_session_id,
