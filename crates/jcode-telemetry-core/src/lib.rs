@@ -1400,8 +1400,23 @@ fn telemetry_status_is_permanent(status: u16) -> bool {
 fn payload_is_breaker_exempt(payload: &serde_json::Value) -> bool {
     matches!(
         payload.get("event").and_then(|value| value.as_str()),
-        Some("usage_report")
+        Some("usage_report" | "desktop_active" | "desktop_upgrade" | "desktop_update")
     )
+}
+
+/// Background payloads queued but not yet delivered (or abandoned).
+static TELEMETRY_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Block until queued background telemetry has been delivered, or `timeout`
+/// elapses. For short-lived processes, such as `jcode-desktop --update`, that
+/// exit right after recording an event.
+pub fn flush_pending(timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while TELEMETRY_IN_FLIGHT.load(std::sync::atomic::Ordering::Acquire) > 0
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn spawn_background_worker<F>(capacity: usize, mut deliver: F) -> std::io::Result<SyncSender<Value>>
@@ -1424,6 +1439,7 @@ fn background_sender() -> &'static SyncSender<Value> {
     TELEMETRY_BACKGROUND_SENDER.get_or_init(|| {
         spawn_background_worker(BACKGROUND_QUEUE_CAPACITY, |payload| {
             let _ = post_payload_with_retry(payload, ASYNC_SEND_TIMEOUT);
+            TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
         })
         .expect("telemetry background worker should start")
     })
@@ -1481,12 +1497,14 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
                 return false;
             }
             logging::debug("queueing telemetry payload for background delivery");
+            TELEMETRY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
             match background_sender().try_send(payload) {
                 Ok(()) => {
                     TELEMETRY_QUEUE_OVERFLOW_WARNED.store(false, Ordering::Relaxed);
                     true
                 }
                 Err(TrySendError::Full(_)) => {
+                    TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
                     if !TELEMETRY_QUEUE_OVERFLOW_WARNED.swap(true, Ordering::Relaxed) {
                         logging::warn(&format!(
                             "telemetry background queue is full (capacity={BACKGROUND_QUEUE_CAPACITY}); dropping events until delivery catches up"
@@ -1495,6 +1513,7 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
                     false
                 }
                 Err(TrySendError::Disconnected(_)) => {
+                    TELEMETRY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
                     logging::warn("telemetry background worker stopped; dropping payload");
                     false
                 }
