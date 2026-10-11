@@ -1,0 +1,10 @@
+{
+  "version": "0.90.0",
+  "tag": "v0.90.0",
+  "hashes": {
+    "x86_64-linux": "sha256-uWO3zVPsDcOcgFxFSel1KrGU1OG9M4tTbVh8m/iFFRY=",
+    "aarch64-linux": "sha256-i0S3F+EIWVDPH8WxpQBeCHyeOMHgKTtgCf7hqwssRR8=",
+    "x86_64-darwin": "sha256-E/B380cDXHl4rYwBYWssRFq3i1/8s7YOPKrEJMFLr8I=",
+    "aarch64-darwin": "sha256-NFPvShOQTB5STKzAL+ERXLhD06GI4TYEvASG0qRQ8cs="
+  }
+}

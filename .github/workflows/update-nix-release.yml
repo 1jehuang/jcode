@@ -1,0 +1,155 @@
+name: Update Nix binary release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing public stable release tag (vN.N.N)
+        required: true
+        type: string
+
+concurrency:
+  group: update-nix-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  JCODE_CI: "1"
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  validate:
+    if: >-
+      github.repository == '1jehuang/jcode' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (!github.event.release.draft && !github.event.release.prerelease))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      changed: ${{ steps.metadata.outputs.changed }}
+      base: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        id: source
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Test release metadata updater
+        run: python3 -m unittest discover -s scripts -p test_update_nix_release.py -v
+
+      - name: Update release metadata
+        id: metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/update_nix_release.py --tag "$TAG"
+          git add -- nix/release.json
+          if git diff --cached --quiet -- nix/release.json; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Nix (v31)
+        if: steps.metadata.outputs.changed == 'true'
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+
+      - name: Check flake and smoke-test x86_64-linux binary package
+        if: steps.metadata.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          nix flake check --no-update-lock-file
+          nix build --no-update-lock-file .#packages.x86_64-linux.jcode-bin
+          ./result/bin/jcode --version
+          git diff --exit-code -- flake.lock
+
+      - name: Upload validated metadata
+        if: steps.metadata.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nix-release-metadata
+          path: nix/release.json
+          if-no-files-found: error
+          retention-days: 1
+
+  propose:
+    needs: validate
+    if: github.repository == '1jehuang/jcode' && needs.validate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nix-release-metadata
+          path: ${{ runner.temp }}/nix-release-metadata
+
+      - name: Revalidate against current default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATED_BASE: ${{ needs.validate.outputs.base }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "$VALIDATED_BASE" ]; then
+            echo '::error::The default branch changed during validation. Dispatch this workflow again to validate the new base before opening a PR.'
+            exit 1
+          fi
+          python3 scripts/update_nix_release.py --tag "$TAG"
+          cmp nix/release.json "$RUNNER_TEMP/nix-release-metadata/release.json"
+
+      - name: Create or update release metadata PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: 1jehuang/jcode
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          NIX_UPDATE_ISSUE: ${{ vars.NIX_UPDATE_ISSUE || '115' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$NIX_UPDATE_ISSUE" =~ ^[1-9][0-9]*$ ]] ||
+             ! gh api "repos/$GH_REPO/issues/$NIX_UPDATE_ISSUE" --jq 'has("pull_request") | not' | grep -qx true; then
+            echo '::error::NIX_UPDATE_ISSUE must identify an existing issue (not a PR) in 1jehuang/jcode. The default is #115, the Nix distribution RFC linked by PR #1570.'
+            exit 1
+          fi
+          git add -- nix/release.json
+          if git diff --cached --quiet; then
+            echo 'Release metadata is already on the default branch.'
+            exit 0
+          fi
+          if [ "$(git diff --cached --name-only)" != 'nix/release.json' ]; then
+            echo '::error::Refusing to publish changes outside nix/release.json.'
+            exit 1
+          fi
+          branch="automation/nix-release-$TAG"
+          expected=$(git ls-remote --heads origin "refs/heads/$branch" | cut -f1)
+          git switch -c "$branch"
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "nix: Update binary release to $TAG"
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+              push --force-with-lease="refs/heads/$branch:$expected" origin "HEAD:refs/heads/$branch"
+          body=$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
+            "Update only nix/release.json from public stable release $TAG." \
+            'Validated all four checksum entries, ran nix flake check, and built/smoke-tested jcode-bin on x86_64-linux. The source package remains the default. No lockfile update.' \
+            "Related to #$NIX_UPDATE_ISSUE." \
+            'This PR requires human review and is not automatically merged. GITHUB_TOKEN does not trigger pull-request CI. A maintainer must close and reopen this PR after the latest bot update to run any required general CI checks, and wait for them before merging.')
+          number=$(gh pr list --base "$DEFAULT_BRANCH" --head "$branch" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "nix: Update binary release to $TAG" --body "$body"
+          else
+            gh pr create --base "$DEFAULT_BRANCH" --head "$branch" \
+              --title "nix: Update binary release to $TAG" --body "$body"
+          fi
