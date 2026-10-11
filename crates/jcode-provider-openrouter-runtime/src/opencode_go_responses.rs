@@ -18,7 +18,9 @@ use std::task::{Context, Poll};
 /// Models currently documented by OpenCode Go as Responses API models.
 const RESPONSES_MODELS: &[&str] = &[
     "grok-4.6",
+    "grok-4.7",
     "gpt-5.6-luna",
+    "gpt-6-luna",
     "muse-spark-1.3-contributor",
     "muse-spark-1.2-contributor",
 ];
@@ -464,6 +466,13 @@ mod tests {
             Some("opencode-go"),
             "kimi-k2.7-code"
         ));
+        for model in ["grok-4.7", "gpt-6-luna"] {
+            assert!(model_uses_responses_api(
+                "https://opencode.ai/zen/go/v1",
+                Some("opencode-go"),
+                model
+            ));
+        }
         assert!(!model_uses_responses_api(
             "https://opencode.ai/zen/v1",
             Some("opencode"),
