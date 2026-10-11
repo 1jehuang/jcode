@@ -112,6 +112,31 @@ fn published_status_documents(dir: &std::path::Path) -> Result<usize> {
     Ok(published)
 }
 
+fn sole_status_document(dir: &std::path::Path) -> Result<PathBuf> {
+    let mut found = None;
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.to_string_lossy().ends_with(".status.json") {
+            assert!(found.is_none(), "expected exactly one status document");
+            found = Some(path);
+        }
+    }
+    found.ok_or_else(|| anyhow!("no status document was published"))
+}
+
+async fn wait_for_terminal_status(path: &std::path::Path) -> Result<TaskStatusFile> {
+    for _ in 0..500 {
+        if let Ok(content) = tokio::fs::read_to_string(path).await
+            && let Ok(status) = serde_json::from_str::<TaskStatusFile>(&content)
+            && status.status != BackgroundTaskStatus::Running
+        {
+            return Ok(status);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!("status document stayed Running")
+}
+
 fn progress(percent: f32) -> BackgroundTaskProgress {
     BackgroundTaskProgress {
         kind: BackgroundTaskProgressKind::Determinate,
@@ -626,5 +651,111 @@ async fn registering_a_detached_task_publishes_its_status_document_before_yieldi
     );
     assert_eq!(visible.pid, Some(std::process::id()));
     drop(gate);
+    Ok(())
+}
+
+/// The abort the P1 measured lands after the document is visible: the caller
+/// parks on the live-map insert, the first await after publication and after the
+/// wrapper that owns the supplied handle exists. Dropping the caller there must
+/// not stop that wrapper, so the adopted work's output and completion still land
+/// even though the aborted caller never returned a task id.
+///
+/// The held status gate stands for another task's slow write, the wait the
+/// initial publication must not join: an awaited publication would park the
+/// caller *before* the wrapper exists, which is the lost-work case this asserts
+/// against.
+#[tokio::test(flavor = "current_thread")]
+async fn aborting_the_adopting_caller_still_records_the_adopted_work() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        finish_rx.await?;
+        Ok(jcode_tool_types::ToolOutput::new(
+            "adopted output survives\n",
+        ))
+    });
+
+    // Both held guards park the caller exactly at the abort point: publication
+    // is already done and the wrapper that owns `handle` already exists.
+    let gate = manager.status_updates.clone().lock_owned().await;
+    let live_map = manager.tasks.clone().write_owned().await;
+    let mut adoption = Box::pin(manager.adopt_with_options(
+        "bash",
+        None,
+        "session-aborted-adopt",
+        false,
+        false,
+        handle,
+    ));
+    assert!(
+        matches!(poll_once(adoption.as_mut()).await, Poll::Pending),
+        "the abort must land after publication, not before"
+    );
+    // The document is visible while the gate is still held.
+    let status_path = sole_status_document(tmp.path())?;
+
+    // The caller stops here; its work must not.
+    drop(adoption);
+    drop(live_map);
+    drop(gate);
+    finish_tx.send(()).expect("finish adopted work");
+
+    let status = wait_for_terminal_status(&status_path).await?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    assert_eq!(status.exit_code, Some(0));
+    let output_path = tmp.path().join(format!("{}.output", status.task_id));
+    assert_eq!(
+        tokio::fs::read_to_string(&output_path).await?,
+        "adopted output survives\n"
+    );
+    Ok(())
+}
+
+/// The same abort point for spawned work: the wrapper that runs the closure
+/// exists before the caller's first await, so an abort cannot leave a `Running`
+/// document whose work never started.
+#[tokio::test(flavor = "current_thread")]
+async fn aborting_the_spawning_caller_still_runs_the_spawned_work() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+
+    let gate = manager.status_updates.clone().lock_owned().await;
+    let live_map = manager.tasks.clone().write_owned().await;
+    let mut spawning = Box::pin(manager.spawn_with_notify(
+        "bash",
+        None,
+        "session-aborted-spawn",
+        false,
+        false,
+        move |output_path| async move {
+            tokio::fs::write(&output_path, "spawned work survives\n").await?;
+            finish_rx.await?;
+            Ok(TaskResult::completed(Some(0)))
+        },
+    ));
+    assert!(
+        matches!(poll_once(spawning.as_mut()).await, Poll::Pending),
+        "the abort must land after publication, not before"
+    );
+    let status_path = sole_status_document(tmp.path())?;
+
+    drop(spawning);
+    drop(live_map);
+    drop(gate);
+    finish_tx.send(()).expect("finish spawned work");
+
+    let status = wait_for_terminal_status(&status_path).await?;
+    assert_eq!(status.status, BackgroundTaskStatus::Completed);
+    let output_path = tmp.path().join(format!("{}.output", status.task_id));
+    assert_eq!(
+        tokio::fs::read_to_string(&output_path).await?,
+        "spawned work survives\n"
+    );
     Ok(())
 }
