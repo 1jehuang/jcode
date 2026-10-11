@@ -214,6 +214,20 @@ impl Agent {
             let snippet: String = text.chars().take(LAST_TEXT_LIMIT).collect();
             event = event.field("LAST_ASSISTANT_TEXT", snippet);
         }
+        if let Some(usage) = turn_token_usage_after(&self.session.messages, start_message_index) {
+            if let Some(value) = usage.prompt_tokens {
+                event = event.field("PROMPT_TOKENS", value.to_string());
+            }
+            event = event
+                .field("INPUT_TOKENS", usage.input_tokens.to_string())
+                .field("OUTPUT_TOKENS", usage.output_tokens.to_string());
+            if let Some(value) = usage.cache_read_input_tokens {
+                event = event.field("CACHE_READ_TOKENS", value.to_string());
+            }
+            if let Some(value) = usage.cache_creation_input_tokens {
+                event = event.field("CACHE_WRITE_TOKENS", value.to_string());
+            }
+        }
         if let Err(error) = result {
             const ERROR_LIMIT: usize = 1000;
             let message: String = error.to_string().chars().take(ERROR_LIMIT).collect();
@@ -1488,6 +1502,138 @@ impl Agent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TurnTokenUsage {
+    prompt_tokens: Option<u64>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_input_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+}
+
+fn turn_token_usage_after(
+    messages: &[crate::session::StoredMessage],
+    start_message_index: usize,
+) -> Option<TurnTokenUsage> {
+    let mut usage = TurnTokenUsage {
+        prompt_tokens: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+    };
+    let mut saw_usage = false;
+
+    for message in messages.iter().skip(start_message_index) {
+        if !matches!(&message.role, Role::Assistant) {
+            continue;
+        }
+        let Some(message_usage) = message.token_usage.as_ref() else {
+            continue;
+        };
+
+        saw_usage = true;
+        if let Some(value) = message_usage.prompt_tokens {
+            usage.prompt_tokens = Some(usage.prompt_tokens.unwrap_or(0).saturating_add(value));
+        }
+        usage.input_tokens = usage
+            .input_tokens
+            .saturating_add(message_usage.input_tokens);
+        usage.output_tokens = usage
+            .output_tokens
+            .saturating_add(message_usage.output_tokens);
+
+        if let Some(value) = message_usage.cache_read_input_tokens {
+            usage.cache_read_input_tokens = Some(
+                usage
+                    .cache_read_input_tokens
+                    .unwrap_or(0)
+                    .saturating_add(value),
+            );
+        }
+        if let Some(value) = message_usage.cache_creation_input_tokens {
+            usage.cache_creation_input_tokens = Some(
+                usage
+                    .cache_creation_input_tokens
+                    .unwrap_or(0)
+                    .saturating_add(value),
+            );
+        }
+    }
+
+    saw_usage.then_some(usage)
+}
+
+#[cfg(test)]
+mod turn_token_usage_tests {
+    use super::*;
+    use crate::session::StoredTokenUsage;
+
+    fn assistant_message(
+        id: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        prompt_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+    ) -> crate::session::StoredMessage {
+        crate::session::StoredMessage {
+            id: id.to_string(),
+            role: Role::Assistant,
+            content: Vec::new(),
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: Some(StoredTokenUsage {
+                prompt_tokens,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            }),
+        }
+    }
+
+    #[test]
+    fn sums_assistant_usage_only_from_the_turn_start() {
+        let messages = vec![
+            assistant_message("before", 100, 20, Some(100), Some(30), Some(4)),
+            crate::session::StoredMessage {
+                id: "user".to_string(),
+                role: Role::User,
+                content: Vec::new(),
+                display_role: None,
+                timestamp: None,
+                tool_duration_ms: None,
+                token_usage: None,
+            },
+            assistant_message("first", 10, 2, Some(12), Some(3), None),
+            assistant_message("second", 20, 4, Some(25), Some(5), Some(7)),
+        ];
+
+        let usage = turn_token_usage_after(&messages, 1).expect("turn usage");
+        assert_eq!(usage.prompt_tokens, Some(37));
+        assert_eq!(usage.input_tokens, 30);
+        assert_eq!(usage.output_tokens, 6);
+        assert_eq!(usage.cache_read_input_tokens, Some(8));
+        assert_eq!(usage.cache_creation_input_tokens, Some(7));
+    }
+
+    #[test]
+    fn returns_none_without_assistant_usage() {
+        let messages = vec![crate::session::StoredMessage {
+            id: "user".to_string(),
+            role: Role::User,
+            content: Vec::new(),
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        }];
+
+        assert_eq!(turn_token_usage_after(&messages, 0), None);
+    }
+}
 /// Cap on tools listed in one late-MCP transcript announcement.
 const MAX_ANNOUNCED_MCP_TOOLS: usize = 32;
 
