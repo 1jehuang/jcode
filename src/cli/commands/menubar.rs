@@ -153,7 +153,7 @@ pub fn ensure_menubar_helper_running() {
     use std::process::{Command, Stdio};
 
     // Allow users to opt out entirely.
-    if std::env::var_os("JCODE_NO_MENUBAR").is_some() {
+    if std::env::var_os("JCODE_NO_MENUBAR").is_some() || !menubar_enabled_in_config() {
         return;
     }
 
@@ -214,6 +214,14 @@ pub fn ensure_menubar_helper_running() {
 
 #[cfg(not(target_os = "macos"))]
 pub fn ensure_menubar_helper_running() {}
+
+/// `[menubar] enabled` from config. The helper itself is spawned with
+/// `JCODE_NO_MENUBAR=1` (so it never recursively spawns), so the config value
+/// is the only opt-out it can observe while running.
+#[cfg(target_os = "macos")]
+fn menubar_enabled_in_config() -> bool {
+    crate::config::config().menubar.enabled
+}
 
 /// True when another process of this uid looks like a `jcode menubar` helper
 /// (see [`menubar_helper_pids`]).
@@ -544,7 +552,7 @@ mod macos {
         // to spawn from sandboxes) plus the global singleton lock below, but a
         // stray `jcode menubar` invoked directly inside a test harness should
         // still never realize a status item.
-        if super::running_in_menubar_sandbox() {
+        if super::running_in_menubar_sandbox() || !super::menubar_enabled_in_config() {
             return;
         }
 
@@ -663,6 +671,12 @@ mod macos {
         let root_visibility: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
         let app_for_refresh = app.clone();
         let refresh = move || {
+            // `[menubar] enabled = false` turns the helper off without the user
+            // having to find and kill the process.
+            if !super::menubar_enabled_in_config() {
+                app_for_refresh.terminate(None);
+                return;
+            }
             // Re-sync the Light/Dark appearance each tick so toggling the
             // system theme at runtime keeps the status item visible (the
             // process won't auto-adopt the change on its own).

@@ -717,6 +717,12 @@ prevent_sleep_while_streaming = true
 # saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
 
+[menubar]
+# macOS only: show the jcode session count in the menu bar. Set to false to
+# stop the menu bar helper (a running helper exits within a second).
+# JCODE_NO_MENUBAR=1 also disables it.
+enabled = true
+
 [safety]
 # Notification settings for ambient mode events
 

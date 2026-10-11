@@ -234,22 +234,21 @@ impl ResponsesStream {
                     self.thinking = true;
                 } else if let Some(item) = value.get("item")
                     && item.get("type").and_then(Value::as_str) == Some("function_call")
+                    && let Some(item_id) = item.get("id").and_then(Value::as_str)
                 {
-                    if let Some(item_id) = item.get("id").and_then(Value::as_str) {
-                        let state = self.tools.entry(item_id.to_string()).or_default();
-                        state.call_id = item
-                            .get("call_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or(item_id)
-                            .to_string();
-                        state.name = item
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string();
-                        if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
-                            state.arguments = arguments.to_string();
-                        }
+                    let state = self.tools.entry(item_id.to_string()).or_default();
+                    state.call_id = item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(item_id)
+                        .to_string();
+                    state.name = item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                        state.arguments = arguments.to_string();
                     }
                 }
             }
