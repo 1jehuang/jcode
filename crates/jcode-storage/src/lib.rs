@@ -257,15 +257,15 @@ static TEST_HOME_CLEANUP: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::ne
 
 fn register_test_home_cleanup(path: &Path) {
     extern "C" fn remove_test_home() {
-        if let Some(path) = TEST_HOME_CLEANUP.get() {
-            if let Err(error) = std::fs::remove_dir_all(path) {
-                // `atexit` runs after the suite, so nothing can act on this
-                // failure; naming it keeps a leaked test home traceable.
-                eprintln!(
-                    "warning: could not remove test home {}: {error}",
-                    path.display()
-                );
-            }
+        if let Some(path) = TEST_HOME_CLEANUP.get()
+            && let Err(error) = std::fs::remove_dir_all(path)
+        {
+            // `atexit` runs after the suite, so nothing can act on this
+            // failure; naming it keeps a leaked test home traceable.
+            eprintln!(
+                "warning: could not remove test home {}: {error}",
+                path.display()
+            );
         }
     }
     if TEST_HOME_CLEANUP.set(path.to_path_buf()).is_ok() {
