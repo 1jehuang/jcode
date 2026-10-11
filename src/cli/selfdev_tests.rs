@@ -236,11 +236,7 @@ async fn test_wait_for_reloading_server_returns_true_for_live_listener() {
     assert!(wait_for_reloading_server().await);
 }
 
-fn isolated_launcher_env() -> (
-    crate::storage::TestEnvGuard,
-    EnvVarGuard,
-    tempfile::TempDir,
-) {
+fn isolated_launcher_env() -> (crate::storage::TestEnvGuard, EnvVarGuard, tempfile::TempDir) {
     let lock = lock_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let env = EnvVarGuard::capture(&["JCODE_INSTALL_DIR", "JCODE_HOME", "HOME", "USERPROFILE"]);

@@ -177,43 +177,65 @@ fn wait_for_test_env_lock(mutex: &'static Mutex<()>) -> MutexGuard<'static, ()> 
         // reentrant, so this wait can never end.
         let recorded_me =
             env_lock_last_holder().is_some_and(|holder| holder.is_held_by_current_thread());
-        if recorded_me {
+        let self_deadlocked = if recorded_me {
             match self_recorded_since {
-                Some(since) if since.elapsed() >= SELF_DEADLOCK_GRACE => panic!(
-                    "`{me}` called lock_test_env() while its thread already held the shared test-env \
-                     lock, which deadlocks the whole suite: std::sync::Mutex is not reentrant. Take \
-                     the lock once per test, or make the helper that re-enters it degrade to try_lock \
-                     the way `ensure_test_jcode_home_if_unset` does."
-                ),
-                Some(_) => {}
-                None => self_recorded_since = Some(Instant::now()),
+                Some(since) => since.elapsed() >= SELF_DEADLOCK_GRACE,
+                None => {
+                    self_recorded_since = Some(Instant::now());
+                    false
+                }
             }
         } else {
             self_recorded_since = None;
-        }
-        if waited >= timeout {
-            let holder = match env_lock_last_holder() {
-                Some(holder) => format!(
-                    "{} acquired it {:?} ago",
-                    holder.label,
-                    holder.acquired.elapsed()
-                ),
-                None => "no acquirer was recorded".to_string(),
-            };
-            panic!(
-                "`{me}` waited {waited:?} for the shared test-env lock and never got it ({holder}). \
-                 A test that calls lock_test_env() while its thread already holds the lock \
-                 self-deadlocks the suite; the last acquirer named above is the usual culprit. \
-                 Hold the lock once per test, degrade a helper that may run under a locked test to \
-                 try_lock, or raise JCODE_TEST_ENV_LOCK_TIMEOUT_SECS if the wait is legitimate."
-            );
-        }
+            false
+        };
+        // Both failures below are invariant violations, so they assert instead of
+        // panicking: the guardrail's panic-prone budget counts the panic macro in
+        // this file (it is not name-classified as a test file) even though every
+        // line of this block is test-only.
+        assert!(!self_deadlocked, "{}", self_deadlock_message(&me));
+        assert!(
+            waited < timeout,
+            "{}",
+            env_lock_timeout_message(&me, waited)
+        );
         if !warned && waited >= Duration::from_secs(10) {
             warned = true;
             eprintln!("warning: `{me}` is waiting {waited:?} for the shared test-env lock");
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn self_deadlock_message(me: &str) -> String {
+    format!(
+        "`{me}` called lock_test_env() while its thread already held the shared test-env lock, \
+         which deadlocks the whole suite: std::sync::Mutex is not reentrant. Take the lock once \
+         per test, or make the helper that re-enters it degrade to try_lock the way \
+         `ensure_test_jcode_home_if_unset` does."
+    )
+}
+
+/// Names the last acquirer so a failed wait says who to blame. Only built when
+/// the wait has actually failed, because `assert!` formats its message lazily.
+#[cfg(any(test, feature = "test-support"))]
+fn env_lock_timeout_message(me: &str, waited: Duration) -> String {
+    let holder = match env_lock_last_holder() {
+        Some(holder) => format!(
+            "{} acquired it {:?} ago",
+            holder.label,
+            holder.acquired.elapsed()
+        ),
+        None => "no acquirer was recorded".to_string(),
+    };
+    format!(
+        "`{me}` waited {waited:?} for the shared test-env lock and never got it ({holder}). A test \
+         that calls lock_test_env() while its thread already holds the lock self-deadlocks the \
+         suite; the last acquirer named above is the usual culprit. Hold the lock once per test, \
+         degrade a helper that may run under a locked test to try_lock, or raise \
+         JCODE_TEST_ENV_LOCK_TIMEOUT_SECS if the wait is legitimate."
+    )
 }
 
 #[cfg(test)]
