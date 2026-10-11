@@ -164,7 +164,7 @@ pub fn jcode_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("JCODE_HOME") {
         return Ok(PathBuf::from(path));
     }
-    if let Some(path) = test_harness_home() {
+    if let Some(path) = test_harness_home()? {
         return Ok(path.to_path_buf());
     }
 
@@ -180,18 +180,31 @@ pub fn jcode_dir() -> Result<PathBuf> {
 /// active-pid markers, config, model-picker usage). Suite-by-suite guards kept
 /// missing cases, so unsandboxed tests fall back here instead. Tests that set
 /// `JCODE_HOME` explicitly, including to the real home, are unaffected.
-fn test_harness_home() -> Option<&'static Path> {
+fn test_harness_home() -> Result<Option<&'static Path>> {
     static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    HOME.get_or_init(|| {
-        let exe = std::env::current_exe().ok()?;
-        if !is_test_harness_exe(&exe) {
-            return None;
-        }
-        let home = create_private_test_home();
-        register_test_home_cleanup(&home);
-        Some(home)
-    })
-    .as_deref()
+    if let Some(cached) = HOME.get() {
+        return Ok(cached.as_deref());
+    }
+    // Resolve before caching, so a test binary that cannot create a private home
+    // reports that instead of quietly using the real `~/.jcode`.
+    let resolved = resolve_test_harness_home()?;
+    Ok(HOME.get_or_init(|| resolved).as_deref())
+}
+
+/// Resolve the sandbox once, before `test_harness_home` caches it.
+fn resolve_test_harness_home() -> Result<Option<PathBuf>> {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        // Without the executable path there is no way to tell a test binary from
+        // a real one, and guessing could sandbox a real session.
+        Err(_) => return Ok(None),
+    };
+    if !is_test_harness_exe(&exe) {
+        return Ok(None);
+    }
+    let home = create_private_test_home()?;
+    register_test_home_cleanup(&home);
+    Ok(Some(home))
 }
 
 /// Create a fresh, private test home that only this process can use.
@@ -201,7 +214,11 @@ fn test_harness_home() -> Option<&'static Path> {
 /// and the random suffix keeps a reused PID from inheriting an earlier run's
 /// sessions. The directory is `0o700` on Unix. Callers own its cleanup:
 /// `test_harness_home` registers the process-wide home for removal at exit.
-fn create_private_test_home() -> PathBuf {
+///
+/// A home that cannot be created is reported as an error rather than a panic:
+/// this module is production-classified by the guardrail's panic-prone budget
+/// even though the shim only ever activates inside test binaries.
+fn create_private_test_home() -> Result<PathBuf> {
     let temp = std::env::temp_dir();
     for _ in 0..16 {
         let path = temp.join(format!(
@@ -216,20 +233,22 @@ fn create_private_test_home() -> PathBuf {
             builder.mode(0o700);
         }
         match builder.create(&path) {
-            Ok(()) => return path,
+            Ok(()) => return Ok(path),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             // Falling back to the real `~/.jcode` is exactly what this guards
             // against, so a test binary that cannot sandbox itself stops here.
-            Err(error) => panic!(
-                "cannot create private test home {}: {error}",
-                path.display()
-            ),
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "cannot create private test home {}: {error}",
+                    path.display()
+                ));
+            }
         }
     }
-    panic!(
+    Err(anyhow::anyhow!(
         "cannot create a unique private test home in {}",
         temp.display()
-    );
+    ))
 }
 
 /// The process-wide test home removed at exit. Only `test_harness_home`
@@ -239,7 +258,14 @@ static TEST_HOME_CLEANUP: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::ne
 fn register_test_home_cleanup(path: &Path) {
     extern "C" fn remove_test_home() {
         if let Some(path) = TEST_HOME_CLEANUP.get() {
-            let _ = std::fs::remove_dir_all(path);
+            if let Err(error) = std::fs::remove_dir_all(path) {
+                // `atexit` runs after the suite, so nothing can act on this
+                // failure; naming it keeps a leaked test home traceable.
+                eprintln!(
+                    "warning: could not remove test home {}: {error}",
+                    path.display()
+                );
+            }
         }
     }
     if TEST_HOME_CLEANUP.set(path.to_path_buf()).is_ok() {
@@ -872,6 +898,12 @@ mod windows_hardening_tests {
 mod test_harness_home_tests {
     use super::*;
 
+    fn harness_home() -> &'static Path {
+        test_harness_home()
+            .expect("resolving the test home cannot fail here")
+            .expect("cargo test binary is a test harness")
+    }
+
     #[test]
     fn only_cargo_test_binaries_count_as_test_harnesses() {
         assert!(is_test_harness_exe(Path::new(
@@ -894,7 +926,7 @@ mod test_harness_home_tests {
 
     #[test]
     fn this_test_binary_never_resolves_to_the_real_jcode_home() {
-        let sandbox = test_harness_home().expect("cargo test binary is a test harness");
+        let sandbox = harness_home();
         assert!(sandbox.starts_with(std::env::temp_dir()));
         assert!(sandbox.is_dir());
         if let Some(home) = dirs::home_dir() {
@@ -904,10 +936,10 @@ mod test_harness_home_tests {
 
     #[test]
     fn private_test_homes_are_unique_and_never_follow_existing_entries() {
-        let a = create_private_test_home();
-        let b = create_private_test_home();
+        let a = create_private_test_home().expect("first private test home");
+        let b = create_private_test_home().expect("second private test home");
         assert_ne!(a, b, "a reused PID must not share an earlier home");
-        let shared = test_harness_home().expect("cargo test binary is a test harness");
+        let shared = harness_home();
         assert_eq!(
             TEST_HOME_CLEANUP.get().map(PathBuf::as_path),
             Some(shared),
