@@ -50,7 +50,7 @@ the agent; failures are only logged.
 ### `turn_end`
 
 Fires when an agent turn completes (streaming turn path, which covers TUI,
-desktop, swarm workers, and headless sessions).
+desktop, swarm workers, and headless sessions, plus one-shot `jcode run`).
 
 Extra fields: `JCODE_HOOK_STATUS` (`ok`/`error`), `JCODE_HOOK_DURATION_MS`,
 `JCODE_HOOK_MODEL`, `JCODE_HOOK_LAST_ASSISTANT_TEXT` (first 4000 chars),

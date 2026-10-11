@@ -37,8 +37,14 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        let _ = self.run_turn(true).await?;
-        Ok(())
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("run");
+        let result = self.run_turn(true).await.map(|_| ());
+        // `jcode run` uses this path, so headless turns fire the same
+        // lifecycle hooks as streaming turns (docs/HOOKS.md).
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {

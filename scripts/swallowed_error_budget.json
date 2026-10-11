@@ -1,8 +1,8 @@
 {
-  "total": 3781,
+  "total": 3780,
   "totals_by_pattern": {
     "dot_ok": 1458,
-    "let_underscore": 1389,
+    "let_underscore": 1388,
     "unwrap_or_default": 934
   },
   "tracked_files": {
@@ -43,7 +43,7 @@
     },
     "crates/jcode-app-core/src/agent/turn_execution.rs": {
       "dot_ok": 0,
-      "let_underscore": 1,
+      "let_underscore": 0,
       "unwrap_or_default": 2
     },
     "crates/jcode-app-core/src/agent/turn_loops.rs": {
