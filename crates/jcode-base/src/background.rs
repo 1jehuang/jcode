@@ -39,7 +39,10 @@ pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
     /// Globally serializes the small status read-modify-publish cycles. This is
     /// intentionally one gate: status files are tiny, and the blocking write
-    /// runs off-worker while retaining the owned guard through rename.
+    /// runs off-worker while retaining the owned guard through rename. The one
+    /// exception is the initial publication, which writes on the caller's thread
+    /// before the task exists so that no await separates the visible `Running`
+    /// document from registration (`status_file::publish_initial_status`).
     status_updates: Arc<Mutex<()>>,
     /// Live stall watchdogs by task id. Each entry is a spawned monitor that
     /// fires a [`BusEvent::BackgroundTaskStalled`] after its task produces no
@@ -142,6 +145,10 @@ impl BackgroundTaskManager {
         serde_json::from_str(&content).ok()
     }
 
+    /// Publish one document through the gate-taking async path, the way an
+    /// unrelated writer would. Production publications are atomic and the
+    /// initial one is synchronous, so only the write-race tests need this.
+    #[cfg(test)]
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
         let guard = self.status_updates.clone().lock_owned().await;
         drop(status_file::publish_status_file(&self.status_updates, guard, path, status).await);
@@ -433,7 +440,9 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        self.write_status_file(&info.status_file, &status).await;
+        // Registration is synchronous and the detached child already exists, so
+        // this document never outlives its owner: see `publish_initial_status`.
+        status_file::publish_initial_status(&info.status_file, &status);
         Self::publish_task_started_activity(
             &info.task_id,
             tool_name,
@@ -503,7 +512,8 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        self.write_status_file(&status_path, &initial_status).await;
+        // No await after the document is visible: see `publish_initial_status`.
+        status_file::publish_initial_status(&status_path, &initial_status);
         Self::publish_task_started_activity(
             &task_id,
             tool_name,
@@ -718,7 +728,8 @@ impl BackgroundTaskManager {
             event_history: Vec::new(),
             stall_wake_seconds: None,
         };
-        self.write_status_file(&status_path, &initial_status).await;
+        // No await after the document is visible: see `publish_initial_status`.
+        status_file::publish_initial_status(&status_path, &initial_status);
         Self::publish_task_started_activity(
             &task_id,
             tool_name,

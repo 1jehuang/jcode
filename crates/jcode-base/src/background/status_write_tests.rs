@@ -102,6 +102,16 @@ async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
     std::future::poll_fn(|context| Poll::Ready(future.as_mut().poll(context))).await
 }
 
+fn published_status_documents(dir: &std::path::Path) -> Result<usize> {
+    let mut published = 0;
+    for entry in std::fs::read_dir(dir)? {
+        if entry?.path().to_string_lossy().ends_with(".status.json") {
+            published += 1;
+        }
+    }
+    Ok(published)
+}
+
 fn progress(percent: f32) -> BackgroundTaskProgress {
     BackgroundTaskProgress {
         kind: BackgroundTaskProgressKind::Determinate,
@@ -451,5 +461,170 @@ async fn completion_in_publication_cannot_be_overwritten_by_cancellation() -> Re
         .ok_or_else(|| anyhow!("completed task status missing"))?;
     assert_eq!(status.status, BackgroundTaskStatus::Completed);
     assert_eq!(status.error, None);
+    Ok(())
+}
+
+/// The initial publication writes a freshly generated task id that no other
+/// writer can reach yet, and its caller is an agent turn that a reload can abort
+/// at any await, so it must not park behind the manager-wide status gate: that
+/// gate serializes the read-modify-write cycles of *other* tasks, which can take
+/// as long as their filesystem work. A held gate therefore cannot delay or drop
+/// the `Running` document.
+#[tokio::test(flavor = "current_thread")]
+async fn initial_publication_ignores_a_held_status_gate() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let path = manager.status_path_for("initial-publication");
+    let status = running_status_fixture("initial-publication", "session-initial");
+    let gate = manager.status_updates.clone().lock_owned().await;
+
+    status_file::publish_initial_status(&path, &status);
+
+    let visible: TaskStatusFile = serde_json::from_str(&tokio::fs::read_to_string(&path).await?)?;
+    assert_eq!(visible.status, BackgroundTaskStatus::Running);
+    assert_eq!(visible.session_id, "session-initial");
+    drop(gate);
+    Ok(())
+}
+
+/// The same ordering holds at the call site the abort actually interrupts:
+/// adopting a running tool publishes the task's `Running` document before the
+/// caller yields for the first time, so no abort can separate the visible
+/// document from the wrapper that owns the task handle.
+#[tokio::test(flavor = "current_thread")]
+async fn adopting_a_running_tool_publishes_its_status_document_before_yielding() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(async move {
+        finish_rx.await?;
+        Ok(jcode_tool_types::ToolOutput::new("complete output\n"))
+    });
+
+    let mut adoption = Box::pin(manager.adopt_with_options(
+        "bash",
+        None,
+        "session-adopt-publication",
+        false,
+        false,
+        handle,
+    ));
+    let first_poll = poll_once(adoption.as_mut()).await;
+    assert_eq!(
+        published_status_documents(tmp.path())?,
+        1,
+        "the adopted task's `Running` document must be published before the caller's first yield"
+    );
+
+    // An uncontended adopt completes in that same poll, publication and
+    // registration included; only a contended live map can park it.
+    let info = match first_poll {
+        Poll::Ready(info) => info,
+        Poll::Pending => adoption.await,
+    };
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("adopted task status missing"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Running);
+
+    finish_tx.send(()).expect("finish adopted tool");
+    let finished = manager
+        .wait(&info.task_id, Duration::from_secs(5), false)
+        .await
+        .expect("adopted task should exist");
+    assert_eq!(finished.task.status, BackgroundTaskStatus::Completed);
+    Ok(())
+}
+
+/// `spawn_with_notify` is the other call site an abort interrupts, and it has
+/// the same requirement: the task's `Running` document must be visible before
+/// the caller yields, or a reload can publish a document whose work never
+/// started.
+#[tokio::test(flavor = "current_thread")]
+async fn spawning_background_work_publishes_its_status_document_before_yielding() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let mut spawning = Box::pin(manager.spawn_with_notify(
+        "bash",
+        None,
+        "session-spawn-publication",
+        false,
+        false,
+        move |_output_path| async move {
+            finish_rx.await?;
+            Ok(TaskResult::completed(Some(0)))
+        },
+    ));
+    let first_poll = poll_once(spawning.as_mut()).await;
+    assert_eq!(
+        published_status_documents(tmp.path())?,
+        1,
+        "the spawned task's `Running` document must be published before the caller's first yield"
+    );
+
+    let info = match first_poll {
+        Poll::Ready(info) => info,
+        Poll::Pending => spawning.await,
+    };
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("spawned task status missing"))?;
+    assert_eq!(status.status, BackgroundTaskStatus::Running);
+
+    finish_tx.send(()).expect("finish spawned task");
+    let finished = manager
+        .wait(&info.task_id, Duration::from_secs(5), false)
+        .await
+        .expect("spawned task should exist");
+    assert_eq!(finished.task.status, BackgroundTaskStatus::Completed);
+    Ok(())
+}
+
+/// A detached child outlives the server, so its `Running` document is the only
+/// record that the child exists. Registration publishes it without waiting for
+/// the manager-wide gate and without yielding, even while another task holds
+/// that gate.
+#[tokio::test(flavor = "current_thread")]
+async fn registering_a_detached_task_publishes_its_status_document_before_yielding() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
+    let info = manager.reserve_task_info();
+    let started_at = Utc::now().to_rfc3339();
+    let gate = manager.status_updates.clone().lock_owned().await;
+    let mut registration = Box::pin(manager.register_detached_task(
+        &info,
+        "bash",
+        None,
+        "session-detached-publication",
+        std::process::id(),
+        &started_at,
+        false,
+        false,
+    ));
+    assert!(
+        matches!(poll_once(registration.as_mut()).await, Poll::Ready(())),
+        "detached registration yielded, which reopens the abort window"
+    );
+
+    let visible: TaskStatusFile =
+        serde_json::from_str(&tokio::fs::read_to_string(&info.status_file).await?)?;
+    assert_eq!(visible.status, BackgroundTaskStatus::Running);
+    assert!(
+        visible.detached,
+        "a detached task must be recorded as detached"
+    );
+    assert_eq!(visible.pid, Some(std::process::id()));
+    drop(gate);
     Ok(())
 }

@@ -27,6 +27,36 @@ pub(super) fn write_status_file_atomic(
     std::fs::rename(&temp, path)
 }
 
+/// Publish a task's initial `Running` document synchronously, before the task
+/// exists anywhere else.
+///
+/// This is the one publication that happens *before* the caller creates the
+/// wrapper that owns the task handle (and, for adopted work, before the
+/// live-map entry). Its caller is an agent turn that a server reload can abort
+/// at any await, so the document must become visible with no await in between:
+/// an abort landing after the document was visible but before the wrapper
+/// existed leaves a `Running` document that no live task will ever finish, with
+/// the supplied work's output and completion lost. Blocking the caller's thread
+/// for this one small write is the deliberate cost: awaiting the write is
+/// exactly the window this closes, while every later update still runs
+/// off-worker behind the gate.
+///
+/// It also skips the status gate. That gate serializes read-modify-write cycles
+/// on one path, while this writes a freshly generated task id that no other
+/// writer can reach yet: the wrapper that publishes later updates is spawned
+/// only after this returns. The initial document carries no progress history, so
+/// the write stays small and bounded, matching the output file created
+/// alongside it.
+pub(super) fn publish_initial_status(path: &std::path::Path, status: &TaskStatusFile) {
+    let Ok(json) = serde_json::to_string_pretty(status) else {
+        crate::logging::warn("background status serialization failed");
+        return;
+    };
+    if let Err(error) = write_status_file_atomic(path, &json) {
+        crate::logging::warn(&format!("background status write failed: {error}"));
+    }
+}
+
 /// Publish one serialized status file while holding the status gate, keeping the
 /// owned guard so the caller can extend the same critical section.
 pub(super) async fn publish_status_file(
