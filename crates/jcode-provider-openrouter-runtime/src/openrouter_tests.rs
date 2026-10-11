@@ -1,3 +1,4 @@
+use super::issue_1056_tests::spawn_single_response_models_server;
 use super::*;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -1456,7 +1457,7 @@ fn make_provider() -> OpenRouterProvider {
     }
 }
 
-fn make_custom_compatible_provider() -> OpenRouterProvider {
+pub(crate) fn make_custom_compatible_provider() -> OpenRouterProvider {
     OpenRouterProvider {
         client: jcode_provider_core::shared_http_client(),
         model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
@@ -1489,98 +1490,6 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         provider_pin: Arc::new(Mutex::new(None)),
         endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
     }
-}
-
-#[test]
-fn profile_headers_are_sent_on_model_discovery_requests() {
-    let _lock = ENV_LOCK.lock();
-    let temp = TempDir::new().expect("create temp home");
-    let _home = EnvVarGuard::set("HOME", temp.path());
-    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
-    let _namespace = EnvVarGuard::set(
-        "JCODE_OPENROUTER_CACHE_NAMESPACE",
-        "test-profile-header-discovery",
-    );
-    let header = (
-        reqwest::header::HeaderName::from_static("cf-aig-metadata"),
-        reqwest::header::HeaderValue::from_static("gateway-profile"),
-    );
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-
-    let (api_base, request_rx) =
-        spawn_single_response_models_server(r#"{"data":[{"id":"gateway-model"}]}"#);
-    let provider = OpenRouterProvider {
-        api_base,
-        supports_model_catalog: true,
-        extra_headers: Arc::new(vec![header.clone()]),
-        ..make_custom_compatible_provider()
-    };
-    rt.block_on(provider.refresh_models())
-        .expect("refresh fake model catalog");
-    let request = request_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("capture catalog request")
-        .to_ascii_lowercase();
-    assert!(request.starts_with("get /v1/models "), "{request}");
-    assert!(
-        request.contains("cf-aig-metadata: gateway-profile"),
-        "catalog request should carry profile headers: {request}"
-    );
-
-    let (api_base, request_rx) =
-        spawn_single_response_models_server(r#"{"data":{"endpoints":[]}}"#);
-    let provider = OpenRouterProvider {
-        api_base,
-        supports_provider_features: true,
-        supports_model_catalog: true,
-        extra_headers: Arc::new(vec![header]),
-        ..make_custom_compatible_provider()
-    };
-    rt.block_on(provider.refresh_endpoints("vendor/gateway-model"))
-        .expect("refresh fake endpoints");
-    let request = request_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("capture endpoints request")
-        .to_ascii_lowercase();
-    assert!(
-        request.starts_with("get /v1/models/vendor/gateway-model/endpoints "),
-        "{request}"
-    );
-    assert!(
-        request.contains("cf-aig-metadata: gateway-profile"),
-        "endpoint request should carry profile headers: {request}"
-    );
-}
-
-fn spawn_single_response_models_server(body: &'static str) -> (String, mpsc::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake provider server");
-    let addr = listener.local_addr().expect("fake provider addr");
-    let (request_tx, request_rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept fake provider request");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set read timeout");
-        let mut request = vec![0u8; 8192];
-        let n = stream.read(&mut request).unwrap_or(0);
-        let request = String::from_utf8_lossy(&request[..n]).into_owned();
-        let _ = request_tx.send(request);
-
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        stream
-            .write_all(response.as_bytes())
-            .expect("write fake provider response");
-    });
-
-    (format!("http://{addr}/v1"), request_rx)
 }
 
 fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
@@ -1921,7 +1830,6 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
         supports_model_catalog: false,
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
-        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
     provider
@@ -1979,7 +1887,6 @@ fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
         supports_model_catalog: false,
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
-        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
     provider
@@ -2052,7 +1959,6 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
         static_models: vec!["static-login-flow-fallback".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
-        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
 
@@ -2103,7 +2009,6 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
         reasoning_effort_support: None,
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
-        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
     assert_eq!(fresh_provider.context_window(), 131_072);
@@ -2143,7 +2048,6 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
         static_models: vec!["gpt-oss-120b".to_string(), "zai-glm-4.7".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
-        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
 
@@ -2174,7 +2078,6 @@ fn direct_openai_compatible_static_models_are_marked_as_fallback_before_live_cat
         static_models: vec!["minimax-m2.7".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
-        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
 
@@ -2201,7 +2104,6 @@ fn cerebras_live_catalog_models_are_selectable_on_explicit_switch() {
         static_models: vec!["gpt-oss-120b".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
-        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
 

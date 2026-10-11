@@ -1,5 +1,11 @@
-//! Per-host request headers for OpenAI-compatible coding endpoints (Kimi
-//! coding agents, OpenCode Go/Zen session ids).
+//! Per-host request headers for OpenAI-compatible endpoints: Kimi coding
+//! agents, OpenCode Go/Zen session ids, named-profile headers, the API-key
+//! header name, and the per-turn Grok CLI sampler headers.
+
+use super::ProviderAuth;
+use reqwest::header::{HeaderName, HeaderValue};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub(crate) const KIMI_CODING_USER_AGENT: &str = "claude-cli/1.0.0";
 pub(crate) const KIMI_CODING_X_APP: &str = "cli";
@@ -75,3 +81,74 @@ pub(crate) fn apply_opencode_session_header(
 }
 
 pub(crate) const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
+
+/// Extra request headers configured on a named provider profile.
+pub(crate) type ExtraHeaders = Arc<Vec<(HeaderName, HeaderValue)>>;
+
+/// Parse a profile's `headers` table. Invalid names or values are skipped with
+/// a warning so one bad entry does not disable the provider.
+pub(crate) fn parse_profile_headers(
+    profile_name: &str,
+    headers: &BTreeMap<String, String>,
+) -> ExtraHeaders {
+    let mut parsed = Vec::with_capacity(headers.len());
+    for (name, value) in headers {
+        match (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            (Ok(name), Ok(value)) => parsed.push((name, value)),
+            _ => jcode_base::logging::warn(&format!(
+                "Provider profile '{profile_name}': ignoring invalid header '{name}'"
+            )),
+        }
+    }
+    Arc::new(parsed)
+}
+
+pub(crate) fn apply_extra_headers(
+    mut req: reqwest::RequestBuilder,
+    headers: &[(HeaderName, HeaderValue)],
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        req = req.header(name, value);
+    }
+    req
+}
+
+/// Header that carries the API key for OpenAI-compatible providers.
+pub(crate) fn configured_auth_header_name() -> HeaderName {
+    let configured = match std::env::var("JCODE_OPENROUTER_AUTH_HEADER_NAME") {
+        Ok(value) => value,
+        Err(_) => "api-key".to_string(),
+    };
+    let raw = configured.trim();
+    let raw = if raw.is_empty() { "api-key" } else { raw };
+    HeaderName::from_bytes(raw.as_bytes()).unwrap_or_else(|_| {
+        jcode_base::logging::warn(&format!(
+            "Ignoring invalid JCODE_OPENROUTER_AUTH_HEADER_NAME '{}'; using api-key",
+            raw
+        ));
+        HeaderName::from_static("api-key")
+    })
+}
+
+/// Per-turn Grok CLI sampler headers (model override, conversation/request ids).
+pub(crate) fn apply_grok_cli_turn_headers(
+    mut req: reqwest::RequestBuilder,
+    auth: &ProviderAuth,
+    model: &str,
+    conversation_id: &str,
+) -> reqwest::RequestBuilder {
+    if matches!(auth, ProviderAuth::GrokCli { .. }) {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        for (name, value) in jcode_base::auth::grok_build::chat_proxy_turn_headers(
+            model,
+            conversation_id,
+            &request_id,
+        ) {
+            req = req.header(name, value);
+        }
+    }
+    req
+}

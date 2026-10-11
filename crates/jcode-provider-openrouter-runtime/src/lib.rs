@@ -273,21 +273,6 @@ fn configured_auth_header_mode() -> AuthHeaderMode {
     }
 }
 
-fn configured_auth_header_name() -> HeaderName {
-    let raw = std::env::var("JCODE_OPENROUTER_AUTH_HEADER_NAME")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "api-key".to_string());
-    HeaderName::from_bytes(raw.as_bytes()).unwrap_or_else(|_| {
-        jcode_base::logging::warn(&format!(
-            "Ignoring invalid JCODE_OPENROUTER_AUTH_HEADER_NAME '{}'; using api-key",
-            raw
-        ));
-        HeaderName::from_static("api-key")
-    })
-}
-
 fn configured_dynamic_bearer_provider() -> Option<String> {
     std::env::var("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER")
         .ok()
@@ -404,66 +389,9 @@ impl OpenRouterTransportState {
     }
 }
 
-/// Extra request headers configured on a named provider profile.
-pub(crate) type ExtraHeaders = Arc<Vec<(HeaderName, reqwest::header::HeaderValue)>>;
-
-/// Parse a profile's `headers` table. Invalid names or values are skipped with
-/// a warning so one bad entry does not disable the provider.
-fn parse_profile_headers(
-    profile_name: &str,
-    headers: &std::collections::BTreeMap<String, String>,
-) -> ExtraHeaders {
-    Arc::new(
-        headers
-            .iter()
-            .filter_map(|(name, value)| {
-                let parsed = HeaderName::from_bytes(name.as_bytes())
-                    .ok()
-                    .zip(reqwest::header::HeaderValue::from_str(value).ok());
-                if parsed.is_none() {
-                    jcode_base::logging::warn(&format!(
-                        "Provider profile '{profile_name}': ignoring invalid header '{name}'"
-                    ));
-                }
-                parsed
-            })
-            .collect(),
-    )
-}
-
-fn apply_extra_headers(
-    mut req: reqwest::RequestBuilder,
-    headers: &[(HeaderName, reqwest::header::HeaderValue)],
-) -> reqwest::RequestBuilder {
-    for (name, value) in headers {
-        req = req.header(name, value);
-    }
-    req
-}
-
 /// Models the Grok CLI chat proxy serves to Grok Build subscribers.
 pub const GROK_BUILD_MODELS: &[&str] = &["grok-4.6", "grok-4.5", "grok-code-fast-1"];
 const GROK_BUILD_AUTH_LABEL: &str = "Grok Build subscription (Grok CLI OIDC)";
-
-/// Per-turn Grok CLI sampler headers (model override, conversation/request ids).
-fn apply_grok_cli_turn_headers(
-    mut req: reqwest::RequestBuilder,
-    auth: &ProviderAuth,
-    model: &str,
-    conversation_id: &str,
-) -> reqwest::RequestBuilder {
-    if matches!(auth, ProviderAuth::GrokCli { .. }) {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        for (name, value) in jcode_base::auth::grok_build::chat_proxy_turn_headers(
-            model,
-            conversation_id,
-            &request_id,
-        ) {
-            req = req.header(name, value);
-        }
-    }
-    req
-}
 
 #[derive(Debug, Clone)]
 enum ProviderAuth {
