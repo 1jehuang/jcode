@@ -295,11 +295,11 @@ mod macos {
     use objc2_app_kit::{
         NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
         NSApplicationActivationPolicy, NSCellImagePosition, NSColor, NSFont, NSFontAttributeName,
-        NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSMenu, NSMenuItem,
-        NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+        NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration,
+        NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
     };
     use objc2_foundation::{
-        NSAttributedString, NSDictionary, NSObject, NSString, NSUserDefaults, ns_string,
+        NSArray, NSAttributedString, NSDictionary, NSObject, NSString, NSUserDefaults, ns_string,
     };
 
     /// Poll interval for refreshing the counts (milliseconds).
@@ -505,13 +505,8 @@ mod macos {
                 NSFontWeightRegular
             });
         if let Some(button) = status_item.button(mtm) {
-            let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                ns_string!("terminal.fill"),
-                Some(ns_string!("jcode sessions")),
-            );
-            if let Some(icon) = icon.as_deref() {
-                icon.setTemplate(true);
-                button.setImage(Some(icon));
+            if let Some(icon) = status_icon(false) {
+                button.setImage(Some(&icon));
                 // Title on the left, icon on the right.
                 button.setImagePosition(NSCellImagePosition::ImageTrailing);
             }
@@ -554,6 +549,9 @@ mod macos {
         status_item.setMenu(Some(&menu));
 
         let last_sessions: RefCell<Vec<SessionPresence>> = RefCell::new(Vec::new());
+        // Streaming state the icon was last built for, so the image is only
+        // swapped when it flips rather than on every refresh tick.
+        let icon_streaming = std::cell::Cell::new(false);
         // Classification does not change for a session ID. Cache it so a large
         // population of internal workers costs one metadata read each rather
         // than one read per worker every second.
@@ -593,15 +591,13 @@ mod macos {
                 let title = format_menubar_title(counts);
                 let attributed = attributed_title(&title, &title_font, counts.streaming > 0);
                 button.setAttributedTitle(&attributed);
-                // Tint the template icon to match: accent green while any
-                // session is streaming, default (nil) otherwise so it follows
-                // the menu bar's normal appearance.
-                let tint: Option<Retained<NSColor>> = if counts.streaming > 0 {
-                    Some(streaming_color())
-                } else {
-                    None
-                };
-                button.setContentTintColor(tint.as_deref());
+                let streaming = counts.streaming > 0;
+                if streaming != icon_streaming.get() {
+                    if let Some(icon) = status_icon(streaming) {
+                        button.setImage(Some(&icon));
+                    }
+                    icon_streaming.set(streaming);
+                }
             }
             summary_item.setTitle(&NSString::from_str(&format_menubar_summary(counts)));
 
@@ -651,7 +647,37 @@ mod macos {
         app.setAppearance(appearance.as_deref());
     }
 
-    /// Color used for the count (and icon tint) while any session is actively
+    /// The status item icon. Idle uses a template SF Symbol so AppKit renders
+    /// it like every other menu bar extra. While streaming it is a non-template
+    /// image drawn in the streaming color through a palette configuration.
+    /// Tinting the template with `contentTintColor` instead takes the button
+    /// off the vibrancy path, so the symbol draws its literal black artwork on
+    /// a dark menu bar and never shows the green (#1124). Palette configurations
+    /// need macOS 12; where they are unavailable, or the configured image
+    /// cannot be produced, fall back to the template so the icon stays visible.
+    fn status_icon(streaming: bool) -> Option<Retained<NSImage>> {
+        let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            ns_string!("terminal.fill"),
+            Some(ns_string!("jcode sessions")),
+        )?;
+        let palette = sel!(configurationWithPaletteColors:);
+        if streaming
+            && objc2::class!(NSImageSymbolConfiguration)
+                .metaclass()
+                .responds_to(palette)
+        {
+            let colors = NSArray::from_retained_slice(&[streaming_color()]);
+            let config = NSImageSymbolConfiguration::configurationWithPaletteColors(&colors);
+            if let Some(colored) = icon.imageWithSymbolConfiguration(&config) {
+                colored.setTemplate(false);
+                return Some(colored);
+            }
+        }
+        icon.setTemplate(true);
+        Some(icon)
+    }
+
+    /// Color used for the count (and streaming icon) while any session is actively
     /// streaming a response. A slightly muted system green that reads well in
     /// both light and dark menu bars.
     fn streaming_color() -> Retained<NSColor> {
