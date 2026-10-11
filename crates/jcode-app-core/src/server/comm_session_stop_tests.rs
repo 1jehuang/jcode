@@ -1,7 +1,7 @@
 #![allow(clippy::await_holding_lock)]
 
-use super::super::{handle_comm_stop, process_message_streaming_mpsc};
-use super::{member, test_agent_with_working_dir};
+use super::comm_session_tests::{member, test_agent_with_working_dir};
+use super::{handle_comm_stop, process_message_streaming_mpsc};
 
 /// Isolates `JCODE_HOME` for one test and restores the previous value on drop.
 struct EnvVarGuard {
@@ -309,6 +309,7 @@ async fn stopping_busy_owned_worker_cancels_turn_and_discards_queued_wake() {
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::System,
+            client_id: None,
         },
     )
     .expect("persist queued follow-up");
@@ -440,6 +441,7 @@ async fn stop_drains_inflight_queue_producers_and_rejects_late_live_or_persisted
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::System,
+            client_id: None,
         });
     crate::soft_interrupt_store::append(
         &fixture.worker_id,
@@ -448,6 +450,7 @@ async fn stop_drains_inflight_queue_producers_and_rejects_late_live_or_persisted
             images: Vec::new(),
             urgent: false,
             source: SoftInterruptSource::System,
+            client_id: None,
         },
     )
     .expect("persist in-flight producer work");

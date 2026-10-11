@@ -75,7 +75,7 @@ impl Provider for MockProvider {
     }
 }
 
-fn member(
+pub(super) fn member(
     session_id: &str,
     swarm_id: Option<&str>,
     role: &str,
@@ -108,14 +108,14 @@ fn member(
     )
 }
 
-async fn test_agent_with_working_dir(session_id: &str, working_dir: &str) -> Arc<Mutex<Agent>> {
+pub(super) async fn test_agent_with_working_dir(session_id: &str, dir: &str) -> Arc<Mutex<Agent>> {
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider.clone()).await;
     let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
     session.model = Some("mock".to_string());
-    session.working_dir = Some(working_dir.to_string());
+    session.working_dir = Some(dir.to_string());
     let mut agent = Agent::new_with_session(provider, registry, session, None);
-    agent.set_working_dir(working_dir);
+    agent.set_working_dir(dir);
     Arc::new(Mutex::new(agent))
 }
 
@@ -1413,6 +1413,3 @@ fn per_call_auto_spawn_mode_defers_to_configured_mode() {
     assert_eq!(resolve_swarm_spawn_mode(Some(Headless), Visible), Headless);
     assert_eq!(resolve_swarm_spawn_mode(Some(Inline), Visible), Inline);
 }
-
-#[path = "comm_session_stop_tests.rs"]
-mod comm_session_stop_tests;

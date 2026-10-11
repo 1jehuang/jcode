@@ -6,6 +6,11 @@ impl Agent {
         &self.session
     }
 
+    /// Whether this session was terminally closed (for example by `swarm stop`).
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(self.session.status, SessionStatus::Closed)
+    }
+
     pub fn session_memory_profile_snapshot(
         &mut self,
     ) -> crate::session::SessionMemoryProfileSnapshot {
