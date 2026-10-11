@@ -19,7 +19,9 @@ use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
+mod cancel_grace;
 mod model;
+mod status_file;
 
 pub use model::{
     BackgroundCleanupResult, BackgroundTaskEventKind, BackgroundTaskEventRecord,
@@ -31,56 +33,6 @@ use model::{
     EXIT_MARKER_PREFIX, RunningTask, normalize_delivery, progress_equivalent,
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
-
-/// Write a task status file so concurrent readers never observe a torn file.
-///
-/// `bg status`/`bg wait`, the reconciliation sweeps, and other jcode processes
-/// read these paths while the owning task keeps rewriting them. A plain
-/// truncating write is observable as an empty or partial file, and a reader that
-/// hits that window reports the task as missing (`wait` then returns `None`
-/// instead of a result). Writing a sibling temp file and renaming it into place
-/// makes every read see either the previous file or the complete new one. A
-/// failed publish can leave one uniquely named temp file behind; the reconcile
-/// sweep and `bg cleanup` both key off the `.json` extension, so it is inert.
-fn write_status_file_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
-    static WRITE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = WRITE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temp = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
-    std::fs::write(&temp, contents)?;
-    #[cfg(test)]
-    status_write_tests::before_status_file_rename(path, temp.clone());
-    std::fs::rename(&temp, path)
-}
-
-async fn publish_status_file(
-    status_updates: &Arc<Mutex<()>>,
-    guard: OwnedMutexGuard<()>,
-    path: &std::path::Path,
-    status: &TaskStatusFile,
-) -> OwnedMutexGuard<()> {
-    let Ok(json) = serde_json::to_string_pretty(status) else {
-        crate::logging::warn("background status serialization failed");
-        return guard;
-    };
-    let path = path.to_path_buf();
-    match tokio::task::spawn_blocking(move || {
-        let result = write_status_file_atomic(&path, &json);
-        (guard, result)
-    })
-    .await
-    {
-        Ok((guard, result)) => {
-            if let Err(error) = result {
-                crate::logging::warn(&format!("background status write failed: {error}"));
-            }
-            guard
-        }
-        Err(error) => {
-            crate::logging::warn(&format!("background status writer failed: {error}"));
-            status_updates.clone().lock_owned().await
-        }
-    }
-}
 
 /// Manages background task execution
 pub struct BackgroundTaskManager {
@@ -192,7 +144,7 @@ impl BackgroundTaskManager {
 
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
         let guard = self.status_updates.clone().lock_owned().await;
-        drop(publish_status_file(&self.status_updates, guard, path, status).await);
+        drop(status_file::publish_status_file(&self.status_updates, guard, path, status).await);
     }
 
     async fn write_status_file_locked(
@@ -201,7 +153,7 @@ impl BackgroundTaskManager {
         path: &std::path::Path,
         status: &TaskStatusFile,
     ) -> OwnedMutexGuard<()> {
-        publish_status_file(&self.status_updates, guard, path, status).await
+        status_file::publish_status_file(&self.status_updates, guard, path, status).await
     }
 
     async fn finalize_detached_status_if_needed(
@@ -631,7 +583,7 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
-            let status_guard = publish_status_file(
+            let status_guard = status_file::publish_status_file(
                 &status_updates,
                 status_guard,
                 &status_path_clone,
@@ -855,7 +807,7 @@ impl BackgroundTaskManager {
                 &mut final_status,
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
-            let status_guard = publish_status_file(
+            let status_guard = status_file::publish_status_file(
                 &status_updates,
                 status_guard,
                 &status_path_clone,
@@ -1433,187 +1385,9 @@ impl BackgroundTaskManager {
     pub async fn cancel_with_grace(
         &self,
         task_id: &str,
-        _graceful_timeout: std::time::Duration,
+        graceful_timeout: std::time::Duration,
     ) -> Result<bool> {
-        let status_path = self.status_path_for(task_id);
-        let mut status_guard = self.status_updates.clone().lock_owned().await;
-        let status = self.read_status_file(&status_path).await;
-
-        if status
-            .as_ref()
-            .is_some_and(|status| status.status != BackgroundTaskStatus::Running)
-        {
-            let task = { self.tasks.write().await.remove(task_id) };
-            if let Some(task) = task {
-                task.handle.abort();
-                if let Err(error) = task.handle.await
-                    && !error.is_cancelled()
-                {
-                    crate::logging::warn(&format!("background task join failed: {error}"));
-                }
-            }
-            return Ok(false);
-        }
-
-        let task = { self.tasks.write().await.remove(task_id) };
-        if let Some(task) = task {
-            let RunningTask {
-                task_id,
-                tool_name,
-                display_name,
-                session_id,
-                started_at,
-                started_at_rfc3339,
-                delivery_flags,
-                handle,
-                ..
-            } = task;
-            handle.abort();
-
-            let (notify_flag, wake_flag) = *delivery_flags.borrow();
-            let mut status = status.unwrap_or_else(|| TaskStatusFile {
-                task_id: task_id.clone(),
-                tool_name: tool_name.clone(),
-                display_name: display_name.clone(),
-                session_id: session_id.clone(),
-                status: BackgroundTaskStatus::Running,
-                exit_code: None,
-                error: None,
-                started_at: started_at_rfc3339.clone(),
-                completed_at: None,
-                duration_secs: None,
-                pid: None,
-                owner_pid: Some(std::process::id()),
-                owner_instance: Some(model::process_instance_token().to_string()),
-                detached: false,
-                notify: notify_flag,
-                wake: wake_flag,
-                progress: None,
-                event_history: Vec::new(),
-                stall_wake_seconds: None,
-            });
-            status.task_id = task_id;
-            status.tool_name = tool_name;
-            status.display_name = status.display_name.or(display_name);
-            status.session_id = session_id;
-            status.status = BackgroundTaskStatus::Failed;
-            status.exit_code = None;
-            status.error = Some("Cancelled by user".to_string());
-            status.started_at = started_at_rfc3339;
-            status.completed_at = Some(Utc::now().to_rfc3339());
-            status.duration_secs = Some(started_at.elapsed().as_secs_f64());
-            status.pid = None;
-            status.owner_pid = Some(std::process::id());
-            status.owner_instance = Some(model::process_instance_token().to_string());
-            status.detached = false;
-            status.notify = notify_flag;
-            status.wake = wake_flag;
-            status.stall_wake_seconds = None;
-            push_task_event(
-                &mut status,
-                terminal_event_record(
-                    BackgroundTaskStatus::Failed,
-                    None,
-                    Some("Cancelled by user"),
-                ),
-            );
-            status_guard = self
-                .write_status_file_locked(status_guard, &status_path, &status)
-                .await;
-            if let Err(error) = handle.await
-                && !error.is_cancelled()
-            {
-                crate::logging::warn(&format!("background task join failed: {error}"));
-            }
-            drop(status_guard);
-            return Ok(true);
-        }
-
-        let Some(mut status) = status else {
-            return Ok(false);
-        };
-        if !status.detached {
-            return Ok(false);
-        }
-        drop(status_guard);
-        status = self
-            .finalize_detached_status_if_needed(status, &status_path)
-            .await;
-        if status.status != BackgroundTaskStatus::Running {
-            return Ok(false);
-        }
-
-        status_guard = self.status_updates.clone().lock_owned().await;
-        let Some(refreshed) = self.read_status_file(&status_path).await else {
-            return Ok(false);
-        };
-        status = refreshed;
-        if status.status != BackgroundTaskStatus::Running || !status.detached {
-            return Ok(false);
-        }
-        let Some(pid) = status.pid else {
-            return Ok(false);
-        };
-
-        #[cfg(unix)]
-        {
-            if let Err(error) = crate::platform::signal_detached_process_group(pid, libc::SIGTERM)
-                && error.raw_os_error() != Some(libc::ESRCH)
-            {
-                crate::logging::warn(&format!("background task {pid} TERM failed: {error}"));
-            }
-            let grace_sleep = tokio::time::sleep(_graceful_timeout);
-            drop(status_guard);
-            #[cfg(test)]
-            cancel_grace_tests::at_grace_boundary(task_id).await;
-            grace_sleep.await;
-            status_guard = self.status_updates.clone().lock_owned().await;
-            let Some(refreshed) = self.read_status_file(&status_path).await else {
-                return Ok(false);
-            };
-            if refreshed.status != BackgroundTaskStatus::Running
-                || !refreshed.detached
-                || refreshed.pid != Some(pid)
-            {
-                return Ok(false);
-            }
-            status = refreshed;
-            if crate::platform::is_process_running(pid)
-                && let Err(error) =
-                    crate::platform::signal_detached_process_group(pid, libc::SIGKILL)
-                && error.raw_os_error() != Some(libc::ESRCH)
-            {
-                crate::logging::warn(&format!("background task {pid} KILL failed: {error}"));
-            }
-        }
-        #[cfg(windows)]
-        {
-            if let Err(error) = crate::platform::signal_detached_process_group(pid, 0) {
-                crate::logging::warn(&format!(
-                    "background task {pid} termination failed: {error}"
-                ));
-            }
-        }
-
-        let completed_at = Utc::now();
-        status.status = BackgroundTaskStatus::Failed;
-        status.exit_code = None;
-        status.error = Some("Cancelled by user".to_string());
-        status.completed_at = Some(completed_at.to_rfc3339());
-        status.duration_secs = Self::status_duration_secs(&status.started_at, completed_at);
-        push_task_event(
-            &mut status,
-            terminal_event_record(
-                BackgroundTaskStatus::Failed,
-                None,
-                Some("Cancelled by user"),
-            ),
-        );
-        drop(
-            self.write_status_file_locked(status_guard, &status_path, &status)
-                .await,
-        );
-        Ok(true)
+        cancel_grace::cancel_with_grace(self, task_id, graceful_timeout).await
     }
 
     /// Abort every live in-process task before an exec-based server reload.
