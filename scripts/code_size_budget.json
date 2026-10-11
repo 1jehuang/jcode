@@ -72,7 +72,7 @@
     "crates/jcode-telemetry-core/src/lib.rs": 2761,
     "crates/jcode-terminal-launch/src/lib.rs": 1700,
     "crates/jcode-tui-core/src/keybind.rs": 1235,
-    "crates/jcode-tui-markdown/src/markdown_latex_image.rs": 1349,
+    "crates/jcode-tui-markdown/src/markdown_latex_image.rs": 1328,
     "crates/jcode-tui-mermaid/src/lib.rs": 1651,
     "crates/jcode-tui-mermaid/src/mermaid_cache_render.rs": 1477,
     "crates/jcode-tui-mermaid/src/mermaid_viewport.rs": 1971,

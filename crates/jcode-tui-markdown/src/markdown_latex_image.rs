@@ -10,6 +10,10 @@ use std::sync::{LazyLock, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
+#[path = "latex_fallback_log.rs"]
+pub(crate) mod latex_fallback_log;
+pub(crate) use latex_fallback_log::{report_error, set_log_hook};
+
 // Bump whenever rendering output changes so stale images are not reused.
 const RENDERER_VERSION: u8 = 6;
 const MAX_SOURCE_BYTES: usize = 32 * 1024;
@@ -21,11 +25,6 @@ const MAX_RENDER_DPI: u16 = 480;
 const DPI_PER_CELL_PIXEL: u16 = 9;
 const DPI_QUANTUM: u16 = 12;
 
-static LOG_HOOK: LazyLock<Mutex<fn(&str)>> = LazyLock::new(|| Mutex::new(|_| {}));
-static REPORTED_ERRORS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
-const REPORTED_ERROR_LIMIT: usize = 256;
-static REPORTED_ERRORS_FULL: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 const COPY_SOURCE_CACHE_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,37 +220,6 @@ pub(super) fn test_render_attempts() -> u64 {
 #[cfg(test)]
 pub(super) fn test_toolchain_runs() -> u64 {
     TEST_TOOLCHAIN_RUNS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub(crate) fn set_log_hook(hook: fn(&str)) {
-    if let Ok(mut current) = LOG_HOOK.lock() {
-        *current = hook;
-    }
-}
-
-/// Log each distinct fallback reason once per process. Redraws re-read cached
-/// failures, and alternating reasons defeated a last-error-only check.
-/// Once the set is full, new reasons are dropped rather than evicting old
-/// ones, so cached failures can never be logged again on redraw. The first
-/// dropped reason is logged with a one-time notice so the cap is never silent.
-pub(crate) fn report_error(error: &str) {
-    let message = match REPORTED_ERRORS.lock() {
-        Ok(seen) if seen.contains(error) => return,
-        Ok(mut seen) if seen.len() < REPORTED_ERROR_LIMIT => {
-            seen.insert(error.to_string());
-            error.to_string()
-        }
-        Ok(_) if !REPORTED_ERRORS_FULL.swap(true, std::sync::atomic::Ordering::Relaxed) => {
-            format!(
-                "{error} (LaTeX fallback: {REPORTED_ERROR_LIMIT} distinct reasons logged, \
-                 suppressing further new reasons)"
-            )
-        }
-        _ => return,
-    };
-    if let Ok(hook) = LOG_HOOK.lock() {
-        hook(&message);
-    }
 }
 
 fn handterm_terminal_name(term_program: Option<&str>) -> bool {
@@ -874,27 +842,6 @@ fn validate_source(source: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    static OVERFLOW_NOTICES: std::sync::atomic::AtomicUsize =
-        std::sync::atomic::AtomicUsize::new(0);
-
-    #[test]
-    fn reason_cap_logs_one_overflow_notice_instead_of_going_silent() {
-        set_log_hook(|message| {
-            if message.contains("suppressing further new reasons") {
-                OVERFLOW_NOTICES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-        });
-        for _ in 0..2 {
-            for i in 0..REPORTED_ERROR_LIMIT + 8 {
-                report_error(&format!("overflow probe {i}"));
-            }
-        }
-        assert_eq!(
-            OVERFLOW_NOTICES.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-    }
 
     #[test]
     fn document_wraps_inline_and_display_math_without_shell_escape() {
