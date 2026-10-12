@@ -27,8 +27,10 @@ Every hook key accepts either a single command or an **array of commands**:
 post_tool = ["~/bin/jcode-event-log", "~/bin/other-plugin"]
 ```
 
-Commands in an array run in declaration order, independently (one hook's
-failure never affects the others). This lets several integrations register
+Commands in an array are **launched** in declaration order, independently
+(one hook's failure never affects the others). Observer commands run
+concurrently without waiting for each other, so launch order does not
+guarantee completion order. This lets several integrations register
 against the same hook without overwriting each other.
 
 Env overrides (always win; empty value disables a config hook):
@@ -67,8 +69,8 @@ the model starts generating, and before the first `pre_tool` of the turn. It
 lets integrations detect that the agent is actively working during the
 think/stream window before any tool call runs.
 
-Extra fields: `JCODE_HOOK_MODEL` and `JCODE_HOOK_SOURCE` (`chat`, `resume`,
-or `ambient`).
+Extra fields: `JCODE_HOOK_MODEL` and `JCODE_HOOK_SOURCE` (`chat` for
+streaming turns, `run` for one-shot `jcode run` turns).
 
 ### `turn_end`
 
@@ -126,7 +128,8 @@ and can add text to the result the model sees. It gets the same env fields as
   report findings. Stderr is discarded.
 - Timeouts (`post_tool_feedback_timeout_ms`, default 10s) and spawn failures
   add nothing and are logged.
-- Multiple hooks run in declaration order and their outputs are concatenated.
+- Multiple hooks are launched in declaration order and their outputs are
+  concatenated (feedback hooks run synchronously, one after another).
 
 Keep it fast and filter early: it runs on every tool call, including reads.
 
