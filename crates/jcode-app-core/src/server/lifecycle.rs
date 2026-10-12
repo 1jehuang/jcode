@@ -11,6 +11,21 @@ const TEMP_IDLE_SECS_ENV: &str = "JCODE_TEMP_SERVER_IDLE_SECS";
 const DEFAULT_TEMP_IDLE_SECS: u64 = 30 * 60;
 const TEMP_SERVER_EXIT_CODE: i32 = super::EXIT_IDLE_TIMEOUT;
 
+/// Wait (bounded) for an in-flight session save before the process exits.
+/// Exiting between a checkpoint's snapshot write and journal delete used to
+/// duplicate history on the next load (#1632).
+pub(crate) async fn drain_session_saves_before_exit() {
+    crate::logging::info("Server received SIGTERM, shutting down gracefully");
+    let drained = tokio::task::spawn_blocking(|| {
+        crate::session::drain_saves_for_shutdown(Duration::from_secs(5))
+    })
+    .await
+    .unwrap_or(false);
+    if !drained {
+        crate::logging::warn("Shutdown: a session save was still running after 5s; exiting anyway");
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TemporaryServerPolicy {
     pub(crate) owner_pid: Option<u32>,
@@ -204,6 +219,14 @@ async fn shutdown_temporary_server(
     crate::transport::remove_socket(socket_path);
     crate::transport::remove_socket(debug_socket_path);
     cleanup_temporary_metadata(socket_path);
+    // `std::process::exit` skips `DaemonLockGuard::drop`, so clear the lock
+    // this process holds. Per-run sockets would otherwise leave one stale lock
+    // file behind per run.
+    #[cfg(unix)]
+    super::socket::cleanup_held_daemon_lock();
+    // Same for the build-hash sidecar the registry publisher writes next to
+    // the socket: an ephemeral server must leave nothing behind.
+    let _ = std::fs::remove_file(format!("{}.hash", socket_path.display()));
     std::process::exit(TEMP_SERVER_EXIT_CODE);
 }
 
@@ -235,9 +258,28 @@ pub(crate) fn process_alive(pid: u32) -> bool {
     )
 }
 
+/// Owner liveness on non-Unix hosts.
+///
+/// This used to return `true` unconditionally, which was harmless only while
+/// nothing depended on it. Now that a headless `run` owns a temporary server
+/// through `--owner-pid`, an always-alive answer means the owner's exit is
+/// never noticed on Windows and the server lingers until the idle timeout
+/// (30 minutes by default, and the timer does not even start while workers are
+/// alive). Delegate to the real check the registry already uses.
+///
+/// Note the asymmetry with the Unix arm above: that one treats `EPERM` as
+/// alive, whereas `is_process_running` reports a process it cannot open as
+/// gone. For an owner we spawned ourselves, under the same user, the query
+/// right is available; and erring toward "gone" only retires a temporary
+/// server early, which is the safe direction for one that is supposed to be
+/// ephemeral.
 #[cfg(not(unix))]
-pub(crate) fn process_alive(_pid: u32) -> bool {
-    true
+pub(crate) fn process_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+
+    crate::platform::is_process_running(pid)
 }
 
 #[cfg(test)]
@@ -318,5 +360,18 @@ mod tests {
     fn current_process_is_alive() {
         assert!(process_alive(std::process::id()));
         assert!(!process_alive(0));
+    }
+
+    /// The non-Unix `process_alive` arm delegates to `is_process_running`, and
+    /// that arm only compiles in CI. Exercise the helper itself here so a wrong
+    /// path or signature cannot reach Windows unnoticed.
+    ///
+    /// Pid 0 is deliberately not asserted against the helper: on Unix
+    /// `kill(0, 0)` signals the caller's whole process group and reports
+    /// "alive", which is why `process_alive` screens pid 0 out before calling
+    /// it rather than trusting it.
+    #[test]
+    fn platform_process_running_detects_this_process() {
+        assert!(crate::platform::is_process_running(std::process::id()));
     }
 }

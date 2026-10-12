@@ -110,7 +110,10 @@ impl App {
         // Take pending memory if available (computed in background during last turn)
         let fresh_user_turn = crate::message::ends_with_fresh_user_turn(messages);
         let pending = if fresh_user_turn {
-            crate::memory::take_pending_memory(&self.session.id)
+            crate::memory::take_pending_memory_for_project(
+                &self.session.id,
+                self.session.working_dir.as_deref(),
+            )
         } else {
             None
         };
@@ -178,7 +181,9 @@ impl App {
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. } => {}
+                    | ContentBlock::OpenAIReasoning { .. }
+                    | ContentBlock::ToolReference { .. }
+                    | ContentBlock::ProviderNative { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
@@ -215,7 +220,8 @@ impl App {
             .filter(|e| e.active)
             .map(|e| e.content)
             .collect();
-        let sidecar = crate::sidecar::Sidecar::new();
+        // Honor this session's `/agents memory` choice, like server-side extraction.
+        let sidecar = crate::sidecar::Sidecar::for_session(&self.session);
         match sidecar
             .extract_memories_with_existing(&transcript, &existing)
             .await
@@ -241,7 +247,6 @@ impl App {
 
                     // Create memory entry
                     let entry = crate::memory::MemoryEntry::new(category, memory.content)
-                        .with_id(format!("auto_{}", chrono::Utc::now().timestamp_millis()))
                         .with_source(self.session.id.clone())
                         .with_trust(trust);
 

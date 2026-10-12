@@ -222,9 +222,9 @@ fn multi_account_active_switch_works() {
     })
     .unwrap();
 
-    assert_eq!(active_account_label().as_deref(), Some("openai-1"));
-    set_active_account("openai-2").unwrap();
-    assert_eq!(active_account_label().as_deref(), Some("openai-2"));
+    assert_eq!(active_account_label().as_deref(), Some("openai-otter"));
+    set_active_account("openai-fox").unwrap();
+    assert_eq!(active_account_label().as_deref(), Some("openai-fox"));
 
     let creds = load_credentials().unwrap();
     assert_eq!(creds.access_token, "at_work");

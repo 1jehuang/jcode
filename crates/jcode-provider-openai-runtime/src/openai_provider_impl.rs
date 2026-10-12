@@ -1,3 +1,4 @@
+use super::openai_stream_cancellation::while_consumer_open;
 use super::openai_stream_runtime::{
     stream_response, stream_response_websocket_persistent, try_persistent_ws_continuation,
 };
@@ -93,7 +94,19 @@ impl Provider for OpenAIProvider {
                 .await;
         }
 
-        let input = build_responses_input(messages);
+        let mut input = build_responses_input(messages);
+        insert_additional_tools(&mut input, messages, tools);
+        {
+            // Stored hosted-search items are replayed only when this request
+            // also declares the hosted tool; otherwise send their summary.
+            let model_id = self.model_id().await;
+            let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
+            if native_web_search::hosted_tools_for_request(&model_id, is_chatgpt_mode, tools)
+                .is_empty()
+            {
+                native_web_search::downgrade_web_search_calls(&mut input);
+            }
+        }
         let input_item_count = input.len();
         let request = self.response_request(&input, tools, system).await;
         let model_id = openai_request_model(&request);
@@ -269,15 +282,21 @@ impl Provider for OpenAIProvider {
                     // from the top, which must roll the partial output back.
                     let (attempt_tx, attempt_guard) =
                         jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
-                    let continuation_result = try_persistent_ws_continuation(
-                        &persistent_ws,
-                        &credentials,
-                        &request,
-                        &input,
-                        input_item_count,
-                        &attempt_tx,
+                    let continuation_result = while_consumer_open(
+                        &tx,
+                        try_persistent_ws_continuation(
+                            &persistent_ws,
+                            &credentials,
+                            &request,
+                            &input,
+                            input_item_count,
+                            &attempt_tx,
+                        ),
                     )
                     .await;
+                    let Some(continuation_result) = continuation_result else {
+                        return;
+                    };
                     drop(attempt_tx);
                     let saw_output = attempt_guard.finish().await;
 
@@ -350,6 +369,9 @@ impl Provider for OpenAIProvider {
                 let mut next_retry_delay = None;
 
                 for attempt in 0..MAX_RETRIES {
+                    if tx.is_closed() {
+                        return;
+                    }
                     if attempt > 0 {
                         emit_connection_phase(
                             &tx,
@@ -366,7 +388,12 @@ impl Provider for OpenAIProvider {
                             RETRY_BASE_DELAY_MS,
                             next_retry_delay.take(),
                         );
-                        tokio::time::sleep(delay).await;
+                        if while_consumer_open(&tx, tokio::time::sleep(delay))
+                            .await
+                            .is_none()
+                        {
+                            return;
+                        }
                         jcode_base::logging::info(&format!(
                             "Retrying OpenAI API request (attempt {}/{})",
                             attempt + 1,
@@ -491,6 +518,9 @@ impl Provider for OpenAIProvider {
                         .await
                     };
                     let saw_output = attempt_guard.finish().await;
+                    if tx.is_closed() {
+                        return;
+                    }
 
                     match result {
                         Ok(()) => {
@@ -569,20 +599,10 @@ impl Provider for OpenAIProvider {
                                     cooldown.as_secs()
                                 ));
                             }
-                            // Clear persistent state on fallback
-                            {
-                                let mut guard = persistent_ws.lock().await;
-                                *guard = None;
-                            }
-                            log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Warn,
-                                "persistent_state_reset",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("reason", "fallback_to_https".to_string()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                ],
-                            );
+                            // A failed fresh attempt never published its socket.
+                            // Persistent reuse already invalidates under its own
+                            // lock. Clearing here could erase a replacement
+                            // connection successfully published by another turn.
                             last_error = Some(error);
                             continue;
                         }
@@ -689,6 +709,9 @@ impl Provider for OpenAIProvider {
                 }
             };
 
+            // Transport waits observe consumer closure. Do not cancel this
+            // entire future: an OAuth refresh must finish its rotated-token
+            // persistence and in-memory commit even if its consumer leaves.
             let result = AssertUnwindSafe(stream_task).catch_unwind().await;
 
             if let Err(panic_payload) = result {
@@ -735,6 +758,11 @@ impl Provider for OpenAIProvider {
         !is_chatgpt_web_model(&self.model())
     }
 
+    fn supports_deferred_tools(&self) -> bool {
+        let model = self.model();
+        !is_chatgpt_web_model(&model) && model_supports_additional_tools(&model)
+    }
+
     fn set_model(&self, model: &str) -> Result<()> {
         let model = model.trim();
         if self.is_browser_only() && !is_chatgpt_web_model(model) {
@@ -744,8 +772,9 @@ impl Provider for OpenAIProvider {
                 CHATGPT_WEB_MODEL,
             );
         }
+        let scope = self.catalog_scope();
         if !is_chatgpt_web_model(model)
-            && !jcode_base::provider::known_openai_model_ids()
+            && !jcode_base::provider::known_openai_model_ids_for_scope(&scope)
                 .iter()
                 .any(|known| known == model)
         {
@@ -754,7 +783,7 @@ impl Provider for OpenAIProvider {
                 model,
             );
         }
-        let availability = jcode_base::provider::model_availability_for_account(model);
+        let availability = jcode_base::provider::model_availability_for_scope(&scope, model);
         if !is_chatgpt_web_model(model)
             && availability.state
                 == jcode_base::provider::AccountModelAvailabilityState::Unavailable
@@ -794,7 +823,7 @@ impl Provider for OpenAIProvider {
         if let Ok(mut current) = self.model.try_write() {
             let changed = current.as_str() != model;
             *current = model.to_string();
-            jcode_base::provider::clear_model_unavailable_for_account(model);
+            jcode_base::provider::clear_model_unavailable_for_scope(&self.catalog_scope(), model);
             drop(current);
             if changed {
                 self.clear_persistent_ws_try("manual OpenAI model change reset the response chain");
@@ -820,7 +849,8 @@ impl Provider for OpenAIProvider {
             return vec![CHATGPT_WEB_MODEL.to_string()];
         }
         let mut models =
-            jcode_base::provider::cached_openai_model_ids().unwrap_or_else(|| vec![self.model()]);
+            jcode_base::provider::cached_openai_model_ids_for_scope(&self.catalog_scope())
+                .unwrap_or_else(|| vec![self.model()]);
         if !models.iter().any(|model| model == CHATGPT_WEB_MODEL) {
             models.insert(0, CHATGPT_WEB_MODEL.to_string());
         }
@@ -850,12 +880,13 @@ impl Provider for OpenAIProvider {
         // while the mode stays Auto; routing by mode would send that platform
         // key to the ChatGPT/Codex endpoint and get a 401.
         let account_label = jcode_base::auth::codex::active_account_label();
-        let (access_token, is_chatgpt_mode, credential_identity) = {
+        let (access_token, is_chatgpt_mode, credential_identity, scope) = {
             let creds = self.credentials.read().await;
             (
                 creds.access_token.clone(),
                 Self::is_chatgpt_mode(&creds),
                 Self::catalog_credential_identity(&creds),
+                Self::catalog_scope_for(&creds),
             )
         };
         let catalog = if is_chatgpt_mode {
@@ -913,12 +944,15 @@ impl Provider for OpenAIProvider {
             Err(poisoned) => *poisoned.into_inner() = catalog.reasoning_efforts.clone(),
         }
         self.revalidate_reasoning_effort();
-        jcode_base::provider::persist_openai_model_catalog(&catalog);
+        jcode_base::provider::persist_openai_model_catalog_for_scope(&scope, &catalog);
         if !catalog.context_limits.is_empty() {
             jcode_base::provider::populate_context_limits(catalog.context_limits);
         }
         if !catalog.available_models.is_empty() {
-            jcode_base::provider::populate_account_models(catalog.available_models);
+            jcode_base::provider::populate_account_models_for_scope(
+                &scope,
+                catalog.available_models,
+            );
         }
         Ok(())
     }
@@ -1031,7 +1065,11 @@ impl Provider for OpenAIProvider {
     }
 
     fn available_service_tiers(&self) -> Vec<&'static str> {
-        vec!["priority", "flex"]
+        if jcode_provider_core::service_tier::openai_model_supports_ultrafast(&self.model()) {
+            vec!["priority", "ultrafast", "flex"]
+        } else {
+            vec!["priority", "flex"]
+        }
     }
 
     fn transport(&self) -> Option<String> {
@@ -1143,6 +1181,9 @@ impl Provider for OpenAIProvider {
             }));
         }
         input.extend(build_responses_input(messages));
+        // The compact request declares no tools, so hosted-search history
+        // goes as its text summary.
+        native_web_search::downgrade_web_search_calls(&mut input);
 
         let mut builder = self
             .client

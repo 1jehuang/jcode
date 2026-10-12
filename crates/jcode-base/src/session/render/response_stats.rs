@@ -105,6 +105,7 @@ mod tests {
     }
     fn usage(input: u64) -> Option<StoredTokenUsage> {
         Some(StoredTokenUsage {
+            prompt_tokens: None,
             input_tokens: input,
             output_tokens: 2,
             cache_read_input_tokens: Some(3),

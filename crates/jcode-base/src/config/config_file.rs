@@ -2,6 +2,17 @@ use super::*;
 use crate::storage::jcode_dir;
 use std::path::PathBuf;
 
+type TrustedExternalAuthKey = (
+    Option<PathBuf>,
+    Option<std::time::SystemTime>,
+    Option<u64>,
+    Option<String>,
+);
+type TrustedExternalAuthLists = std::sync::Arc<(Vec<String>, Vec<String>)>;
+static TRUSTED_EXTERNAL_AUTH_MEMO: std::sync::Mutex<
+    Option<(TrustedExternalAuthKey, TrustedExternalAuthLists)>,
+> = std::sync::Mutex::new(None);
+
 impl Config {
     /// Get the config file path
     pub fn path() -> Option<PathBuf> {
@@ -61,47 +72,9 @@ impl Config {
             anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
         })?;
         config.display.apply_legacy_compat();
-        config.repair_frozen_sponsors_optout(&content);
+        // An explicit discovery opt-out is authoritative. Older saves wrote the
+        // default endpoint too, so table shape cannot establish user intent.
         Ok(Some(config))
-    }
-
-    /// Undo a machine-frozen partner-discovery opt-out.
-    ///
-    /// Discovery shipped opt-in (`enabled = false`), and because [`Self::save`]
-    /// serializes the whole struct, any config write during that window baked
-    /// the old default into the user's file. Those users keep discovery
-    /// permanently disabled even after the default flipped to opt-out, and
-    /// telemetry shows this is the single largest discovery blocker.
-    ///
-    /// A machine-written section is exactly `enabled` plus `endpoint` with a
-    /// known default endpoint. A hand-written opt-out (`enabled = false` alone,
-    /// or paired with a custom endpoint) is always respected. Repair happens in
-    /// memory only; the section then disappears on the next save because it
-    /// serializes back to the default.
-    pub(crate) fn repair_frozen_sponsors_optout(&mut self, raw: &str) {
-        if self.sponsors.enabled {
-            return;
-        }
-        let Ok(doc) = raw.parse::<toml::Value>() else {
-            return;
-        };
-        let Some(table) = doc.get("sponsors").and_then(toml::Value::as_table) else {
-            return;
-        };
-        let machine_written = table.len() == 2
-            && table.get("enabled").and_then(toml::Value::as_bool) == Some(false)
-            && table
-                .get("endpoint")
-                .and_then(toml::Value::as_str)
-                .is_some_and(super::is_default_discovery_endpoint);
-        if !machine_written {
-            return;
-        }
-        self.sponsors = SponsorsConfig::default();
-        crate::logging::info(
-            "config: restored integration discovery default (legacy opt-in value was frozen by an \
-             earlier config save)",
-        );
     }
 
     /// Save config to file
@@ -121,7 +94,37 @@ impl Config {
 
     /// Mark the process-cached config as stale and notify dependent caches.
     pub fn invalidate_cache() {
+        // Also drop the trust-list memo: its mtime key can miss two same-length
+        // saves inside one filesystem timestamp tick.
+        if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
+            *guard = None;
+        }
         super::invalidate_config_cache();
+    }
+
+    /// Persist a worker-model default (`/agents global`). None clears it.
+    pub fn set_agent_model_default(target: &str, model: Option<&str>) -> anyhow::Result<()> {
+        let value = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let mut cfg = Self::load_for_update()?;
+        match target {
+            "swarm" => cfg.agents.swarm_model = value,
+            "review" => cfg.autoreview.model = value,
+            "judge" => cfg.autojudge.model = value,
+            "memory" => cfg.agents.memory_model = value,
+            "ambient" => cfg.ambient.model = value,
+            other => anyhow::bail!("Unknown agent model target: {other}"),
+        }
+        cfg.save()
+    }
+
+    /// Persist the Anthropic cache duration for clients and the shared daemon.
+    pub fn set_anthropic_cache_ttl_1h(enabled: bool) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.provider.anthropic_cache_ttl_1h = enabled;
+        cfg.save()
     }
 
     /// Update the copilot premium mode in the config file.
@@ -149,6 +152,13 @@ impl Config {
             model.unwrap_or("(none)"),
             provider.unwrap_or("(auto)")
         ));
+        // The first auto-switch account is the default, so the order follows
+        // whichever path changed it. A failure here must not undo the save.
+        if let Some(route) = provider
+            && let Err(error) = crate::auth::account_pool::sync_order_with_default_route(route)
+        {
+            crate::logging::error(&format!("Could not sync account order: {error}"));
+        }
         Ok(())
     }
 
@@ -609,9 +619,8 @@ impl Config {
             return false;
         }
 
-        let cfg = Self::load();
-        cfg.auth
-            .trusted_external_sources
+        Self::trusted_external_auth_lists()
+            .0
             .iter()
             .any(|value| value.trim().eq_ignore_ascii_case(&source_id))
     }
@@ -621,11 +630,45 @@ impl Config {
             return false;
         };
 
-        let cfg = Self::load();
-        cfg.auth
-            .trusted_external_source_paths
+        Self::trusted_external_auth_lists()
+            .1
             .iter()
             .any(|value| value.trim().eq_ignore_ascii_case(&entry))
+    }
+
+    /// Fresh `(trusted_external_sources, trusted_external_source_paths)`.
+    ///
+    /// Trust checks must observe a just-saved decision immediately, so they
+    /// cannot use the throttled [`config()`] snapshot. Re-parsing config.toml
+    /// on every call was the alternative, and a single auth probe makes a dozen
+    /// of these checks (~0.5ms of TOML parsing each, on the TUI's first frame).
+    /// Memoize the two lists keyed on everything that can change them: the
+    /// config path, the file's mtime and length, and the env override.
+    fn trusted_external_auth_lists() -> TrustedExternalAuthLists {
+        let path = Self::path();
+        let metadata = path.as_ref().and_then(|path| std::fs::metadata(path).ok());
+        let key: TrustedExternalAuthKey = (
+            path,
+            metadata.as_ref().and_then(|meta| meta.modified().ok()),
+            metadata.as_ref().map(std::fs::Metadata::len),
+            std::env::var("JCODE_TRUSTED_EXTERNAL_AUTH_SOURCES").ok(),
+        );
+        if let Ok(guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock()
+            && let Some((cached_key, lists)) = guard.as_ref()
+            && *cached_key == key
+        {
+            return lists.clone();
+        }
+
+        let cfg = Self::load();
+        let lists = std::sync::Arc::new((
+            cfg.auth.trusted_external_sources,
+            cfg.auth.trusted_external_source_paths,
+        ));
+        if let Ok(mut guard) = TRUSTED_EXTERNAL_AUTH_MEMO.lock() {
+            *guard = Some((key, lists.clone()));
+        }
+        lists
     }
 
     /// Startup-sensitive variant that uses the process-cached config snapshot.
@@ -650,11 +693,11 @@ impl Config {
 
         // The global config snapshot can be initialized before an auth flow saves
         // a new path-bound trust decision, or before tests switch JCODE_HOME. Fall
-        // back to a fresh load on cache misses so fast auth probes remain correct
-        // without penalizing the common already-trusted path.
-        Self::load()
-            .auth
-            .trusted_external_source_paths
+        // back to a fresh read on cache misses so fast auth probes remain correct
+        // without penalizing the common already-trusted path. The memo re-stats
+        // config.toml, so it is as fresh as a full reload.
+        Self::trusted_external_auth_lists()
+            .1
             .iter()
             .any(|value| value.trim().eq_ignore_ascii_case(&entry))
     }

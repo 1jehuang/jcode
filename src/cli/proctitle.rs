@@ -38,6 +38,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Pair { .. }) => "jcode pair".to_string(),
         Some(Command::Permissions) => "jcode permissions".to_string(),
         Some(Command::Transcript { .. }) => "jcode transcript".to_string(),
+        Some(Command::Companion { .. }) => "jcode companion".to_string(),
         Some(Command::Dictate { .. }) => "jcode dictate".to_string(),
         Some(Command::SetupHotkey {
             listen_macos_hotkey,

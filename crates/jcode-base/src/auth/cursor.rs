@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Client;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -195,6 +196,15 @@ pub fn read_vscdb_machine_id() -> Result<String> {
     read_vscdb_key(&db_path, "storage.serviceMachineId")
 }
 
+/// The email Cursor IDE is signed in with, read from its local state. Only
+/// the address is read, never a token.
+pub fn vscdb_cached_email() -> Option<String> {
+    let path = cursor_vscdb_paths()
+        .into_iter()
+        .find(|path| path.exists())?;
+    read_vscdb_key(&path, "cursorAuth/cachedEmail").ok()
+}
+
 /// Find the Cursor vscdb file on this platform.
 fn find_cursor_vscdb() -> Result<PathBuf> {
     let candidates = cursor_vscdb_paths();
@@ -250,7 +260,9 @@ fn read_vscdb_key(db_path: &PathBuf, key: &str) -> Result<String> {
         .query_row("SELECT value FROM ItemTable WHERE key = ?1", [key], |row| {
             row.get(0)
         })
-        .with_context(|| format!("Key '{key}' not found in {}", db_path.display()))?;
+        .optional()
+        .with_context(|| format!("Failed to query Cursor state at {}", db_path.display()))?
+        .unwrap_or_default();
     let value = value.trim().to_string();
     if value.is_empty() {
         anyhow::bail!("Key '{}' not found or empty in {}", key, db_path.display());
@@ -295,8 +307,8 @@ pub fn load_api_key() -> Result<String> {
 pub fn save_api_key(key: &str) -> Result<()> {
     let file_path = config_file_path()?;
     crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(key))?;
-
-    crate::env::set_var("CURSOR_API_KEY", key);
+    // File only (#1386): `load_api_key` falls back to this file, and a process
+    // env copy would shadow later edits and leak into child processes.
     Ok(())
 }
 
@@ -335,8 +347,8 @@ pub fn cursor_auth_file_path() -> Result<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        return crate::storage::user_home_path(".cursor/auth.json")
-            .context("No home directory found for Cursor auth.json");
+        crate::storage::user_home_path(".cursor/auth.json")
+            .context("No home directory found for Cursor auth.json")
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]

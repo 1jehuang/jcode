@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 use super::*;
 
 /// Point the process at a temp jcode home and return it with a restore guard.

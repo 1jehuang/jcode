@@ -2,6 +2,9 @@ name: Release
 
 env:
   JCODE_CI: "1"
+  # CI builds without the local parallel-frontend rustc wrapper from
+  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
+  CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
   CARGO_INCREMENTAL: "0"
@@ -21,6 +24,14 @@ permissions:
 jobs:
   create-release:
     name: Create release
+    # Publish only from the canonical repository. A fork that runs this
+    # workflow on a `v*` tag would otherwise create a release carrying that
+    # upstream version number with binaries built from the fork, which is the
+    # same class of accidental-publication path as a fork pushing a package.
+    # Every other job in this workflow needs `create-release`, directly or
+    # transitively, so gating this one job skips the whole workflow: a skipped
+    # dependency skips its dependents.
+    if: github.repository == '1jehuang/jcode'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -175,6 +186,16 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/jcode dist/${{ matrix.artifact }}
           chmod +x dist/${{ matrix.artifact }}
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # The linker's ad-hoc signature uses cargo's hashed output name
+            # (`jcode-<hash>`) as the code-signing identifier, so every release
+            # looked like a different program. macOS Tahoe's "Allow in the Menu
+            # Bar" keys unbundled executables on that identity, which added a new
+            # jcode toggle per update and reset the menu bar item's placement
+            # (#621). Re-sign ad-hoc with a stable identifier.
+            codesign --force --sign - --identifier com.jcode.cli dist/${{ matrix.artifact }}
+            codesign -dv dist/${{ matrix.artifact }} 2>&1 | grep -qx 'Identifier=com.jcode.cli'
+          fi
           cd dist && tar czf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
 
       - name: Upload artifact

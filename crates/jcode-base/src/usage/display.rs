@@ -59,6 +59,10 @@ impl OpenAIUsageData {
 
         if cleared_any_window {
             snapshot.hard_limit_reached = false;
+            // The old server `allowed` flag is no longer authoritative after
+            // rollover. Wait for the existing usage refresh before suggesting
+            // an irreversible banked reset.
+            snapshot.openai_reset_credits = None;
         }
 
         snapshot
@@ -171,5 +175,7 @@ pub fn format_usage_bar(percent: f32, width: usize) -> String {
     let filled = filled.min(width);
     let empty = width.saturating_sub(filled);
     let bar: String = "█".repeat(filled) + &"░".repeat(empty);
-    format!("{} {:.0}%", bar, percent)
+    // Right-align the number so the `%` (and any "· resets" suffix) lines up
+    // across rows with different percentages.
+    format!("{} {:>3.0}%", bar, percent)
 }

@@ -1,0 +1,82 @@
+#!/bin/sh
+# rustc wrapper: compile local, unoptimized crates with rustc's parallel
+# front-end (-Zthreads).
+#
+# Cargo runs this as `rustc-parallel-frontend <rustc> <args...>`, either as
+# build.rustc-wrapper (every crate) or RUSTC_WORKSPACE_WRAPPER (workspace
+# members). Only crates whose sources live outside CARGO_HOME are threaded:
+# this checkout's workspace plus path dependencies such as the sibling Jcode
+# crates. Registry/git dependencies, build-script probes, optimized compiles
+# (release/publish builds and per-package opt-level overrides), and non-compile
+# calls such as `rustc -vV` pass through byte-for-byte.
+#
+# Why: large crates spend most of an opt-level 0 compile in the single-threaded
+# front-end (type/borrow checking). On a 16-thread machine a full re-check of
+# one crate measured jcode-desktop-ui 20.5s -> 3.9s, jcode-base 29.3s -> 8.8s,
+# jcode-app-core 25.7s -> 8.9s, for ~0.1-0.2 GiB more RSS.
+#
+# -Z flags are nightly-only, so RUSTC_BOOTSTRAP=1 is set for the threaded
+# invocations only.
+#
+# Keep this setting stable: rustc's incremental cache is keyed on these flags,
+# so flipping it between builds recompiles the affected crates from scratch.
+#
+# Controls:
+#   JCODE_PARALLEL_FRONTEND=0        pass everything through unchanged
+#   JCODE_FRONTEND_THREADS=<n>       thread count (default: min(8, CPUs))
+
+rustc="$1"
+shift
+
+case "${JCODE_PARALLEL_FRONTEND:-auto}" in
+  0|false|no|off) exec "$rustc" "$@" ;;
+esac
+
+# Cargo sets CARGO_CRATE_NAME and CARGO_MANIFEST_DIR for the crates it compiles.
+# Build scripts that probe the compiler run it without CARGO_CRATE_NAME
+# matching their probe, so they are never given RUSTC_BOOTSTRAP.
+[ -n "${CARGO_CRATE_NAME:-}" ] && [ -n "${CARGO_MANIFEST_DIR:-}" ] || exec "$rustc" "$@"
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+case "$CARGO_MANIFEST_DIR/" in
+  "$cargo_home"/*) exec "$rustc" "$@" ;;
+esac
+
+crate_name=""
+optimized=false
+explicit_threads=false
+expect=""
+for arg in "$@"; do
+  case "$expect" in
+    crate-name) crate_name="$arg"; expect=""; continue ;;
+    codegen)
+      expect=""
+      case "$arg" in
+        opt-level=0) ;;
+        opt-level=*) optimized=true ;;
+      esac
+      continue
+      ;;
+  esac
+  case "$arg" in
+    --crate-name) expect=crate-name ;;
+    -C) expect=codegen ;;
+    -Copt-level=0) ;;
+    -Copt-level=*) optimized=true ;;
+    -Zthreads=*) explicit_threads=true ;;
+  esac
+done
+
+if [ "$crate_name" != "$CARGO_CRATE_NAME" ] || [ "$optimized" = true ] || [ "$explicit_threads" = true ]; then
+  exec "$rustc" "$@"
+fi
+
+threads="${JCODE_FRONTEND_THREADS:-}"
+if [ -z "$threads" ]; then
+  cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)
+  threads=$(( cpus < 8 ? cpus : 8 ))
+fi
+case "$threads" in
+  ''|*[!0-9]*|0) exec "$rustc" "$@" ;;
+esac
+
+RUSTC_BOOTSTRAP=1 exec "$rustc" "$@" "-Zthreads=$threads"
