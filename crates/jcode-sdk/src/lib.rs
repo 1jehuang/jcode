@@ -139,6 +139,7 @@
 
 mod auth;
 mod client;
+pub mod collections;
 mod diagnostics;
 mod errors;
 mod launch;
