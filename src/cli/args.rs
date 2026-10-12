@@ -376,6 +376,18 @@ pub(crate) enum Command {
         session: Option<String>,
     },
 
+    /// Run the desktop companion: opens URLs and terminals, global voice and
+    /// the lid override for the shared server, in this login session
+    Companion {
+        /// Report whether a companion is running and exit
+        #[arg(long)]
+        status: bool,
+
+        /// Do not run the global push-to-talk listener
+        #[arg(long)]
+        no_voice: bool,
+    },
+
     /// Run configured dictation: send to last-focused jcode client or type raw text
     Dictate {
         /// Type the transcript into the focused app instead of sending to jcode

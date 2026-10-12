@@ -31,6 +31,11 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] 
 # Native microphone input is opt-in so CLI builds need no audio development libraries.
 cpal = { version = "0.15", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# logind session check for background microphone use.
+zbus = "5.19"
+async-io = "2.6"
+
 [features]
 voice-capture = ["dep:cpal"]
 

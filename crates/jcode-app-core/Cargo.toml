@@ -59,7 +59,8 @@ base64 = "0.22"
 sha2 = "0.10"
 rand = "0.9.3"
 url = "2"
-open = "5"               # Open URLs in browser
+# Local fallback for the open tool when no `jcode companion` is running.
+jcode-desktop-open = { path = "../jcode-desktop-open" }
 jcode-agent-runtime = { path = "../jcode-agent-runtime" }
 jcode-ambient-types = { path = "../jcode-ambient-types" }
 jcode-notify-email = { path = "../jcode-notify-email" }

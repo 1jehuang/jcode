@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::{fmt, time::Duration};
 
 pub mod dictation;
+pub mod global;
 mod nari;
 pub mod timing;
 pub use nari::{

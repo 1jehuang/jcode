@@ -1453,6 +1453,29 @@ pub async fn run_transcript_command(
     }
 }
 
+pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
+    use crate::companion_client::{CompanionRequest, request_async};
+    if status {
+        match request_async(CompanionRequest::Status, std::time::Duration::from_secs(2)).await {
+            Ok(response) => {
+                println!(
+                    "{} at {} (capabilities: {})",
+                    response.message,
+                    crate::companion_client::socket_path().display(),
+                    response.capabilities.join(", ")
+                );
+                return Ok(());
+            }
+            Err(error) => anyhow::bail!("{error}"),
+        }
+    }
+    jcode_companion::run(jcode_companion::CompanionOptions {
+        voice: !no_voice,
+        ..Default::default()
+    })
+    .await
+}
+
 pub async fn run_dictate_command(type_output: bool) -> Result<()> {
     let run = jcode_voice::dictation::run_configured().await?;
 

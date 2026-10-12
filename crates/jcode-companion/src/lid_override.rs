@@ -87,17 +87,17 @@ impl LidOverride {
     /// (Linux handles the lid via `systemd-inhibit`) or not supported.
     pub fn for_current_platform() -> Option<Self> {
         let backend = platform_backend()?;
-        let journal_path = crate::storage::jcode_dir().ok()?.join(JOURNAL_FILE);
+        let journal_path = jcode_base::storage::jcode_dir().ok()?.join(JOURNAL_FILE);
         // A sandboxed JCODE_HOME (tests, isolated profiles) must never touch
         // machine-wide power settings.
-        if crate::storage::running_with_sandboxed_home() {
+        if jcode_base::storage::running_with_sandboxed_home() {
             return None;
         }
         Some(Self::new(
             backend,
             journal_path,
             std::process::id(),
-            crate::platform::is_process_running,
+            jcode_base::platform::is_process_running,
         ))
     }
 
@@ -132,11 +132,11 @@ impl LidOverride {
                 self.disabled = true;
                 if !self.warned {
                     self.warned = true;
-                    crate::logging::warn(&format!(
+                    jcode_base::logging::warn(&format!(
                         "lid_override: could not block sleep on lid close: {error}"
                     ));
                     if cfg!(target_os = "macos") {
-                        crate::logging::warn(MACOS_SUDOERS_HINT);
+                        jcode_base::logging::warn(MACOS_SUDOERS_HINT);
                     }
                 }
             }
@@ -186,7 +186,7 @@ impl LidOverride {
             return Err(error);
         }
         self.engaged = true;
-        crate::logging::info("lid_override: lid close will not sleep while jcode is working");
+        jcode_base::logging::info("lid_override: lid close will not sleep while jcode is working");
         Ok(())
     }
 
@@ -198,11 +198,11 @@ impl LidOverride {
         match self.read_journal() {
             Some(journal) if journal.owner_pid == self.pid => {
                 if let Err(error) = self.restore_journal(&journal) {
-                    crate::logging::warn(&format!(
+                    jcode_base::logging::warn(&format!(
                         "lid_override: failed to restore lid settings: {error}"
                     ));
                 } else {
-                    crate::logging::info("lid_override: restored original lid settings");
+                    jcode_base::logging::info("lid_override: restored original lid settings");
                 }
             }
             _ => {}
@@ -222,11 +222,11 @@ impl LidOverride {
             return;
         }
         match self.restore_journal(&journal) {
-            Ok(()) => crate::logging::info(&format!(
+            Ok(()) => jcode_base::logging::info(&format!(
                 "lid_override: restored lid settings left by exited process {}",
                 journal.owner_pid
             )),
-            Err(error) => crate::logging::warn(&format!(
+            Err(error) => jcode_base::logging::warn(&format!(
                 "lid_override: failed to restore stale lid settings: {error}"
             )),
         }
@@ -246,7 +246,7 @@ impl LidOverride {
         match serde_json::from_slice(&bytes) {
             Ok(journal) => Some(journal),
             Err(error) => {
-                crate::logging::warn(&format!(
+                jcode_base::logging::warn(&format!(
                     "lid_override: ignoring unreadable journal {}: {error}",
                     self.journal_path.display()
                 ));
