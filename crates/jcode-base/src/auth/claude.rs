@@ -545,6 +545,21 @@ pub fn is_max_subscription() -> bool {
 /// Load credentials for the active Anthropic account.
 /// Falls through Claude Code -> jcode accounts -> OpenCode, preferring non-expired tokens.
 pub fn load_credentials() -> Result<ClaudeCredentials> {
+    load_credentials_with_candidate(None)
+}
+
+/// Resolve normal source precedence as if an approved native snapshot were
+/// imported and selected, without writing accounts, runtime overrides or trust.
+/// Used by native login to validate before committing persistent changes.
+pub fn load_credentials_with_staged_native(
+    credentials: &ClaudeCredentials,
+) -> Result<ClaudeCredentials> {
+    load_credentials_with_candidate(Some(credentials))
+}
+
+fn load_credentials_with_candidate(
+    staged_native: Option<&ClaudeCredentials>,
+) -> Result<ClaudeCredentials> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let mut expired_candidates: Vec<(&str, ClaudeCredentials)> = Vec::new();
@@ -575,7 +590,7 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
     // macOS Keychain is NOT read here: it can trigger an interactive unlock
     // prompt, so it is read once at import time and copied into jcode's own
     // auth.json (see `import_native_credentials_into_account`).
-    if native_source_allowed()
+    if (staged_native.is_some() || native_source_allowed())
         && let Some(creds) = load_claude_code_env_credentials()
     {
         if creds.expires_at > now_ms {
@@ -584,7 +599,11 @@ pub fn load_credentials() -> Result<ClaudeCredentials> {
         expired_candidates.push(("claude-native", creds));
     }
 
-    if let Ok(creds) = load_jcode_credentials() {
+    let jcode_credentials = match staged_native {
+        Some(credentials) => Ok(credentials.clone()),
+        None => load_jcode_credentials(),
+    };
+    if let Ok(creds) = jcode_credentials {
         if creds.expires_at > now_ms {
             return Ok(creds);
         }
@@ -928,30 +947,29 @@ pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> 
         );
     }
 
-    // Never overwrite a different saved account: reuse the account that
-    // already holds these tokens, otherwise store the login under a new label.
-    let accounts = list_accounts()?;
-    let label = accounts
-        .iter()
-        .find(|account| {
-            account.refresh == creds.refresh_token
-                || (!creds.access_token.is_empty() && account.access == creds.access_token)
-        })
-        .map(|account| account.label.clone())
-        .unwrap_or_else(|| {
-            (accounts.len() + 1..)
-                .map(|index| {
-                    crate::auth::account_store::canonical_account_label(ACCOUNT_LABEL_PREFIX, index)
-                })
-                .find(|label| !accounts.iter().any(|account| &account.label == label))
-                .unwrap_or_else(|| {
-                    crate::auth::account_store::next_account_label(
-                        ACCOUNT_LABEL_PREFIX,
-                        accounts.len(),
-                    )
-                })
-        });
-    upsert_account(AnthropicAccount {
+    // Never use the current login target: native reuse must not overwrite an
+    // unrelated active account. Match an existing snapshot or allocate a label
+    // from the latest store, skipping holes and arbitrary user labels.
+    let mut auth = load_auth_file()?;
+    if let Some(account) = auth.anthropic_accounts.iter().find(|account| {
+        account.access == creds.access_token && account.refresh == creds.refresh_token
+    }) {
+        return Ok(account.label.clone());
+    }
+    let mut index = 1;
+    let label = loop {
+        let candidate =
+            crate::auth::account_store::canonical_account_label(ACCOUNT_LABEL_PREFIX, index);
+        if !auth
+            .anthropic_accounts
+            .iter()
+            .any(|account| account.label == candidate)
+        {
+            break candidate;
+        }
+        index += 1;
+    };
+    auth.anthropic_accounts.push(AnthropicAccount {
         label: label.clone(),
         access: creds.access_token,
         refresh: creds.refresh_token,
@@ -959,7 +977,12 @@ pub fn import_native_credentials_into_account_from(creds: ClaudeCredentials) -> 
         email: None,
         subscription_type: creds.subscription_type.or_else(|| Some("max".to_string())),
         scopes: creds.scopes,
-    })
+    });
+    if auth.active_anthropic_account.is_none() {
+        auth.active_anthropic_account = Some(label.clone());
+    }
+    save_auth_file(&auth)?;
+    Ok(label)
 }
 
 pub fn load_opencode_credentials() -> Result<ClaudeCredentials> {
