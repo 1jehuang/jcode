@@ -237,7 +237,7 @@ pub async fn login(no_browser: bool) -> Result<AntigravityTokens> {
     {
         eprintln!("\nOpening browser for Antigravity login...\n");
         eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
-        if let Some(qr) = crate::login_qr::indented_section(
+        if let Some(qr) = crate::auth::login_ui::qr_section(
             &auth_url,
             "Scan this QR on another device if this machine has no browser:",
             "    ",
@@ -300,7 +300,7 @@ async fn manual_login(
 
     eprintln!("\nManual Antigravity auth required.\n");
     eprintln!("Open this URL in your browser:\n\n{}\n", auth_url);
-    if let Some(qr) = crate::login_qr::indented_section(
+    if let Some(qr) = crate::auth::login_ui::qr_section(
         auth_url,
         "Scan this QR on another device if needed:",
         "    ",
@@ -319,7 +319,7 @@ async fn manual_login(
     );
     eprint!("Callback URL: ");
     io::stdout().flush()?;
-    let input = crate::secret_input::read_secret_line()?;
+    let input = crate::auth::login_ui::read_secret_line()?;
     if input.trim().is_empty() {
         anyhow::bail!("No callback URL provided.");
     }

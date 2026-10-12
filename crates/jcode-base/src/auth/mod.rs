@@ -18,7 +18,7 @@ pub mod grok_build;
 pub mod integration;
 pub mod lifecycle;
 pub mod login_diagnostics;
-pub mod login_flows;
+pub mod login_ui;
 pub mod oauth;
 pub(crate) mod refresh_coordinator;
 pub mod refresh_state;

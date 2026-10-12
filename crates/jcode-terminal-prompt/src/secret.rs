@@ -1,9 +1,8 @@
 //! Low-level secret/credential input helpers.
 //!
-//! Reading an API key or verification code from the terminal is a pure
-//! stdin/terminal concern with no dependency on the CLI command layer. Keeping
-//! it in a low-level module lets lower layers (e.g. `auth`) read secrets
-//! without taking a dependency on `cli`.
+//! Reading an API key or verification code from the terminal is a client
+//! concern. The CLI installs this as the login presenter's secret reader, so
+//! the shared auth flows ask for input without touching a terminal directly.
 
 use anyhow::{Context, Result};
 use std::io::{self, IsTerminal, Write};
@@ -94,5 +93,5 @@ pub fn read_secret_line() -> Result<String> {
 // The masking path only runs on a real terminal, so its tests need a pty.
 // Unix-only: openpty/fork have no Windows equivalent here.
 #[cfg(all(test, unix))]
-#[path = "secret_input_pty_tests.rs"]
+#[path = "secret_pty_tests.rs"]
 mod pty_tests;

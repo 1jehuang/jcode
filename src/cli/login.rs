@@ -1006,7 +1006,30 @@ fn login_openai_compatible_flow(
     Ok(())
 }
 
-pub use crate::secret_input::read_secret_line;
+pub use jcode_terminal_prompt::read_secret_line;
+
+/// Terminal implementation of the shared auth flows' login presenter.
+struct TerminalLoginPresenter;
+
+impl crate::auth::login_ui::LoginPresenter for TerminalLoginPresenter {
+    fn qr_section(
+        &self,
+        data: &str,
+        heading: &str,
+        indent: &str,
+        browser_suppressed: bool,
+    ) -> Option<String> {
+        jcode_terminal_prompt::qr::indented_section(data, heading, indent, browser_suppressed)
+    }
+
+    fn read_secret_line(&self) -> Result<String> {
+        jcode_terminal_prompt::read_secret_line()
+    }
+}
+
+pub fn install_terminal_login_presenter() {
+    crate::auth::login_ui::install(Box::new(TerminalLoginPresenter));
+}
 
 fn read_line_trimmed(prompt: &str) -> Result<String> {
     print!("{}", prompt);
@@ -1090,7 +1113,7 @@ async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
     eprintln!("  Open this URL in your browser:");
     eprintln!("    {}", device_resp.verification_uri);
     eprintln!();
-    if let Some(qr) = crate::login_qr::indented_section(
+    if let Some(qr) = jcode_terminal_prompt::qr::indented_section(
         &device_resp.verification_uri,
         "  Or scan this QR on another device to open the verification page:",
         "    ",

@@ -166,7 +166,10 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                         .map(|(p, _)| p)
                         .unwrap_or(path);
 
-                    super::output::print_centered(&format!("Restarting with session {}...", session_id));
+                    super::output::print_centered(&format!(
+                        "Restarting with session {}...",
+                        session_id
+                    ));
 
                     crate::env::set_var("JCODE_RESUMING", "1");
 

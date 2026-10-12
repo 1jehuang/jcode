@@ -19,6 +19,9 @@ pub async fn run() -> Result<()> {
     // Parse once, before startup side effects. Invalid arguments and --help
     // must not harden credential files or create configuration/telemetry state.
     let args = Args::parse();
+    // Interactive login prompts (masked secrets, QR codes) are a terminal
+    // concern. The shared auth flows reach them through this presenter.
+    super::login::install_terminal_login_presenter();
     // Snapshot user-supplied provider env before provider init rewrites it.
     super::provider_init::capture_user_openrouter_model_env();
     // Credential import must refuse existing stores without normal startup
