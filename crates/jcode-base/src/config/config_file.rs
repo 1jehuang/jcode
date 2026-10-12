@@ -108,7 +108,37 @@ impl Config {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("No config directory"))?;
+        std::fs::create_dir_all(parent)?;
+        // Lock a stable sibling, not config.toml's inode, which replacement changes.
+        // Never unlink this file: concurrent processes must all lock the same inode.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join("config.toml.lock"))?;
+        let started = std::time::Instant::now();
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    #[cfg(test)]
+                    role_transaction_tests::contended();
+                    if started.elapsed() >= std::time::Duration::from_secs(30) {
+                        anyhow::bail!("Timed out waiting for config update lock");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
         let mut cfg = Self::load_for_update()?;
+        #[cfg(test)]
+        role_transaction_tests::loaded();
         match target {
             "swarm" => cfg.agents.swarm_model = value,
             "review" => cfg.autoreview.model = value,
@@ -117,7 +147,20 @@ impl Config {
             "ambient" => cfg.ambient.model = value,
             other => anyhow::bail!("Unknown agent model target: {other}"),
         }
-        cfg.save()
+        use std::io::Write;
+        let mut replacement = tempfile::NamedTempFile::new_in(parent)?;
+        match std::fs::metadata(&path) {
+            Ok(metadata) => replacement
+                .as_file()
+                .set_permissions(metadata.permissions())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        replacement.write_all(toml::to_string_pretty(&cfg)?.as_bytes())?;
+        replacement.as_file().sync_all()?;
+        replacement.persist(&path)?;
+        Self::invalidate_cache();
+        Ok(())
     }
 
     /// Persist the Anthropic cache duration for clients and the shared daemon.
@@ -794,6 +837,10 @@ impl Config {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "role_transaction_tests.rs"]
+mod role_transaction_tests;
 
 #[cfg(test)]
 mod issue_1056_tests {
