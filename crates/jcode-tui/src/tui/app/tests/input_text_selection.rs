@@ -315,6 +315,77 @@ fn test_remote_input_selection_cut_and_copy() {
     assert_eq!(app.input, "y  world");
 }
 
+#[test]
+fn test_picker_filter_selection_paste_space_is_inserted() {
+    for command in ["/model", "/models", "/login"] {
+        let mut app = create_test_app();
+        app.input = format!("{command} foo");
+        app.set_input_selection(command.len() + 1, app.input.len());
+        super::input::handle_text_paste(&mut app, " ".to_string());
+        assert_eq!(app.input, format!("{command}  "));
+    }
+}
+
+#[test]
+fn test_picker_filter_selection_paste_space_undo_restores_filter() {
+    for command in ["/model", "/models", "/login"] {
+        let mut app = create_test_app();
+        app.input = format!("{command} foo");
+        app.set_input_selection(command.len() + 1, app.input.len());
+        super::input::handle_text_paste(&mut app, " ".to_string());
+        app.undo_input_change();
+        assert_eq!(app.input, format!("{command} foo"));
+    }
+}
+
+#[test]
+fn test_disconnected_selection_delete_removes_selected_text() {
+    for key in [KeyCode::Backspace, KeyCode::Delete] {
+        let mut app = create_test_app();
+        app.input = "hello big world".to_string();
+        app.set_input_selection(6, 9);
+        super::remote::handle_disconnected_key(&mut app, key, KeyModifiers::empty()).unwrap();
+        assert_eq!(app.input, "hello  world");
+    }
+}
+
+#[test]
+fn test_disconnected_shift_arrow_extends_selection() {
+    let mut app = create_test_app();
+    app.input = "hello big world".to_string();
+    app.cursor_pos = 6;
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Right, KeyModifiers::SHIFT).unwrap();
+    assert_eq!(app.input_selection(), Some((6, 7)));
+}
+
+#[test]
+fn test_disconnected_selection_copy_preserves_draft() {
+    let clipboard = CapturedClipboard::new();
+    let mut app = create_test_app();
+    app.input = "hello big world".to_string();
+    app.set_input_selection(6, 9);
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(
+        (app.input.as_str(), clipboard.text(), app.quit_pending.is_none()),
+        ("hello big world", Some("big".to_string()), true)
+    );
+}
+
+#[test]
+fn test_disconnected_selection_cut_copies_only_selected_text() {
+    let clipboard = CapturedClipboard::new();
+    let mut app = create_test_app();
+    app.input = "hello big world".to_string();
+    app.set_input_selection(6, 9);
+    super::remote::handle_disconnected_key(&mut app, KeyCode::Char('x'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(
+        (app.input.as_str(), clipboard.text()),
+        ("hello  world", Some("big".to_string()))
+    );
+}
+
 fn clipboard_paste_result(
     app: &App,
     content: crate::bus::ClipboardPasteContent,

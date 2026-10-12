@@ -1020,7 +1020,10 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // A habitual space typed after an auto-inserted picker separator would
     // only add noise. Swallow it so command + space + filter still produces
     // a single separator.
-    if text == " " && at_end && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
+    if !replaced_selection
+        && text == " "
+        && at_end
+        && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
     {
         app.input_typing_undo = None;
         return;
