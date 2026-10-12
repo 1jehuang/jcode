@@ -904,8 +904,14 @@ pub(super) fn queue_review_spawn_remote(
 ) {
     app.pending_split_parent_session_id = Some(parent_session_id);
     app.pending_split_startup_message = Some(startup_message);
-    app.pending_split_model_override = model_override;
-    app.pending_split_provider_key_override = provider_key_override;
+    // The server resolves feedback roles from its own defaults and credentials.
+    // Do not overwrite its selection with this host's config after the split.
+    app.pending_split_model_override = if app.is_remote { None } else { model_override };
+    app.pending_split_provider_key_override = if app.is_remote {
+        None
+    } else {
+        provider_key_override
+    };
     app.pending_split_label = Some(label.to_string());
     app.pending_split_started_at = Some(Instant::now());
     app.pending_split_request = true;

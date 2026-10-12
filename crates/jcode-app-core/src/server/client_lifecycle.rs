@@ -2344,8 +2344,8 @@ pub(super) async fn handle_client(
                 .await;
             }
 
-            Request::Split { id } => {
-                handle_split(id, &client_session_id, &agent, &client_event_tx).await;
+            Request::Split { id, feedback_role } => {
+                handle_split(id, &client_session_id, &agent, &client_event_tx, feedback_role.as_deref()).await;
             }
 
             Request::Transfer { id } => {

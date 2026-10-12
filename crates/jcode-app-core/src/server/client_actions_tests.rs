@@ -1,5 +1,8 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
+#[path = "feedback_role_tests.rs"]
+mod feedback_role_tests;
+
 use super::{
     NotifySessionContext, clone_split_session, create_transfer_child_session,
     handle_notify_session, handle_rename_session, handle_resume_all_sessions, handle_set_feature,
@@ -254,7 +257,7 @@ async fn split_empty_live_session_without_persisted_parent() {
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    handle_split(17, &parent.id, &agent, &tx).await;
+    handle_split(17, &parent.id, &agent, &tx, None).await;
     let child = split_response(&mut rx, 17);
     assert_ne!(child.id, parent.id);
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
@@ -301,7 +304,7 @@ async fn split_busy_session_uses_persisted_state_without_waiting_for_agent() {
 
     timeout(
         Duration::from_millis(100),
-        handle_split(18, &parent.id, &agent, &tx),
+        handle_split(18, &parent.id, &agent, &tx, None),
     )
     .await
     .expect("split must not wait on the held streaming Agent lock");
@@ -343,7 +346,7 @@ async fn split_busy_unsaved_session_returns_error_without_waiting() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     timeout(
         Duration::from_millis(100),
-        handle_split(19, &parent_id, &agent, &tx),
+        handle_split(19, &parent_id, &agent, &tx, None),
     )
     .await
     .expect("missing snapshot must not block a busy session");

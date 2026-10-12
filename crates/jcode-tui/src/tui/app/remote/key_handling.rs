@@ -109,21 +109,8 @@ async fn apply_remote_effort_direction(
     }
     let current = app.remote_reasoning_effort_hint();
     let current = current.as_deref();
-    let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
-        .unwrap_or(efforts.len() - 1);
-    let len = efforts.len();
-    let next_index = if direction > 0 {
-        if current_index + 1 >= len {
-            current_index
-        } else {
-            current_index + 1
-        }
-    } else if current_index == 0 {
-        0
-    } else {
-        current_index - 1
-    };
+    let next_index = app_mod::helpers::cycled_effort_index(&efforts, current, direction)
+        .expect("nonempty effort ladder");
     let next_effort = efforts[next_index];
     if Some(next_effort) == current {
         let label = app_mod::effort_display_label(next_effort);
@@ -1650,7 +1637,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Autoreview");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("autoreview".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1707,7 +1694,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Autojudge");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("autojudge".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1742,7 +1729,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Review");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("review".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
@@ -1777,7 +1764,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             } else {
                 app.pending_split_request = false;
                 begin_remote_split_launch(app, "Judge");
-                if let Err(error) = remote.split().await {
+                if let Err(error) = remote.split_feedback(Some("judge".to_string())).await {
                     finish_remote_split_launch(app);
                     app.pending_split_startup_message = None;
                     app.pending_split_parent_session_id = None;
