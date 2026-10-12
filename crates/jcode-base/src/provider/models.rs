@@ -88,6 +88,7 @@ static CONTEXT_LIMIT_CACHE: std::sync::LazyLock<RwLock<HashMap<String, usize>>> 
 
 #[derive(Debug, Clone)]
 struct RuntimeProviderUnavailability {
+    generation: u64,
     reason: String,
     recorded_at: Instant,
     observed_at: SystemTime,
@@ -1017,9 +1018,15 @@ fn record_provider_unavailable_for_key(key: String, reason: &str) {
     }
 
     if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        let generation = if key.starts_with("openai::") {
+            crate::usage::note_openai_unavailability_observed()
+        } else {
+            0
+        };
         unavailable.insert(
             key,
             RuntimeProviderUnavailability {
+                generation,
                 reason: reason.trim().to_string(),
                 recorded_at: Instant::now(),
                 observed_at: SystemTime::now(),
@@ -1105,6 +1112,22 @@ fn is_usage_limit_cooldown_reason(reason: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+/// Compare and remove under each owning lock. No locks are nested, and a
+/// snapshot accepted before a new mark cannot remove that newer observation.
+pub(crate) fn clear_openai_unavailability_through_generation(label: &str, generation: u64) {
+    let key = provider_runtime_scope_key("openai", Some(label));
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write()
+        && unavailable.get(&key).is_some_and(|entry| {
+            entry.generation <= generation
+                && (jcode_provider_core::classify_account_usage_limit(&entry.reason).is_some()
+                    || is_usage_limit_cooldown_reason(&entry.reason))
+        })
+    {
+        unavailable.remove(&key);
+    }
+    super::account_failover::clear_openai_account_exhausted_through_generation(label, generation);
 }
 
 /// Clear the quota cooldown for the exact Claude login whose limits were reset.

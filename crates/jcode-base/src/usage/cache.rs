@@ -21,8 +21,14 @@ pub fn note_openai_usage_limit_observed() {
     OPENAI_USAGE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
-pub(super) fn openai_usage_generation() -> u64 {
+pub(crate) fn openai_usage_generation() -> u64 {
     OPENAI_USAGE_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Called while holding the lock that publishes an OpenAI unavailability mark.
+/// Its version lets a deferred snapshot clear only observations it includes.
+pub(crate) fn note_openai_unavailability_observed() -> u64 {
+    OPENAI_USAGE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 
 /// Shared OpenAI usage cache keyed by account label/token prefix.
@@ -187,6 +193,15 @@ pub(super) fn store_openai_usage_for_generation(
     cache_key: String,
     data: OpenAIUsageData,
 ) {
+    store_openai_usage_for_generation_then(generation, cache_key, data, || {});
+}
+
+pub(crate) fn store_openai_usage_for_generation_then(
+    generation: u64,
+    cache_key: String,
+    data: OpenAIUsageData,
+    before_clear: impl FnOnce(),
+) {
     // A label whose fresh usage confirms the limit is open again. Cleared
     // after the cache lock is released to keep lock order flat.
     let mut reset_label: Option<String> = None;
@@ -227,10 +242,11 @@ pub(super) fn store_openai_usage_for_generation(
         map.insert(cache_key, data);
     }
     if let Some(label) = reset_label {
+        before_clear();
         // Fresh usage says this account is open again (an early or banked
         // reset, or the window rolled over). Drop the usage-limit mark and
         // the provider cooldown so the next resume is actually sent.
-        crate::provider::clear_openai_usage_limit_for_account_label(&label);
+        crate::provider::models::clear_openai_unavailability_through_generation(&label, generation);
     }
 }
 

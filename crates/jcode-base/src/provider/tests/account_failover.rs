@@ -1125,13 +1125,20 @@ fn openai_marked_account_is_rechecked_live_and_the_resume_is_sent() {
             "openai-otter",
             Some(chrono::Utc::now().timestamp() + 5 * 3600),
         );
-        record_provider_unavailable_for_label("openai", "openai-otter", "openai-otter is out of usage");
+        record_provider_unavailable_for_label(
+            "openai",
+            "openai-otter",
+            "openai-otter is out of usage",
+        );
 
         let text = complete_text(&rt, &a);
         crate::usage::set_openai_usage_url_for_tests(None);
         crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
         assert_eq!(text.expect("resume is sent"), "hi from openai-otter");
-        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "usage was fetched live");
+        assert!(
+            hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "usage was fetched live"
+        );
     });
 }
 
@@ -1246,3 +1253,5 @@ fn available_snapshot_keeps_an_auth_cooldown() {
         crate::usage::forget_openai_usage_for_label_for_tests("openai-otter");
     });
 }
+#[path = "quota_snapshot.rs"]
+mod quota_snapshot;

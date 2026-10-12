@@ -21,8 +21,11 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub(crate) use cache::note_openai_unavailability_observed;
 pub use cache::note_openai_usage_limit_observed;
 use cache::*;
+#[cfg(test)]
+pub(crate) use cache::{openai_usage_generation, store_openai_usage_for_generation_then};
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
 pub use openai_reset::{
