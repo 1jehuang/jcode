@@ -141,23 +141,19 @@ fn test_shell_wrapped_reader_is_detected() {
     // poll below can only report `Reading` through the descendant walk, rather
     // than catching the shell inside that window.
     let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut shell_only = StdinState::Unknown;
+    let mut state = StdinState::Unknown;
+    let mut settled_samples = 0;
     while std::time::Instant::now() < settle_deadline {
-        if macos::check(pid) != StdinState::Reading {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-
-    // The wrapper shell itself is parked in `wait4`, which the parked-thread
-    // gate rejects on purpose; the descendant walk is what finds the reader.
-    let shell_only = macos::check(pid);
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut state = StdinState::NotReading;
-    while std::time::Instant::now() < deadline {
+        shell_only = macos::check(pid);
         state = check_process_tree(pid);
-        if state == StdinState::Reading {
-            break;
+        if shell_only == StdinState::NotReading && state == StdinState::Reading {
+            settled_samples += 1;
+            if settled_samples == 3 {
+                break;
+            }
+        } else {
+            settled_samples = 0;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -165,6 +161,10 @@ fn test_shell_wrapped_reader_is_detected() {
     child.kill().ok();
     child.wait().ok();
 
+    assert_eq!(
+        settled_samples, 3,
+        "shell and descendant states should settle"
+    );
     assert_eq!(
         state,
         StdinState::Reading,
