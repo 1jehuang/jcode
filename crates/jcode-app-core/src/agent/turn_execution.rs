@@ -120,12 +120,34 @@ impl Agent {
             );
         }
 
-        self.current_turn_system_reminder =
-            system_reminder.filter(|value| !value.trim().is_empty());
+        let system_reminder = system_reminder.filter(|value| !value.trim().is_empty());
+        // A reminder-only turn (e.g. reload recovery) used to persist an empty
+        // user message, so the model saw a blank prompt and asked about it.
+        // Carry the reminder as the turn's message instead.
+        let (user_message, system_reminder, display_role, continues_turn) = match system_reminder {
+            Some(reminder) if user_message.trim().is_empty() && images.is_empty() => (
+                std::borrow::Cow::Owned(format!("[auto] {}", reminder.trim())),
+                None,
+                display_role.or(Some(crate::session::StoredDisplayRole::System)),
+                true,
+            ),
+            reminder => (
+                std::borrow::Cow::Borrowed(user_message),
+                reminder,
+                display_role,
+                false,
+            ),
+        };
+        self.current_turn_system_reminder = system_reminder;
 
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
-        self.append_user_context_message_with_display_role(user_message, images, display_role)?;
+        self.append_user_context_message_with_display_role(
+            &user_message,
+            images,
+            display_role,
+            continues_turn,
+        )?;
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -142,7 +164,7 @@ impl Agent {
         user_message: &str,
         images: Vec<(String, String)>,
     ) -> Result<()> {
-        self.append_user_context_message_with_display_role(user_message, images, None)
+        self.append_user_context_message_with_display_role(user_message, images, None, false)
     }
 
     fn append_user_context_message_with_display_role(
@@ -150,6 +172,9 @@ impl Agent {
         user_message: &str,
         images: Vec<(String, String)>,
         display_role: Option<crate::session::StoredDisplayRole>,
+        // A synthetic continuation (reload recovery) resumes the previous
+        // turn, so it must not start a new model-usage turn.
+        continues_turn: bool,
     ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
@@ -167,7 +192,7 @@ impl Agent {
             ));
         }
 
-        let starts_turn = blocks.len() > 1 || !user_message.trim().is_empty();
+        let starts_turn = !continues_turn && (blocks.len() > 1 || !user_message.trim().is_empty());
         let input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
         if starts_turn {
             self.begin_model_usage_turn(&input_id);
