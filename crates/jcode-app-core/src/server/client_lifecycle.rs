@@ -1273,6 +1273,7 @@ pub(super) async fn handle_client(
                         info.current_tool_name = None;
                     }
                 }
+                let peer_content = content.clone();
                 start_processing_message(
                     ProcessingMessage {
                         id,
@@ -1301,6 +1302,20 @@ pub(super) async fn handle_client(
                     },
                 )
                 .await;
+                // Other windows attached to this session only see the turn's
+                // stream events, never the message that started it. Tell them
+                // so the prompt (or auto-poke notice) shows up everywhere.
+                if processing_message_id == Some(id) && !peer_content.trim().is_empty() {
+                    super::state::fanout_peer_client_event(
+                        &swarm_members,
+                        &client_session_id,
+                        &client_connection_id,
+                        ServerEvent::PeerUserMessage {
+                            content: peer_content,
+                        },
+                    )
+                    .await;
+                }
             }
 
             Request::Cancel { id } => {

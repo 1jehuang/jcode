@@ -3073,6 +3073,10 @@ pub(in crate::tui::app) fn handle_server_event(
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
             false
         }
+        ServerEvent::PeerUserMessage { content } => {
+            app.handle_peer_user_message(&content);
+            true
+        }
         _ => false,
     }
 }

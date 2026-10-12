@@ -1938,6 +1938,61 @@ impl App {
         true
     }
 
+    /// Fingerprint of the current open todos, matching the one auto-poke
+    /// records when it nudges, so a poke sent elsewhere can be credited here.
+    fn current_incomplete_poke_fingerprint(&self) -> Option<String> {
+        let incomplete: Vec<_> = super::commands::poke_todos(self)
+            .into_iter()
+            .filter(super::commands::is_incomplete_poke_todo)
+            .collect();
+        if incomplete.is_empty() {
+            return None;
+        }
+        serde_json::to_string(&incomplete).ok()
+    }
+
+    /// Another window attached to this session started a turn. Show what it
+    /// sent, and when it was an auto-poke, treat the nudge as already given so
+    /// this window does not send a duplicate one for the same open work.
+    pub(super) fn handle_peer_user_message(&mut self, content: &str) {
+        let text = content.trim();
+        if text.is_empty() {
+            return;
+        }
+        if !super::commands::is_poke_message(text) {
+            self.push_display_message(DisplayMessage::user(text.to_string()));
+            return;
+        }
+        let notice = crate::todo::auto_poke_display_summary(text)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let count = text
+                    .strip_prefix("You have ")
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|n| n.parse::<usize>().ok());
+                match count {
+                    Some(count) => format!(
+                        "👉 {} incomplete todo{}. We poked it for you. /poke off to stop.",
+                        count,
+                        if count == 1 { "" } else { "s" },
+                    ),
+                    None => text.to_string(),
+                }
+            });
+        self.push_display_message(DisplayMessage::system(notice));
+        // Drop an identical continuation this window queued but has not sent.
+        let before = self.queued_messages.len();
+        self.queued_messages.retain(|queued| queued.trim() != text);
+        if self.queued_messages.len() != before && !self.has_queued_followups() {
+            self.pending_queued_dispatch = false;
+        }
+        if let Some(fingerprint) = self.current_incomplete_poke_fingerprint()
+            && text.starts_with("You have ")
+        {
+            self.last_auto_poke_fingerprint = Some(fingerprint);
+        }
+    }
+
     pub(super) fn schedule_queued_dispatch_after_interrupt(&mut self) {
         if self.has_queued_followups() {
             self.pending_queued_dispatch = true;

@@ -449,6 +449,36 @@ pub(super) async fn fanout_live_client_event(
     delivered
 }
 
+/// Deliver `event` to every live attachment of `session_id` except the
+/// connection that caused it.
+pub(super) async fn fanout_peer_client_event(
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    exclude_connection_id: &str,
+    event: ServerEvent,
+) -> usize {
+    let targets = {
+        let mut members = swarm_members.write().await;
+        let Some(member) = members.get_mut(session_id) else {
+            return 0;
+        };
+        member.event_txs.retain(|_, tx| !tx.is_closed());
+        member
+            .event_txs
+            .iter()
+            .filter(|(connection_id, _)| connection_id.as_str() != exclude_connection_id)
+            .map(|(_, tx)| tx.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut delivered = 0;
+    for tx in targets {
+        if tx.send(event.clone()).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
+}
+
 pub(super) fn session_event_fanout_sender(
     session_id: String,
     swarm_members: Arc<RwLock<HashMap<String, SwarmMember>>>,

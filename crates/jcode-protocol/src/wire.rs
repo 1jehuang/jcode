@@ -1274,6 +1274,12 @@ pub enum ServerEvent {
     #[serde(rename = "context_message_added")]
     ContextMessageAdded { id: u64 },
 
+    /// Another client attached to this session started a turn with this
+    /// message. Sent to every other live attachment so each window shows the
+    /// prompt (or the auto-poke notice) instead of only the sender seeing it.
+    #[serde(rename = "peer_user_message")]
+    PeerUserMessage { content: String },
+
     /// Error occurred
     #[serde(rename = "error")]
     Error {
