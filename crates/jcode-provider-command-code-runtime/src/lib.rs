@@ -286,9 +286,7 @@ impl Provider for CommandCodeProvider {
                 head.chars().take(512).collect::<String>()
             );
         };
-        let byte_stream = response
-            .bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        let byte_stream = response.bytes_stream().map_err(std::io::Error::other);
         let text_lines = FramedStringStream::new(byte_stream);
         decode_ndjson_stream(Box::pin(text_lines))
     }
@@ -364,6 +362,10 @@ impl Provider for CommandCodeProvider {
     }
 }
 
+/// Incomplete NDJSON records larger than this are a protocol error. A
+/// newline-free provider response must not grow without a bound.
+pub(crate) const MAX_NDJSON_RECORD_BYTES: usize = 1024 * 1024;
+
 /// Incremental splitter: byte chunks -> complete NDJSON lines.
 pub struct FramedStringStream<S> {
     inner: S,
@@ -400,7 +402,15 @@ where
                 return std::task::Poll::Ready(Some(Ok(text)));
             }
             match self.inner.poll_next_unpin(cx) {
-                std::task::Poll::Ready(Some(Ok(chunk))) => self.buffer.extend_from_slice(&chunk),
+                std::task::Poll::Ready(Some(Ok(chunk))) => {
+                    if self.buffer.len().saturating_add(chunk.len()) > MAX_NDJSON_RECORD_BYTES {
+                        self.buffer.clear();
+                        return std::task::Poll::Ready(Some(Err(anyhow::anyhow!(
+                            "Command Code NDJSON record exceeded {MAX_NDJSON_RECORD_BYTES} bytes"
+                        ))));
+                    }
+                    self.buffer.extend_from_slice(&chunk);
+                }
                 std::task::Poll::Ready(Some(Err(e))) => {
                     return std::task::Poll::Ready(Some(Err(anyhow::anyhow!(e))));
                 }

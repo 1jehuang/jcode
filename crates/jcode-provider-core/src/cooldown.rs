@@ -29,7 +29,7 @@ impl CooldownRecord {
         if self.is_expired(now_ms) {
             return false;
         }
-        let remaining_secs = (self.cooldown_until_ms.saturating_sub(now_ms) + 999) / 1000;
+        let remaining_secs = self.cooldown_until_ms.saturating_sub(now_ms).div_ceil(1000);
         remaining_secs <= STICK_WAIT_MAX_SECS
     }
 }

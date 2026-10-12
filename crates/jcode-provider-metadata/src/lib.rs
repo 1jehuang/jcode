@@ -39,6 +39,7 @@ pub enum LoginProviderTarget {
     Gemini,
     Antigravity,
     Google,
+    CommandCode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

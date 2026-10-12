@@ -19,17 +19,22 @@ pub fn compose_provider(account: CommandCodeAccount, model: &str) -> Result<Comm
     );
     let catalog = provider.catalog.clone();
     let key = provider.api_key.clone();
-    let _ = std::thread::spawn(move || {
+    // Discovery updates the shared catalog in the background. Curated models
+    // are already seeded, so startup does not wait on the network.
+    std::thread::spawn(move || {
         if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
         {
             let _ = runtime.block_on(catalog.refresh_live(&reqwest::Client::new(), &key));
         }
-    })
-    .join();
-    let canonical = crate::models::canonicalize_command_code_model(model, &provider.catalog)
-        .unwrap_or_else(|| crate::models::default_command_code_model().to_string());
+    });
+    let canonical = if model.trim().is_empty() {
+        crate::models::default_command_code_model().to_string()
+    } else {
+        crate::models::canonicalize_command_code_model(model, &provider.catalog)
+            .ok_or_else(|| anyhow!("unsupported Command Code model: {model}"))?
+    };
     provider.set_model(&canonical)?;
     Ok(provider)
 }

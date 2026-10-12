@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use jcode_base::auth::account_store::write_json_secret_locked;
 use jcode_provider_command_code::{
-    OAUTH_LOOPBACK_HOST, OAUTH_LOOPBACK_PORT, OAUTH_TIMEOUT_SECS, PROVIDER_KEY, WHOAMI_URL,
-    WhoamiIdentity, whoami_identity_valid,
+    OAUTH_CALLBACK_PATH, OAUTH_LOOPBACK_HOST, OAUTH_LOOPBACK_PORT, OAUTH_SITE, OAUTH_TIMEOUT_SECS,
+    PROVIDER_KEY, WHOAMI_URL, WhoamiIdentity, whoami_identity_valid,
 };
 use serde::{Deserialize, Serialize};
 
@@ -216,19 +216,126 @@ pub async fn oauth_add_or_replace(
         "Command Code OAuth state mismatch; rejecting callback"
     );
     let identity = verify_whoami(client, &callback.api_key).await?;
-    let account = CommandCodeAccount {
+    let account = verified_account_from_callback(callback, &identity);
+    persist_verified_account(store_path, account, &identity, requested_label)
+}
+
+/// Persist the `/alpha/whoami` identity. Callback `userId` / `userName` are
+/// not authenticated and must not replace the verified account owner.
+pub(crate) fn verified_account_from_callback(
+    callback: OAuthCallback,
+    identity: &WhoamiIdentity,
+) -> CommandCodeAccount {
+    CommandCodeAccount {
         label: None,
         api_key: callback.api_key,
-        user_id: if callback.user_id.is_empty() {
-            identity.user.id.clone()
-        } else {
-            callback.user_id
-        },
-        user_name: callback.user_name,
+        user_id: identity.user.id.clone(),
+        user_name: identity.user.user_name.clone(),
         org_id: identity.user.org_id.clone(),
         key_name: callback.key_name,
-    };
-    persist_verified_account(store_path, account, &identity, requested_label)
+    }
+}
+
+/// Browser URL for the Command Code Studio CLI login. The site POSTs the key
+/// to the loopback `/callback` listener.
+pub fn oauth_authorize_url(state: &str) -> String {
+    let callback = format!("http://localhost:{OAUTH_LOOPBACK_PORT}{OAUTH_CALLBACK_PATH}");
+    format!(
+        "{OAUTH_SITE}/studio/auth/cli?callback={}&state={}",
+        form_encode(&callback),
+        form_encode(state)
+    )
+}
+
+fn form_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// In-progress browser login. Open [`CommandCodeOAuthLogin::url`], then finish.
+pub struct CommandCodeOAuthLogin {
+    pub url: String,
+    state: String,
+}
+
+impl CommandCodeOAuthLogin {
+    pub fn begin() -> Self {
+        let state = issue_oauth_state();
+        let url = oauth_authorize_url(&state);
+        Self { url, state }
+    }
+
+    pub async fn finish(
+        self,
+        store_path: &std::path::Path,
+        requested_label: Option<String>,
+    ) -> Result<String> {
+        let callback = await_oauth_callback(&self.state).await?;
+        let client = reqwest::Client::new();
+        oauth_add_or_replace(store_path, callback, &self.state, &client, requested_label).await
+    }
+}
+
+/// Result of preparing an explicit Command Code login.
+pub enum CommandCodeLoginStep {
+    /// A verified account was imported from `~/.commandcode/auth.json`.
+    Imported { label: String },
+    /// No verified account is available yet; start the browser callback.
+    NeedsBrowser { login: CommandCodeOAuthLogin },
+}
+
+fn snapshot_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::PathBuf::from(home).join(".commandcode/auth.json"))
+}
+
+fn store_has_verified_account(store: &CommandCodeStore) -> bool {
+    store.accounts.iter().any(|account| {
+        !account.api_key.trim().is_empty()
+            && !account.user_id.trim().is_empty()
+            && !account.user_name.trim().is_empty()
+    })
+}
+
+/// Import an existing snapshot when one is present and this store has no
+/// verified account. Otherwise return the browser login the caller must open.
+pub async fn prepare_command_code_login() -> Result<CommandCodeLoginStep> {
+    let client = reqwest::Client::new();
+    let store_path = auth_store_path()?;
+    if !store_has_verified_account(&CommandCodeStore::load(&store_path))
+        && let Some(snapshot) = snapshot_path()
+        && snapshot.exists()
+    {
+        let client = client.clone();
+        match import_command_code_auth_snapshot(&store_path, &snapshot, |key| {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(verify_whoami(&client, key))
+            })
+        }) {
+            Ok(Some(account)) => {
+                return Ok(CommandCodeLoginStep::Imported {
+                    label: account.label.unwrap_or_default(),
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!(
+                    "Could not import ~/.commandcode/auth.json ({error}). Starting browser login."
+                );
+            }
+        }
+    }
+    Ok(CommandCodeLoginStep::NeedsBrowser {
+        login: CommandCodeOAuthLogin::begin(),
+    })
 }
 
 /// Bind the loopback listener and poll for one browser callback until the
@@ -299,9 +406,6 @@ pub fn active_account() -> Option<CommandCodeAccount> {
         .into_iter()
         .find(|account| label.is_none() || account.label.as_deref() == label)
 }
-
-/// The credential check happens on every /alpha/whoami flow; tests inject a
-/// mock. A persisted key always returns the long-lived credential directly.
 
 /// Locked, daemon-authoritative store for Command Code accounts.
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -374,10 +478,12 @@ pub fn persist_verified_account(
     requested_label: Option<String>,
 ) -> Result<String> {
     verify_identity(identity)?;
-    let mut store = CommandCodeStore::load(store_path);
-    let label = upsert_account_locked(&mut store, candidate, requested_label);
-    store.save(store_path)?;
-    Ok(label)
+    jcode_base::auth::account_store::with_account_file_lock(store_path, || {
+        let mut store = CommandCodeStore::load(store_path);
+        let label = upsert_account_locked(&mut store, candidate, requested_label);
+        jcode_base::storage::write_json_secret(store_path, &store)?;
+        Ok(label)
+    })
 }
 
 /// One-time import of the external snapshot file (~/.commandcode/auth.json).
@@ -388,12 +494,11 @@ pub fn import_command_code_auth_snapshot(
     snapshot_path: &std::path::Path,
     whoami: impl Fn(&str) -> Result<WhoamiIdentity>,
 ) -> Result<Option<CommandCodeAccount>> {
-    let store = CommandCodeStore::load(store_path);
-    if store.imported_at.is_some() {
+    if CommandCodeStore::load(store_path).imported_at.is_some() {
         return Ok(None);
     }
     let snapshot = jcode_base::storage::read_json::<serde_json::Value>(snapshot_path).ok();
-    let candidate = snapshot.and_then(|value| {
+    let imported = snapshot.and_then(|value| {
         let api_key = value
             .get("apiKey")
             .and_then(serde_json::Value::as_str)
@@ -403,44 +508,56 @@ pub fn import_command_code_auth_snapshot(
         if api_key.is_empty() {
             None
         } else {
-            Some((api_key, value))
+            let identity = whoami(&api_key);
+            Some((api_key, value, identity))
         }
     });
-    let imported = match candidate {
-        Some((api_key, value)) => Some((api_key.clone(), value, whoami(&api_key))),
-        None => None,
-    };
-    let mut store = CommandCodeStore::load(store_path);
-    store
-        .imported_at
-        .get_or_insert_with(|| Utc::now().to_rfc3339());
-    store.save(store_path)?;
-    match imported {
-        Some((api_key, value, identity_result)) => {
-            let identity = identity_result?;
-            let account = CommandCodeAccount {
-                label: None,
-                api_key,
-                user_id: identity.user.id.clone(),
-                user_name: identity.user.user_name.clone(),
-                org_id: identity.user.org_id.clone(),
-                key_name: value
-                    .get("keyName")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-            };
-            let label = persist_verified_account(store_path, account, &identity, None)?;
-            let store = CommandCodeStore::load(store_path);
-            Ok(Some(
-                store
-                    .accounts
-                    .into_iter()
-                    .find(|account| account.label.as_deref() == Some(label.as_str()))
-                    .context("persisted account missing after save")?,
-            ))
+    jcode_base::auth::account_store::with_account_file_lock(store_path, || {
+        let mut store = CommandCodeStore::load(store_path);
+        if store.imported_at.is_some() {
+            return Ok(None);
         }
-        None => Ok(None),
-    }
+        store.imported_at = Some(Utc::now().to_rfc3339());
+        match imported {
+            Some((api_key, value, identity_result)) => {
+                let identity = match identity_result {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        jcode_base::storage::write_json_secret(store_path, &store)?;
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = verify_identity(&identity) {
+                    jcode_base::storage::write_json_secret(store_path, &store)?;
+                    return Err(error);
+                }
+                let account = CommandCodeAccount {
+                    label: None,
+                    api_key,
+                    user_id: identity.user.id.clone(),
+                    user_name: identity.user.user_name.clone(),
+                    org_id: identity.user.org_id.clone(),
+                    key_name: value
+                        .get("keyName")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                };
+                let label = upsert_account_locked(&mut store, account, None);
+                jcode_base::storage::write_json_secret(store_path, &store)?;
+                Ok(Some(
+                    store
+                        .accounts
+                        .into_iter()
+                        .find(|account| account.label.as_deref() == Some(label.as_str()))
+                        .context("persisted account missing after save")?,
+                ))
+            }
+            None => {
+                jcode_base::storage::write_json_secret(store_path, &store)?;
+                Ok(None)
+            }
+        }
+    })
 }
 
 /// Startup adapter: perform the one-time import with the real whoami gate.

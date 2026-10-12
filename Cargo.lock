@@ -4429,6 +4429,7 @@ dependencies = [
  "jcode-fuzzy",
  "jcode-logging",
  "jcode-productivity-core",
+ "jcode-provider-command-code-runtime",
  "jcode-provider-core",
  "jcode-selfdev-types",
  "jcode-session-types",

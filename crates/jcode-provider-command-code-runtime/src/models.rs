@@ -45,6 +45,12 @@ pub struct CommandCodeCatalog {
     snapshot: RwLock<CatalogSnapshot>,
 }
 
+impl Default for CommandCodeCatalog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandCodeCatalog {
     pub fn new() -> Self {
         Self {
@@ -186,10 +192,9 @@ pub fn canonicalize_command_code_model(
     if let Some((_, canonical)) = MODEL_ALIASES
         .iter()
         .find(|(alias, _)| alias.eq_ignore_ascii_case(candidate))
+        && models.iter().any(|model| model == canonical)
     {
-        if models.iter().any(|model| model == canonical) {
-            return Some((*canonical).to_string());
-        }
+        return Some((*canonical).to_string());
     }
     None
 }

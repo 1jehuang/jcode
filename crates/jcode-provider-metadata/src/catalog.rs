@@ -1290,9 +1290,9 @@ pub const COMMAND_CODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDe
     auth_state_key: LoginProviderAuthStateKey::ExternalImport,
     auth_status_method: "OAuth",
     aliases: &["commandcode", "cmdc"],
-    menu_detail: "Command Code OAuth login via ~/.commandcode/auth.json",
+    menu_detail: "Command Code browser OAuth, or import ~/.commandcode/auth.json",
     recommended: false,
-    target: LoginProviderTarget::AutoImport,
+    target: LoginProviderTarget::CommandCode,
     order: LoginProviderSurfaceOrder::new(Some(14), Some(14), None, Some(14), Some(14)),
 };
 

@@ -23,11 +23,11 @@ pub fn command_code_pool_candidates(accounts: &[String], affinity: Option<&str>)
         .filter(|label| !jcode_provider_core::is_account_in_cooldown(PROVIDER_KEY, label))
         .cloned()
         .collect();
-    if let Some(affinity) = affinity {
-        if let Some(pos) = eligible.iter().position(|label| label == affinity) {
-            let bound = eligible.remove(pos);
-            eligible.insert(0, bound);
-        }
+    if let Some(affinity) = affinity
+        && let Some(pos) = eligible.iter().position(|label| label == affinity)
+    {
+        let bound = eligible.remove(pos);
+        eligible.insert(0, bound);
     }
     eligible
 }

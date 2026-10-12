@@ -1629,10 +1629,11 @@ impl NativeProviderKind {
                     .iter()
                     .find(|a| store.active.as_deref() == a.label.as_deref())
                     .or_else(|| store.accounts.first());
-                if let Some(acc) = account {
-                    if !acc.user_id.trim().is_empty() && !acc.api_key.trim().is_empty() {
-                        return Ok(format!("Command Code account {} resolved", acc.user_id));
-                    }
+                if let Some(acc) = account
+                    && !acc.user_id.trim().is_empty()
+                    && !acc.api_key.trim().is_empty()
+                {
+                    return Ok(format!("Command Code account {} resolved", acc.user_id));
                 }
                 anyhow::bail!("no active Command Code credentials found in store");
             }

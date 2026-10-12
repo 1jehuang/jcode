@@ -6,7 +6,7 @@ use jcode_message_types::{ContentBlock, Message, Role};
 
 #[test]
 fn command_code_ndjson_maps_events_and_drops_junk() {
-    assert!(matches!(decode_line("blank"), None));
+    assert!(decode_line("blank").is_none());
     assert!(matches!(
         decode_line(r#"{"type":"text-delta","text":"hi"}"#),
         Some(jcode_message_types::StreamEvent::TextDelta(_))
@@ -25,7 +25,7 @@ fn command_code_workspace_context_is_bounded() {
         context
             .agents
             .as_ref()
-            .map_or(true, |text| text.len() <= 32_768)
+            .is_none_or(|text| text.len() <= 32_768)
     );
 }
 
@@ -142,6 +142,18 @@ async fn command_code_finish_step_usage_precedes_one_terminal() {
         }
     }
     assert_eq!(terminals, 1);
+}
+
+#[tokio::test]
+async fn framed_stream_rejects_an_unbounded_record() {
+    let chunk = bytes::Bytes::from(vec![b'x'; crate::MAX_NDJSON_RECORD_BYTES + 1]);
+    let input = futures::stream::iter(vec![Ok::<_, std::io::Error>(chunk)]);
+    let mut framed = crate::FramedStringStream::new(Box::pin(input));
+    let item = framed.next().await.expect("oversized record");
+    assert!(
+        item.is_err(),
+        "newline-free records must not grow without a cap"
+    );
 }
 
 #[test]

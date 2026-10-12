@@ -30,12 +30,11 @@ static CACHE: OnceLock<Mutex<HashMap<PathBuf, (Instant, ProjectContext)>>> = Onc
 pub fn project_context_cache(cwd: impl AsRef<Path>) -> ProjectContext {
     let cwd = cwd.as_ref().to_path_buf();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(lock) = cache.lock() {
-        if let Some((at, value)) = lock.get(&cwd) {
-            if at.elapsed() < Duration::from_secs(30) {
-                return value.clone();
-            }
-        }
+    if let Ok(lock) = cache.lock()
+        && let Some((at, value)) = lock.get(&cwd)
+        && at.elapsed() < Duration::from_secs(30)
+    {
+        return value.clone();
     }
     let git = |args: &[&str]| {
         Command::new("git")
@@ -105,21 +104,6 @@ pub fn project_context_cache(cwd: impl AsRef<Path>) -> ProjectContext {
     value
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn non_git_context_serializes_required_command_code_config_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let value = serde_json::to_value(project_context_cache(dir.path())).unwrap();
-        assert_eq!(value["isGitRepo"], false);
-        assert_eq!(value["currentBranch"], "");
-        assert_eq!(value["mainBranch"], "");
-        assert_eq!(value["gitStatus"], "");
-        assert!(value["recentCommits"].as_array().unwrap().is_empty());
-    }
-}
 fn read_agents(cwd: &Path) -> Option<String> {
     let mut path = Some(cwd);
     let mut out = String::new();
@@ -135,4 +119,20 @@ fn read_agents(cwd: &Path) -> Option<String> {
         path = dir.parent();
     }
     (!out.is_empty()).then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_git_context_serializes_required_command_code_config_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = serde_json::to_value(project_context_cache(dir.path())).unwrap();
+        assert_eq!(value["isGitRepo"], false);
+        assert_eq!(value["currentBranch"], "");
+        assert_eq!(value["mainBranch"], "");
+        assert_eq!(value["gitStatus"], "");
+        assert!(value["recentCommits"].as_array().unwrap().is_empty());
+    }
 }

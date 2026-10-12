@@ -23,6 +23,7 @@ pub enum RuntimeProviderId {
     Gemini,
     Antigravity,
     AutoImport,
+    CommandCode,
 }
 
 impl RuntimeProviderId {
@@ -43,6 +44,7 @@ impl RuntimeProviderId {
             Self::Gemini => "gemini",
             Self::Antigravity => "antigravity",
             Self::AutoImport => "auto-import",
+            Self::CommandCode => "command-code",
         }
     }
 
@@ -63,6 +65,7 @@ impl RuntimeProviderId {
             Self::Gemini => "Gemini",
             Self::Antigravity => "Antigravity",
             Self::AutoImport => "Auto Import",
+            Self::CommandCode => "Command Code",
         }
     }
 }

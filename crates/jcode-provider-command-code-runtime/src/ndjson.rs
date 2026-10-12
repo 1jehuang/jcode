@@ -34,23 +34,10 @@ fn event(value: Value) -> Option<StreamEvent> {
                 .cloned()
                 .unwrap_or(Value::Null),
         }),
-        "finish-step" | "finish" => {
-            let reason = obj
-                .get("rawFinishReason")
-                .or_else(|| obj.get("finishReason"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if reason.as_deref() == Some("error") {
-                return Some(StreamEvent::Error {
-                    message: "Command Code upstream ended the turn with finishReason \"error\""
-                        .into(),
-                    retry_after_secs: None,
-                });
-            }
-            Some(StreamEvent::MessageEnd {
-                stop_reason: reason,
-            })
-        }
+        // `finish-step` is an intermediate boundary. Treating it as MessageEnd
+        // makes the decoder drop every later record, including the real `finish`.
+        "finish-step" => finish_step_event(obj),
+        "finish" => Some(finish_event(obj)),
         "usage" => {
             let usage = obj
                 .get("totalUsage")
@@ -81,6 +68,39 @@ fn event(value: Value) -> Option<StreamEvent> {
             })
         }
         _ => None,
+    }
+}
+
+fn finish_reason(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    obj.get("rawFinishReason")
+        .or_else(|| obj.get("finishReason"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn finish_error() -> StreamEvent {
+    StreamEvent::Error {
+        message: "Command Code upstream ended the turn with finishReason \"error\"".into(),
+        retry_after_secs: None,
+    }
+}
+
+fn finish_step_event(obj: &serde_json::Map<String, Value>) -> Option<StreamEvent> {
+    if finish_reason(obj).as_deref() == Some("error") {
+        Some(finish_error())
+    } else {
+        None
+    }
+}
+
+fn finish_event(obj: &serde_json::Map<String, Value>) -> StreamEvent {
+    let reason = finish_reason(obj);
+    if reason.as_deref() == Some("error") {
+        finish_error()
+    } else {
+        StreamEvent::MessageEnd {
+            stop_reason: reason,
+        }
     }
 }
 
@@ -115,26 +135,22 @@ where
                                 .unwrap_or(part.trim()),
                         ) && raw.get("type").and_then(Value::as_str) == Some("finish-step")
                             && !done
+                            && let Some(usage) = raw.get("totalUsage").or_else(|| raw.get("usage"))
                         {
-                            if let Some(usage) = raw.get("totalUsage").or_else(|| raw.get("usage"))
-                            {
-                                let _ = tx
-                                    .send(Ok(StreamEvent::TokenUsage {
-                                        input_tokens: usage
-                                            .get("inputTokens")
-                                            .and_then(Value::as_u64),
-                                        output_tokens: usage
-                                            .get("outputTokens")
-                                            .and_then(Value::as_u64),
-                                        cache_read_input_tokens: usage
-                                            .pointer("/inputTokenDetails/cacheReadTokens")
-                                            .and_then(Value::as_u64),
-                                        cache_creation_input_tokens: usage
-                                            .pointer("/inputTokenDetails/cacheWriteTokens")
-                                            .and_then(Value::as_u64),
-                                    }))
-                                    .await;
-                            }
+                            let _ = tx
+                                .send(Ok(StreamEvent::TokenUsage {
+                                    input_tokens: usage.get("inputTokens").and_then(Value::as_u64),
+                                    output_tokens: usage
+                                        .get("outputTokens")
+                                        .and_then(Value::as_u64),
+                                    cache_read_input_tokens: usage
+                                        .pointer("/inputTokenDetails/cacheReadTokens")
+                                        .and_then(Value::as_u64),
+                                    cache_creation_input_tokens: usage
+                                        .pointer("/inputTokenDetails/cacheWriteTokens")
+                                        .and_then(Value::as_u64),
+                                }))
+                                .await;
                         }
                         if let Some(value) = decode_line(part) {
                             if done {

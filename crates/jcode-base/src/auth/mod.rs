@@ -593,7 +593,7 @@ impl AuthStatus {
                     AuthState::NotConfigured
                 }
             }
-            _ => self.state_for_key(provider.auth_state_key),
+            _ => account_store::state_for_login_target(self, provider),
         }
     }
 
@@ -936,7 +936,7 @@ impl AuthStatus {
                     AuthValidationMethod::PresenceCheck,
                 )
             }
-            _ => assessment_for_key(self, provider.auth_state_key, state),
+            _ => account_store::assessment_for_login_target(self, provider, state),
         };
 
         ProviderAuthAssessment {

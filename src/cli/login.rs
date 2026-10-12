@@ -12,6 +12,7 @@ use crate::provider_catalog::{
 use super::provider_init::{ProviderChoice, login_provider_for_choice};
 use crate::provider_catalog::save_named_api_key;
 
+mod command_code;
 mod existing_key_notice;
 mod google;
 mod jcode_device;
@@ -326,6 +327,11 @@ pub async fn run_login_provider(
         }
     } else {
         match provider.target {
+            LoginProviderTarget::CommandCode => {
+                command_code::login_command_code_flow(account_label, options.no_browser)
+                    .await
+                    .map(|_| LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::AutoImport => {
                 let imported = super::provider_init::maybe_run_external_auth_auto_import_flow()
                     .await?

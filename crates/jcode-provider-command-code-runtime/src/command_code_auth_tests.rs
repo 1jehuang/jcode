@@ -3,8 +3,9 @@
 //! and the minimal text-delta stream decode.
 
 use crate::auth::{
-    CommandCodeAccount, import_command_code_auth_snapshot, oauth_state_matches,
-    parse_callback_from_request, persist_verified_account,
+    CommandCodeAccount, CommandCodeStore, OAuthCallback, import_command_code_auth_snapshot,
+    oauth_authorize_url, oauth_state_matches, parse_callback_from_request,
+    persist_verified_account, verified_account_from_callback,
 };
 use crate::{CommandCodeProvider, decode_text_only_stream};
 use futures::StreamExt;
@@ -181,6 +182,74 @@ fn command_code_persistence_requires_verified_identity() {
         Some("cmd-1".to_string()),
     );
     assert!(rejected.is_err(), "empty whoami identity must fail closed");
+}
+
+#[test]
+fn oauth_account_uses_whoami_identity_not_callback() {
+    let account = verified_account_from_callback(
+        OAuthCallback {
+            api_key: "key-1".into(),
+            state: "state-1".into(),
+            user_id: "callback-user".into(),
+            user_name: "Callback Name".into(),
+            key_name: Some("dev".into()),
+        },
+        &valid_identity("verified-user", "Verified Name"),
+    );
+    assert_eq!(account.user_id, "verified-user");
+    assert_eq!(account.user_name, "Verified Name");
+    assert_eq!(account.org_id.as_deref(), Some("org-1"));
+    assert_eq!(account.api_key, "key-1");
+}
+
+#[test]
+fn overlapping_account_persists_keep_both_records() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = dir.path().join("accounts.json");
+    let account = |key: &str, user: &str| CommandCodeAccount {
+        label: None,
+        api_key: key.into(),
+        user_id: user.into(),
+        user_name: user.into(),
+        org_id: None,
+        key_name: None,
+    };
+    let left = store.clone();
+    let right = store.clone();
+    let first = std::thread::spawn(move || {
+        persist_verified_account(
+            &left,
+            account("key-1", "u1"),
+            &valid_identity("u1", "user-1"),
+            Some("one".into()),
+        )
+    });
+    let second = std::thread::spawn(move || {
+        persist_verified_account(
+            &right,
+            account("key-2", "u2"),
+            &valid_identity("u2", "user-2"),
+            Some("two".into()),
+        )
+    });
+    first.join().expect("first persist").expect("saved");
+    second.join().expect("second persist").expect("saved");
+    let loaded = CommandCodeStore::load(&store);
+    let mut labels = loaded
+        .accounts
+        .iter()
+        .filter_map(|account| account.label.clone())
+        .collect::<Vec<_>>();
+    labels.sort();
+    assert_eq!(labels, vec!["one".to_string(), "two".to_string()]);
+}
+
+#[test]
+fn oauth_authorize_url_targets_studio_cli_callback() {
+    let url = oauth_authorize_url("abc");
+    assert!(url.starts_with("https://commandcode.ai/studio/auth/cli?"));
+    assert!(url.contains("callback=http%3A%2F%2Flocalhost%3A5959%2Fcallback"));
+    assert!(url.contains("state=abc"));
 }
 
 #[test]

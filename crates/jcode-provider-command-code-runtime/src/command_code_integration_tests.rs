@@ -4,7 +4,7 @@ use super::{
 };
 #[test]
 fn test_command_code_multi_turn_context_and_model_contract() {
-    assert!(bounded_context().cwd.len() > 0);
+    assert!(!bounded_context().cwd.is_empty());
     assert_eq!(
         super::models::canonicalize_command_code_model(
             "glm-5.3",
@@ -25,6 +25,22 @@ fn unverified_account_is_rejected_before_composition() {
         key_name: None,
     };
     assert!(compose_provider(account, "glm").is_err());
+}
+
+#[test]
+fn explicit_unknown_model_is_rejected() {
+    let account = CommandCodeAccount {
+        label: None,
+        api_key: "key".into(),
+        user_id: "u".into(),
+        user_name: "u".into(),
+        org_id: None,
+        key_name: None,
+    };
+    let Err(error) = compose_provider(account, "totally-unknown") else {
+        panic!("explicit unknown models must not be replaced with the default");
+    };
+    assert!(error.to_string().contains("totally-unknown"), "{error}");
 }
 
 #[test]

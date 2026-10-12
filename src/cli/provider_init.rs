@@ -1440,6 +1440,15 @@ pub async fn login_and_bootstrap_provider(
             crate::env::set_var("JCODE_ACTIVE_PROVIDER", "antigravity");
             Arc::new(jcode_provider_antigravity_runtime::AntigravityProvider::new())
         }
+        LoginProviderTarget::CommandCode => {
+            disable_subscription_runtime_mode();
+            clear_initial_model_provider();
+            crate::env::set_var("JCODE_ACTIVE_PROVIDER", "command-code");
+            crate::provider::external::instantiate_external_provider(
+                crate::provider::external::COMMAND_CODE_RUNTIME,
+            )
+            .ok_or_else(|| anyhow::anyhow!("Command Code credentials are unavailable"))?
+        }
         LoginProviderTarget::Google => {
             anyhow::bail!("Google login cannot be used as a model provider bootstrap");
         }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, RwLock, Weak};
 
 static FILE_MUTEXES: LazyLock<StdMutex<HashMap<String, Weak<StdMutex<()>>>>> =
@@ -21,13 +21,99 @@ fn account_file_lock(path: &Path) -> Arc<StdMutex<()>> {
     lock
 }
 
+/// Run a read-modify-write against one account file without another writer in
+/// this process loading a stale snapshot between the read and the write.
+pub fn with_account_file_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let lock = account_file_lock(path);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    f()
+}
+
 /// Save credentials atomically while serializing writers in this process.
 pub fn write_json_secret_locked<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    let lock = account_file_lock(path);
-    let _guard = lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    jcode_storage::write_json_secret(path, value)
+    with_account_file_lock(path, || jcode_storage::write_json_secret(path, value))
+}
+
+/// Auth state for login targets that do not have their own `AuthStatus` field.
+pub(super) fn state_for_login_target(
+    status: &super::AuthStatus,
+    provider: crate::provider_catalog::LoginProviderDescriptor,
+) -> super::AuthState {
+    if matches!(
+        provider.target,
+        crate::provider_catalog::LoginProviderTarget::CommandCode
+    ) {
+        if command_code_account_configured() {
+            super::AuthState::Available
+        } else {
+            super::AuthState::NotConfigured
+        }
+    } else {
+        status.state_for_key(provider.auth_state_key)
+    }
+}
+
+pub(super) fn assessment_for_login_target(
+    status: &super::AuthStatus,
+    provider: crate::provider_catalog::LoginProviderDescriptor,
+    state: super::AuthState,
+) -> (
+    super::AuthCredentialSource,
+    String,
+    super::AuthExpiryConfidence,
+    super::AuthRefreshSupport,
+    super::AuthValidationMethod,
+) {
+    if matches!(
+        provider.target,
+        crate::provider_catalog::LoginProviderTarget::CommandCode
+    ) {
+        let configured = state == super::AuthState::Available;
+        return (
+            if configured {
+                super::AuthCredentialSource::JcodeManagedFile
+            } else {
+                super::AuthCredentialSource::None
+            },
+            if configured {
+                "Command Code account in command_code_accounts.json".to_string()
+            } else {
+                "Command Code login not configured".to_string()
+            },
+            super::AuthExpiryConfidence::NotApplicable,
+            super::AuthRefreshSupport::NotApplicable,
+            super::AuthValidationMethod::PresenceCheck,
+        );
+    }
+    super::assessment_for_key(status, provider.auth_state_key, state)
+}
+
+fn command_code_account_configured() -> bool {
+    let Ok(dir) = crate::storage::app_config_dir() else {
+        return false;
+    };
+    let Ok(value) =
+        crate::storage::read_json::<serde_json::Value>(&dir.join("command_code_accounts.json"))
+    else {
+        return false;
+    };
+    value
+        .get("accounts")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|accounts| {
+            accounts.iter().any(|account| {
+                json_field_nonempty(account, "api_key")
+                    && json_field_nonempty(account, "user_id")
+                    && json_field_nonempty(account, "user_name")
+            })
+        })
+}
+
+fn json_field_nonempty(value: &serde_json::Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
 }
 
 /// Runtime (process-local) active-account overrides, keyed by provider
