@@ -74,12 +74,8 @@ jcode-terminal-image = { path = "../jcode-terminal-image" }
 # Streaming
 tokio-stream = "0.1"
 
-# TUI
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-
-# Markdown & syntax highlighting
-unicode-width = "0.2"   # Unicode character display width
+# NOTE: no ratatui/crossterm here. Terminal rendering and prompts belong to the
+# CLI and jcode-tui, so the shared runtime never touches a terminal.
 
 # PDF parsing (behind feature flag)
 jcode-pdf = { path = "../jcode-pdf", optional = true }

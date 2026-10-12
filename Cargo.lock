@@ -3192,6 +3192,7 @@ dependencies = [
  "tokio-stream",
  "tokio-tungstenite",
  "toml",
+ "unicode-width",
  "windows-sys 0.59.0",
 ]
 
@@ -3222,7 +3223,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "core-graphics",
- "crossterm",
  "dirs",
  "flate2",
  "futures",
@@ -3259,7 +3259,6 @@ dependencies = [
  "libc",
  "open",
  "rand 0.9.3",
- "ratatui",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -3271,7 +3270,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "unicode-width",
  "url",
  "urlencoding",
  "uuid",
