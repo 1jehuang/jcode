@@ -118,7 +118,10 @@ pub fn clear_all_cooldowns() {
     }
 }
 
-pub fn prune_expired_cooldowns(records: &mut HashMap<String, CooldownRecord>, now_ms: u64) -> usize {
+pub fn prune_expired_cooldowns(
+    records: &mut HashMap<String, CooldownRecord>,
+    now_ms: u64,
+) -> usize {
     let before = records.len();
     records.retain(|_, record| !record.is_expired(now_ms));
     before.saturating_sub(records.len())
@@ -139,7 +142,10 @@ pub fn load_durable_cooldowns(path: &Path) -> Result<HashMap<String, CooldownRec
     Ok(records)
 }
 
-pub fn save_durable_cooldowns(path: &Path, records: &HashMap<String, CooldownRecord>) -> Result<()> {
+pub fn save_durable_cooldowns(
+    path: &Path,
+    records: &HashMap<String, CooldownRecord>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -224,7 +230,8 @@ mod tests {
 
     #[test]
     fn test_durable_save_and_load() {
-        let temp = std::env::temp_dir().join(format!("test_cooldown_{}.json", rand::random::<u64>()));
+        let temp =
+            std::env::temp_dir().join(format!("test_cooldown_{}.json", rand::random::<u64>()));
         let mut records = HashMap::new();
         let now_ms = now_unix_ms();
         records.insert(

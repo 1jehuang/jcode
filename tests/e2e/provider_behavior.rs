@@ -1005,7 +1005,9 @@ async fn test_command_code_isolated_daemon_streaming() -> Result<()> {
             continue;
         };
         match event? {
-            ServerEvent::TextDelta { text } if text.contains("Hello from Command Code native streaming!") => {
+            ServerEvent::TextDelta { text }
+                if text.contains("Hello from Command Code native streaming!") =>
+            {
                 saw_text = true;
             }
             ServerEvent::Done { id } if id == msg_id => {
@@ -1018,7 +1020,10 @@ async fn test_command_code_isolated_daemon_streaming() -> Result<()> {
 
     abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
 
-    assert!(saw_text, "Did not receive streamed TextDelta from isolated daemon");
+    assert!(
+        saw_text,
+        "Did not receive streamed TextDelta from isolated daemon"
+    );
     assert!(saw_done, "Did not receive Done event for message");
 
     Ok(())

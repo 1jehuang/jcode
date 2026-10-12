@@ -1531,20 +1531,25 @@ impl NativeProviderKind {
                 let store_path = jcode_provider_command_code_runtime::auth::auth_store_path().ok();
                 let store = store_path
                     .as_ref()
-                    .map(|p| jcode_provider_command_code_runtime::auth::CommandCodeStore::load(p.as_path()))
+                    .map(|p| {
+                        jcode_provider_command_code_runtime::auth::CommandCodeStore::load(
+                            p.as_path(),
+                        )
+                    })
                     .unwrap_or_default();
                 let model = std::env::var("JCODE_COMMAND_CODE_MODEL")
                     .unwrap_or_else(|_| "zai-org/GLM-5.3".to_string());
-                let runtime = jcode_provider_command_code_runtime::integration::compose_provider_from_store(
-                    &store,
-                    &model,
-                ).unwrap_or_else(|_| {
-                    jcode_provider_command_code_runtime::CommandCodeProvider::new(
-                        String::new(),
-                        "command-code-offline".to_string(),
-                        "zai-org/GLM-5.3".to_string(),
+                let runtime =
+                    jcode_provider_command_code_runtime::integration::compose_provider_from_store(
+                        &store, &model,
                     )
-                });
+                    .unwrap_or_else(|_| {
+                        jcode_provider_command_code_runtime::CommandCodeProvider::new(
+                            String::new(),
+                            "command-code-offline".to_string(),
+                            "zai-org/GLM-5.3".to_string(),
+                        )
+                    });
                 std::sync::Arc::new(runtime)
             }
         };
@@ -1623,7 +1628,9 @@ impl NativeProviderKind {
             Self::CommandCode => {
                 let store_path = jcode_provider_command_code_runtime::auth::auth_store_path()
                     .context("resolve Command Code auth store path")?;
-                let store = jcode_provider_command_code_runtime::auth::CommandCodeStore::load(store_path.as_path());
+                let store = jcode_provider_command_code_runtime::auth::CommandCodeStore::load(
+                    store_path.as_path(),
+                );
                 let account = store
                     .accounts
                     .iter()
