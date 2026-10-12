@@ -5,13 +5,23 @@
 //! Paste events and key events are both handled on the TUI event-loop thread,
 //! so a thread-local timestamp is sufficient and keeps `App` untouched.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(150);
+const RAW_PASTE_BURST_WINDOW: Duration = Duration::from_millis(100);
+const RAW_PASTE_ACTIVE_WINDOW: Duration = Duration::from_millis(200);
+const RAW_PASTE_BURST_CHAR_THRESHOLD: usize = 8;
 
 thread_local! {
     static LAST_PASTE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static RAW_CHAR_ARRIVALS: RefCell<VecDeque<Instant>> = const { RefCell::new(VecDeque::new()) };
+    static RAW_PASTE_ACTIVE_UNTIL: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+fn raw_key_stream_detection_enabled() -> bool {
+    cfg!(windows) || cfg!(test)
 }
 
 /// Record that a bracketed-paste event was just handled.
@@ -29,10 +39,62 @@ pub(super) fn consume_paste_trailing_enter() -> bool {
     })
 }
 
+/// Record one printable character that arrived through the key-event path.
+///
+/// Windows Terminal / conhost can deliver a Ctrl+V paste as ordinary key events
+/// instead of a crossterm `Event::Paste` (#928). If enough printable characters
+/// arrive inside a human-impossible window, a following bare Enter is treated as
+/// pasted newline content rather than as submit. The heuristic is production-
+/// enabled only on Windows, where the missing paste event has been observed.
+pub(super) fn note_raw_key_stream_char(ch: char) {
+    if !raw_key_stream_detection_enabled() || ch.is_control() {
+        return;
+    }
+
+    let now = Instant::now();
+    RAW_CHAR_ARRIVALS.with(|arrivals| {
+        let mut arrivals = arrivals.borrow_mut();
+        while arrivals
+            .front()
+            .is_some_and(|at| now.duration_since(*at) > RAW_PASTE_BURST_WINDOW)
+        {
+            arrivals.pop_front();
+        }
+        arrivals.push_back(now);
+        if arrivals.len() >= RAW_PASTE_BURST_CHAR_THRESHOLD {
+            RAW_PASTE_ACTIVE_UNTIL.with(|cell| cell.set(Some(now + RAW_PASTE_ACTIVE_WINDOW)));
+        }
+    });
+}
+
+/// Returns true when a bare Enter is probably a newline embedded in a raw
+/// key-stream paste. Consuming the Enter extends the active window so consecutive
+/// pasted lines stay protected until normal character arrivals resume.
+pub(super) fn consume_raw_paste_enter() -> bool {
+    if !raw_key_stream_detection_enabled() {
+        return false;
+    }
+
+    let now = Instant::now();
+    RAW_PASTE_ACTIVE_UNTIL.with(|cell| match cell.get() {
+        Some(until) if now <= until => {
+            cell.set(Some(now + RAW_PASTE_ACTIVE_WINDOW));
+            true
+        }
+        Some(_) => {
+            cell.set(None);
+            false
+        }
+        None => false,
+    })
+}
+
 /// Test hook: age the recorded paste so a subsequent Enter submits normally.
 #[cfg(test)]
 pub(in crate::tui::app) fn expire_for_test() {
     LAST_PASTE.with(|cell| cell.set(None));
+    RAW_CHAR_ARRIVALS.with(|arrivals| arrivals.borrow_mut().clear());
+    RAW_PASTE_ACTIVE_UNTIL.with(|cell| cell.set(None));
 }
 
 /// Test hook: bytes of a real 1x1 PNG, for drop tests that need content
