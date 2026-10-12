@@ -1054,7 +1054,12 @@ fn load_prompt_overlay_files_from_dir(
 
     if let Some(files) = extra_files {
         for path_str in files.iter() {
-            let path = expand_home_path(path_str);
+            let expanded = expand_home_path(path_str);
+            let path = if expanded.is_absolute() {
+                expanded
+            } else {
+                project_dir.join(expanded)
+            };
             if let Some((content, size)) = load_file(&path, &path.display().to_string()) {
                 total_chars += size;
                 contents.push(content);
