@@ -722,7 +722,7 @@ pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
         return Ok(Some(session.id));
     }
 
-    if let Some(db) = opencode_db_with_session(resume_id) {
+    if let Some(db) = opencode_db_with_session(resume_id)? {
         let session = import_opencode_db_session(&db, resume_id)?;
         return Ok(Some(session.id));
     }
@@ -1307,7 +1307,7 @@ fn find_opencode_session_file(session_id: &str) -> Result<PathBuf> {
 }
 
 pub fn import_opencode_session(session_id: &str) -> Result<Session> {
-    if let Some(db) = opencode_db_with_session(session_id) {
+    if let Some(db) = opencode_db_with_session(session_id)? {
         return import_opencode_db_session(&db, session_id);
     }
     let session_path = find_opencode_session_file(session_id)?;
@@ -1315,12 +1315,11 @@ pub fn import_opencode_session(session_id: &str) -> Result<Session> {
 }
 
 /// The OpenCode database path, if it exists and contains `session_id`.
-fn opencode_db_with_session(session_id: &str) -> Option<PathBuf> {
-    let db = crate::opencode_db::existing_db_path()?;
-    crate::opencode_db::load_session(&db, session_id)
-        .ok()
-        .flatten()
-        .map(|_| db)
+fn opencode_db_with_session(session_id: &str) -> Result<Option<PathBuf>> {
+    let Some(db) = crate::opencode_db::existing_db_path() else {
+        return Ok(None);
+    };
+    Ok(crate::opencode_db::load_session(&db, session_id)?.map(|_| db))
 }
 
 /// Import one session from OpenCode's SQLite store (OpenCode 1.17+).
