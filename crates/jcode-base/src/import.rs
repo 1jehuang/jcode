@@ -1011,9 +1011,18 @@ fn append_text_message(
 }
 
 fn finalize_imported_session(
+    session: Session,
+    created_at: DateTime<Utc>,
+    updated_at: Option<DateTime<Utc>>,
+) -> Result<Session> {
+    finalize_imported_session_with_omissions(session, created_at, updated_at, 0)
+}
+
+fn finalize_imported_session_with_omissions(
     mut session: Session,
     created_at: DateTime<Utc>,
     updated_at: Option<DateTime<Utc>>,
+    omitted: usize,
 ) -> Result<Session> {
     // Never overwrite a jcode-side continuation with a shorter external
     // transcript. This protection applies to every importer, not only Claude.
@@ -1027,12 +1036,25 @@ fn finalize_imported_session(
         return Ok(existing);
     }
 
-    let original_messages = session.messages.len();
+    let original_messages = session.messages.len().saturating_add(omitted);
     session.created_at = created_at;
     session.updated_at = updated_at.unwrap_or(created_at);
     session.last_active_at = updated_at.or(Some(created_at));
     session.status = SessionStatus::Closed;
     normalize_imported_history(&mut session, true);
+    if omitted > 0 {
+        let mut messages = std::mem::take(&mut session.messages);
+        messages.insert(0, StoredMessage {
+            id: crate::id::new_id("message"),
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: format!("[Imported session: {omitted} older messages were omitted for a fast, provider-safe resume. Use session_search to inspect earlier external history.]"),
+                cache_control: None,
+            }],
+            display_role: None, timestamp: None, tool_duration_ms: None, token_usage: None,
+        });
+        session.replace_messages(messages);
+    }
     session.save()?;
     crate::logging::info(&format!(
         "Imported session prepared: source_messages={original_messages} kept_messages={}",
@@ -1340,10 +1362,16 @@ pub fn import_opencode_db_session(db_path: &Path, session_id: &str) -> Result<Se
             .map(truncate_title)
             .unwrap_or_else(|| format!("OpenCode session {}", session_id)),
     );
-    let messages = crate::opencode_db::load_messages(db_path, session_id, None)?;
-    let mut provider_key = meta.provider_id.clone();
-    let mut model = meta.model_id.clone();
-    for msg in messages {
+    let extracted = crate::opencode_db::load_import_messages(
+        db_path,
+        session_id,
+        IMPORT_HISTORY_MAX_MESSAGES,
+        IMPORT_HISTORY_MAX_TEXT_BYTES,
+        IMPORT_BLOCK_MAX_TEXT_BYTES,
+    )?;
+    let mut provider_key = meta.provider_id.clone().or(extracted.provider_id);
+    let mut model = meta.model_id.clone().or(extracted.model_id);
+    for msg in extracted.messages {
         let role = if msg.role == "user" {
             Role::User
         } else {
@@ -1362,7 +1390,12 @@ pub fn import_opencode_db_session(db_path: &Path, session_id: &str) -> Result<Se
     }
     session.provider_key = provider_key.or_else(|| Some("opencode".to_string()));
     session.model = model;
-    finalize_imported_session(session, meta.created_at, Some(meta.updated_at))
+    finalize_imported_session_with_omissions(
+        session,
+        meta.created_at,
+        Some(meta.updated_at),
+        extracted.omitted,
+    )
 }
 
 pub fn import_opencode_session_from_path(
@@ -1564,3 +1597,7 @@ pub fn import_cursor_session_from_path(
 #[cfg(test)]
 #[path = "import_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "import_sqlite_budget_tests.rs"]
+mod sqlite_budget_tests;

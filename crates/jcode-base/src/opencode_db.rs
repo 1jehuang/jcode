@@ -208,6 +208,204 @@ pub fn load_messages(
     load_messages_with(path, session_id, limit, false)
 }
 
+/// Import-only retention result. Search and previews deliberately keep their
+/// existing extraction policy.
+pub(crate) struct ImportMessages {
+    pub messages: Vec<OpenCodeDbMessage>,
+    pub omitted: usize,
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
+}
+
+/// Scan text in bounded UTF-8 chunks, retaining only a provider-safe tail.
+/// SQLite still parses each JSON part, but neither a whole text part nor the
+/// full history is copied into Rust. Older turns are scanned for exact omission
+/// diagnostics and the original oldest-first metadata fallback.
+/// The 32 KiB blob chunks bound Rust payloads, not SQLite's internal JSON
+/// allocations or total database RSS. A partial UTF-8 scalar carries at most
+/// three bytes into the next chunk. Blob slicing also preserves embedded NULs.
+pub(crate) fn load_import_messages(
+    path: &Path,
+    session_id: &str,
+    max_messages: usize,
+    max_bytes: usize,
+    max_block_bytes: usize,
+) -> Result<ImportMessages> {
+    anyhow::ensure!(
+        max_messages > 0 && max_block_bytes >= 128 && max_block_bytes <= max_bytes,
+        "Invalid OpenCode import retention budgets"
+    );
+    let db = open(path)?;
+    let mut stmt = db.prepare(
+        "SELECT id, time_created, json_extract(data, '$.role'), \
+         json_extract(data, '$.providerID'), json_extract(data, '$.modelID') \
+         FROM message WHERE session_id = ?1 \
+         AND json_extract(data, '$.role') IN ('user', 'assistant') \
+         ORDER BY time_created DESC, id DESC",
+    )?;
+    let mut parts = db.prepare(
+        "SELECT id FROM part WHERE message_id = ?1 \
+         AND json_extract(data, '$.type') = 'text' \
+         AND COALESCE(json_extract(data, '$.synthetic'), 0) = 0 ORDER BY id",
+    )?;
+    let mut chunk = db.prepare(
+        "SELECT substr(CAST(json_extract(data, '$.text') AS BLOB), ?2, 32768) \
+         FROM part WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query(params![session_id])?;
+    let mut result = ImportMessages {
+        messages: Vec::new(),
+        omitted: 0,
+        provider_id: None,
+        model_id: None,
+    };
+    let mut kept_bytes = 0usize;
+    let mut tail_full = false;
+    'messages: while let Some(row) = rows.next()? {
+        let mut message = OpenCodeDbMessage {
+            id: row.get(0)?,
+            created_at: ms(row.get(1)?),
+            role: row.get(2)?,
+            provider_id: row.get(3)?,
+            model_id: row.get(4)?,
+            text: String::new(),
+        };
+        if message.provider_id.is_some() {
+            result.provider_id = message.provider_id.clone();
+        }
+        if message.model_id.is_some() {
+            result.model_id = message.model_id.clone();
+        }
+        let mut text = ImportText::new(max_block_bytes);
+        let mut part_rows = parts.query(params![message.id])?;
+        let mut has_part = false;
+        while let Some(part) = part_rows.next()? {
+            let id: String = part.get(0)?;
+            // Whitespace-only parts were ignored by the original reader. A
+            // bounded first pass avoids retaining them or their separators.
+            let mut usable = false;
+            scan_import_part(&mut chunk, &id, |s| {
+                usable |= !s.trim().is_empty();
+                !usable
+            })?;
+            if !usable {
+                continue;
+            }
+            if tail_full || result.messages.len() >= max_messages {
+                tail_full = true;
+                result.omitted += 1;
+                continue 'messages;
+            }
+            if has_part {
+                text.push("\n");
+            }
+            has_part = true;
+            scan_import_part(&mut chunk, &id, |s| {
+                text.push(s);
+                true
+            })?;
+        }
+        let Some(text) = text.finish() else {
+            continue;
+        };
+        if tail_full
+            || result.messages.len() >= max_messages
+            || (!result.messages.is_empty() && kept_bytes.saturating_add(text.len()) > max_bytes)
+        {
+            tail_full = true;
+            result.omitted += 1;
+            continue;
+        }
+        kept_bytes = kept_bytes.saturating_add(text.len());
+        message.text = text;
+        result.messages.push(message);
+    }
+    result.messages.reverse();
+    Ok(result)
+}
+
+fn scan_import_part(
+    stmt: &mut rusqlite::Statement<'_>,
+    id: &str,
+    mut visit: impl FnMut(&str) -> bool,
+) -> Result<()> {
+    let mut offset = 1i64;
+    let mut pending = Vec::new();
+    loop {
+        let bytes: Option<Vec<u8>> = stmt.query_row(params![id, offset], |row| row.get(0))?;
+        let Some(bytes) = bytes.filter(|s| !s.is_empty()) else {
+            anyhow::ensure!(pending.is_empty(), "Incomplete UTF-8 OpenCode text part");
+            break;
+        };
+        offset += bytes.len() as i64;
+        pending.extend_from_slice(&bytes);
+        let valid = match std::str::from_utf8(&pending) {
+            Ok(_) => pending.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(error) => return Err(error.into()),
+        };
+        if !visit(std::str::from_utf8(&pending[..valid])?) {
+            break;
+        }
+        pending.drain(..valid);
+    }
+    Ok(())
+}
+
+struct ImportText {
+    prefix: String,
+    bytes: usize,
+    trimmed_bytes: usize,
+    cap: usize,
+}
+
+impl ImportText {
+    fn new(cap: usize) -> Self {
+        Self {
+            prefix: String::new(),
+            bytes: 0,
+            trimmed_bytes: 0,
+            cap,
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        for ch in text.chars() {
+            if self.bytes == 0 && ch.is_whitespace() {
+                continue;
+            }
+            self.bytes = self.bytes.saturating_add(ch.len_utf8());
+            if self.bytes <= self.cap {
+                self.prefix.push(ch);
+            }
+            if !ch.is_whitespace() {
+                self.trimmed_bytes = self.bytes;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Option<String> {
+        if self.trimmed_bytes == 0 {
+            return None;
+        }
+        if self.trimmed_bytes <= self.cap {
+            self.prefix.truncate(self.trimmed_bytes);
+            return Some(self.prefix);
+        }
+        let suffix = format!(
+            "\n[... {} bytes omitted from imported history]",
+            self.trimmed_bytes - self.cap
+        );
+        let mut end = self.cap.saturating_sub(suffix.len()).min(self.prefix.len());
+        while !self.prefix.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.prefix.truncate(end);
+        self.prefix.push_str(&suffix);
+        Some(self.prefix)
+    }
+}
+
 /// Like [`load_messages`] without a limit, but for session search: with
 /// `include_tools` the text also carries `reasoning` parts and `tool` part
 /// input and output, exactly like the legacy JSON store's search text.
