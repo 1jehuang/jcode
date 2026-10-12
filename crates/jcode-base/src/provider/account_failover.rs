@@ -199,6 +199,8 @@ pub(crate) const UNKNOWN_RESET_EXHAUSTION_SECS: i64 = 30 * 60;
 
 #[derive(Clone, Debug)]
 struct AccountExhaustion {
+    /// OpenAI observation version, assigned under the ledger lock.
+    generation: u64,
     /// Reset time reported by the provider.
     resets_at: Option<i64>,
     /// When it was recorded (used when `resets_at` is unknown).
@@ -259,17 +261,36 @@ pub(crate) fn record_account_exhausted(
     // resets now. Treat it as unknown, or the mark would clear at once and
     // the next turn would resend the doomed request or bounce back to it.
     let resets_at = resets_at.filter(|at| *at > now);
-    ACCOUNT_EXHAUSTION
+    let mut ledger = ACCOUNT_EXHAUSTION
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(
-            (kind, label.to_string()),
-            AccountExhaustion {
-                resets_at,
-                recorded_at: now,
-                fingerprint,
-            },
-        );
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let generation = if kind == AccountProviderKind::OpenAi {
+        crate::usage::note_openai_unavailability_observed()
+    } else {
+        0
+    };
+    ledger.insert(
+        (kind, label.to_string()),
+        AccountExhaustion {
+            generation,
+            resets_at,
+            recorded_at: now,
+            fingerprint,
+        },
+    );
+}
+
+pub(super) fn clear_openai_account_exhausted_through_generation(label: &str, generation: u64) {
+    let mut ledger = ACCOUNT_EXHAUSTION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let key = (AccountProviderKind::OpenAi, label.to_string());
+    if ledger
+        .get(&key)
+        .is_some_and(|entry| entry.generation <= generation)
+    {
+        ledger.remove(&key);
+    }
 }
 
 pub(crate) fn clear_account_exhausted(kind: AccountProviderKind, label: &str) {
