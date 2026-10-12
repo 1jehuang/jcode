@@ -217,6 +217,7 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         .clone()
         .unwrap_or_else(|| PathBuf::from("jcode"));
     let mut command = Command::new(&binary);
+    crate::process::no_console_window(&mut command);
     command
         // `--no-update` turns off the bridge's own background update check, which
         // also runs for source builds.
@@ -568,13 +569,23 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
 }
 
 fn spawn_detached(program: &Path, args: &[&str]) -> std::io::Result<()> {
-    Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(drop)
+        .stderr(Stdio::null());
+    // A GUI host (Jcode Desktop) has no console to share, so each
+    // console-subsystem child would open its own window. CREATE_NO_WINDOW
+    // gives the daemon a hidden console its own children inherit, and a new
+    // process group keeps the host's Ctrl+C or exit from reaching it.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | crate::process::CREATE_NO_WINDOW);
+    }
+    command.spawn().map(drop)
 }
 
 /// Block until `path` accepts connections, or the timeout expires.
