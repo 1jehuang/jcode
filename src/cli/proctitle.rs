@@ -23,6 +23,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Update) => "jcode update".to_string(),
         Some(Command::Version { .. }) => "jcode version".to_string(),
         Some(Command::PruneBuilds { .. }) => "jcode prune-builds".to_string(),
+        Some(Command::PublishBuild { .. }) => "jcode publish-build".to_string(),
         Some(Command::Usage { .. }) => "jcode usage".to_string(),
         Some(Command::Telemetry(_)) => "jcode telemetry".to_string(),
         Some(Command::SelfDev { .. }) => "jcode:selfdev".to_string(),

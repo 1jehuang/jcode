@@ -1,8 +1,11 @@
 mod paths;
 mod platform_support;
+mod publication;
+pub use publication::{PreparedBuildChannel, publish_prepared_build};
 mod prune;
 mod source_state;
 mod storage_helpers;
+mod store_lock;
 mod version_gc;
 
 pub use paths::{
@@ -35,6 +38,8 @@ pub use version_gc::{
     DEFAULT_KEEP_RECENT_VERSIONS, VersionPruneReport,
     prune_old_versions as prune_old_versions_on_idle, prune_old_versions_in,
 };
+
+pub use store_lock::{BuildStoreLock, acquire_build_store_lock};
 
 use anyhow::Result;
 use chrono::Utc;
@@ -88,6 +93,7 @@ impl BuildManifest {
 
     /// Save manifest to disk
     pub fn save(&self) -> Result<()> {
+        let _store_lock = acquire_build_store_lock()?;
         let path = manifest_path()?;
         storage::write_json(&path, self)
     }
@@ -174,6 +180,7 @@ impl BuildManifest {
 }
 
 pub fn complete_pending_activation_for_session(session_id: &str) -> Result<Option<String>> {
+    let _store_lock = acquire_build_store_lock()?;
     let mut manifest = BuildManifest::load()?;
     let Some(pending) = manifest.pending_activation.clone() else {
         return Ok(None);
@@ -192,6 +199,7 @@ pub fn complete_pending_activation_for_session(session_id: &str) -> Result<Optio
 }
 
 pub fn rollback_pending_activation_for_session(session_id: &str) -> Result<Option<String>> {
+    let _store_lock = acquire_build_store_lock()?;
     let mut manifest = BuildManifest::load()?;
     let Some(pending) = manifest.pending_activation.clone() else {
         return Ok(None);
@@ -214,7 +222,12 @@ pub fn rollback_pending_activation_for_session(session_id: &str) -> Result<Optio
 }
 
 /// Install a binary at a specific immutable version path.
+///
+/// Callers that subsequently publish references MUST hold an outer
+/// [`acquire_build_store_lock`] guard across this call and all publication.
+/// The local guard only serializes the copy, not a future caller's transaction.
 pub fn install_binary_at_version(source: &std::path::Path, version: &str) -> Result<PathBuf> {
+    let _store_lock = acquire_build_store_lock()?;
     if !source.exists() {
         anyhow::bail!("Binary not found at {:?}", source);
     }
@@ -666,6 +679,7 @@ fn update_channel_symlink(channel: &str, version: &str) -> Result<PathBuf> {
 
 /// Update stable symlink to point to a version and publish stable-version marker.
 pub fn update_stable_symlink(version: &str) -> Result<PathBuf> {
+    let _store_lock = acquire_build_store_lock()?;
     let stable_link = update_channel_symlink("stable", version)?;
     std::fs::write(stable_version_file()?, version)?;
     Ok(stable_link)
@@ -673,6 +687,7 @@ pub fn update_stable_symlink(version: &str) -> Result<PathBuf> {
 
 /// Update current symlink to point to a version and publish current-version marker.
 pub fn update_current_symlink(version: &str) -> Result<PathBuf> {
+    let _store_lock = acquire_build_store_lock()?;
     let current_link = update_channel_symlink("current", version)?;
     std::fs::write(current_version_file()?, version)?;
     Ok(current_link)
@@ -681,6 +696,7 @@ pub fn update_current_symlink(version: &str) -> Result<PathBuf> {
 /// Update the shared server symlink to point to a version and publish the
 /// shared-server-version marker.
 pub fn update_shared_server_symlink(version: &str) -> Result<PathBuf> {
+    let _store_lock = acquire_build_store_lock()?;
     let shared_link = update_channel_symlink("shared-server", version)?;
     std::fs::write(shared_server_version_file()?, version)?;
     Ok(shared_link)
@@ -697,6 +713,7 @@ pub fn publish_local_current_build_for_source(
     }
 
     validate_dev_binary_matches_source(repo_dir, &binary, source)?;
+    let _store_lock = acquire_build_store_lock()?;
     let previous_current_version = read_current_version()?;
     let versioned_path = install_binary_at_version(&binary, &source.version_label)?;
     let installed_report = read_binary_version_report(&versioned_path)?;
@@ -735,6 +752,7 @@ pub fn publish_local_current_build(repo_dir: &std::path::Path) -> Result<PathBuf
 
 /// Promote an already installed immutable version onto the shared server channel.
 pub fn promote_version_to_shared_server(version: &str) -> Result<Option<String>> {
+    let _store_lock = acquire_build_store_lock()?;
     if version.is_empty()
         || version.trim() != version
         || version == "."
@@ -786,6 +804,7 @@ pub fn shared_server_tracks_stable() -> Result<bool> {
 /// Callers in the update path MUST invoke this *before* moving the `stable`
 /// marker, otherwise the pre-update comparison would always disagree.
 pub fn advance_shared_server_if_tracking_stable(version: &str) -> Result<bool> {
+    let _store_lock = acquire_build_store_lock()?;
     if shared_server_tracks_stable()? {
         update_shared_server_symlink(version)?;
         Ok(true)
@@ -826,6 +845,7 @@ pub enum SharedServerRepair {
 /// self-dev `shared-server` build whenever it is at least as fresh as stable (the
 /// case the pin exists to protect), and never downgrades the channel.
 pub fn repair_stale_shared_server_channel() -> Result<SharedServerRepair> {
+    let _store_lock = acquire_build_store_lock()?;
     let stable_version = read_stable_version()?;
     let Some(stable_version) = stable_version
         .as_deref()
@@ -924,6 +944,7 @@ pub fn install_local_release(repo_dir: &std::path::Path) -> Result<PathBuf> {
     }
 
     let version = repo_build_version(repo_dir)?;
+    let _store_lock = acquire_build_store_lock()?;
 
     let versioned = install_binary_at_version(&source, &version)?;
     update_stable_symlink(&version)?;
@@ -943,6 +964,7 @@ pub fn install_version(repo_dir: &std::path::Path, hash: &str) -> Result<PathBuf
 
 /// Update canary symlink to point to a version
 pub fn update_canary_symlink(hash: &str) -> Result<()> {
+    let _store_lock = acquire_build_store_lock()?;
     let _ = update_channel_symlink("canary", hash)?;
     Ok(())
 }

@@ -17,8 +17,8 @@ use std::time::{Duration, SystemTime};
 /// Unreferenced versions kept for rollback, newest first.
 pub const DEFAULT_KEEP_RECENT_VERSIONS: usize = 5;
 
-/// Never remove a version installed more recently than this, so an in-flight
-/// build/publish sequence cannot lose its binary between install and symlink.
+/// Retain newly installed versions for rollback convenience. Publication safety
+/// comes from the store lock, never from this age threshold.
 const MIN_VERSION_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Override how many unreferenced versions to keep. `0` disables cleanup.
@@ -128,6 +128,11 @@ pub fn prune_old_versions() {
     let Ok(dir) = builds_dir() else {
         return;
     };
+    // Idle housekeeping never waits for an in-flight publication. Do not mark
+    // a contended pass complete, so the next idle opportunity can retry.
+    let Ok(_store_lock) = crate::store_lock::acquire_build_store_lock_nonblocking() else {
+        return;
+    };
     if !prune_due(&dir) {
         return;
     }
@@ -172,6 +177,8 @@ fn mark_pruned(dir: &Path) {
 }
 
 /// Core of [`prune_old_versions`], parameterized for unit tests.
+/// Callers using a live store must hold a store lock BEFORE constructing their
+/// `protected` snapshot and through this call, as the production caller does.
 pub fn prune_old_versions_in(
     versions_dir: &Path,
     protected: &HashSet<String>,
@@ -260,6 +267,52 @@ mod tests {
             assert!(!versions.join(removed).exists(), "{removed} should go");
         }
         assert_eq!(report.removed.len(), 5);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn idle_prune_skips_contended_store_without_deletion_or_completion_marker() {
+        crate::tests::with_temp_jcode_home(|| {
+            let builds = builds_dir().unwrap();
+            let versions = builds.join("versions");
+            make_version(&versions, "oldest", DAY * 5);
+            make_version(&versions, "newer", DAY * 3);
+            let previous_keep = std::env::var_os(KEEP_VERSIONS_ENV);
+            jcode_core::env::set_var(KEEP_VERSIONS_ENV, "1");
+
+            // Take the actual kernel lock on an independent open file, not a
+            // reentrant guard. Keep it held until the idle call has returned.
+            let lock = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(builds.join(".store.lock"))
+                .unwrap();
+            lock.try_lock().unwrap();
+            let (finished, receive) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                prune_old_versions();
+                finished.send(()).unwrap();
+            });
+            let returned_while_locked = receive.recv_timeout(Duration::from_secs(2));
+            // Release even if the old blocking implementation regresses, so
+            // failure is bounded rather than leaving a worker parked for 30s.
+            drop(lock);
+            let joined = worker.join();
+            if let Some(previous_keep) = previous_keep {
+                jcode_core::env::set_var(KEEP_VERSIONS_ENV, previous_keep);
+            } else {
+                jcode_core::env::remove_var(KEEP_VERSIONS_ENV);
+            }
+            joined.unwrap();
+            assert!(
+                returned_while_locked.is_ok(),
+                "idle pruning waited for the publisher"
+            );
+            assert!(versions.join("oldest").is_dir());
+            assert!(!builds.join(PRUNE_MARKER).exists());
+        });
     }
 
     #[test]
