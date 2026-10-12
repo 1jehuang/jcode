@@ -2599,3 +2599,7 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
         "no search means no highlight color in preview"
     );
 }
+
+#[cfg(test)]
+#[path = "session_picker/compact_render_tests.rs"]
+mod compact_render_tests;

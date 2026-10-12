@@ -2194,6 +2194,26 @@ impl SessionPicker {
         let has_banner = self.crashed_sessions.is_some();
         let has_search = self.search_active || !self.search_query.is_empty();
         let has_onboarding = self.onboarding_banner.is_some();
+        // Keep resume usable when a terminal is smaller than the full list and
+        // preview layout. Navigation remains active; the selected title gives
+        // the operator a visible confirmation of the current selection.
+        if frame.area().width < 60 || frame.area().height < 20 {
+            self.last_list_area = None;
+            self.last_preview_area = None;
+            // Drop any in-flight preview load so its callback cannot touch the
+            // compact frame; the next normal render requests it again.
+            self.pending_preview_load = None;
+            let text = self
+                .loading_message
+                .as_deref()
+                .or_else(|| {
+                    self.selected_session()
+                        .map(|session| session.title.as_str())
+                })
+                .unwrap_or("No session selected");
+            frame.render_widget(Paragraph::new(text), frame.area());
+            return;
+        }
         // The first-run picker is action-only. Do not render the session list or
         // preview panes underneath it, which would make this look like `/resume`.
         if has_onboarding && self.visible_sessions.is_empty() {
