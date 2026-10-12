@@ -353,9 +353,15 @@ pub(super) fn draw_messages(
         height: render_area.height,
     };
     let wrapped_user_indices = &prepared.wrapped_user_indices;
-    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts;
-    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends;
-    let user_prompt_texts = &prepared.user_prompt_texts;
+    let clear_start = super::terminal_clear_start(app, &prepared);
+    let preview_start = clear_start.map_or(0, |start| {
+        prepared
+            .wrapped_user_prompt_starts
+            .partition_point(|line| *line < start)
+    });
+    let wrapped_user_prompt_starts = &prepared.wrapped_user_prompt_starts[preview_start..];
+    let wrapped_user_prompt_ends = &prepared.wrapped_user_prompt_ends[preview_start..];
+    let user_prompt_texts = &prepared.user_prompt_texts[preview_start..];
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
@@ -369,6 +375,7 @@ pub(super) fn draw_messages(
         user_prompt_texts,
         text_render_area,
         pinned_todo_band.len() as u16,
+        preview_start + app.compacted_hidden_user_prompts(),
     );
 
     super::set_last_max_scroll(max_scroll);
@@ -407,7 +414,14 @@ pub(super) fn draw_messages(
         super::set_tail_catchup_active(false);
         user_scroll.min(max_scroll)
     } else {
-        resolve_tail_follow_scroll(max_scroll, viewport_height)
+        // A clear is an explicit viewport boundary, not a jump to animate
+        // through old history. Never show rows preceding it while tailing.
+        if let Some(start) = clear_start {
+            super::set_tail_catchup_active(false);
+            max_scroll.max(start)
+        } else {
+            resolve_tail_follow_scroll(max_scroll, viewport_height)
+        }
     };
 
     // Publish the resolved geometry so scroll handlers and the anchor-reconcile
@@ -425,6 +439,7 @@ pub(super) fn draw_messages(
             user_prompt_texts,
             scroll,
             text_render_area.width,
+            preview_start + app.compacted_hidden_user_prompts(),
         )
     } else {
         0u16
@@ -1263,7 +1278,8 @@ pub(super) fn draw_messages(
         {
             let prompt_text = prompt_text.trim();
             if !prompt_text.is_empty() {
-                let prompt_num = prompt_order + 1 + app.compacted_hidden_user_prompts();
+                let prompt_num =
+                    preview_start + prompt_order + 1 + app.compacted_hidden_user_prompts();
                 let num_str = format!("{}", prompt_num);
                 let prefix_len = num_str.len() + 2;
                 let content_width =
@@ -1397,7 +1413,7 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
 
 /// Lines for the pinned todo band. Background tasks render in the
 /// `background` info widget, not here.
-fn pinned_todo_band_lines(
+pub(super) fn pinned_todo_band_lines(
     app: &dyn TuiState,
     width: u16,
     viewport_height: u16,
@@ -1468,6 +1484,7 @@ fn compute_prompt_preview_line_count(
     user_prompt_texts: &[String],
     scroll: usize,
     area_width: u16,
+    prompt_number_offset: usize,
 ) -> u16 {
     let last_offscreen = lower_bound(wrapped_user_prompt_starts, scroll).checked_sub(1);
     let Some(prompt_order) = last_offscreen else {
@@ -1480,7 +1497,7 @@ fn compute_prompt_preview_line_count(
     if prompt_text.is_empty() {
         return 0;
     }
-    let num_str = format!("{}", prompt_order + 1);
+    let num_str = format!("{}", prompt_number_offset + prompt_order + 1);
     let prefix_len = num_str.len() + 2;
     let content_width = area_width.saturating_sub(prefix_len as u16 + 2) as usize;
     let text_flat = prompt_text.replace('\n', " ");
@@ -1494,6 +1511,7 @@ fn compute_max_scroll_with_prompt_preview(
     user_prompt_texts: &[String],
     area: Rect,
     pinned_todo_lines: u16,
+    prompt_number_offset: usize,
 ) -> usize {
     let mut max_scroll = total_lines.saturating_sub(area.height as usize);
     let preview_enabled = crate::config::config().display.prompt_preview;
@@ -1508,6 +1526,7 @@ fn compute_max_scroll_with_prompt_preview(
                 user_prompt_texts,
                 max_scroll,
                 area.width,
+                prompt_number_offset,
             )
         } else {
             0
@@ -1527,6 +1546,19 @@ fn compute_max_scroll_with_prompt_preview(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ctrl_l_preview_measurement_keeps_global_prompt_number_width() {
+        let prompts = vec!["x".repeat(15)];
+        assert_eq!(
+            super::compute_prompt_preview_line_count(&[0], &prompts, 1, 20, 0),
+            1
+        );
+        assert_eq!(
+            super::compute_prompt_preview_line_count(&[0], &prompts, 1, 20, 9),
+            2
+        );
+    }
+
     #[test]
     fn handterm_native_latex_cell_symbol_moves_invokes_and_restores_cursor() {
         assert_eq!(
