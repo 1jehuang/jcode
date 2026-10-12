@@ -385,13 +385,15 @@ impl MultiProvider {
 
         if let Some((prefix, rest)) = model.split_once(':') {
             let prefix = prefix.trim();
-            if !prefix.is_empty()
-                && !rest.trim().is_empty()
-                && (crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
-                    .is_some()
-                    || crate::config::config().providers.contains_key(prefix))
-            {
-                return model.to_string();
+            if !prefix.is_empty() && !rest.trim().is_empty() {
+                if crate::config::config().providers.contains_key(prefix) {
+                    return model.to_string();
+                }
+                if let Some(profile) =
+                    crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+                {
+                    return format!("{}:{}", profile.id, rest.trim());
+                }
             }
         }
 
@@ -435,13 +437,14 @@ impl MultiProvider {
             "copilot" | "antigravity" | "gemini" | "cursor" | "bedrock" | "openrouter"
             | "claude-code" => format!("{provider_key}:{model}"),
             _ => {
-                if crate::provider_catalog::resolve_openai_compatible_profile_selection(
-                    provider_key,
-                )
-                .is_some()
-                    || crate::config::config().providers.contains_key(provider_key)
-                {
+                if crate::config::config().providers.contains_key(provider_key) {
                     format!("{provider_key}:{model}")
+                } else if let Some(profile) =
+                    crate::provider_catalog::resolve_openai_compatible_profile_selection(
+                        provider_key,
+                    )
+                {
+                    format!("{}:{model}", profile.id)
                 } else {
                     model.to_string()
                 }
@@ -460,18 +463,22 @@ impl MultiProvider {
         }
         // A worker model override can carry its own transport while the child
         // still has its parent's saved route. Honor the explicit model first.
-        if crate::provider::explicit_model_provider_prefix(model).is_some()
-            || model.split_once(':').is_some_and(|(prefix, rest)| {
-                !prefix.trim().is_empty()
-                    && !rest.trim().is_empty()
-                    && (crate::provider_catalog::resolve_openai_compatible_profile_selection(
-                        prefix,
-                    )
-                    .is_some()
-                        || crate::config::config().providers.contains_key(prefix))
-            })
-        {
+        if crate::provider::explicit_model_provider_prefix(model).is_some() {
             return model.to_string();
+        }
+        if let Some((prefix, rest)) = model.split_once(':') {
+            if !prefix.trim().is_empty() && !rest.trim().is_empty() {
+                // Named profiles own their exact keys, including catalog aliases.
+                // Runtime profile lookup requires a canonical catalog id.
+                if crate::config::config().providers.contains_key(prefix) {
+                    return model.to_string();
+                }
+                if let Some(profile) =
+                    crate::provider_catalog::resolve_openai_compatible_profile_selection(prefix)
+                {
+                    return format!("{}:{}", profile.id, rest.trim());
+                }
+            }
         }
         if model.contains('@') {
             return format!("openrouter:{model}");
