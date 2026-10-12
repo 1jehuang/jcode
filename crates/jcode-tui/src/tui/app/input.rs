@@ -326,11 +326,12 @@ fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent 
             // Native-only reader first, so copied web text whose HTML carries
             // an <img> stays text. Only when the clipboard offers nothing else
             // fall back to the HTML <img> URL path (e.g. Discord on Wayland).
-            match read_clipboard_for_paste_with(
+            match read_clipboard_for_paste_with_files(
                 kind,
                 read_clipboard_text,
                 super::clipboard_image_native,
                 download_image_url_content,
+                read_clipboard_file_list,
             ) {
                 // The HTML <img> fallback downloads a URL; never do that
                 // implicitly over SSH (direct image-URL paste has the same rule).
@@ -344,11 +345,12 @@ fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent 
         }
         _ => {
             // ImageOnly and ImageUrl can use full clipboard_image with HTML fallback
-            read_clipboard_for_paste_with(
+            read_clipboard_for_paste_with_files(
                 kind,
                 read_clipboard_text,
                 super::clipboard_image,
                 download_image_url_content,
+                read_clipboard_file_list,
             )
         }
     }
@@ -359,7 +361,7 @@ fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent 
 /// extension. Copying an image commonly leaves exactly this on the text
 /// target alongside the image bytes. Web URLs are excluded: those go through
 /// the explicit image-URL download path instead.
-fn text_names_an_image(text: &str) -> bool {
+fn text_names_an_image(text: &str, copied_files: impl FnOnce() -> Vec<std::path::PathBuf>) -> bool {
     let text = text.trim();
     if text.contains('\n') || text.len() > 4096 {
         return false;
@@ -368,15 +370,82 @@ fn text_names_an_image(text: &str) -> bool {
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return false;
     }
-    let path = lower.strip_prefix("file://").unwrap_or(&lower);
-    paste_guard::has_image_extension(std::path::Path::new(path.trim_matches(['\'', '"'])))
+    let unquoted = text.trim_matches(['\'', '"']);
+    let quoted = unquoted.len() != text.len();
+    let path = unquoted
+        .strip_prefix("file://")
+        .or_else(|| unquoted.strip_prefix("FILE://"))
+        .unwrap_or(unquoted);
+    if !paste_guard::has_image_extension(std::path::Path::new(path)) {
+        return false;
+    }
+    if !path.chars().any(char::is_whitespace) {
+        return true;
+    }
+    if quoted && (path.starts_with('/') || path.starts_with("~/")) {
+        return true;
+    }
+    if names_existing_file(path, dirs::home_dir(), std::env::current_dir().ok()) {
+        return true;
+    }
+    copied_files()
+        .iter()
+        .any(|file| file.as_os_str() == path || file.file_name().is_some_and(|name| name == path))
 }
 
+fn names_existing_file(
+    path: &str,
+    home: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+) -> bool {
+    let candidate = if let Some(rest) = path.strip_prefix("~/") {
+        home.map(|home| home.join(rest))
+    } else if std::path::Path::new(path).is_absolute() {
+        Some(std::path::PathBuf::from(path))
+    } else {
+        cwd.map(|cwd| cwd.join(path))
+    };
+    candidate.is_some_and(|candidate| candidate.is_file())
+}
+
+fn read_clipboard_file_list() -> Vec<std::path::PathBuf> {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            crate::logging::info(&format!("clipboard unavailable for file list: {error}"));
+            return Vec::new();
+        }
+    };
+    match clipboard.get().file_list() {
+        Ok(files) => files,
+        Err(error) => {
+            crate::logging::info(&format!("clipboard has no file list: {error}"));
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(test)]
 fn read_clipboard_for_paste_with<ReadText, ReadImage, DownloadImageUrl>(
+    kind: &ClipboardPasteKind,
+    read_text: ReadText,
+    read_image: ReadImage,
+    download_image_url: DownloadImageUrl,
+) -> ClipboardPasteContent
+where
+    ReadText: FnMut() -> Option<String>,
+    ReadImage: FnMut() -> Option<(String, String)>,
+    DownloadImageUrl: FnMut(&str) -> Option<ClipboardPasteContent>,
+{
+    read_clipboard_for_paste_with_files(kind, read_text, read_image, download_image_url, Vec::new)
+}
+
+fn read_clipboard_for_paste_with_files<ReadText, ReadImage, DownloadImageUrl>(
     kind: &ClipboardPasteKind,
     mut read_text: ReadText,
     mut read_image: ReadImage,
     mut download_image_url: DownloadImageUrl,
+    copied_files: impl FnOnce() -> Vec<std::path::PathBuf>,
 ) -> ClipboardPasteContent
 where
     ReadText: FnMut() -> Option<String>,
@@ -393,10 +462,11 @@ where
             // Only then, or when there is no text at all, probe for native
             // image bytes and prefer them. Image-only clipboards (especially
             // on Wayland/arboard) frequently expose an empty text target.
-            // Over SSH a path names a file on the remote host, so keep it as
-            // text there, matching bracketed paste.
-            let text_is_image_name =
-                text.as_deref().is_some_and(text_names_an_image) && !crate::tui::is_ssh_remote();
+            // Native image targets are local even for an SSH-attached TUI.
+            // Remote paths with no native bytes still fall back to text.
+            let text_is_image_name = text
+                .as_deref()
+                .is_some_and(|text| text_names_an_image(text, copied_files));
             if (text.is_none() || text_is_image_name)
                 && let Some((media_type, base64_data)) = read_image()
             {
@@ -1073,7 +1143,10 @@ fn insert_input_text_with_undo(app: &mut App, text: &str, typed: bool) {
     // A habitual space typed after an auto-inserted picker separator would
     // only add noise. Swallow it so command + space + filter still produces
     // a single separator.
-    if text == " " && at_end && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
+    if !replaced_selection
+        && text == " "
+        && at_end
+        && matches!(app.input.trim_start(), "/login " | "/model " | "/models ")
     {
         app.input_typing_undo = None;
         return;
@@ -1556,6 +1629,7 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
     }
     if !app.queued_messages.is_empty() {
         parts.extend(std::mem::take(&mut app.queued_messages));
+        app.pending_images.append(&mut app.queued_message_images);
         if !app.has_queued_followups() {
             app.pending_queued_dispatch = false;
         }
@@ -3073,9 +3147,8 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                     && !interleave.trim().is_empty()
                 {
                     followups.push(interleave);
-                    // Queued follow-ups are text-only, so carry staged images
-                    // back to the composer instead of dropping them silently.
-                    app.pending_images.append(&mut app.interleave_images);
+                    // Keep attachments with this queued turn, not a later draft.
+                    app.queued_message_images.append(&mut app.interleave_images);
                 }
                 app.interleave_images.clear();
                 followups.append(&mut app.queued_messages);
@@ -4267,6 +4340,52 @@ impl App {
         self.pending_turn = true;
     }
 
+    /// Commit the combined queued user turn at the real provider/session boundary.
+    /// Taking attachments here keeps them out of unrelated composer submissions.
+    pub(super) fn append_queued_user_payload(&mut self, combined: &str) {
+        let images = std::mem::take(&mut self.queued_message_images);
+        self.add_provider_message(Message::user_with_images(combined, images.clone()));
+        let mut blocks: Vec<ContentBlock> = images
+            .into_iter()
+            .map(|(media_type, data)| ContentBlock::Image { media_type, data })
+            .collect();
+        blocks.push(ContentBlock::Text {
+            text: combined.to_string(),
+            cache_control: None,
+        });
+        self.session.add_message(Role::User, blocks);
+    }
+
+    /// Prepare the next queued turn without entering the terminal/provider loop.
+    pub(super) fn prepare_queued_local_turn(&mut self) -> (bool, bool) {
+        let queued_messages = std::mem::take(&mut self.queued_messages);
+        let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
+        let (messages, reminder, display_system_messages) =
+            super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
+        let combined = messages.join("\n\n");
+        let has_combined = !combined.is_empty();
+        let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
+        self.commit_pending_streaming_assistant_message();
+        for msg in display_system_messages {
+            self.push_display_message(DisplayMessage::system(msg));
+        }
+        for msg in &messages {
+            if !super::commands::is_poke_message(msg) {
+                self.push_display_message(DisplayMessage::user(msg.clone()));
+            }
+        }
+        self.current_turn_system_reminder =
+            merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
+        if has_combined {
+            self.append_queued_user_payload(&combined);
+        } else {
+            // A discarded user queue must not attach stale images to a later turn.
+            self.queued_message_images.clear();
+        }
+        self.session_save_pending = true;
+        (has_combined, preserve_visible_turn)
+    }
+
     /// Process all queued messages (combined into a single request)
     /// Loops until queue is empty (in case more messages are queued during processing)
     pub(super) async fn process_queued_messages(
@@ -4275,42 +4394,7 @@ impl App {
         event_stream: &mut EventStream,
     ) {
         while !self.queued_messages.is_empty() || !self.hidden_queued_system_messages.is_empty() {
-            // Combine all currently queued messages into one, treating [SYSTEM: ...]
-            // startup continuations as system reminders rather than user turns.
-            let queued_messages = std::mem::take(&mut self.queued_messages);
-            let hidden_reminders = std::mem::take(&mut self.hidden_queued_system_messages);
-            let (messages, reminder, display_system_messages) =
-                super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
-            let combined = messages.join("\n\n");
-            let has_combined = !combined.is_empty();
-            let preserve_visible_turn = super::commands::queued_messages_are_only_pokes(&messages);
-
-            self.commit_pending_streaming_assistant_message();
-
-            for msg in display_system_messages {
-                self.push_display_message(DisplayMessage::system(msg));
-            }
-
-            for msg in &messages {
-                if !super::commands::is_poke_message(msg) {
-                    self.push_display_message(DisplayMessage::user(msg.clone()));
-                }
-            }
-
-            self.current_turn_system_reminder =
-                merge_turn_reminders(reminder, mission_turn_reminder(&self.session.id));
-
-            if has_combined {
-                self.add_provider_message(Message::user(&combined));
-                self.session.add_message(
-                    Role::User,
-                    vec![ContentBlock::Text {
-                        text: combined.clone(),
-                        cache_control: None,
-                    }],
-                );
-            }
-            self.session_save_pending = true;
+            let (has_combined, preserve_visible_turn) = self.prepare_queued_local_turn();
             self.clear_streaming_render_state();
             self.stream_buffer.clear();
             self.thought_line_inserted = false;

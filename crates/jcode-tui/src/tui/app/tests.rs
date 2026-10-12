@@ -34,6 +34,8 @@ include!("tests/model_browser.rs");
 include!("tests/model_effort_step.rs");
 include!("tests/scroll_copy_01/part_01.rs");
 include!("tests/scroll_copy_01/part_02.rs");
+#[path = "tests/attachment_redirect.rs"]
+mod attachment_redirect;
 include!("tests/scroll_copy_02/part_01.rs");
 include!("tests/scroll_copy_02/part_02.rs");
 include!("tests/scroll_copy_03.rs");

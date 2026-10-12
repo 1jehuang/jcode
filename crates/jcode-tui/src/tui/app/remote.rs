@@ -328,6 +328,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
         needs_redraw = true;
     } else if !app.is_processing && !app.queued_messages.is_empty() {
         let queued_messages = std::mem::take(&mut app.queued_messages);
+        let queued_images = std::mem::take(&mut app.queued_message_images);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
@@ -347,7 +348,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             app,
             remote,
             combined.clone(),
-            vec![],
+            queued_images.clone(),
             true,
             reminder.clone(),
             auto_retry,
@@ -368,6 +369,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             }
             if !combined.is_empty() {
                 app.queued_messages.insert(0, combined);
+                app.queued_message_images.splice(0..0, queued_images);
             }
         }
         needs_redraw = true;
@@ -1580,6 +1582,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         }
     } else if !app.queued_messages.is_empty() {
         let queued_messages = std::mem::take(&mut app.queued_messages);
+        let queued_images = std::mem::take(&mut app.queued_message_images);
         let hidden_reminders = std::mem::take(&mut app.hidden_queued_system_messages);
         let (messages, reminder, display_system_messages) =
             super::helpers::partition_queued_messages(queued_messages, hidden_reminders);
@@ -1605,7 +1608,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             app,
             remote,
             combined.clone(),
-            vec![],
+            queued_images.clone(),
             true,
             reminder.clone(),
             auto_retry,
@@ -1624,6 +1627,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             }
             if !combined.is_empty() {
                 app.queued_messages.insert(0, combined);
+                app.queued_message_images.splice(0..0, queued_images);
             }
         }
     } else if !app.hidden_queued_system_messages.is_empty() {
@@ -2003,6 +2007,10 @@ fn handle_disconnected_key_internal(
     }
 
     if input::handle_scroll_overlay_key(app, code)? {
+        return Ok(());
+    }
+
+    if super::input_selection::handle_input_selection_key(app, code, modifiers) {
         return Ok(());
     }
 

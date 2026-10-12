@@ -9,11 +9,13 @@ pub(super) struct RestoredReloadInput {
     pub pending_images: Vec<(String, String)>,
     pub submit_on_restore: bool,
     pub queued_messages: Vec<String>,
+    pub queued_message_images: Vec<(String, String)>,
     pub queued_commands: Vec<String>,
     pub hidden_queued_system_messages: Vec<String>,
     pub startup_status_notice: Option<String>,
     pub startup_display_message: Option<(String, String)>,
     pub interleave_message: Option<String>,
+    pub interleave_images: Vec<(String, String)>,
     pub pending_soft_interrupts: Vec<String>,
     pub pending_soft_interrupt_resend: Option<Vec<String>>,
     pub rate_limit_pending_message: Option<super::PendingRemoteMessage>,
@@ -314,10 +316,16 @@ impl App {
                     })
                 };
             let mut queued_messages = self.queued_messages.clone();
+            let mut queued_message_images = if queued_messages.is_empty() {
+                Vec::new()
+            } else {
+                self.queued_message_images.clone()
+            };
             let mut hidden_queued_system_messages = self.hidden_queued_system_messages.clone();
             if let Some(pending) = inflight_continuation {
                 if !pending.content.trim().is_empty() {
                     queued_messages.insert(0, pending.content.clone());
+                    queued_message_images.splice(0..0, pending.images.clone());
                 }
                 if let Some(reminder) = pending.system_reminder.clone() {
                     hidden_queued_system_messages.insert(0, reminder);
@@ -341,9 +349,11 @@ impl App {
                 })).collect::<Vec<_>>(),
                 "submit_on_restore": resume_prompt.is_some(),
                 "queued_messages": queued_messages,
+                "queued_message_images": queued_message_images,
                 "queued_commands": self.queued_commands,
                 "hidden_queued_system_messages": hidden_queued_system_messages,
                 "interleave_message": self.interleave_message,
+                "interleave_images": self.interleave_images,
                 "pending_soft_interrupts": self.pending_soft_interrupts,
                 "pending_soft_interrupt_resend": pending_soft_interrupt_resend,
                 "rate_limit_pending_message": rate_limit_pending_message,
@@ -444,6 +454,18 @@ impl App {
                         .iter()
                         .filter_map(|item| item.as_str().map(|s| s.to_string()))
                         .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let queued_message_images = value
+                .get("queued_message_images")
+                .and_then(|images| {
+                    serde_json::from_value::<Vec<(String, String)>>(images.clone()).ok()
+                })
+                .unwrap_or_default();
+            let interleave_images = value
+                .get("interleave_images")
+                .and_then(|images| {
+                    serde_json::from_value::<Vec<(String, String)>>(images.clone()).ok()
                 })
                 .unwrap_or_default();
             let queued_commands = value
@@ -598,11 +620,13 @@ impl App {
                 pending_images,
                 submit_on_restore,
                 queued_messages,
+                queued_message_images,
                 queued_commands,
                 hidden_queued_system_messages,
                 startup_status_notice,
                 startup_display_message,
                 interleave_message,
+                interleave_images,
                 pending_soft_interrupts,
                 pending_soft_interrupt_resend,
                 rate_limit_pending_message,
@@ -633,11 +657,13 @@ impl App {
             pending_images: Vec::new(),
             submit_on_restore: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             startup_status_notice: None,
             startup_display_message: None,
             interleave_message: None,
+            interleave_images: Vec::new(),
             pending_soft_interrupts: Vec::new(),
             pending_soft_interrupt_resend: None,
             rate_limit_pending_message: None,

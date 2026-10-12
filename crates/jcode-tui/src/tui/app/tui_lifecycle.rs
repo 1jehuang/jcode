@@ -42,11 +42,18 @@ impl App {
         self.todo_final_response_requested = self.final_response_todo_fingerprint.is_some();
 
         let mut queued_messages = restored.queued_messages;
+        // Attachments belong to the original queue, not newly recovered text.
+        let mut queued_message_images = if queued_messages.is_empty() {
+            Vec::new()
+        } else {
+            restored.queued_message_images
+        };
         let mut recovered_followups = Vec::new();
         if let Some(interleave_message) = restored.interleave_message
             && !interleave_message.trim().is_empty()
         {
             recovered_followups.push(interleave_message);
+            queued_message_images.splice(0..0, restored.interleave_images);
         }
         let recovered_interrupts = restored
             .pending_soft_interrupt_resend
@@ -66,6 +73,7 @@ impl App {
         }
 
         self.queued_messages = queued_messages;
+        self.queued_message_images = queued_message_images;
         self.queued_commands = restored.queued_commands;
         if self.has_queued_followups() {
             if self.is_remote {
@@ -606,6 +614,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
@@ -1084,6 +1093,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_message_images: Vec::new(),
             queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,

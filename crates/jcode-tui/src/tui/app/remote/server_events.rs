@@ -1909,6 +1909,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.follow_chat_bottom();
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
+                    app.queued_message_images.clear();
                     app.queued_commands.clear();
                     app.interleave_message = None;
                     app.interleave_images.clear();
