@@ -1,3 +1,4 @@
+use jcode_tui_markdown::{FrameRow, classify_frame_rows};
 use unicode_width::UnicodeWidthStr;
 
 use super::display_width::{
@@ -44,6 +45,8 @@ struct RawSelectionPoint {
     column: usize,
 }
 
+/// Raw logical-line copy (with math substitution) and nothing else. Tests use
+/// it to pin the raw path without the wrapped fallback.
 #[cfg(test)]
 pub(super) fn copy_selection_text_from_raw_lines(
     snapshot: &CopyViewportSnapshot,
@@ -53,7 +56,7 @@ pub(super) fn copy_selection_text_from_raw_lines(
     if let Some(text) = copy_selection_text_with_math_targets(snapshot, start, end) {
         return Some(text);
     }
-    copy_selection_text_from_raw_lines_base(snapshot, start, end)
+    selection_text(|piece| visit_raw_selection(snapshot, start, end, piece))
 }
 
 /// Full copy text for a selection: semantic math substitution first, then the
@@ -70,45 +73,190 @@ pub(super) fn copy_selection_text_any(
     copy_segment_text(snapshot, start, end)
 }
 
+/// `(char_count, line_count)` of [`copy_selection_text_any`], computed without
+/// allocating the selection string (except around math images, which are rare).
+/// Shares the row walkers with the text path, so the status count always
+/// matches what is copied.
+pub(super) fn copy_selection_metrics_any(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+) -> Option<(usize, usize)> {
+    if let Some(text) = copy_selection_text_with_math_targets(snapshot, start, end) {
+        return Some(text_metrics(&text));
+    }
+    selection_metrics(|piece| visit_raw_selection(snapshot, start, end, piece))
+        .or_else(|| selection_metrics(|piece| visit_wrapped_selection(snapshot, start, end, piece)))
+}
+
 fn copy_segment_text(
     snapshot: &CopyViewportSnapshot,
     start: crate::tui::CopySelectionPoint,
     end: crate::tui::CopySelectionPoint,
 ) -> Option<String> {
-    copy_selection_text_from_raw_lines_base(snapshot, start, end)
-        .or_else(|| copy_selection_text_from_wrapped_lines(snapshot, start, end))
+    selection_text(|piece| visit_raw_selection(snapshot, start, end, piece))
+        .or_else(|| selection_text(|piece| visit_wrapped_selection(snapshot, start, end, piece)))
 }
 
-/// Display-line copy path. Mirrors the raw path but slices wrapped lines and
-/// honors per-line copy offsets that skip gutter chrome.
-pub(super) fn copy_selection_text_from_wrapped_lines(
+/// A row walker: calls `piece` once per copied line, in order.
+type PieceSink<'s> = &'s mut dyn FnMut(&str);
+
+fn selection_text(walk: impl FnOnce(PieceSink<'_>) -> Option<()>) -> Option<String> {
+    let mut out = String::new();
+    let mut first = true;
+    walk(&mut |piece| {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+        out.push_str(piece);
+    })?;
+    Some(out)
+}
+
+fn selection_metrics(walk: impl FnOnce(PieceSink<'_>) -> Option<()>) -> Option<(usize, usize)> {
+    let mut chars = 0usize;
+    let mut lines = 0usize;
+    walk(&mut |piece| {
+        if lines > 0 {
+            chars += 1; // the joining '\n'
+        }
+        lines += 1;
+        chars += piece.chars().count();
+    })?;
+    Some((chars, lines.max(1)))
+}
+
+fn text_metrics(text: &str) -> (usize, usize) {
+    (text.chars().count(), text.split('\n').count().max(1))
+}
+
+/// Raw logical-line walker. Frame art is excluded per row with the whole pane
+/// as context (see [`for_each_copy_row`]), so the selection's own bounds never
+/// change how a row is read. Inline math is copied as its LaTeX source.
+fn visit_raw_selection(
     snapshot: &CopyViewportSnapshot,
     start: crate::tui::CopySelectionPoint,
     end: crate::tui::CopySelectionPoint,
-) -> Option<String> {
-    let mut out = String::new();
-    for abs_line in start.abs_line..=end.abs_line {
-        if abs_line > start.abs_line {
-            out.push('\n');
-        }
-        let text = snapshot.wrapped_plain_line(abs_line)?;
-        let copy_start = snapshot.wrapped_copy_offset(abs_line).unwrap_or(0);
-        let start_col = if abs_line == start.abs_line {
-            clamp_display_col(text, start.column).max(copy_start)
-        } else {
-            copy_start
-        };
-        let end_col = if abs_line == end.abs_line {
-            clamp_display_col(text, end.column).max(copy_start)
-        } else {
-            line_display_width(text)
-        };
-        if end_col < start_col {
-            continue;
-        }
-        out.push_str(&semantic_slice(text, start_col, end_col));
+    piece: PieceSink<'_>,
+) -> Option<()> {
+    if snapshot.raw_plain_line_count() == 0 || snapshot.wrapped_line_map(start.abs_line).is_none() {
+        return None;
     }
-    Some(out)
+
+    let start = raw_selection_point(snapshot, start)?;
+    let end = raw_selection_point(snapshot, end)?;
+    if start.raw_line >= snapshot.raw_plain_line_count()
+        || end.raw_line >= snapshot.raw_plain_line_count()
+    {
+        return None;
+    }
+
+    for_each_copy_row(
+        snapshot.pane,
+        |raw_line| snapshot.raw_plain_line(raw_line),
+        |raw_line| snapshot.raw_line_is_literal(raw_line),
+        start.raw_line..end.raw_line + 1,
+        |raw_line, text, frame| {
+            let gutter = match frame {
+                FrameRow::Edge => return,
+                FrameRow::Content => 0,
+                FrameRow::Gutter(width) => width,
+            };
+            let start_col = if raw_line == start.raw_line {
+                clamp_display_col(text, start.column)
+            } else {
+                0
+            }
+            .max(gutter);
+            let end_col = if raw_line == end.raw_line {
+                clamp_display_col(text, end.column)
+            } else {
+                line_display_width(text)
+            };
+            if end_col < start_col {
+                piece("");
+            } else {
+                piece(&semantic_slice(text, start_col, end_col));
+            }
+        },
+    )
+}
+
+/// Wrapped display-row walker for selections without a raw-line map. Honors
+/// per-line copy offsets that skip gutter chrome, and frame art like the raw
+/// walker.
+fn visit_wrapped_selection(
+    snapshot: &CopyViewportSnapshot,
+    start: crate::tui::CopySelectionPoint,
+    end: crate::tui::CopySelectionPoint,
+    piece: PieceSink<'_>,
+) -> Option<()> {
+    for_each_copy_row(
+        snapshot.pane,
+        |abs_line| snapshot.wrapped_plain_line(abs_line),
+        |abs_line| {
+            snapshot
+                .wrapped_line_map(abs_line)
+                .is_some_and(|m| snapshot.raw_line_is_literal(m.raw_line))
+        },
+        start.abs_line..end.abs_line + 1,
+        |abs_line, text, frame| {
+            let gutter = match frame {
+                FrameRow::Edge => return,
+                FrameRow::Content => 0,
+                FrameRow::Gutter(width) => width,
+            };
+            let copy_start = snapshot
+                .wrapped_copy_offset(abs_line)
+                .unwrap_or(0)
+                .max(gutter);
+            let start_col = if abs_line == start.abs_line {
+                clamp_display_col(text, start.column).max(copy_start)
+            } else {
+                copy_start
+            };
+            let end_col = if abs_line == end.abs_line {
+                clamp_display_col(text, end.column).max(copy_start)
+            } else {
+                line_display_width(text)
+            };
+            if end_col < start_col {
+                piece("");
+            } else {
+                piece(&semantic_slice(text, start_col, end_col));
+            }
+        },
+    )
+}
+
+/// Visit rows `range` of a pane with the frame art each row carries. Code,
+/// math, and quote frames are drawn art, so transcript and side-panel rows are
+/// classified. The composer and submitted prompts (`is_literal`) are the user's
+/// own text: copied verbatim and blanked for the classifier.
+pub(super) fn for_each_copy_row<'a>(
+    pane: crate::tui::CopySelectionPane,
+    row: impl Fn(usize) -> Option<&'a str>,
+    is_literal: impl Fn(usize) -> bool,
+    range: std::ops::Range<usize>,
+    mut visit: impl FnMut(usize, &'a str, FrameRow),
+) -> Option<()> {
+    if pane != crate::tui::CopySelectionPane::Input {
+        let masked = |idx: usize| {
+            let text = row(idx)?;
+            Some(if is_literal(idx) { "" } else { text })
+        };
+        return classify_frame_rows(masked, range, |idx, text, kind| {
+            match is_literal(idx).then(|| row(idx)).flatten() {
+                Some(literal) => visit(idx, literal, FrameRow::Content),
+                None => visit(idx, text, kind),
+            }
+        });
+    }
+    for idx in range {
+        visit(idx, row(idx)?, FrameRow::Content);
+    }
+    Some(())
 }
 
 /// Slice `text` between display columns, replacing any fully or partially
@@ -140,66 +288,6 @@ fn semantic_slice(text: &str, start_col: usize, end_col: usize) -> std::borrow::
         out.push_str(display_col_slice_copy(text, col, end_col));
     }
     std::borrow::Cow::Owned(out)
-}
-
-fn copy_selection_text_from_raw_lines_base(
-    snapshot: &CopyViewportSnapshot,
-    start: crate::tui::CopySelectionPoint,
-    end: crate::tui::CopySelectionPoint,
-) -> Option<String> {
-    if snapshot.raw_plain_line_count() == 0 || snapshot.wrapped_line_map(start.abs_line).is_none() {
-        return None;
-    }
-
-    let start = raw_selection_point(snapshot, start)?;
-    let end = raw_selection_point(snapshot, end)?;
-    if start.raw_line >= snapshot.raw_plain_line_count()
-        || end.raw_line >= snapshot.raw_plain_line_count()
-    {
-        return None;
-    }
-
-    let selected_lines = end
-        .raw_line
-        .saturating_sub(start.raw_line)
-        .saturating_add(1);
-    let mut out = String::new();
-    for raw_line in start.raw_line..=end.raw_line {
-        if raw_line > start.raw_line {
-            out.push('\n');
-        }
-        let text = snapshot.raw_plain_line(raw_line)?;
-        if raw_line != start.raw_line && raw_line != end.raw_line {
-            if raw_line == start.raw_line + 1 {
-                out.reserve(text.len().saturating_mul(selected_lines.min(8)));
-            }
-            out.push_str(&semantic_slice(text, 0, line_display_width(text)));
-            continue;
-        }
-        let line_width = line_display_width(text);
-        let start_col = if raw_line == start.raw_line {
-            clamp_display_col(text, start.column)
-        } else {
-            0
-        };
-        let end_col = if raw_line == end.raw_line {
-            clamp_display_col(text, end.column)
-        } else {
-            line_width
-        };
-
-        if end_col < start_col {
-            continue;
-        }
-
-        let slice = semantic_slice(text, start_col, end_col);
-        if raw_line == start.raw_line {
-            out.reserve(slice.len().saturating_mul(selected_lines.min(8)));
-        }
-        out.push_str(&slice);
-    }
-
-    Some(out)
 }
 
 /// Replace selected terminal-image placeholder rows with their semantic LaTeX
@@ -265,62 +353,17 @@ fn copy_selection_text_with_math_targets(
     Some(parts.join("\n"))
 }
 
-/// Selection metrics (character count and line count) for the raw-lines path,
-/// computed without allocating the full joined selection string. Mirrors the
-/// slicing in [`copy_selection_text_from_raw_lines`] exactly so the displayed
-/// "N chars · M lines" matches what would actually be copied.
+/// Metrics for [`copy_selection_text_from_raw_lines`], for tests.
+#[cfg(test)]
 pub(super) fn copy_selection_metrics_from_raw_lines(
     snapshot: &CopyViewportSnapshot,
     start: crate::tui::CopySelectionPoint,
     end: crate::tui::CopySelectionPoint,
 ) -> Option<(usize, usize)> {
     if let Some(text) = copy_selection_text_with_math_targets(snapshot, start, end) {
-        return Some((text.chars().count(), text.split('\n').count().max(1)));
+        return Some(text_metrics(&text));
     }
-    if snapshot.raw_plain_line_count() == 0 || snapshot.wrapped_line_map(start.abs_line).is_none() {
-        return None;
-    }
-
-    let start = raw_selection_point(snapshot, start)?;
-    let end = raw_selection_point(snapshot, end)?;
-    if start.raw_line >= snapshot.raw_plain_line_count()
-        || end.raw_line >= snapshot.raw_plain_line_count()
-    {
-        return None;
-    }
-
-    let mut chars = 0usize;
-    let mut lines = 0usize;
-    for raw_line in start.raw_line..=end.raw_line {
-        if raw_line > start.raw_line {
-            chars += 1; // the joining '\n'
-        }
-        lines += 1;
-        let text = snapshot.raw_plain_line(raw_line)?;
-        if raw_line != start.raw_line && raw_line != end.raw_line {
-            chars += semantic_slice(text, 0, line_display_width(text))
-                .chars()
-                .count();
-            continue;
-        }
-        let line_width = line_display_width(text);
-        let start_col = if raw_line == start.raw_line {
-            clamp_display_col(text, start.column)
-        } else {
-            0
-        };
-        let end_col = if raw_line == end.raw_line {
-            clamp_display_col(text, end.column)
-        } else {
-            line_width
-        };
-        if end_col < start_col {
-            continue;
-        }
-        chars += semantic_slice(text, start_col, end_col).chars().count();
-    }
-
-    Some((chars, lines.max(1)))
+    selection_metrics(|piece| visit_raw_selection(snapshot, start, end, piece))
 }
 
 pub(super) fn link_target_from_snapshot(
@@ -386,6 +429,7 @@ mod tests {
             wrapped_copy_offsets: Arc::new(vec![0; plain.len()]),
             raw_plain_lines: Arc::new(plain.clone()),
             wrapped_line_map: Arc::new(maps),
+            literal_raw_lines: Vec::new(),
             wrapped_user_indices: Vec::new(),
             wrapped_user_prompt_starts: Vec::new(),
             wrapped_user_prompt_ends: Vec::new(),

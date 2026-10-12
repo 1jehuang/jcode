@@ -32,6 +32,7 @@ fn prepare_body_preserves_multiline_user_prompt_lines() {
         &mut line_raw_overrides,
         &mut line_copy_offsets,
         &mut user_line_indices,
+        &mut Vec::new(),
         1,
         user_color(),
         "first line\nsecond line\n\nthird line",
@@ -72,7 +73,8 @@ fn wrapped_row_map_tiles_raw_line_and_skips_repeated_prefix() {
             .unwrap_or_else(|| panic!("case should render a line wider than 40: {case:?}"));
         let raw_width = unicode_width::UnicodeWidthStr::width(ui::line_plain_text(&line).as_str());
 
-        let prepared = wrap_lines_with_map(vec![line], &[], &[], &[], &[], &[], 40, &[], &[], &[]);
+        let prepared =
+            wrap_lines_with_map(vec![line], &[], &[], &[], &[], &[], &[], 40, &[], &[], &[]);
         let maps = prepared.wrapped_line_map.as_ref();
 
         assert!(maps.len() > 1, "case should wrap at width 40: {case:?}");
@@ -139,6 +141,7 @@ fn wrapped_copy_rows_match_visible_content_at_reported_widths() {
                 &[],
                 &[],
                 &[],
+                &[],
                 width,
                 &[],
                 &[],
@@ -157,6 +160,7 @@ fn wrapped_copy_rows_match_visible_content_at_reported_widths() {
             &mut maps,
             &mut offsets,
             &mut users,
+            &mut Vec::new(),
             1,
             user_color(),
             &text,
@@ -168,6 +172,7 @@ fn wrapped_copy_rows_match_visible_content_at_reported_widths() {
             &maps,
             &offsets,
             &users,
+            &[],
             &[],
             width,
             &[],
@@ -196,6 +201,7 @@ fn matching_suffix_len_detects_prepended_history() {
         wrapped_copy_offsets: Arc::new(Vec::new()),
         raw_plain_lines: Arc::new(Vec::new()),
         wrapped_line_map: Arc::new(Vec::new()),
+        literal_raw_lines: Vec::new(),
         wrapped_user_indices: Vec::new(),
         wrapped_user_prompt_starts: Vec::new(),
         wrapped_user_prompt_ends: Vec::new(),

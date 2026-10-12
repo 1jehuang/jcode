@@ -138,6 +138,11 @@ pub use render_core_adapter::{
 
 pub use render_full::{render_markdown_with_width, thread_render_count};
 pub use render_lazy::render_markdown_lazy;
+#[path = "markdown_copy_frames.rs"]
+mod copy_frames;
+pub use copy_frames::{
+    FrameRow, classify_frame_rows, line_is_literal_text, strip_rendered_frame_decorations,
+};
 pub use render_support::extract_copy_targets_from_rendered_lines;
 
 /// Reasoning-line markdown formatters and the zero-width sentinel they use.
