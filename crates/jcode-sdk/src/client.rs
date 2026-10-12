@@ -847,13 +847,30 @@ impl JcodeClient {
         images: Vec<(String, String)>,
         wait_for_accept: Option<Duration>,
     ) -> Result<()> {
+        self.send_message_with_reminder(session_id, content, images, None, wait_for_accept)
+    }
+
+    /// [`send_message`](Self::send_message) with a hidden system reminder
+    /// for this turn only, such as a collection's instructions. The reminder
+    /// guides the model without appearing in the visible transcript.
+    pub fn send_message_with_reminder(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<&str>,
+        wait_for_accept: Option<Duration>,
+    ) -> Result<()> {
         // Subscribe *before* writing: an ack that lands between the write and
         // the subscribe would otherwise be missed and time out a healthy turn.
         let stream = wait_for_accept.map(|_| self.events(Some(session_id)));
         self.notify(ApiRequest::SendMessage {
             session_id: session_id.to_string(),
             content: content.to_string(),
-            system_reminder: None,
+            system_reminder: system_reminder
+                .map(str::trim)
+                .filter(|reminder| !reminder.is_empty())
+                .map(str::to_owned),
             images,
             no_reply: false,
         })?;

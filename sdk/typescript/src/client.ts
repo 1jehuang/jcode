@@ -621,6 +621,36 @@ export class JcodeClient extends EventEmitter {
     this.notify({ req: "send_message", session_id: sessionId, content: "", system_reminder: reminder });
   }
 
+  /**
+   * Send a user message with a hidden system reminder for this turn only,
+   * such as a collection's instructions. The reminder guides the model
+   * without appearing in the visible transcript.
+   */
+  async sendMessageWithReminder(
+    sessionId: string,
+    content: string,
+    images: ImageAttachment[] = [],
+    systemReminder?: string,
+    options: Pick<SendMessageOptions, "waitForAccept" | "acceptTimeoutMs"> = {},
+  ): Promise<void> {
+    const reminder = systemReminder?.trim();
+    const waitForAccept = options.waitForAccept ?? true;
+    const accepted = waitForAccept
+      ? this.waitForEvent(
+          (frame) => frame.ev === "message_accepted" && frame.session_id === sessionId,
+          options.acceptTimeoutMs ?? 10_000,
+        )
+      : undefined;
+    this.notify({
+      req: "send_message",
+      session_id: sessionId,
+      content,
+      images,
+      ...(reminder ? { system_reminder: reminder } : {}),
+    });
+    await accepted;
+  }
+
   /** Write a request without expecting a request-level reply. */
   notify(request: ApiRequest): void {
     if (this.closed) throw this.closeError ?? new Error("client closed");

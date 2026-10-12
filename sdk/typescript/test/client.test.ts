@@ -720,6 +720,24 @@ test("sendSystemReminder writes hidden content without waiting for acceptance", 
   }
 });
 
+test("sendMessageWithReminder sends visible content with a hidden per-turn reminder", async () => {
+  const requests: any[] = [];
+  const server = await startMockHarness({ onRequest(request) { requests.push(request); } });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    await client.sendMessageWithReminder("mine", "hello", [], "  be brief  ", { waitForAccept: false });
+    await client.sendMessageWithReminder("mine", "plain", [], "   ", { waitForAccept: false });
+    await waitFor(() => requests.length === 2);
+    assert.equal(requests[0].content, "hello");
+    assert.equal(requests[0].system_reminder, "be brief");
+    assert.equal(requests[1].content, "plain");
+    assert.equal("system_reminder" in requests[1], false);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
 test("run retains an abnormal stop without leaking another session's reason", async () => {
   const server = await startMockHarness({
     onRequest(request, send) {
