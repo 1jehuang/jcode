@@ -135,6 +135,23 @@ fn test_shell_wrapped_reader_is_detected() {
         .expect("failed to spawn bash");
 
     let pid = child.id();
+
+    // The shell parks in `wait4`, and until the kernel reclaims its stack it
+    // can still sample as a reader. Wait for the parked state to settle so the
+    // poll below can only report `Reading` through the descendant walk, rather
+    // than catching the shell inside that window.
+    let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < settle_deadline {
+        if macos::check(pid) != StdinState::Reading {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // The wrapper shell itself is parked in `wait4`, which the parked-thread
+    // gate rejects on purpose; the descendant walk is what finds the reader.
+    let shell_only = macos::check(pid);
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut state = StdinState::NotReading;
     while std::time::Instant::now() < deadline {
@@ -144,10 +161,6 @@ fn test_shell_wrapped_reader_is_detected() {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-
-    // The wrapper shell itself is parked in `wait4`, which the parked-thread
-    // gate rejects on purpose; the descendant walk is what finds the reader.
-    let shell_only = macos::check(pid);
 
     child.kill().ok();
     child.wait().ok();
