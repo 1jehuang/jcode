@@ -12,7 +12,71 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 #[test]
-fn memory_cli_project_import_uses_explicit_directory_and_persists() {
+fn server_reload_report_preserves_json_fields_and_exit_status_contract() {
+    let cases = [
+        (false, false, false, false),
+        (true, true, true, false),
+        (true, false, true, false),
+        (true, false, false, true),
+    ];
+
+    for (had_listener, already_current, handoff_ready, should_fail) in cases {
+        let report = ServerReloadReport {
+            socket: "/tmp/jcode.sock".to_string(),
+            had_listener,
+            forced: false,
+            reloaded: had_listener && !already_current,
+            already_current,
+            handoff_ready,
+            detail: "test reload outcome".to_string(),
+        };
+
+        let json = serde_json::to_value(&report).expect("serialize reload report");
+        assert_eq!(json["had_listener"], had_listener);
+        assert_eq!(json["already_current"], already_current);
+        assert_eq!(json["handoff_ready"], handoff_ready);
+
+        let result = validate_server_reload_report(&report);
+        assert_eq!(result.is_err(), should_fail, "report: {json}");
+        if should_fail {
+            assert!(
+                result
+                    .expect_err("not-ready handoff must fail")
+                    .to_string()
+                    .contains("never became ready")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn server_reload_without_listener_is_a_successful_json_noop() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_SOCKET"]);
+    let home = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_SOCKET", home.path().join("isolated.sock"));
+
+    let mut output = Vec::new();
+    let result = run_server_reload_command_to(false, true, &mut output).await;
+
+    result.expect("reload without a listener must be a successful no-op");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output).expect("reload --json must emit one JSON report");
+    assert_eq!(report["had_listener"], false);
+    assert_eq!(report["already_current"], false);
+    assert_eq!(report["handoff_ready"], false);
+    assert_eq!(report["reloaded"], false);
+    assert_eq!(report["forced"], false);
+    assert!(
+        report["detail"]
+            .as_str()
+            .is_some_and(|detail| { detail.contains("No running jcode server found") })
+    );
+}
+
+#[tokio::test]
+async fn memory_cli_project_import_uses_explicit_directory_and_persists() {
     let _guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&["JCODE_HOME"]);
     let temp = tempfile::tempdir().expect("temp dir");
@@ -39,6 +103,7 @@ fn memory_cli_project_import_uses_explicit_directory_and_persists() {
         },
         Some(project.clone()),
     )
+    .await
     .expect("import project memory");
 
     let reloaded = crate::memory::MemoryManager::new()
@@ -53,8 +118,8 @@ fn memory_cli_project_import_uses_explicit_directory_and_persists() {
     );
 }
 
-#[test]
-fn memory_cli_project_import_fails_without_durable_project_store() {
+#[tokio::test]
+async fn memory_cli_project_import_fails_without_durable_project_store() {
     let temp = tempfile::tempdir().expect("temp dir");
     let input = temp.path().join("memories.json");
     std::fs::write(&input, "[]").expect("write import");
@@ -67,9 +132,63 @@ fn memory_cli_project_import_fails_without_durable_project_store() {
         },
         None,
     )
+    .await
     .expect_err("project import must require a durable store");
 
     assert!(error.to_string().contains("without a project directory"));
+}
+
+#[tokio::test]
+async fn memory_cli_semantic_requires_jev_but_keyword_search_remains_local() {
+    let _guard = crate::storage::lock_test_env();
+    let keys = [
+        "JCODE_HOME",
+        "JCODE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "TYPESAFE_API_KEY",
+        "AIMLAPI_API_KEY",
+        "JCODE_MEMORY_JEV_PROVIDER",
+    ];
+    let _saved = SavedEnv::capture(&keys);
+    let temp = tempfile::tempdir().expect("temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    for key in &keys[1..] {
+        crate::env::remove_var(key);
+    }
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let manager = crate::memory::MemoryManager::new().with_project_dir(&project);
+    manager
+        .remember_project(crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "cli-jev-probe without embedding",
+        ))
+        .unwrap();
+    assert!(
+        manager
+            .list_all()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.embedding.is_none())
+    );
+
+    let command = |semantic| MemorySubcommand::Search {
+        query: "cli-jev-probe".into(),
+        semantic,
+    };
+    run_memory_command_for_dir(command(false), Some(project.clone()))
+        .await
+        .expect("local keyword search must remain available without credentials");
+    let error = run_memory_command_for_dir(command(true), Some(project))
+        .await
+        .expect_err("--semantic must report missing Jev access, not silently use embeddings");
+    assert!(error.to_string().contains("Jev memory search failed"));
+    assert!(!format!("{error:#}").contains("cli-jev-probe"));
+
+    // Scope still comes from the explicit directory, never the process cwd.
+    run_memory_command_for_dir(command(true), Some(temp.path().join("empty-project")))
+        .await
+        .expect("an empty project must not leak another project's candidates");
 }
 
 struct SavedEnv {
@@ -152,6 +271,62 @@ impl Provider for FailingTestProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self)
     }
+}
+
+struct OpenRouterSlotProvider;
+
+#[async_trait]
+impl Provider for OpenRouterSlotProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!(
+            "the provider label test never sends a request"
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "openrouter"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
+#[test]
+fn run_report_names_local_profile_instead_of_openrouter_slot() {
+    // Ollama/LM Studio share the OpenRouter transport slot (#804).
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("ollama")),
+        "ollama"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("lmstudio")),
+        "lmstudio"
+    );
+    // Public OpenRouter and unknown identities keep the slot id.
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("openrouter")),
+        "openrouter"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, None),
+        "openrouter"
+    );
+    assert_eq!(
+        run_report_provider_name(&OpenRouterSlotProvider, Some("  ")),
+        "openrouter"
+    );
+    // Other providers keep their established name.
+    assert_eq!(
+        run_report_provider_name(&TestProvider, Some("openai-api")),
+        "test"
+    );
 }
 
 fn spawn_single_response_http_server(status: u16, body: &str) -> String {
@@ -395,7 +570,9 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
         }) => {
             assert_eq!(total_todos, 2);
             assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
-            assert!(message.contains("completion confidence"));
+            assert!(message.contains("Validate further:"));
+            assert!(message.contains("\"todo a\""));
+            assert!(message.contains("\"todo b\""));
             assert!(!message.to_ascii_lowercase().contains("threshold"));
         }
         _ => panic!("expected confidence-summary follow-up"),
@@ -712,13 +889,8 @@ fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
         Some(ConfidenceState::Plausible),
         Some(ConfidenceState::Verified),
     )];
-    assert!(matches!(
-        build_run_auto_poke_follow_up_from_todos(&validated, false, None),
-        Some(RunAutoPokeFollowUp::ConfidenceSummary {
-            confidence_spike_challenge: true,
-            ..
-        })
-    ));
+    // A normal validation gain is not a reason to spend another model turn.
+    assert!(build_run_auto_poke_follow_up_from_todos(&validated, false, None).is_none());
     assert!(build_run_auto_poke_follow_up_from_todos(&validated, true, None).is_none());
 }
 

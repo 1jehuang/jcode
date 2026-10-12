@@ -35,6 +35,13 @@ impl Provider for MockProvider {
         "mock"
     }
 
+    /// Deliberately different from `name()`: the provider class id and the
+    /// profile label must not be interchangeable, or a fallback that reaches
+    /// for `name()` where a display label belongs goes unnoticed (#1286).
+    fn display_name(&self) -> String {
+        "Mock Profile".to_string()
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self(self.0))
     }
@@ -111,15 +118,174 @@ async fn session_activity_snapshot_uses_fallback_when_no_live_connection_is_mark
 #[tokio::test]
 async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy() {
     for tier in [Some("priority"), Some("flex"), None] {
-        assert_busy_history_service_tier(tier).await;
+        assert_history_service_tier_and_pdf_capability(tier, true, false, false).await;
     }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test serializes storage environment and deliberately holds the busy agent"
+)]
+async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
+    let _env_guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_fresh_busy_history";
+    let session = crate::session::Session::create_with_id(session_id.into(), None, None);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(Some("priority")));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let snapshot_path = crate::session::session_path(session_id).unwrap();
+    assert!(
+        !snapshot_path.exists(),
+        "fresh empty sessions are not persisted"
+    );
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.to_string(),
+        agent.clone(),
+    )])));
+    let connections = Arc::new(RwLock::new(HashMap::new()));
+    let count = Arc::new(RwLock::new(1));
+    let (stream, mut peer) = crate::transport::stream_pair().unwrap();
+    let (_reader, write_half) = stream.into_split();
+    let writer = Arc::new(Mutex::new(write_half));
+    let busy_guard = agent.lock().await;
+
+    // Keep the mutex held throughout, representing either idle prefetch or a
+    // real turn. Concurrent requests must not queue behind either lock owner.
+    let request = |id, processing| {
+        handle_get_history(
+            id,
+            session_id,
+            processing,
+            &agent,
+            &provider,
+            &sessions,
+            &connections,
+            &count,
+            &writer,
+            "test-server",
+            "test",
+            None,
+            false,
+        )
+    };
+    for processing in [false, true] {
+        let results = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                request(1, processing),
+                request(2, processing),
+                request(3, processing)
+            )
+        })
+        .await
+        .expect("fresh history must not wait for busy agent");
+        results.0.unwrap();
+        results.1.unwrap();
+        results.2.unwrap();
+    }
+    assert!(
+        !snapshot_path.exists(),
+        "fallback must not persist synthetic state"
+    );
+
+    // A nonexistent session is not the same as a registered, unsaved one.
+    sessions.write().await.clear();
+    assert!(request(4, false).await.is_err());
+    sessions
+        .write()
+        .await
+        .insert(session_id.into(), agent.clone());
+    // Corrupt snapshots must not silently become empty history either.
+    std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot_path, b"not valid session json").unwrap();
+    assert!(request(5, false).await.is_err());
+
+    drop(busy_guard);
+    drop(writer);
+    let mut bytes = Vec::new();
+    peer.read_to_end(&mut bytes).await.unwrap();
+    let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
+        .lines()
+        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+        .collect();
+    assert_eq!(events.len(), 6);
+    for (index, event) in events.into_iter().enumerate() {
+        match event {
+            crate::protocol::ServerEvent::History {
+                session_id: returned_id,
+                messages,
+                images,
+                provider_name,
+                provider_model,
+                reasoning_effort,
+                service_tier,
+                activity,
+                all_sessions,
+                client_count,
+                ..
+            } => {
+                assert_eq!(returned_id, session_id);
+                assert!(messages.is_empty());
+                assert!(images.is_empty());
+                assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
+                assert_eq!(provider_model.as_deref(), Some("mock-model"));
+                assert_eq!(reasoning_effort.as_deref(), Some("high"));
+                assert_eq!(service_tier.as_deref(), Some("priority"));
+                assert_eq!(
+                    activity.is_some_and(|activity| activity.is_processing),
+                    index >= 3
+                );
+                assert_eq!(all_sessions, vec![session_id.to_string()]);
+                assert_eq!(client_count, Some(1));
+            }
+            other => panic!("expected history, got {other:?}"),
+        }
+    }
+    if let Some(home) = prev_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn pdf_panels_history_capability_covers_live_and_persisted_paths() {
+    for busy in [false, true] {
+        for supports_pdf_panels in [false, true] {
+            assert_history_service_tier_and_pdf_capability(None, busy, supports_pdf_panels, false)
+                .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn handle_get_history_uses_live_snapshot_when_agent_is_available() {
+    assert_history_service_tier_and_pdf_capability(None, false, false, false).await;
+}
+
+#[tokio::test]
+async fn history_guard_survives_racing_turn_and_is_released_before_write() {
+    assert_history_service_tier_and_pdf_capability(None, false, false, true).await;
 }
 
 #[expect(
     clippy::await_holding_lock,
     reason = "test intentionally keeps the agent busy lock held to exercise persisted-history fallback"
 )]
-async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
+async fn assert_history_service_tier_and_pdf_capability(
+    tier: Option<&'static str>,
+    busy: bool,
+    supports_pdf_panels: bool,
+    racing_turn: bool,
+) {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -146,17 +312,31 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     });
     session.save().expect("save session");
 
+    let pdf_path = temp_home.path().join("report.pdf");
+    std::fs::write(&pdf_path, b"%PDF-1.4\n%%EOF").unwrap();
+    let original_panel =
+        crate::side_panel::load_file(session_id, "report", Some("Report"), &pdf_path, true)
+            .unwrap();
+
     let provider: Arc<dyn Provider> = Arc::new(MockProvider(tier));
     let registry = Registry::empty();
     let mut live_session = session.clone();
     live_session.title = Some("live agent".to_string());
+    live_session.messages[0].content = vec![crate::message::ContentBlock::Text {
+        text: "live unsaved history".to_string(),
+        cache_control: None,
+    }];
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider.clone(),
         registry,
         live_session,
         None,
     )));
-    let busy_guard = agent.lock().await;
+    // Agent construction persists its session. Force a full snapshot of the
+    // older transcript rather than a metadata-only journal update.
+    session.replace_messages(session.messages.clone());
+    session.save().expect("restore persisted history snapshot");
+    let busy_guard = if busy { Some(agent.lock().await) } else { None };
 
     let sessions = Arc::new(RwLock::new(HashMap::from([(
         session_id.to_string(),
@@ -169,22 +349,67 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     let (_reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
 
-    handle_get_history(
-        42,
-        session_id,
-        true,
-        &agent,
-        &provider,
-        &sessions,
-        &client_connections,
-        &client_count,
-        &writer,
-        "server-name",
-        "🔥",
-        None,
-    )
-    .await
-    .expect("history should be written from persisted fallback");
+    if racing_turn {
+        // Reproduce the exact decision/preparation boundary without scheduler
+        // timing: a turn queues after the successful nonblocking acquisition.
+        let history_guard = agent.try_lock().expect("idle agent fast path");
+        let turn = agent.lock();
+        tokio::pin!(turn);
+        assert!(futures::poll!(&mut turn).is_pending());
+
+        // Socket backpressure lets us inspect the lock lifetime after snapshot
+        // preparation, while the history request is still in flight.
+        let writer_guard = writer.lock().await;
+        let history = super::send_history_with_guard(
+            42,
+            session_id,
+            history_guard,
+            &sessions,
+            &client_count,
+            &writer,
+            "server-name",
+            "🔥",
+            None,
+            None,
+            super::HistoryPayloadMode::Full,
+            true,
+            supports_pdf_panels,
+        );
+        tokio::pin!(history);
+        assert!(futures::poll!(&mut history).is_pending());
+        let turn_guard = match futures::poll!(&mut turn) {
+            std::task::Poll::Ready(guard) => guard,
+            std::task::Poll::Pending => panic!("snapshot must release agent before socket write"),
+        };
+        drop(writer_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut history)
+            .await
+            .expect("history must not reacquire the racing turn's lock")
+            .expect("write live history");
+        drop(turn_guard);
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle_get_history(
+                42,
+                session_id,
+                busy,
+                &agent,
+                &provider,
+                &sessions,
+                &client_connections,
+                &client_count,
+                &writer,
+                "server-name",
+                "🔥",
+                None,
+                supports_pdf_panels,
+            ),
+        )
+        .await
+        .expect("history must complete without waiting for the held turn lock")
+        .expect("history should be written");
+    }
 
     drop(busy_guard);
     drop(writer);
@@ -200,6 +425,34 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     let event: crate::protocol::ServerEvent =
         serde_json::from_str(line.trim()).expect("decode history event");
 
+    if !supports_pdf_panels {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum LegacyFormat {
+            Markdown,
+        }
+        #[derive(serde::Deserialize)]
+        struct LegacyPage {
+            format: LegacyFormat,
+        }
+        #[derive(serde::Deserialize)]
+        struct LegacySnapshot {
+            pages: Vec<LegacyPage>,
+        }
+        #[derive(serde::Deserialize)]
+        struct LegacyHistory {
+            messages: Vec<serde_json::Value>,
+            side_panel: LegacySnapshot,
+        }
+        let legacy: LegacyHistory = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(legacy.messages.len(), 1);
+        assert!(matches!(
+            legacy.side_panel.pages[0].format,
+            LegacyFormat::Markdown
+        ));
+        assert!(!line.contains("pdf_data"));
+    }
+
     match event {
         crate::protocol::ServerEvent::History {
             id,
@@ -207,15 +460,37 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
             messages,
             activity,
             service_tier,
+            side_panel,
             ..
         } => {
             assert_eq!(id, 42);
             assert_eq!(returned_session_id, session_id);
             assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].content, "persisted fallback history");
+            assert_eq!(
+                messages[0].content,
+                if busy {
+                    "persisted fallback history"
+                } else {
+                    "live unsaved history"
+                }
+            );
             assert_eq!(service_tier.as_deref(), tier);
-            let activity = activity.expect("fallback activity snapshot");
-            assert!(activity.is_processing);
+            assert_eq!(
+                side_panel,
+                super::super::client_writer::side_panel_for_client(
+                    original_panel.clone(),
+                    supports_pdf_panels,
+                )
+            );
+            // Wire projection must not alter shared persisted PDF state.
+            assert_eq!(
+                crate::side_panel::snapshot_for_session(session_id).unwrap(),
+                original_panel
+            );
+            if busy {
+                let activity = activity.expect("fallback activity snapshot");
+                assert!(activity.is_processing);
+            }
         }
         other => panic!("expected history event, got {:?}", other),
     }
@@ -307,7 +582,7 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
         } => {
             assert_eq!(id, 43);
             assert_eq!(returned_session_id, session_id);
-            assert_eq!(provider_name.as_deref(), Some("mock"));
+            assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
             assert_eq!(
                 provider_model.as_deref(),
                 Some(if busy {

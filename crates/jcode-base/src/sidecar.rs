@@ -159,6 +159,50 @@ impl Sidecar {
         Self::with_configured_model(configured_model)
     }
 
+    pub fn for_session(session: &crate::session::Session) -> Self {
+        let model = session
+            .effective_agent_model("memory", crate::config::Config::load().agents.memory_model);
+        let inherit = model.as_deref() == Some("inherit");
+        let model = if inherit {
+            session.model.clone()
+        } else {
+            model
+        };
+        if let Some(model) = model.as_deref()
+            && let Some(provider) = crate::provider::active_provider_fork()
+        {
+            let request = if inherit {
+                crate::provider::MultiProvider::model_switch_request_for_session_route(
+                    model,
+                    session.provider_key.as_deref(),
+                    session.route_api_method.as_deref(),
+                )
+            } else {
+                model.to_string()
+            };
+            if crate::provider::set_model_with_auth_refresh(provider.as_ref(), &request).is_ok() {
+                return Self {
+                    client: crate::provider::shared_http_client(),
+                    model: provider.model(),
+                    max_tokens: DEFAULT_MAX_TOKENS,
+                    backend: SidecarBackend::Provider,
+                    provider: Some(provider),
+                    reasoning_override: None,
+                };
+            }
+        }
+        // No live routing provider: retain extraction auto-selection as fallback
+        // for unsupported coordinator models and strip transport prefixes for
+        // the dedicated OpenAI/Claude clients.
+        let model = model.map(|model| {
+            model
+                .split_once(':')
+                .map(|(_, id)| id.to_string())
+                .unwrap_or(model)
+        });
+        Self::with_configured_model(model)
+    }
+
     fn with_configured_model(configured_model: Option<String>) -> Self {
         let (backend, model, provider) = if let Some(model) = configured_model {
             match crate::provider::provider_for_model(&model) {
@@ -309,10 +353,18 @@ impl Sidecar {
         let provider = self.provider.as_ref().context(
             "No active provider registered for sidecar; memory features require a logged-in provider",
         )?;
-        provider
-            .complete_simple(user_message, system)
+        let (text, usage) = provider
+            .complete_simple_with_usage(user_message, system)
             .await
-            .context("Sidecar completion via active provider failed")
+            .context("Sidecar completion via active provider failed")?;
+        crate::telemetry::record_simple_completion_usage(
+            None,
+            provider.name(),
+            &provider.model(),
+            crate::telemetry::UsageSource::Sidecar,
+            usage,
+        );
+        Ok(text)
     }
 
     /// Complete via OpenAI Responses API.
@@ -480,7 +532,7 @@ impl Sidecar {
         }
 
         if is_chatgpt_mode {
-            collect_openai_sse_text(response)
+            collect_openai_sse_text(response, model)
                 .await
                 .map_err(OpenAiSidecarError::other)
         } else {
@@ -489,6 +541,7 @@ impl Sidecar {
                 .await
                 .context("Failed to parse OpenAI API response")
                 .map_err(OpenAiSidecarError::other)?;
+            record_openai_sidecar_usage(model, result.get("usage"));
             extract_openai_response_text(&result).map_err(OpenAiSidecarError::other)
         }
     }
@@ -563,7 +616,7 @@ impl Sidecar {
         .await
         .context("Failed to send request to Claude API")?;
 
-        Self::parse_claude_response(response).await
+        Self::parse_claude_response(response, &self.model).await
     }
 
     /// Direct API-key completion path (`x-api-key`).
@@ -599,11 +652,11 @@ impl Sidecar {
             .await
             .context("Failed to send request to Claude API")?;
 
-        Self::parse_claude_response(response).await
+        Self::parse_claude_response(response, &self.model).await
     }
 
     /// Shared response parsing for both Claude credential paths.
-    async fn parse_claude_response(response: reqwest::Response) -> Result<String> {
+    async fn parse_claude_response(response: reqwest::Response, model: &str) -> Result<String> {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
@@ -619,6 +672,21 @@ impl Sidecar {
             .json()
             .await
             .context("Failed to parse Claude API response")?;
+
+        if let Some(usage) = result.usage.as_ref() {
+            crate::telemetry::record_provider_usage(
+                None,
+                "claude",
+                model,
+                crate::telemetry::UsageSource::Sidecar,
+                crate::telemetry::ProviderUsage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                },
+            );
+        }
 
         let text = result
             .content
@@ -917,7 +985,7 @@ pub struct ExtractedMemory {
 ///
 /// Parses `data: <json>` lines and accumulates text deltas from
 /// `response.output_text.delta` events, stopping on completion/done.
-async fn collect_openai_sse_text(response: reqwest::Response) -> Result<String> {
+async fn collect_openai_sse_text(response: reqwest::Response, model: &str) -> Result<String> {
     use futures::StreamExt;
     let mut stream = response.bytes_stream();
     let mut text = String::new();
@@ -944,6 +1012,10 @@ async fn collect_openai_sse_text(response: reqwest::Response) -> Result<String> 
                             }
                         }
                         "response.completed" | "response.incomplete" => {
+                            record_openai_sidecar_usage(
+                                model,
+                                event.response.as_ref().and_then(|r| r.get("usage")),
+                            );
                             return Ok(text);
                         }
                         "response.failed" | "error" => {
@@ -962,6 +1034,40 @@ async fn collect_openai_sse_text(response: reqwest::Response) -> Result<String> 
     }
 
     Ok(text)
+}
+
+/// Parsed OpenAI Responses API `usage` object. OpenAI reports cached prompt
+/// tokens as a subset of `input_tokens` (`input_tokens_details.cached_tokens`),
+/// so the total stays `input + output`; cache reads are surfaced separately for
+/// pricing, the same convention the agent path uses for OpenAI providers.
+fn parse_openai_usage(usage: &serde_json::Value) -> Option<crate::telemetry::ProviderUsage> {
+    let input = usage.get("input_tokens").and_then(|v| v.as_u64());
+    let output = usage.get("output_tokens").and_then(|v| v.as_u64());
+    if input.is_none() && output.is_none() {
+        return None;
+    }
+    let cached = usage
+        .get("input_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64());
+    Some(crate::telemetry::ProviderUsage {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        cache_read_input_tokens: cached,
+        cache_creation_input_tokens: None,
+    })
+}
+
+fn record_openai_sidecar_usage(model: &str, usage: Option<&serde_json::Value>) {
+    if let Some(parsed) = usage.and_then(parse_openai_usage) {
+        crate::telemetry::record_provider_usage(
+            None,
+            "openai",
+            model,
+            crate::telemetry::UsageSource::Sidecar,
+            parsed,
+        );
+    }
 }
 
 /// Extract text from a non-streaming OpenAI Responses API JSON response.
@@ -993,6 +1099,8 @@ struct SseEvent {
     kind: String,
     delta: Option<String>,
     error: Option<serde_json::Value>,
+    #[serde(default)]
+    response: Option<serde_json::Value>,
 }
 
 // Claude API types
@@ -1087,8 +1195,7 @@ fn is_anthropic_oauth_forbidden(err: &anyhow::Error) -> bool {
 #[derive(Deserialize)]
 struct ClaudeMessagesResponse {
     content: Vec<ClaudeContentBlock>,
-    #[serde(rename = "usage")]
-    _usage: Option<ClaudeUsage>,
+    usage: Option<ClaudeUsage>,
 }
 
 #[derive(Deserialize)]
@@ -1102,10 +1209,14 @@ enum ClaudeContentBlock {
 
 #[derive(Deserialize)]
 struct ClaudeUsage {
-    #[serde(rename = "input_tokens")]
-    _input_tokens: u32,
-    #[serde(rename = "output_tokens")]
-    _output_tokens: u32,
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
 }
 
 #[cfg(test)]
@@ -1113,6 +1224,47 @@ mod tests {
     use super::*;
     use crate::auth::codex;
     use std::ffi::OsString;
+
+    #[test]
+    fn parses_openai_responses_usage_with_cached_subset() {
+        let usage = serde_json::json!({
+            "input_tokens": 1200,
+            "input_tokens_details": {"cached_tokens": 900},
+            "output_tokens": 80,
+            "total_tokens": 1280
+        });
+        let parsed = parse_openai_usage(&usage).expect("usage parsed");
+        assert_eq!(parsed.input_tokens, 1200);
+        assert_eq!(parsed.output_tokens, 80);
+        assert_eq!(parsed.cache_read_input_tokens, Some(900));
+        assert_eq!(parsed.cache_creation_input_tokens, None);
+        assert!(parse_openai_usage(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn sse_completed_event_exposes_response_usage() {
+        let data = r#"{"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":3}}}"#;
+        let event: SseEvent = serde_json::from_str(data).expect("sse event");
+        let usage = event
+            .response
+            .as_ref()
+            .and_then(|r| r.get("usage"))
+            .and_then(parse_openai_usage)
+            .expect("usage");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 3);
+    }
+
+    #[test]
+    fn claude_response_usage_includes_cache_buckets() {
+        let body = r#"{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":5,"output_tokens":2,"cache_read_input_tokens":400,"cache_creation_input_tokens":30}}"#;
+        let parsed: ClaudeMessagesResponse = serde_json::from_str(body).expect("claude response");
+        let usage = parsed.usage.expect("usage");
+        assert_eq!(usage.input_tokens, 5);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.cache_read_input_tokens, Some(400));
+        assert_eq!(usage.cache_creation_input_tokens, Some(30));
+    }
 
     struct EnvVarGuard {
         key: &'static str,
@@ -1325,6 +1477,72 @@ mod tests {
                 reply: self.reply.clone(),
             })
         }
+    }
+
+    /// Stub that records the model it was switched to.
+    struct SwitchableProvider(std::sync::Mutex<String>);
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for SwitchableProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            anyhow::bail!("no network in tests")
+        }
+
+        fn name(&self) -> &str {
+            "switchable"
+        }
+
+        fn model(&self) -> String {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn set_model(&self, model: &str) -> Result<()> {
+            *self.0.lock().unwrap() = model.to_string();
+            Ok(())
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(SwitchableProvider(std::sync::Mutex::new(self.model())))
+        }
+    }
+
+    /// The local TUI end-of-session path builds its sidecar with
+    /// `for_session`, so a session's `/agents memory` choice must win over the
+    /// global default there too.
+    #[test]
+    fn session_sidecar_uses_session_memory_model_override() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("create temp jcode home");
+        let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[agents]\nmemory_model = \"global-memory-model\"\n",
+        )
+        .unwrap();
+        crate::provider::set_active_provider(std::sync::Arc::new(SwitchableProvider(
+            std::sync::Mutex::new("coordinator-model".into()),
+        )));
+        let mut session =
+            crate::session::Session::create_with_id("sidecar_memory".into(), None, None);
+        session.save_prepared().unwrap();
+        session
+            .set_agent_model_override("memory", Some("session-memory-model".into()))
+            .unwrap();
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "session-memory-model"
+        );
+        session.set_agent_model_override("memory", None).unwrap();
+        assert_eq!(
+            Sidecar::for_session(&session).model_name(),
+            "global-memory-model"
+        );
     }
 
     /// With NO OpenAI/Claude credentials, the sidecar must select the live

@@ -712,6 +712,61 @@ env = { TOKEN = "codex-inline-secret" }
 }
 
 #[test]
+fn codex_import_preserves_enabled_false() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let home = tempfile::tempdir().expect("home tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+
+    let codex_dir = home.path().join("external").join(".codex");
+    std::fs::create_dir_all(&codex_dir).expect("create codex config dir");
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"[mcp_servers.disabled_one]
+command = "disabled-bin"
+enabled = false
+
+[mcp_servers.active_one]
+command = "active-bin"
+"#,
+    )
+    .expect("write Codex config");
+
+    let result = std::panic::catch_unwind(|| {
+        let config = McpConfig::load_for_dir(None);
+        let disabled = config
+            .servers
+            .get("disabled_one")
+            .expect("disabled server is still imported");
+        assert!(
+            !disabled.is_enabled(),
+            "enabled = false must survive the import instead of silently activating the server"
+        );
+        assert!(
+            config
+                .servers
+                .get("active_one")
+                .expect("default-enabled server")
+                .is_enabled()
+        );
+
+        let snapshot =
+            std::fs::read_to_string(home.path().join("mcp.json")).expect("Codex snapshot");
+        assert!(
+            snapshot.contains(r#""enabled": false"#),
+            "snapshot should record the disabled state: {snapshot}"
+        );
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    result.expect("codex enabled=false import assertions");
+}
+
+#[test]
 fn claude_only_config_never_creates_a_jcode_snapshot() {
     let _guard = crate::storage::lock_test_env();
     let previous_home = std::env::var_os("JCODE_HOME");

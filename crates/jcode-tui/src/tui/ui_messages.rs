@@ -79,6 +79,12 @@ fn render_single_line_system_notice(
     Some(lines)
 }
 
+/// Assistant message text.
+///
+/// Restored history fills `tool_calls` with the turn's tool names, while live
+/// turns leave it empty. Those names are deliberately not rendered: the chat
+/// already shows a full row per tool, and a summary line would only appear
+/// after a reload.
 pub(crate) fn render_assistant_message(
     msg: &DisplayMessage,
     width: u16,
@@ -93,20 +99,6 @@ pub(crate) fn render_assistant_message(
     };
     if centered {
         markdown::recenter_structured_blocks_for_display(&mut lines, width as usize);
-    }
-    if !msg.tool_calls.is_empty() {
-        if lines.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|span| !span.content.trim().is_empty())
-        }) {
-            lines.push(Line::default().alignment(ratatui::layout::Alignment::Left));
-        }
-        lines.extend(render_assistant_tool_call_lines(
-            &msg.tool_calls,
-            wrap_width,
-            centered,
-        ));
     }
     lines
 }
@@ -311,87 +303,6 @@ pub(crate) fn render_reasoning_message(
     if centered {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
-    lines
-}
-
-fn render_assistant_tool_call_lines(
-    tool_calls: &[String],
-    width: usize,
-    centered: bool,
-) -> Vec<Line<'static>> {
-    if tool_calls.is_empty() {
-        return Vec::new();
-    }
-
-    const TOOL_SEPARATOR: &str = " · ";
-
-    let label = if tool_calls.len() == 1 {
-        "tool:"
-    } else {
-        "tools:"
-    };
-    let prefix = format!("  {} ", label);
-    let prefix_width = prefix.width();
-    let available_width = width.max(prefix_width.saturating_add(1));
-
-    let prefix_style = Style::default().fg(tool_color()).dim();
-    let separator_style = Style::default().fg(dim_color()).dim();
-    let name_style = Style::default().fg(accent_color()).dim();
-
-    let max_width = available_width.saturating_sub(1).max(prefix_width + 1);
-    let mut spans = vec![Span::styled(prefix.clone(), prefix_style)];
-    let mut current_width = prefix_width;
-    let mut shown = 0usize;
-
-    for (idx, tool_name) in tool_calls.iter().enumerate() {
-        let separator_width = if shown == 0 {
-            0
-        } else {
-            TOOL_SEPARATOR.width()
-        };
-        let more_remaining = tool_calls.len().saturating_sub(idx + 1);
-        let more_label = if more_remaining > 0 {
-            format!("{}+{} more", TOOL_SEPARATOR, more_remaining)
-        } else {
-            String::new()
-        };
-        let required = separator_width + tool_name.width() + more_label.width();
-
-        if current_width.saturating_add(required) <= max_width {
-            if shown > 0 {
-                spans.push(Span::styled(TOOL_SEPARATOR, separator_style));
-                current_width = current_width.saturating_add(separator_width);
-            }
-            spans.push(Span::styled(tool_name.clone(), name_style));
-            current_width = current_width.saturating_add(tool_name.width());
-            shown += 1;
-        } else {
-            break;
-        }
-    }
-
-    if shown < tool_calls.len() {
-        let remaining = tool_calls.len() - shown;
-        let more_text = if shown == 0 {
-            format!("+{} more", remaining)
-        } else {
-            format!("{}+{} more", TOOL_SEPARATOR, remaining)
-        };
-        spans.push(Span::styled(more_text, separator_style));
-    }
-
-    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
-        &Line::from(spans),
-        max_width,
-    )];
-
-    if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width as u16);
-        if let Some(line) = lines.first_mut() {
-            *line = super::truncate_line_with_ellipsis_to_width(line, max_width);
-        }
-    }
-
     lines
 }
 
@@ -1212,8 +1123,8 @@ fn todo_card_goal_for_group<'a>(
     })
 }
 
-fn todo_goal_score_spans(goal: &crate::todo::TodoGoal) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
+fn todo_goal_score_segments(goal: &crate::todo::TodoGoal) -> Vec<Vec<Span<'static>>> {
+    let mut segments: Vec<Vec<Span<'static>>> = Vec::new();
     let mut states: Vec<(&str, String, Color)> = Vec::new();
     if !crate::todo::feedback_loop_passes(goal.closed_feedback_loop) {
         let (state, color) = goal.closed_feedback_loop.map_or_else(
@@ -1273,33 +1184,25 @@ fn todo_goal_score_spans(goal: &crate::todo::TodoGoal) -> Vec<Span<'static>> {
     }
 
     if states.is_empty() {
-        spans.push(Span::styled(
+        segments.push(vec![Span::styled(
             "✓ All quality gates passing",
             Style::default().fg(todo_score_color()),
-        ));
+        )]);
     }
 
-    for (index, (label, state, color)) in states.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
-        }
-        spans.push(Span::styled(
-            format!("{} ", label),
-            Style::default().fg(todo_label_color()),
-        ));
-        spans.push(Span::styled(state, Style::default().fg(color)));
+    for (label, state, color) in states {
+        segments.push(vec![
+            Span::styled(
+                format!("{} ", label),
+                Style::default().fg(todo_label_color()),
+            ),
+            Span::styled(state, Style::default().fg(color)),
+        ]);
     }
 
     // Delivery is progress toward the outcome, not a quality gate. Keep it
     // visible and visually separate from failures so it cannot read as one.
     if let Some(state) = goal.delivery_state {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
-        }
-        spans.push(Span::styled(
-            "Delivery ",
-            Style::default().fg(todo_label_color()),
-        ));
         let color = if state >= crate::todo::DeliveryState::WorkflowValidated {
             todo_score_color()
         } else if state == crate::todo::DeliveryState::Integrated {
@@ -1307,12 +1210,12 @@ fn todo_goal_score_spans(goal: &crate::todo::TodoGoal) -> Vec<Span<'static>> {
         } else {
             todo_failure_color()
         };
-        spans.push(Span::styled(
-            state.as_str().to_string(),
-            Style::default().fg(color),
-        ));
+        segments.push(vec![
+            Span::styled("Delivery ", Style::default().fg(todo_label_color())),
+            Span::styled(state.as_str().to_string(), Style::default().fg(color)),
+        ]);
     }
-    spans
+    segments
 }
 
 fn push_todo_status_pips<'a>(
@@ -1543,86 +1446,31 @@ fn push_todo_goal_details(
     let Some(goal) = goal else {
         return;
     };
-    let scores = todo_goal_score_spans(goal);
-    if !scores.is_empty() {
-        let score_width = Line::from(scores.clone()).width();
-        let score_count = usize::from(!crate::todo::feedback_loop_passes(
-            goal.closed_feedback_loop,
-        )) + usize::from(!crate::todo::feedback_loop_relevance_passes(goal))
-            + usize::from(!crate::todo::feedback_loop_coverage_passes(goal))
-            + usize::from(!crate::todo::feedback_loop_traceability_passes(goal))
-            + usize::from(goal.delivery_state.is_some());
-        if score_width > inner_width.saturating_sub(2) && score_count > 1 {
-            let mut states: Vec<(&str, String)> = Vec::new();
-            if !crate::todo::feedback_loop_passes(goal.closed_feedback_loop) {
-                states.push((
-                    "Closed feedback loop",
-                    goal.closed_feedback_loop
-                        .map(|state| state.as_str())
-                        .unwrap_or("missing")
-                        .to_string(),
-                ));
-            }
-            if !crate::todo::feedback_loop_relevance_passes(goal) {
-                states.push((
-                    "Relevance",
-                    goal.feedback_loop_relevance
-                        .map(|state| state.as_str())
-                        .unwrap_or("missing")
-                        .to_string(),
-                ));
-            }
-            if !crate::todo::feedback_loop_coverage_passes(goal) {
-                states.push((
-                    "Coverage",
-                    goal.feedback_loop_coverage
-                        .map(|state| state.as_str())
-                        .unwrap_or("missing")
-                        .to_string(),
-                ));
-            }
-            if !crate::todo::feedback_loop_traceability_passes(goal) {
-                states.push((
-                    "Traceability",
-                    goal.feedback_loop_traceability
-                        .map(|state| state.as_str())
-                        .unwrap_or("missing")
-                        .to_string(),
-                ));
-            }
-            if let Some(state) = goal.delivery_state {
-                states.push(("Delivery", state.as_str().to_string()));
-            }
-            for (label, state) in states {
-                let mut spans = vec![Span::raw("  ")];
-                spans.push(Span::styled(
-                    format!("{} ", label),
-                    Style::default().fg(todo_label_color()),
-                ));
-                let color = if label == "Delivery" {
-                    match crate::todo::DeliveryState::parse(&state) {
-                        Some(value) if value >= crate::todo::DeliveryState::WorkflowValidated => {
-                            todo_score_color()
-                        }
-                        Some(crate::todo::DeliveryState::Integrated) => todo_warning_color(),
-                        _ => todo_failure_color(),
-                    }
-                } else if matches!(
-                    state.as_str(),
-                    "missing" | "absent" | "weak" | "indirect" | "narrow" | "unmapped"
-                ) {
-                    todo_failure_color()
-                } else {
-                    todo_warning_color()
-                };
-                spans.push(Span::styled(state, Style::default().fg(color)));
-                lines.push(todo_card_line(spans, base_indent, inner_width));
-            }
-        } else {
+    // Pack gate segments onto as few rows as fit, separated by " · ", and
+    // only wrap to a new row when the next segment would overflow.
+    let available = inner_width.saturating_sub(2).max(1);
+    let separator_width = " · ".width();
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut row_width = 0usize;
+    for segment in todo_goal_score_segments(goal) {
+        let segment_width = Line::from(segment.clone()).width();
+        if !row.is_empty() && row_width + separator_width + segment_width > available {
             let mut spans = vec![Span::raw("  ")];
-            spans.extend(scores);
+            spans.append(&mut row);
             lines.push(todo_card_line(spans, base_indent, inner_width));
+            row_width = 0;
         }
+        if !row.is_empty() {
+            row.push(Span::styled(" · ", Style::default().fg(dim_color())));
+            row_width += separator_width;
+        }
+        row_width += segment_width;
+        row.extend(segment);
+    }
+    if !row.is_empty() {
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(row);
+        lines.push(todo_card_line(spans, base_indent, inner_width));
     }
 }
 
@@ -3361,6 +3209,10 @@ fn edit_tool_inline_diff_lines(tc: &ToolCall, content: &str) -> Option<Vec<Parse
     (!change_lines.is_empty()).then_some(change_lines)
 }
 
+pub(super) fn edit_tool_has_inline_diff(tc: &ToolCall, content: &str) -> bool {
+    edit_tool_inline_diff_lines(tc, content).is_some()
+}
+
 pub(super) fn edit_tool_inline_diff_is_expandable(
     tc: &ToolCall,
     content: &str,
@@ -4073,6 +3925,18 @@ pub(crate) fn render_tool_message(
     } else {
         tools_ui::get_tool_summary_with_budget(tc, 50, Some(technical_summary_width))
     };
+    // Edit rows read like every other tool row: the intent. The file path is
+    // already shown on the inline diff header right below, so repeating it on
+    // the row is noise. Errors keep their summary so failures stay diagnosable.
+    let edit_path_on_diff_header = is_edit_tool
+        && !is_error
+        && diff_mode.is_inline()
+        && edit_tool_has_inline_diff(tc, &msg.content);
+    let summary = if edit_path_on_diff_header {
+        String::new()
+    } else {
+        summary
+    };
 
     let mut tool_line = vec![
         Span::styled(format!("  {} ", icon), Style::default().fg(icon_color)),
@@ -4312,11 +4176,13 @@ pub(crate) fn render_tool_message(
                 tc.input
                     .get("patch_text")
                     .and_then(|v| v.as_str())
-                    .and_then(|patch_text| match tools_ui::canonical_tool_name(&tc.name) {
-                        "apply_patch" => tools_ui::extract_apply_patch_primary_file(patch_text),
-                        "patch" => tools_ui::extract_unified_patch_primary_file(patch_text),
-                        _ => None,
-                    })
+                    .and_then(
+                        |patch_text| match tools_ui::edit_render_name(&tc.name, &tc.input) {
+                            "apply_patch" => tools_ui::extract_apply_patch_primary_file(patch_text),
+                            "patch" => tools_ui::extract_unified_patch_primary_file(patch_text),
+                            _ => None,
+                        },
+                    )
             });
         const MAX_DIFF_LINES: usize = MAX_INLINE_DIFF_LINES;
         let total_changes = change_lines.len();

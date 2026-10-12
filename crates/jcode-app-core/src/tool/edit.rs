@@ -23,10 +23,131 @@ struct EditInput {
     #[serde(default)]
     intent: Option<String>,
     file_path: String,
+    #[serde(default)]
+    edits: Option<Vec<EditOperation>>,
+    #[serde(default)]
+    old_string: Option<String>,
+    #[serde(default)]
+    new_string: Option<String>,
+    #[serde(default)]
+    replace_all: bool,
+}
+
+#[derive(Deserialize, Clone)]
+struct EditOperation {
     old_string: String,
     new_string: String,
     #[serde(default)]
     replace_all: bool,
+}
+
+impl EditInput {
+    /// Accept either the `edits` array or the single-edit shorthand, never both.
+    fn operations(&self) -> Result<Vec<EditOperation>> {
+        let single = self.old_string.is_some() || self.new_string.is_some();
+        match (&self.edits, single) {
+            (Some(_), true) => Err(anyhow::anyhow!(
+                "Use either `edits` or `old_string`/`new_string`, not both."
+            )),
+            (Some(edits), false) if edits.is_empty() => {
+                Err(anyhow::anyhow!("`edits` must contain at least one edit."))
+            }
+            (Some(edits), false) => Ok(edits.clone()),
+            (None, true) => Ok(vec![EditOperation {
+                old_string: self.old_string.clone().ok_or_else(|| {
+                    anyhow::anyhow!("`old_string` is required with `new_string`.")
+                })?,
+                new_string: self.new_string.clone().ok_or_else(|| {
+                    anyhow::anyhow!("`new_string` is required with `old_string`.")
+                })?,
+                replace_all: self.replace_all,
+            }]),
+            (None, false) => Err(anyhow::anyhow!(
+                "Provide `edits` (array of old_string/new_string) or `old_string` and `new_string`."
+            )),
+        }
+    }
+}
+
+struct AppliedEdit {
+    occurrences: usize,
+    start_line: usize,
+}
+
+/// Apply every edit in order to an in-memory copy. Any failure aborts the whole
+/// call so the file is never left half-edited.
+fn apply_edits(
+    original: &str,
+    edits: &[EditOperation],
+    file_path: &str,
+) -> Result<(String, Vec<AppliedEdit>)> {
+    let mut content = original.to_string();
+    let mut applied = Vec::with_capacity(edits.len());
+    let mut failures = Vec::new();
+    let label = |index: usize| {
+        if edits.len() == 1 {
+            String::new()
+        } else {
+            format!("Edit {}: ", index + 1)
+        }
+    };
+
+    for (index, edit) in edits.iter().enumerate() {
+        if edit.old_string == edit.new_string {
+            failures.push(format!(
+                "{}old_string and new_string must be different",
+                label(index)
+            ));
+            continue;
+        }
+        if edit.old_string.is_empty() {
+            failures.push(format!("{}old_string must not be empty", label(index)));
+            continue;
+        }
+        let occurrences = content.matches(&edit.old_string).count();
+        if occurrences == 0 {
+            let hint = flexible_match_hint(&content, &edit.old_string, file_path);
+            failures.push(format!("{}{hint}", label(index)));
+            continue;
+        }
+        if occurrences > 1 && !edit.replace_all {
+            failures.push(format!(
+                "{}old_string found {occurrences} times. Either:\n\
+                 1. Provide more context to make it unique, or\n\
+                 2. Set replace_all: true to replace all occurrences",
+                label(index)
+            ));
+            continue;
+        }
+        let start_line = find_line_number(&content, &edit.old_string);
+        content = if edit.replace_all {
+            content.replace(&edit.old_string, &edit.new_string)
+        } else {
+            content.replacen(&edit.old_string, &edit.new_string, 1)
+        };
+        applied.push(AppliedEdit {
+            occurrences,
+            start_line,
+        });
+    }
+
+    if failures.is_empty() {
+        return Ok((content, applied));
+    }
+    if edits.len() == 1 {
+        return Err(anyhow::anyhow!(failures.remove(0)));
+    }
+    Err(anyhow::anyhow!(
+        "No changes written to {file_path}. {} of {} edits failed:\n{}\n\
+         Edits apply in order, so later edits see the result of earlier ones.",
+        failures.len(),
+        edits.len(),
+        failures
+            .iter()
+            .map(|failure| format!("  ✗ {failure}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
 }
 
 #[async_trait]
@@ -36,30 +157,44 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Replace text in a file."
+        "Edit a file by exact replacement. All edits apply or none do."
     }
 
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["file_path", "old_string", "new_string"],
+            "required": ["file_path"],
             "properties": {
                 "intent": super::intent_schema_property(),
                 "file_path": {
                     "type": "string",
                     "description": "File path."
                 },
+                "edits": {
+                    "type": "array",
+                    "description": "Replacements applied in order. Each old_string must match exactly once unless replace_all is set.",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "required": ["old_string", "new_string"],
+                        "properties": {
+                            "old_string": {"type": "string", "description": "Exact text to replace."},
+                            "new_string": {"type": "string", "description": "Replacement text."},
+                            "replace_all": {"type": "boolean", "description": "Replace every match."}
+                        }
+                    }
+                },
                 "old_string": {
                     "type": "string",
-                    "description": "Text to replace."
+                    "description": "Single-edit shorthand: exact text to replace. Omit when using edits."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "Replacement text."
+                    "description": "Single-edit shorthand: replacement text."
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "Replace all matches."
+                    "description": "Single-edit shorthand: replace every match."
                 }
             }
         })
@@ -67,83 +202,83 @@ impl Tool for EditTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: EditInput = serde_json::from_value(input)?;
-
-        if params.old_string == params.new_string {
-            return Err(anyhow::anyhow!(
-                "old_string and new_string must be different"
-            ));
-        }
-
+        let edits = params.operations()?;
         let path = ctx.resolve_path(Path::new(&params.file_path));
 
         if !path.exists() {
             return Err(anyhow::anyhow!("File not found: {}", params.file_path));
         }
 
+        let _lock = super::file_lock::lock(&path).await;
         let content = tokio::fs::read_to_string(&path).await?;
+        let (new_content, applied) = apply_edits(&content, &edits, &params.file_path)?;
 
-        // Count occurrences
-        let occurrences = content.matches(&params.old_string).count();
-
-        if occurrences == 0 {
-            // Try flexible matching
-            return try_flexible_match(&content, &params.old_string, &params.file_path);
-        }
-
-        if occurrences > 1 && !params.replace_all {
-            return Err(anyhow::anyhow!(
-                "old_string found {} times in the file. Either:\n\
-                 1. Provide more context to make it unique, or\n\
-                 2. Set replace_all: true to replace all occurrences",
-                occurrences
-            ));
-        }
-
-        // Perform replacement
-        let new_content = if params.replace_all {
-            content.replace(&params.old_string, &params.new_string)
-        } else {
-            content.replacen(&params.old_string, &params.new_string, 1)
-        };
-
-        // Find line number where edit starts
-        let start_line = find_line_number(&content, &params.old_string);
-
-        // Write back
         tokio::fs::write(&path, &new_content).await?;
+        super::edit_stats::record(&ctx, &content, &new_content, false).await;
 
-        // Generate a diff with line numbers
-        let diff = generate_diff(&params.old_string, &params.new_string, start_line);
+        let intent = params
+            .intent
+            .clone()
+            .filter(|value| !value.trim().is_empty());
 
-        // Publish file touch event for swarm coordination
-        let end_line = start_line + params.new_string.lines().count().saturating_sub(1);
-        let detail = build_file_touch_preview(&diff);
-        Bus::global().publish(BusEvent::FileTouch(FileTouch {
-            session_id: ctx.session_id.clone(),
-            path: path.to_path_buf(),
-            op: FileOp::Edit,
-            intent: params
-                .intent
-                .clone()
-                .filter(|value| !value.trim().is_empty()),
-            summary: Some(format!(
-                "edited lines {}-{} ({} occurrence{})",
-                start_line,
-                end_line,
-                occurrences,
-                if occurrences == 1 { "" } else { "s" }
-            )),
-            detail,
-        }));
-
-        // Extract context around the edit to help with consecutive edits
-        let end_line = start_line + params.new_string.lines().count().saturating_sub(1);
-        let context = extract_context(&new_content, start_line, end_line, 3);
-
-        let mut body = format!(
-            "Edited {}: replaced {} occurrence(s)\n{}\n\nContext after edit (lines {}-{}):\n{}",
-            params.file_path, occurrences, diff, context.0, context.1, context.2
-        );
+        let mut body = if let [edit] = edits.as_slice() {
+            let applied = &applied[0];
+            let diff = generate_diff(&edit.old_string, &edit.new_string, applied.start_line);
+            let end_line = applied.start_line + edit.new_string.lines().count().saturating_sub(1);
+            Bus::global().publish(BusEvent::FileTouch(FileTouch {
+                session_id: ctx.session_id.clone(),
+                path: path.to_path_buf(),
+                op: FileOp::Edit,
+                intent,
+                summary: Some(format!(
+                    "edited lines {}-{} ({} occurrence{})",
+                    applied.start_line,
+                    end_line,
+                    applied.occurrences,
+                    if applied.occurrences == 1 { "" } else { "s" }
+                )),
+                detail: build_file_touch_preview(&diff),
+            }));
+            let context = extract_context(&new_content, applied.start_line, end_line, 3);
+            format!(
+                "Edited {}: replaced {} occurrence(s)\n{}\n\nContext after edit (lines {}-{}):\n{}",
+                params.file_path, applied.occurrences, diff, context.0, context.1, context.2
+            )
+        } else {
+            let diff = generate_diff_summary(&content, &new_content);
+            let replaced: usize = applied.iter().map(|edit| edit.occurrences).sum();
+            Bus::global().publish(BusEvent::FileTouch(FileTouch {
+                session_id: ctx.session_id.clone(),
+                path: path.to_path_buf(),
+                op: FileOp::Edit,
+                intent,
+                summary: Some(format!(
+                    "applied {} edits ({replaced} replacement{})",
+                    edits.len(),
+                    if replaced == 1 { "" } else { "s" }
+                )),
+                detail: build_file_touch_preview(&diff),
+            }));
+            let mut body = format!(
+                "Edited {}: applied {} edits\n",
+                params.file_path,
+                edits.len()
+            );
+            for (index, edit) in applied.iter().enumerate() {
+                body.push_str(&format!(
+                    "  ✓ Edit {}: replaced {} occurrence{} at line {}\n",
+                    index + 1,
+                    edit.occurrences,
+                    if edit.occurrences == 1 { "" } else { "s" },
+                    edit.start_line
+                ));
+            }
+            if !diff.is_empty() {
+                body.push_str("\nDiff:\n");
+                body.push_str(&diff);
+            }
+            body
+        };
         super::config_edit_notice::append_config_edit_notice(
             &mut body,
             &path,
@@ -151,14 +286,17 @@ impl Tool for EditTool {
             &new_content,
         );
 
-        Ok(ToolOutput::new(body).with_title(params.file_path.clone()))
+        Ok(super::file_diff::attach(
+            ToolOutput::new(body).with_title(params.file_path.clone()),
+            super::file_diff::unified(&params.file_path, &params.file_path, &content, &new_content),
+        ))
     }
 }
 
 /// Find the 1-based line number where a substring starts
 fn find_line_number(content: &str, substring: &str) -> usize {
     if let Some(pos) = content.find(substring) {
-        content[..pos].lines().count() + 1
+        content[..pos].bytes().filter(|&byte| byte == b'\n').count() + 1
     } else {
         1
     }
@@ -260,40 +398,75 @@ fn extract_context(
     (start + 1, end, context_lines.join("\n"))
 }
 
-fn try_flexible_match(content: &str, old_string: &str, file_path: &str) -> Result<ToolOutput> {
-    // Try trimmed matching
+fn flexible_match_hint(content: &str, old_string: &str, file_path: &str) -> String {
     let trimmed = old_string.trim();
-    if content.contains(trimmed) && trimmed != old_string {
-        return Err(anyhow::anyhow!(
-            "old_string not found exactly, but found after trimming whitespace.\n\
-             Try using the exact string from the file, including leading/trailing whitespace."
-        ));
+    if !trimmed.is_empty() && trimmed != old_string && content.contains(trimmed) {
+        return "old_string not found exactly, but found after trimming whitespace. \
+                Use the exact string from the file, including leading/trailing whitespace."
+            .to_string();
     }
 
-    // Try line-by-line matching with normalized whitespace
     let old_lines: Vec<&str> = old_string.lines().collect();
     let content_lines: Vec<&str> = content.lines().collect();
-
-    for (i, window) in content_lines.windows(old_lines.len()).enumerate() {
-        let matches = window
-            .iter()
-            .zip(old_lines.iter())
-            .all(|(a, b)| a.trim() == b.trim());
-
-        if matches {
-            return Err(anyhow::anyhow!(
-                "old_string not found exactly, but found with different indentation around line {}.\n\
-                 Make sure to preserve the exact whitespace from the file.",
-                i + 1
-            ));
+    if !old_lines.is_empty() {
+        for (i, window) in content_lines.windows(old_lines.len()).enumerate() {
+            if window
+                .iter()
+                .zip(old_lines.iter())
+                .all(|(a, b)| a.trim() == b.trim())
+            {
+                return format!(
+                    "old_string not found exactly, but found with different indentation around line {}. \
+                     Preserve the exact whitespace from the file.",
+                    i + 1
+                );
+            }
         }
     }
 
-    Err(anyhow::anyhow!(
-        "old_string not found in {}.\n\
-         Use the read tool to see the current file contents.",
-        file_path
-    ))
+    format!(
+        "old_string not found in {file_path}. Use the read tool to see the current file contents."
+    )
+}
+
+/// Generate a compact whole-file diff: "42- old" / "42+ new" (max 30 lines)
+fn generate_diff_summary(old: &str, new: &str) -> String {
+    const MAX_LINES: usize = 30;
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
+    let mut lines_shown = 0;
+    let mut old_line = 1usize;
+    let mut new_line = 1usize;
+
+    for change in diff.iter_all_changes() {
+        let (prefix, number) = match change.tag() {
+            ChangeTag::Equal => {
+                old_line += 1;
+                new_line += 1;
+                continue;
+            }
+            ChangeTag::Delete => {
+                old_line += 1;
+                ("-", old_line - 1)
+            }
+            ChangeTag::Insert => {
+                new_line += 1;
+                ("+", new_line - 1)
+            }
+        };
+        let content = change.value().trim();
+        if content.is_empty() {
+            continue;
+        }
+        if lines_shown >= MAX_LINES {
+            output.push_str("...\n");
+            break;
+        }
+        output.push_str(&format!("{number}{prefix} {content}\n"));
+        lines_shown += 1;
+    }
+
+    output.trim_end().to_string()
 }
 
 #[cfg(test)]
@@ -375,12 +548,89 @@ mod tests {
         );
     }
 
+    fn op(old: &str, new: &str) -> EditOperation {
+        EditOperation {
+            old_string: old.into(),
+            new_string: new.into(),
+            replace_all: false,
+        }
+    }
+
+    #[test]
+    fn apply_edits_is_all_or_nothing() {
+        let error = apply_edits(
+            "alpha\nbeta\ngamma\n",
+            &[op("alpha", "a"), op("missing", "x"), op("gamma", "g")],
+            "f.rs",
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("No changes written to f.rs"), "{error}");
+        assert!(error.contains("1 of 3 edits failed"), "{error}");
+        assert!(error.contains("Edit 2: old_string not found"), "{error}");
+    }
+
+    #[test]
+    fn apply_edits_applies_sequentially() {
+        let (content, applied) = apply_edits(
+            "alpha\nbeta\n",
+            &[op("alpha", "temp"), op("temp", "done"), op("beta", "b")],
+            "f.rs",
+        )
+        .unwrap();
+        assert_eq!(content, "done\nb\n");
+        assert_eq!(applied.len(), 3);
+        assert_eq!(applied[2].start_line, 2);
+    }
+
+    #[test]
+    fn apply_edits_rejects_ambiguous_match_without_replace_all() {
+        assert!(apply_edits("x x", &[op("x", "y")], "f").is_err());
+        let mut all = op("x", "y");
+        all.replace_all = true;
+        let (content, applied) = apply_edits("x x", &[all], "f").unwrap();
+        assert_eq!(content, "y y");
+        assert_eq!(applied[0].occurrences, 2);
+    }
+
+    #[test]
+    fn input_accepts_single_or_array_but_not_both() {
+        let parse = |value: Value| serde_json::from_value::<EditInput>(value).unwrap();
+        assert_eq!(
+            parse(json!({"file_path":"f","old_string":"a","new_string":"b"}))
+                .operations()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            parse(json!({"file_path":"f","edits":[{"old_string":"a","new_string":"b"},{"old_string":"c","new_string":"d"}]}))
+                .operations()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            parse(json!({"file_path":"f","edits":[],"old_string":"a","new_string":"b"}))
+                .operations()
+                .is_err()
+        );
+        assert!(parse(json!({"file_path":"f"})).operations().is_err());
+        assert!(
+            parse(json!({"file_path":"f","old_string":"a"}))
+                .operations()
+                .is_err()
+        );
+    }
+
     #[test]
     fn test_find_line_number() {
         let content = "line 1\nline 2\nline 3\nline 4";
 
         assert_eq!(find_line_number(content, "line 1"), 1);
         assert_eq!(find_line_number(content, "line 2"), 2);
+        assert_eq!(find_line_number(content, "ine 2"), 2);
         assert_eq!(find_line_number(content, "line 3"), 3);
         assert_eq!(find_line_number(content, "line 4"), 4);
         assert_eq!(find_line_number(content, "not found"), 1);

@@ -263,8 +263,7 @@ fn onboarding_golden_walks_every_phase() {
 
     // 2. Login with detected imports: the default SUMMARY screen. It lists
     // everything we detected read-only and lands focus on a preselected
-    // import action, with a Jcode subscription alternative and secondary
-    // import/telemetry controls beside it.
+    // import action, with secondary import/telemetry controls beside it.
     {
         let review = ImportReview::new(vec![
             ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
@@ -286,22 +285,14 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Codex auth.json"), "source 1: {text}");
         assert!(text.contains("Claude"), "provider 2: {text}");
         assert!(text.contains('✓'), "detected checkmark: {text}");
-        // The primary actions explicitly offer import or a Jcode subscription.
-        assert!(text.contains("Import"), "import pill label: {text}");
+        // The primary action is import. The Jcode subscription is not offered.
+        assert!(text.contains("Continue"), "continue pill label: {text}");
         assert!(
-            text.contains("Jcode subscription"),
-            "subscription pill label: {text}"
+            !text.contains("Jcode subscription"),
+            "no subscription pill: {text}"
         );
         assert!(text.contains("Import less"), "import-less pill: {text}");
         assert!(text.contains("Telemetry"), "telemetry pill label: {text}");
-        assert!(
-            text.contains("$10 to $20 inference, $20 to $40; then provider API prices"),
-            "subscription allowance and overage pricing: {text}"
-        );
-        assert!(
-            text.contains("Scales through Solo"),
-            "offer should apply through the Solo plan: {text}"
-        );
         assert!(
             text.contains('\u{25D6}') && text.contains('\u{25D7}'),
             "pill rounded end caps: {text}"
@@ -362,10 +353,10 @@ fn onboarding_golden_walks_every_phase() {
             "singular headline: {text}"
         );
         assert!(text.contains("Cursor"), "single login row: {text}");
-        assert!(text.contains("Import"), "import pill: {text}");
+        assert!(text.contains("Continue"), "continue pill: {text}");
         assert!(
-            text.contains("Jcode subscription"),
-            "subscription pill: {text}"
+            !text.contains("Jcode subscription"),
+            "no subscription pill: {text}"
         );
     }
 
@@ -705,10 +696,12 @@ fn onboarding_import_happy_path_images() {
 
     // ---- done (review turn): the suggested architecture review accepted ----
     {
+        let _lock = crate::tui::ui::render_state_test_lock();
         // The full frame includes the "Updates" box when the machine running
         // the generator has unseen changelog entries, which makes the artifact
         // depend on developer-local state. Force it empty for determinism.
-        crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(Some(Vec::new()));
+        let _fixture =
+            crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
         // The git info widget would otherwise capture the live ahead/behind and
         // dirty counts of the repo the generator runs in. Pin it to a clean
         // fixture branch. (The version label is compile-time build meta, which
@@ -722,6 +715,8 @@ fn onboarding_import_happy_path_images() {
                 ahead: 0,
                 behind: 0,
                 dirty_files: Vec::new(),
+                dirty_total: 0,
+                ..Default::default()
             },
         ));
         let mut app = create_test_app();
@@ -734,7 +729,6 @@ fn onboarding_import_happy_path_images() {
         app.push_display_message(DisplayMessage::user(prompt));
         app.is_processing = true;
         write_full_frame_svg(&output_dir, "review-turn.svg", &app, width, height);
-        crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(None);
     }
     crate::env::remove_var("OPENROUTER_API_KEY");
     crate::auth::AuthStatus::invalidate_cached_status();

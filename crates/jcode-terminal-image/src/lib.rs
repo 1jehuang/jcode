@@ -6,10 +6,12 @@
 //! - [`metadata`]: small pure helpers for formatting image dimensions, byte
 //!   counts, formats, and estimating base64-decoded sizes.
 //!
-//! It is shared by the TUI and the `read` tool so neither has to depend on
-//! the other just to display or describe an image.
+//! `display` is behind the `display` feature so only terminal clients pull in
+//! crossterm. The shared runtime uses `metadata` alone.
 
+#[cfg(feature = "display")]
 pub mod display;
 pub mod metadata;
 
+#[cfg(feature = "display")]
 pub use display::{ImageDisplayParams, ImageProtocol, display_image};

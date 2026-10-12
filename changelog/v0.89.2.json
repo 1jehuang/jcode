@@ -1,0 +1,14 @@
+{
+  "version": "0.89.2",
+  "date": "2026-09-29",
+  "title": "Cursor MCP tool calls complete on every model",
+  "highlights": [
+    "Cursor MCP tool calls now complete on Composer, Grok 4.7, Grok 4.6, and Claude models instead of hanging after the tool is requested"
+  ],
+  "improvements": [],
+  "fixes": [
+    "Switching a session to Cursor with /model no longer leaves MCP tool calls stuck: tool results are sent back to Cursor",
+    "jcode answers Cursor's MCP server state and tool allowlist checks, so the model's tool call actually reaches jcode",
+    "Cursor model names resolve against Cursor's live model list, so Grok 4.6, Claude Opus 5/5.5, and GPT-5.6 Sol no longer fail with 'Model name is not valid'"
+  ]
+}
