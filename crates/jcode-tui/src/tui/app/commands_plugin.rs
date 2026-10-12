@@ -1,6 +1,8 @@
 use super::{App, DisplayMessage};
 use crate::bus::{Bus, BusEvent, PluginOperationCompleted};
-use jcode_provider_extensions::{PluginBundle, PluginSource, PluginStore, ProviderRegistry};
+use jcode_provider_extensions::{
+    PluginBundle, PluginSource, PluginStore, ProviderRegistry, unlink_owned_plugin_provider,
+};
 use std::path::Path;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -276,13 +278,15 @@ fn run_plugin_action(action: PluginAction) -> anyhow::Result<String> {
             } else {
                 false
             };
-            store.remove(&name)?;
-            if let Some(provider_id) = provider_id {
-                if owned {
-                    registry.remove(&provider_id)?;
-                    registry.save()?;
-                }
+            if owned {
+                unlink_owned_plugin_provider(
+                    &mut registry,
+                    &store.root().join(&name),
+                    &name,
+                    provider_id.as_deref(),
+                )?;
             }
+            store.remove(&name)?;
             Ok(format!("Removed plugin '{name}'."))
         }
         PluginAction::Help => Ok(plugin_usage()),

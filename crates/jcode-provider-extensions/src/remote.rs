@@ -251,14 +251,14 @@ impl PluginStore {
                 return Err(error);
             }
         };
-        if let Some(expected_name) = expected_name {
-            if bundle.manifest.name != expected_name {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(RemotePluginError::NameMismatch {
-                    expected: expected_name.to_string(),
-                    actual: bundle.manifest.name,
-                });
-            }
+        if let Some(expected_name) = expected_name
+            && bundle.manifest.name != expected_name
+        {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(RemotePluginError::NameMismatch {
+                expected: expected_name.to_string(),
+                actual: bundle.manifest.name,
+            });
         }
         let previous = match self.snapshot(&bundle.manifest.name) {
             Ok(snapshot) => snapshot,
@@ -411,10 +411,10 @@ impl PluginStore {
         let snapshot = &installed.previous;
         let plugin_root = self.root.join(&snapshot.name);
         let mut failures = Vec::new();
-        if installed.metadata.path.exists() {
-            if let Err(error) = fs::remove_dir_all(&installed.metadata.path) {
-                failures.push(error.to_string());
-            }
+        if installed.metadata.path.exists()
+            && let Err(error) = fs::remove_dir_all(&installed.metadata.path)
+        {
+            failures.push(error.to_string());
         }
         let metadata_path = plugin_root.join(INSTALL_METADATA_FILE);
         match &snapshot.metadata {
@@ -424,10 +424,10 @@ impl PluginStore {
                 }
             }
             None => {
-                if let Err(error) = fs::remove_file(&metadata_path) {
-                    if error.kind() != io::ErrorKind::NotFound {
-                        failures.push(error.to_string());
-                    }
+                if let Err(error) = fs::remove_file(&metadata_path)
+                    && error.kind() != io::ErrorKind::NotFound
+                {
+                    failures.push(error.to_string());
                 }
             }
         }
@@ -439,10 +439,10 @@ impl PluginStore {
                 }
             }
             None => {
-                if let Err(error) = fs::remove_file(&current_path) {
-                    if error.kind() != io::ErrorKind::NotFound {
-                        failures.push(error.to_string());
-                    }
+                if let Err(error) = fs::remove_file(&current_path)
+                    && error.kind() != io::ErrorKind::NotFound
+                {
+                    failures.push(error.to_string());
                 }
             }
         }

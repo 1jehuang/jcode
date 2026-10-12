@@ -107,7 +107,7 @@ pub trait EmbeddedExtension: Send + Sync {
 
 pub enum ExtensionBackend {
     Embedded(Arc<dyn EmbeddedExtension>),
-    External(ExternalProviderProcess),
+    External(Box<ExternalProviderProcess>),
 }
 
 impl ExtensionBackend {
@@ -183,7 +183,7 @@ impl ExtensionRuntimeRegistry {
             return Err(ExtensionError::DuplicateEmbeddedExtension(id));
         }
         self.backends
-            .insert(id, ExtensionBackend::External(process));
+            .insert(id, ExtensionBackend::External(Box::new(process)));
         Ok(())
     }
 

@@ -12,5 +12,8 @@ serde_json = "1"
 tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
 thiserror = "2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

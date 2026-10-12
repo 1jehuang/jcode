@@ -36,6 +36,8 @@ pub enum BundleError {
     InvalidSkill { path: PathBuf, message: String },
     #[error("provider manifest error: {0}")]
     Provider(#[from] ExtensionError),
+    #[error("path escapes plugin bundle root: {0}")]
+    EscapesRoot(PathBuf),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,14 +195,18 @@ impl PluginBundle {
             return Err(BundleError::InvalidRoot(root));
         }
 
-        let manifest_candidates = [
+        let mut manifest_candidates = Vec::new();
+        for path in [
             root.join("plugin.json"),
             root.join(".codex-plugin").join("plugin.json"),
             root.join(".claude-plugin").join("plugin.json"),
-        ]
-        .into_iter()
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+        ] {
+            if let Some(path) = resolve_inside(&root, &path)?
+                && path.is_file()
+            {
+                manifest_candidates.push(path);
+            }
+        }
         let manifest_path = manifest_candidates
             .first()
             .cloned()
@@ -250,15 +256,20 @@ impl PluginBundle {
             }
         }
 
-        let provider_path = root.join(PROVIDER_MANIFEST_FILE);
-        let provider_manifest = if provider_path.is_file() {
-            Some(super::load_manifest_file(&provider_path)?)
+        let provider_manifest = if let Some(provider_path) =
+            resolve_inside(&root, &root.join(PROVIDER_MANIFEST_FILE))?
+        {
+            if provider_path.is_file() {
+                Some(super::load_manifest_file(&provider_path)?)
+            } else {
+                None
+            }
         } else {
             None
         };
 
         let skills = discover_skills(&root)?;
-        let components = detect_components(&root, provider_manifest.is_some(), !skills.is_empty());
+        let components = detect_components(&root, provider_manifest.is_some(), !skills.is_empty())?;
 
         Ok(Self {
             root,
@@ -291,8 +302,31 @@ fn optional_field_matches(left: &Option<String>, right: &Option<String>) -> bool
     }
 }
 
+fn resolve_inside(root: &Path, path: &Path) -> Result<Option<PathBuf>, BundleError> {
+    match path.symlink_metadata() {
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(BundleError::Read {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        Ok(_) => {}
+    }
+    let canonical = path.canonicalize().map_err(|source| BundleError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !canonical.starts_with(root) {
+        return Err(BundleError::EscapesRoot(canonical));
+    }
+    Ok(Some(canonical))
+}
+
 fn discover_skills(root: &Path) -> Result<Vec<SkillMetadata>, BundleError> {
-    let skills_root = root.join("skills");
+    let Some(skills_root) = resolve_inside(root, &root.join("skills"))? else {
+        return Ok(Vec::new());
+    };
     if !skills_root.is_dir() {
         return Ok(Vec::new());
     }
@@ -309,6 +343,9 @@ fn discover_skills(root: &Path) -> Result<Vec<SkillMetadata>, BundleError> {
             source,
         })?;
         let path = entry.path();
+        let Some(path) = resolve_inside(root, &path)? else {
+            continue;
+        };
         if !path.is_dir() {
             continue;
         }
@@ -319,7 +356,9 @@ fn discover_skills(root: &Path) -> Result<Vec<SkillMetadata>, BundleError> {
                 message: error.to_string(),
             }
         })?;
-        let skill_path = path.join("SKILL.md");
+        let Some(skill_path) = resolve_inside(root, &path.join("SKILL.md"))? else {
+            continue;
+        };
         if !skill_path.is_file() {
             continue;
         }
@@ -406,20 +445,37 @@ fn parse_skill_frontmatter(
     Ok((name, description))
 }
 
-fn detect_components(root: &Path, provider: bool, skills: bool) -> BundleComponents {
-    BundleComponents {
+fn component_present(root: &Path, relative: &Path, directory: bool) -> Result<bool, BundleError> {
+    let Some(path) = resolve_inside(root, &root.join(relative))? else {
+        return Ok(false);
+    };
+    Ok(if directory {
+        path.is_dir()
+    } else {
+        path.is_file()
+    })
+}
+
+fn detect_components(
+    root: &Path,
+    provider: bool,
+    skills: bool,
+) -> Result<BundleComponents, BundleError> {
+    Ok(BundleComponents {
         provider,
         skills,
-        agents: root.join("agents").is_dir(),
-        hooks: root.join("hooks.json").is_file() || root.join("hooks").join("hooks.json").is_file(),
-        mcp: root.join(".mcp.json").is_file(),
-        lsp: root.join(".lsp.json").is_file(),
-        monitors: root.join("monitors").join("monitors.json").is_file(),
-        commands: root.join("commands").is_dir(),
-        assets: root.join("assets").is_dir(),
-        scripts: root.join("scripts").is_dir() || root.join("bin").is_dir(),
-        apps: root.join(".app.json").is_file(),
-    }
+        agents: component_present(root, Path::new("agents"), true)?,
+        hooks: component_present(root, Path::new("hooks.json"), false)?
+            || component_present(root, Path::new("hooks/hooks.json"), false)?,
+        mcp: component_present(root, Path::new(".mcp.json"), false)?,
+        lsp: component_present(root, Path::new(".lsp.json"), false)?,
+        monitors: component_present(root, Path::new("monitors/monitors.json"), false)?,
+        commands: component_present(root, Path::new("commands"), true)?,
+        assets: component_present(root, Path::new("assets"), true)?,
+        scripts: component_present(root, Path::new("scripts"), true)?
+            || component_present(root, Path::new("bin"), true)?,
+        apps: component_present(root, Path::new(".app.json"), false)?,
+    })
 }
 
 fn validate_identifier(field: &str, value: &str) -> Result<(), BundleError> {
@@ -574,5 +630,50 @@ mod tests {
 
         let bundle = PluginBundle::load(dir.path()).unwrap();
         assert_eq!(bundle.manifest.author.as_deref(), Some("Jesse Vincent"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_manifest_and_skill_outside_the_bundle_are_rejected() {
+        let bundle_dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(
+            outside.path().join("plugin.json"),
+            r#"{"name":"outside-plugin","version":"1.0.0","description":"secret"}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("plugin.json"),
+            bundle_dir.path().join("plugin.json"),
+        )
+        .unwrap();
+        assert!(matches!(
+            PluginBundle::load(bundle_dir.path()),
+            Err(BundleError::EscapesRoot(_))
+        ));
+
+        let skill_bundle = tempdir().unwrap();
+        fs::write(
+            skill_bundle.path().join("plugin.json"),
+            r#"{"name":"skill-plugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let outside_skill = outside.path().join("secret-skill");
+        fs::create_dir_all(&outside_skill).unwrap();
+        fs::write(
+            outside_skill.join("SKILL.md"),
+            "---\nname: secret\ndescription: hidden\n---\n",
+        )
+        .unwrap();
+        fs::create_dir_all(skill_bundle.path().join("skills")).unwrap();
+        std::os::unix::fs::symlink(
+            &outside_skill,
+            skill_bundle.path().join("skills").join("secret"),
+        )
+        .unwrap();
+        assert!(matches!(
+            PluginBundle::load(skill_bundle.path()),
+            Err(BundleError::EscapesRoot(_))
+        ));
     }
 }

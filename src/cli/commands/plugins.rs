@@ -1,5 +1,7 @@
 use anyhow::Result;
-use jcode_provider_extensions::{PluginBundle, PluginSource, PluginStore, ProviderRegistry};
+use jcode_provider_extensions::{
+    PluginBundle, PluginSource, PluginStore, ProviderRegistry, unlink_owned_plugin_provider,
+};
 use serde::Serialize;
 use std::path::Path;
 
@@ -344,13 +346,15 @@ pub(crate) fn run_plugin_remove_command(name: &str, json: bool) -> Result<()> {
     } else {
         false
     };
-    store.remove(name)?;
-    if let Some(provider_id) = provider_id {
-        if owned {
-            registry.remove(&provider_id)?;
-            registry.save()?;
-        }
+    if owned {
+        unlink_owned_plugin_provider(
+            &mut registry,
+            &store.root().join(name),
+            name,
+            provider_id.as_deref(),
+        )?;
     }
+    store.remove(name)?;
     if json {
         println!("{}", serde_json::json!({"status": "removed", "name": name}));
     } else {

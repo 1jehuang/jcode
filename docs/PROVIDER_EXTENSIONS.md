@@ -233,6 +233,16 @@ use `--trusted` after reviewing the requested permissions and executable.
   only a minimal environment (`PATH`, and `SystemRoot` on Windows). Environment
   permission does not implicitly expose parent-process secrets.
 - Native tools and filesystem access require separate permission decisions.
+  Filesystem access is granted only when the manifest declares `filesystem`
+  and the invocation passes `--allow-filesystem`. Otherwise the provider
+  process is started under a Landlock ruleset that allows reading loader
+  paths and denies writes. Platforms without Landlock refuse to start that
+  process instead of giving it ordinary host write access.
+- Provider registry updates hold an exclusive lock from open through save.
+  Plugin removal persists that registry change before deleting the plugin
+  directory, so a failed save can be retried.
+- Bundle inspection canonicalizes metadata and skill paths and rejects any
+  target that resolves outside the bundle root.
 - A provider manifest is metadata and is never proof that an executable is
   trustworthy.
 - Plugin bundle inspection is metadata-only, size-bounded, deterministic, and

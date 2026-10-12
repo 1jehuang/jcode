@@ -27,8 +27,9 @@ use jcode_provider_subprocess::{AdapterError, Handshake, SubprocessProvider};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MANIFEST_VERSION: u32 = 1;
@@ -93,6 +94,8 @@ pub enum ExtensionError {
     CancellationUnsupported(String),
     #[error("plugin operation failed: {0}")]
     Plugin(#[from] RemotePluginError),
+    #[error("provider '{provider}' is not owned by plugin '{plugin}'")]
+    ForeignPluginProvider { provider: String, plugin: String },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -149,6 +152,11 @@ impl ExternalProviderProcess {
                 });
             }
         }
+        let filesystem_granted = record
+            .manifest
+            .permissions
+            .contains(&Permission::Filesystem)
+            && policy.allows(&Permission::Filesystem);
         let transport = SubprocessProvider::spawn_with_config(
             &record.manifest.executable,
             &record.manifest.args,
@@ -156,6 +164,10 @@ impl ExternalProviderProcess {
             record.manifest.capabilities.clone(),
             jcode_provider_subprocess::SubprocessConfig {
                 environment: Some(minimal_environment()),
+                // A missing filesystem declaration used to start with ordinary
+                // host write access. Confine unless this invocation both
+                // declares and is allowed filesystem access.
+                confine_filesystem: !filesystem_granted,
                 ..Default::default()
             },
         )
@@ -237,7 +249,7 @@ pub fn discover_manifest_files() -> Result<Vec<PathBuf>, ExtensionError> {
 fn discover_manifest_files_in(directories: &[PathBuf]) -> Result<Vec<PathBuf>, ExtensionError> {
     let mut manifests = Vec::new();
     for directory in directories {
-        let entries = match fs::read_dir(&directory) {
+        let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => {
@@ -422,6 +434,9 @@ struct RegistryFile {
 pub struct ProviderRegistry {
     path: PathBuf,
     providers: BTreeMap<String, ProviderRecord>,
+    /// Exclusive lock covering the open/mutate/save transaction. Released when
+    /// the last clone of this registry is dropped.
+    lock: Arc<File>,
 }
 
 impl ProviderRegistry {
@@ -439,10 +454,12 @@ impl ProviderRegistry {
 
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, ExtensionError> {
         let path = path.into();
+        let lock = Arc::new(acquire_registry_lock(&path)?);
         if !path.exists() {
             return Ok(Self {
                 path,
                 providers: BTreeMap::new(),
+                lock,
             });
         }
         let bytes = fs::read(&path).map_err(|source| ExtensionError::Read {
@@ -466,6 +483,7 @@ impl ProviderRegistry {
         Ok(Self {
             path,
             providers: file.providers,
+            lock,
         })
     }
 
@@ -565,6 +583,7 @@ impl ProviderRegistry {
     }
 
     pub fn save(&self) -> Result<(), ExtensionError> {
+        let _held = &self.lock;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|source| ExtensionError::Write {
                 path: parent.to_path_buf(),
@@ -597,6 +616,71 @@ impl ProviderRegistry {
         }
         Ok(())
     }
+}
+
+fn registry_lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new(DEFAULT_REGISTRY_FILE))
+        .to_os_string();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+fn acquire_registry_lock(path: &Path) -> Result<File, ExtensionError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|source| ExtensionError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let lock_path = registry_lock_path(path);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| ExtensionError::Write {
+            path: lock_path,
+            source,
+        })?;
+    file.lock().map_err(|source| ExtensionError::Write {
+        path: registry_lock_path(path),
+        source,
+    })?;
+    Ok(file)
+}
+
+/// Remove a plugin-owned provider registration and persist that change before
+/// the caller deletes the plugin directory. A failed save leaves both the
+/// directory and the registration in place so removal can be retried.
+pub fn unlink_owned_plugin_provider(
+    registry: &mut ProviderRegistry,
+    plugin_root: &Path,
+    plugin_name: &str,
+    provider_id: Option<&str>,
+) -> Result<(), ExtensionError> {
+    let Some(provider_id) = provider_id else {
+        return Ok(());
+    };
+    let owned = registry
+        .get(provider_id)
+        .and_then(|record| record.source.as_deref())
+        .is_some_and(|source| source.starts_with(plugin_root));
+    if registry.get(provider_id).is_some() && !owned {
+        return Err(ExtensionError::ForeignPluginProvider {
+            provider: provider_id.to_string(),
+            plugin: plugin_name.to_string(),
+        });
+    }
+    if owned {
+        registry.remove(provider_id)?;
+        registry.save()?;
+    }
+    Ok(())
 }
 
 pub fn load_manifest_file(path: impl AsRef<Path>) -> Result<ProviderManifest, ExtensionError> {
@@ -672,6 +756,7 @@ permissions = ["network"]
         ));
         registry.set_enabled("fixture-provider", false).unwrap();
         registry.save().unwrap();
+        drop(registry);
 
         let mut loaded = ProviderRegistry::open(&path).unwrap();
         assert!(!loaded.get("fixture-provider").unwrap().enabled);
@@ -796,5 +881,119 @@ permissions = ["network"]
             ExternalProviderProcess::start(&record, "jcode-test").await,
             Err(ExtensionError::PermissionDenied { .. })
         ));
+    }
+
+    #[test]
+    fn registry_lock_blocks_a_second_open_until_drop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        let registry = ProviderRegistry::open(&path).unwrap();
+        let contender = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(registry_lock_path(&path))
+            .unwrap();
+        assert!(matches!(
+            contender.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(registry);
+        contender.try_lock().unwrap();
+    }
+
+    #[test]
+    fn unlink_persists_provider_removal_before_the_plugin_directory_is_deleted() {
+        let dir = tempdir().unwrap();
+        let plugin_root = dir.path().join("plugins").join("demo");
+        fs::create_dir_all(&plugin_root).unwrap();
+        fs::write(plugin_root.join("marker"), "keep").unwrap();
+        let registry_path = dir.path().join("providers.json");
+        let mut registry = ProviderRegistry::open(&registry_path).unwrap();
+        registry
+            .register(
+                manifest("demo-provider"),
+                Some(plugin_root.join("provider.toml")),
+                true,
+            )
+            .unwrap();
+        registry.save().unwrap();
+
+        unlink_owned_plugin_provider(&mut registry, &plugin_root, "demo", Some("demo-provider"))
+            .unwrap();
+        assert!(plugin_root.join("marker").exists());
+        let persisted = fs::read_to_string(&registry_path).unwrap();
+        assert!(
+            !persisted.contains("demo-provider"),
+            "provider registration remained after unlink: {persisted}"
+        );
+        drop(registry);
+        let reloaded = ProviderRegistry::open(&registry_path).unwrap();
+        assert!(reloaded.get("demo-provider").is_none());
+
+        let mut foreign = ProviderRegistry::open(dir.path().join("foreign.json")).unwrap();
+        foreign
+            .register(
+                manifest("other-provider"),
+                Some(dir.path().join("elsewhere.toml")),
+                true,
+            )
+            .unwrap();
+        assert!(matches!(
+            unlink_owned_plugin_provider(
+                &mut foreign,
+                &plugin_root,
+                "demo",
+                Some("other-provider")
+            ),
+            Err(ExtensionError::ForeignPluginProvider { .. })
+        ));
+        assert!(foreign.get("other-provider").is_some());
+    }
+
+    #[tokio::test]
+    async fn omitted_filesystem_permission_cannot_write_a_host_file() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("secret.txt");
+        let script = concat!(
+            "import json,sys\n",
+            "for line in sys.stdin:\n",
+            " f=json.loads(line)\n",
+            " if f['kind']=='hello':\n",
+            "  print(json.dumps({'kind':'hello_ok','protocol_version':'0.1','provider':{'id':'fixture','name':'Fixture','version':'1'},'capabilities':[]}),flush=True)\n",
+            " elif f['kind']=='request':\n",
+            "  wrote=True\n",
+            "  try:\n",
+            "   open(f['params']['path'],'w').write('x')\n",
+            "  except Exception:\n",
+            "   wrote=False\n",
+            "  print(json.dumps({'kind':'response','protocol_version':'0.1','id':f['id'],'ok':True,'result':{'wrote':wrote}}),flush=True)\n",
+        );
+        let mut provider = manifest("fixture");
+        provider.executable = PathBuf::from("python3");
+        provider.args = vec!["-c".to_string(), script.to_string()];
+        provider.permissions.clear();
+        let record = ProviderRecord {
+            manifest: provider,
+            source: None,
+            trusted: true,
+            enabled: true,
+            registered_at: 0,
+        };
+        let process = ExternalProviderProcess::start(&record, "jcode-test")
+            .await
+            .unwrap();
+        let frames = process
+            .request_and_collect("write-1", "complete", serde_json::json!({ "path": target }))
+            .await
+            .unwrap();
+        let Some(Frame::Response {
+            result: Some(result),
+            ..
+        }) = frames.last()
+        else {
+            panic!("expected response result");
+        };
+        assert_eq!(result["wrote"], false);
+        assert!(!target.exists());
     }
 }
