@@ -14,6 +14,7 @@ pub fn render_markdown_lazy(
     let deferred_mermaid_mode = deferred_mermaid_render_context_enabled();
     let spacing_mode = effective_markdown_spacing_mode();
     let latex_mode = config_snapshot().latex_rendering;
+    let mut latex_hint_shown = false;
     let mut centered_blocks = CenteredStructuredBlockState::default();
 
     // Style stack for nested formatting
@@ -560,6 +561,7 @@ pub fn render_markdown_lazy(
                     }
                 } else {
                     let block_start = lines.len();
+                    let mut toolchain_fallback = false;
                     let rendered = match latex_mode {
                         LatexRenderingMode::None => raw_math_display_lines(&math),
                         LatexRenderingMode::Unicode => math_display_lines(&math),
@@ -570,13 +572,18 @@ pub fn render_markdown_lazy(
                         {
                             // Strip Markdown container indentation before the
                             // graphical renderer sees the TeX source.
-                            latex_image_lines(math.trim(), true, max_width)
-                                .unwrap_or_else(|| math_display_lines(&math))
+                            latex_image_lines(math.trim(), true, max_width).unwrap_or_else(|| {
+                                toolchain_fallback = true;
+                                math_display_lines(&math)
+                            })
                         }
                         LatexRenderingMode::Image => math_display_lines(&math),
                     };
                     for line in rendered {
                         lines.push(with_blockquote_prefix(line, blockquote_depth));
+                    }
+                    if toolchain_fallback {
+                        push_latex_install_hint_if_needed(&mut lines, &mut latex_hint_shown);
                     }
                     record_centered_independent_block(
                         &mut centered_blocks,

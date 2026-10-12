@@ -34,8 +34,29 @@ pub fn canonical_tool_name(name: &str) -> &str {
 pub fn is_edit_tool_name(name: &str) -> bool {
     matches!(
         canonical_tool_name(name),
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
     )
+}
+
+/// Canonical name refined by input shape, for diff and summary rendering.
+/// `edit` with an `edits` array renders like the old `multiedit`, and
+/// `apply_patch` carrying a unified diff renders like the old `patch`.
+pub fn edit_render_name<'a>(name: &'a str, input: &serde_json::Value) -> &'a str {
+    match canonical_tool_name(name) {
+        "edit" if input.get("edits").is_some_and(|edits| edits.is_array()) => "multiedit",
+        "apply_patch"
+            if input
+                .get("patch_text")
+                .and_then(|text| text.as_str())
+                .is_some_and(|text| {
+                    !text.contains("*** Begin Patch")
+                        && text.lines().any(|line| line.starts_with("+++ "))
+                }) =>
+        {
+            "patch"
+        }
+        other => other,
+    }
 }
 
 fn parse_nonzero_exit_code_line(line: &str) -> bool {

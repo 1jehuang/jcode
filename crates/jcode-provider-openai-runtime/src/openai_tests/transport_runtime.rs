@@ -503,6 +503,7 @@ async fn test_record_websocket_success_clears_normalized_keys() {
 
 #[tokio::test]
 async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
+    let _env_lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test websocket listener");
@@ -542,6 +543,9 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_input_item_hashes: persistent_ws_input_item_hashes(&[
+            serde_json::json!({"type":"message","role":"user","content":"first"}),
+        ]),
     })));
     let (tx, rx) = mpsc::channel(1);
     drop(rx); // Mirrors a soft interrupt cancelling the active stream consumer.
@@ -569,6 +573,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
 
 #[tokio::test]
 async fn persistent_ws_rejects_identity_changed_by_another_fork() {
+    let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
     let persistent_ws = Arc::new(Mutex::new(Some(state)));
     let mut credentials = prewarm_test_credentials();
@@ -596,6 +601,7 @@ async fn persistent_ws_rejects_identity_changed_by_another_fork() {
 
 #[tokio::test]
 async fn persistent_ws_rechecks_identity_after_presend_backpressure() {
+    let _env_lock = jcode_base::storage::lock_test_env();
     let (state, server) = test_persistent_ws_state().await;
     let persistent_ws = Arc::new(Mutex::new(Some(state)));
     let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));

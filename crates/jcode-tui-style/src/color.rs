@@ -149,7 +149,7 @@ pub fn clear_buf(area: Rect, buf: &mut Buffer) {
 /// terminals.
 ///
 /// User color configuration is *not* applied here. It is applied once per
-/// frame at the buffer level (`palette::adapt_buffer_for_palette`) so a color
+/// frame at the buffer level (`theme_mode::adapt_buffer_for_display`) so a color
 /// can never be remapped twice. See `palette` for why that choke point is the
 /// single place colors are substituted.
 #[inline]
@@ -164,7 +164,7 @@ pub fn rgb(r: u8, g: u8, b: u8) -> Color {
 // The xterm-256 color cube: indices 16-231 map to a 6x6x6 RGB cube.
 // Each axis uses values: 0, 95, 135, 175, 215, 255 (indices 0-5).
 // Indices 232-255 are a grayscale ramp from rgb(8,8,8) to rgb(238,238,238).
-fn rgb_to_xterm256(r: u8, g: u8, b: u8) -> u8 {
+pub(crate) fn rgb_to_xterm256(r: u8, g: u8, b: u8) -> u8 {
     let gray_avg = (r as u16 + g as u16 + b as u16) / 3;
 
     let cube_idx = nearest_cube_index(r, g, b);

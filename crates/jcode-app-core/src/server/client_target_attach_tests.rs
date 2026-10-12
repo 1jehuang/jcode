@@ -48,6 +48,8 @@ impl Drop for Home {
 
 fn subscribe(target: &str) -> Request {
     Request::Subscribe {
+        system_prompt: None,
+        supports_pdf_panels: false,
         id: 71,
         working_dir: None,
         target_session_id: Some(target.into()),

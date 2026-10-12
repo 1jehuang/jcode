@@ -1,3 +1,64 @@
+/// The server resolves the real window and reports it here. A remote client
+/// cannot derive it itself: its provider is an inert placeholder with no model
+/// catalog, and the static resolver has no entry for a model it does not
+/// recognise, so without this field the panel shows the generic default.
+#[test]
+fn test_model_changed_roundtrip_carries_context_window() -> Result<()> {
+    let event = ServerEvent::ModelChanged {
+        id: 7,
+        model: "auto/included".to_string(),
+        provider_name: Some("OmniRouteV2".to_string()),
+        context_window: Some(1_310_720),
+        error: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+    };
+    let json = encode_event(&event);
+    assert!(
+        json.contains("\"context_window\":1310720"),
+        "window must reach the wire: {json}"
+    );
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::ModelChanged {
+        context_window, ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(context_window, Some(1_310_720));
+    Ok(())
+}
+
+/// An older server omits the field. It must not appear on the wire, and the
+/// client must read it as unknown rather than as a number, so a missing value can
+/// never be mistaken for a real one.
+#[test]
+fn test_model_changed_without_context_window_stays_absent() -> Result<()> {
+    let event = ServerEvent::ModelChanged {
+        id: 3,
+        model: "m".to_string(),
+        provider_name: None,
+        context_window: None,
+        error: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+    };
+    let json = encode_event(&event);
+    assert!(
+        !json.contains("context_window"),
+        "unknown window must be omitted, not sent as null: {json}"
+    );
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::ModelChanged {
+        context_window, ..
+    } = decoded
+    else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(context_window, None);
+    Ok(())
+}
+
 #[test]
 fn test_request_roundtrip() -> Result<()> {
     let req = Request::Message {
@@ -21,6 +82,7 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
         content: "look at this".to_string(),
         images: vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
         urgent: true,
+        client_id: None,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -46,6 +108,67 @@ fn test_soft_interrupt_images_roundtrip_and_legacy_default() -> Result<()> {
         return Err(anyhow!("wrong legacy request type"));
     };
     assert!(images.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_soft_interrupt_ids_wire_shape_and_legacy_defaults() -> Result<()> {
+    let req = Request::SoftInterrupt {
+        id: 4,
+        content: "steer".to_string(),
+        images: Vec::new(),
+        urgent: false,
+        client_id: Some("f1".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_string(&req)?,
+        r#"{"type":"soft_interrupt","id":4,"content":"steer","urgent":false,"client_id":"f1"}"#
+    );
+    let legacy = parse_request_json(r#"{"type":"soft_interrupt","id":5,"content":"x"}"#)?;
+    assert!(matches!(
+        legacy,
+        Request::SoftInterrupt {
+            client_id: None,
+            ..
+        }
+    ));
+
+    let cancel_all = parse_request_json(r#"{"type":"cancel_soft_interrupts","id":6}"#)?;
+    assert!(matches!(
+        cancel_all,
+        Request::CancelSoftInterrupts {
+            client_ids: None,
+            ..
+        }
+    ));
+    let cancel_some = Request::CancelSoftInterrupts {
+        id: 7,
+        client_ids: Some(vec!["f1".to_string()]),
+    };
+    assert_eq!(
+        serde_json::to_string(&cancel_some)?,
+        r#"{"type":"cancel_soft_interrupts","id":7,"client_ids":["f1"]}"#
+    );
+
+    // An injection without ids keeps the pre-#1778 wire shape exactly.
+    let injected = ServerEvent::SoftInterruptInjected {
+        content: "a".to_string(),
+        display_role: None,
+        point: "D".to_string(),
+        tools_skipped: None,
+        client_ids: Vec::new(),
+    };
+    assert_eq!(
+        serde_json::to_string(&injected)?,
+        r#"{"type":"soft_interrupt_injected","content":"a","point":"D"}"#
+    );
+    let with_ids: ServerEvent = serde_json::from_str(
+        r#"{"type":"soft_interrupt_injected","content":"a","point":"B","client_ids":["f1","f2"]}"#,
+    )?;
+    assert!(matches!(
+        with_ids,
+        ServerEvent::SoftInterruptInjected { client_ids, .. } if client_ids == ["f1", "f2"]
+    ));
     Ok(())
 }
 
@@ -110,6 +233,29 @@ fn test_notify_auth_changed_provider_hint_is_optional() -> Result<()> {
     assert_eq!(provider.as_deref(), Some("azure-openai"));
     assert_eq!(auth, None);
     assert!(prefer_strongest);
+    Ok(())
+}
+
+#[test]
+fn test_invalidate_openai_usage_roundtrip_pins_account_scope() -> Result<()> {
+    for account_label in [None, Some("reset-target".to_string())] {
+        let request = Request::InvalidateOpenAiUsage {
+            id: 41,
+            account_label: account_label.clone(),
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"type\":\"invalidate_openai_usage\""));
+        let decoded = parse_request_json(&json)?;
+        assert_eq!(decoded.id(), 41);
+        let Request::InvalidateOpenAiUsage {
+            account_label: decoded_label,
+            ..
+        } = decoded
+        else {
+            return Err(anyhow!("wrong request type"));
+        };
+        assert_eq!(decoded_label, account_label);
+    }
     Ok(())
 }
 
@@ -419,6 +565,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         connection_type,
         compaction_mode,
         side_panel,
+        agent_model_overrides,
         ..
     } = decoded
     else {
@@ -433,6 +580,7 @@ fn test_history_event_decodes_without_compaction_mode_for_older_servers() -> Res
         jcode_config_types::CompactionMode::Reactive
     );
     assert!(!side_panel.has_pages());
+    assert!(agent_model_overrides.is_empty());
     Ok(())
 }
 
@@ -457,6 +605,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         skills: Vec::new(),
         total_tokens: Some((123, 45)),
         token_usage_totals: Some(TokenUsageTotals {
+            cache_prompt_tokens: Some(130),
             messages_with_token_usage: 2,
             input_tokens: 123,
             output_tokens: 45,
@@ -480,17 +629,21 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         reasoning_effort: None,
         service_tier: None,
         subagent_model: None,
+        agent_model_overrides: Default::default(),
         autoreview_enabled: None,
         autojudge_enabled: None,
         compaction_mode: jcode_config_types::CompactionMode::Reactive,
         activity: None,
+        applets: Default::default(),
         side_panel: jcode_side_panel_types::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![jcode_side_panel_types::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: jcode_side_panel_types::SidePanelPageSource::Managed,
                 content: "# Notes".to_string(),
                 updated_at_ms: 42,
@@ -575,12 +728,14 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
 fn test_side_panel_state_event_roundtrip() -> Result<()> {
     let event = ServerEvent::SidePanelState {
         snapshot: jcode_side_panel_types::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![jcode_side_panel_types::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: jcode_side_panel_types::SidePanelPageSource::Managed,
                 content: "updated".to_string(),
                 updated_at_ms: 99,
@@ -638,5 +793,43 @@ fn test_error_event_retry_after_back_compat_default() -> Result<()> {
     assert_eq!(id, 7);
     assert_eq!(message, "oops");
     assert_eq!(retry_after_secs, None);
+    Ok(())
+}
+
+#[test]
+fn test_agent_models_session_setter_and_response_roundtrip() -> Result<()> {
+    let clear = parse_request_json(r#"{"type":"set_agent_model","id":31,"target":"swarm"}"#)?;
+    assert!(matches!(clear, Request::SetAgentModel { model: None, .. }));
+    assert!(matches!(clear, Request::SetAgentModel { global: false, .. }));
+    let request = Request::SetAgentModel {
+        id: 32,
+        target: "review".into(),
+        model: Some("inherit".into()),
+        global: false,
+    };
+    let encoded = serde_json::to_string(&request)?;
+    assert!(!encoded.contains("global"), "session updates keep the old wire shape");
+    let decoded = parse_request_json(&encoded)?;
+    assert!(
+        matches!(decoded, Request::SetAgentModel { model: Some(model), .. } if model == "inherit")
+    );
+    let global = Request::SetAgentModel {
+        id: 33,
+        target: "swarm".into(),
+        model: Some("server-default".into()),
+        global: true,
+    };
+    let decoded = parse_request_json(&serde_json::to_string(&global)?)?;
+    assert!(matches!(decoded, Request::SetAgentModel { global: true, .. }));
+    let event = ServerEvent::AgentModelsChanged {
+        id: 32,
+        session_id: "session-a".into(),
+        overrides: std::collections::BTreeMap::from([("review".into(), "inherit".into())]),
+    };
+    let decoded = parse_event_json(encode_event(&event).trim())?;
+    assert!(
+        matches!(decoded, ServerEvent::AgentModelsChanged { session_id, overrides, .. }
+        if session_id == "session-a" && overrides.get("review").map(String::as_str) == Some("inherit"))
+    );
     Ok(())
 }

@@ -7,13 +7,17 @@
 //! Model-catalog/account-availability state stays in `jcode_base::provider`
 //! (it is shared vocabulary for routing), as does the pure request shaping in
 //! `jcode_base::provider::openai_request`.
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{FutureExt, SinkExt, StreamExt as FuturesStreamExt};
 use jcode_base::auth::codex::CodexCredentials;
 use jcode_base::auth::oauth;
-use jcode_base::provider::openai_request::{build_responses_input, build_tools};
+use jcode_base::provider::openai_request::{
+    build_responses_input, build_tools, insert_additional_tools,
+};
 #[cfg(test)]
 use jcode_message_types::TOOL_OUTPUT_MISSING_TEXT;
 use jcode_message_types::{Message as ChatMessage, StreamEvent, ToolDefinition};
@@ -38,6 +42,9 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+mod openai_stream_cancellation;
+mod openai_stream_diagnostics;
+
 const CHATGPT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const RESPONSES_PATH: &str = "responses";
 const DEFAULT_MODEL: &str = jcode_provider_core::DEFAULT_OPENAI_MODEL;
@@ -54,6 +61,26 @@ pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
 /// The Responses backend only exposes `image_generation` to general
 /// ChatGPT/GPT models. Codex models (ids containing `codex`) reject unknown
 /// hosted tools, so they must not receive it. See issue #369.
+/// Responses `additional_tools` / deferred tool loading requires gpt-5.4 or
+/// newer. Unknown model families stay eager, which is always correct.
+fn model_supports_additional_tools(model_id: &str) -> bool {
+    let lower = model_id.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("gpt-") else {
+        return false;
+    };
+    let version: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = version.split('.').filter(|p| !p.is_empty());
+    let major: u32 = match parts.next().and_then(|p| p.parse().ok()) {
+        Some(major) => major,
+        None => return false,
+    };
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    major > 5 || (major == 5 && minor >= 4)
+}
+
 fn model_supports_image_generation(model_id: &str) -> bool {
     !model_id.to_ascii_lowercase().contains("codex")
 }
@@ -287,6 +314,10 @@ struct PersistentWsState {
     message_count: usize,
     /// Number of items we sent in the last full request (for detecting conversation changes)
     last_input_item_count: usize,
+    /// Fingerprints of the last canonical full input. A larger input can still
+    /// rewrite earlier items (for example, when tool outputs are reordered).
+    /// A count alone is not a safe continuation cursor in that case.
+    last_input_item_hashes: Vec<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -406,6 +437,13 @@ fn summarize_ws_input(items: &[Value]) -> WsInputStats {
     stats
 }
 
+fn persistent_ws_input_item_hashes(input: &[Value]) -> Vec<u64> {
+    input
+        .iter()
+        .map(jcode_provider_core::fingerprint::stable_hash_json)
+        .collect()
+}
+
 fn persistent_ws_incremental_items(input: &[Value], start_index: usize) -> (Vec<Value>, usize) {
     let mut skipped_reasoning_items = 0usize;
     let incremental_items = input[start_index..]
@@ -468,6 +506,25 @@ fn format_status_duration(duration: Duration) -> String {
 }
 
 async fn ensure_persistent_ws_is_healthy(
+    state: &mut PersistentWsState,
+    verbose: bool,
+) -> Result<PersistentWsHealth, String> {
+    // Include ping readiness/flush and server-ping replies in the same budget.
+    // Otherwise a background keepalive can hold the state mutex indefinitely.
+    tokio::time::timeout(
+        Duration::from_millis(WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS),
+        persistent_ws_healthcheck(state, verbose),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "healthcheck timeout after {}ms",
+            WEBSOCKET_PERSISTENT_HEALTHCHECK_TIMEOUT_MS
+        )
+    })?
+}
+
+async fn persistent_ws_healthcheck(
     state: &mut PersistentWsState,
     verbose: bool,
 ) -> Result<PersistentWsHealth, String> {
@@ -604,10 +661,11 @@ fn spawn_persistent_ws_keepalive_with_interval(
                 return;
             };
             let mut guard = persistent_ws.lock().await;
-            let Some(state) = guard.as_mut() else {
+            let Some(mut state) = guard.take() else {
                 return;
             };
             if state.connected_at != connection_started_at {
+                *guard = Some(state);
                 return;
             }
 
@@ -653,8 +711,8 @@ fn spawn_persistent_ws_keepalive_with_interval(
             // used before foreground reuse while holding the state mutex. This
             // keeps one reader at a time and gives server control frames a
             // bounded opportunity to be processed.
-            match ensure_persistent_ws_is_healthy(state, false).await {
-                Ok(PersistentWsHealth::Healthy) => {}
+            match ensure_persistent_ws_is_healthy(&mut state, false).await {
+                Ok(PersistentWsHealth::Healthy) => *guard = Some(state),
                 Ok(PersistentWsHealth::Reconnect {
                     reset_reason,
                     detail,
@@ -763,16 +821,11 @@ impl OpenAIProvider {
         ));
     }
 
-    pub(crate) fn supports_extended_prompt_cache_retention(model_id: &str) -> bool {
-        jcode_base::provider::openai::supports_extended_prompt_cache_retention(model_id)
-    }
-
     fn effective_prompt_cache_retention<'a>(
         model_id: &str,
         configured: Option<&'a str>,
     ) -> Option<&'a str> {
-        configured
-            .or_else(|| Self::supports_extended_prompt_cache_retention(model_id).then_some("24h"))
+        jcode_base::provider::openai::effective_prompt_cache_retention(model_id, configured)
     }
 
     pub fn new(credentials: CodexCredentials) -> Self {
@@ -813,6 +866,7 @@ impl OpenAIProvider {
         };
 
         // Check for model override from environment
+        let catalog_scope = Self::catalog_scope_for(&credentials);
         let mut model = if browser_only {
             CHATGPT_WEB_MODEL.to_string()
         } else {
@@ -822,7 +876,7 @@ impl OpenAIProvider {
                 .to_string()
         };
         if !is_chatgpt_web_model(&model)
-            && !jcode_base::provider::known_openai_model_ids()
+            && !jcode_base::provider::known_openai_model_ids_for_scope(&catalog_scope)
                 .iter()
                 .any(|known| known == &model)
         {
@@ -837,21 +891,17 @@ impl OpenAIProvider {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        let prompt_cache_retention = std::env::var("JCODE_OPENAI_PROMPT_CACHE_RETENTION")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        let prompt_cache_retention = match prompt_cache_retention.as_deref() {
-            Some("in_memory") | Some("24h") => prompt_cache_retention,
-            Some(other) => {
-                jcode_base::logging::info(&format!(
-                    "Warning: Unsupported JCODE_OPENAI_PROMPT_CACHE_RETENTION '{}'; expected 'in_memory' or '24h'",
-                    other
-                ));
-                None
-            }
-            None => None,
-        };
+        let prompt_cache_retention =
+            jcode_base::provider::openai::prompt_cache_retention_from_env();
+        if prompt_cache_retention.is_none()
+            && let Ok(raw) = std::env::var("JCODE_OPENAI_PROMPT_CACHE_RETENTION")
+            && !raw.trim().is_empty()
+        {
+            jcode_base::logging::warn(&format!(
+                "Unsupported JCODE_OPENAI_PROMPT_CACHE_RETENTION '{}'; expected 'in_memory' or '24h'",
+                raw.trim()
+            ));
+        }
         let max_output_tokens = Self::load_max_output_tokens();
         let reasoning_effort = jcode_base::config::config()
             .provider
@@ -880,7 +930,8 @@ impl OpenAIProvider {
             .openai_native_compaction_threshold_tokens
             .max(1000);
         let model_reasoning_efforts =
-            jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
+            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&catalog_scope)
+                .unwrap_or_default();
 
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
@@ -975,7 +1026,9 @@ impl OpenAIProvider {
     }
 
     fn reload_cached_reasoning_efforts(&self) {
-        let cached = jcode_base::provider::cached_openai_reasoning_efforts().unwrap_or_default();
+        let cached =
+            jcode_base::provider::cached_openai_reasoning_efforts_for_scope(&self.catalog_scope())
+                .unwrap_or_default();
         match self.model_reasoning_efforts.write() {
             Ok(mut efforts) => *efforts = cached,
             Err(poisoned) => *poisoned.into_inner() = cached,
@@ -1016,6 +1069,30 @@ impl OpenAIProvider {
         !credentials.refresh_token.is_empty() || credentials.id_token.is_some()
     }
 
+    /// Model-catalog scope for the credential this runtime will actually send.
+    /// ChatGPT/Codex OAuth and platform API keys expose different model lists,
+    /// so validation, availability, and refresh must all use the loaded
+    /// credential's own catalog instead of one shared per-account slot.
+    pub(crate) fn catalog_scope_for(credentials: &CodexCredentials) -> String {
+        jcode_base::provider::openai_catalog_scope_for_credential(
+            Self::is_chatgpt_mode(credentials),
+            &credentials.access_token,
+        )
+    }
+
+    pub(crate) fn catalog_scope(&self) -> String {
+        match self.credentials.try_read() {
+            Ok(credentials) => Self::catalog_scope_for(&credentials),
+            // Writers hold this lock only briefly (token refresh / mode swap).
+            // Fall back to the account scope rather than blocking.
+            Err(_) => jcode_base::provider::openai_catalog_scope_for_credential(true, ""),
+        }
+    }
+
+    async fn catalog_scope_async(&self) -> String {
+        Self::catalog_scope_for(&*self.credentials.read().await)
+    }
+
     fn catalog_credential_identity(credentials: &CodexCredentials) -> String {
         credentials
             .account_id
@@ -1038,7 +1115,7 @@ impl OpenAIProvider {
             return None;
         }
         match value.as_str() {
-            // `swarm` is a UI sentinel meaning "max effort + use the swarm tool".
+            // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
             // We keep it stored so the UI/session reflect it and the agent injects
             // the swarm directive; it is translated to a real effort at request time
             // by `api_reasoning_effort`.
@@ -1093,24 +1170,40 @@ impl OpenAIProvider {
         }
     }
 
-    /// Translate a stored reasoning effort into the value sent to the API.
-    /// The `swarm` sentinel maps to the active model's strongest advertised
-    /// effort, falling back to `max` before catalog metadata is available.
+    /// Resolve swarm effort only at the wire boundary, preserving the stored mode.
     fn api_reasoning_effort(&self, effort: Option<&str>) -> Option<String> {
-        match effort {
-            Some(e) if jcode_base::prompt::is_swarm_effort(e) => {
-                let available = self.available_efforts();
-                jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
-                    .iter()
-                    .rev()
-                    .find(|candidate| {
-                        !jcode_base::prompt::is_swarm_effort(candidate)
-                            && available.contains(candidate)
-                    })
-                    .map(|effort| (*effort).to_string())
-            }
-            other => other.map(|e| e.to_string()),
+        self.api_reasoning_effort_with_swarm_root(
+            effort,
+            effort.and_then(jcode_base::prompt::swarm_root_reasoning_effort),
+        )
+    }
+
+    fn api_reasoning_effort_with_swarm_root(
+        &self,
+        effort: Option<&str>,
+        swarm_root: Option<&str>,
+    ) -> Option<String> {
+        let effort = effort?;
+        if !jcode_base::prompt::is_swarm_effort(effort) {
+            return Some(effort.to_string());
         }
+        let resolved = swarm_root.unwrap_or("max");
+        let available = self.available_efforts();
+        let ladder = jcode_provider_core::OPENAI_SELECTABLE_EFFORTS;
+        let requested = ladder.iter().position(|e| *e == resolved)?;
+        // Preserve the old strongest-advertised mapping for max. For lower
+        // configured levels prefer the closest supported level at or below it,
+        // falling back to the minimum on models with a restricted ladder.
+        ladder[..=requested]
+            .iter()
+            .rev()
+            .find(|candidate| available.contains(candidate))
+            .or_else(|| {
+                ladder.iter().find(|candidate| {
+                    !jcode_base::prompt::is_swarm_effort(candidate) && available.contains(candidate)
+                })
+            })
+            .map(|effort| (*effort).to_string())
     }
 
     fn native_compaction_threshold_for_context_window(
@@ -1156,10 +1249,11 @@ impl OpenAIProvider {
 
         match value.as_str() {
             "fast" | "priority" => Ok(Some("priority".to_string())),
+            "ultrafast" | "ultra" | "ultra-fast" => Ok(Some("ultrafast".to_string())),
             "flex" => Ok(Some("flex".to_string())),
             "default" | "auto" | "none" | "off" | "standard" => Ok(None),
             other => anyhow::bail!(
-                "Unsupported OpenAI service tier '{}'; expected priority|fast|flex|standard|default|off",
+                "Unsupported OpenAI service tier '{}'; expected priority|fast|ultrafast|flex|standard|default|off",
                 other
             ),
         }
@@ -1253,7 +1347,11 @@ impl OpenAIProvider {
         system: &str,
         is_chatgpt_mode: bool,
     ) -> Value {
-        let api_tools = build_tools(tools);
+        let hosted_tools =
+            native_web_search::hosted_tools_for_request(model_id, is_chatgpt_mode, tools);
+        let tools = native_web_search::without_local_websearch(tools, &hosted_tools);
+        let mut api_tools = build_tools(&tools);
+        api_tools.extend(hosted_tools);
         let reasoning_effort = self
             .reasoning_effort
             .read()
@@ -1361,7 +1459,8 @@ impl OpenAIProvider {
 
     async fn model_id(&self) -> String {
         let current = self.model.read().await.clone();
-        let availability = jcode_base::provider::model_availability_for_account(&current);
+        let scope = self.catalog_scope_async().await;
+        let availability = jcode_base::provider::model_availability_for_scope(&scope, &current);
 
         match availability.state {
             jcode_base::provider::AccountModelAvailabilityState::Unavailable => {
@@ -1371,7 +1470,8 @@ impl OpenAIProvider {
                         current, detail
                     ));
                 }
-                if let Some(fallback) = jcode_base::provider::get_best_available_openai_model()
+                if let Some(fallback) =
+                    jcode_base::provider::get_best_available_openai_model_for_scope(&scope)
                     && fallback != current
                 {
                     jcode_base::logging::info(&format!(
@@ -1390,8 +1490,8 @@ impl OpenAIProvider {
                 }
             }
             jcode_base::provider::AccountModelAvailabilityState::Unknown => {
-                if jcode_base::provider::should_refresh_openai_model_catalog()
-                    && jcode_base::provider::begin_openai_model_catalog_refresh()
+                if jcode_base::provider::should_refresh_openai_model_catalog_for_scope(&scope)
+                    && jcode_base::provider::begin_openai_model_catalog_refresh_for_scope(&scope)
                 {
                     let is_chatgpt_mode = {
                         let creds = self.credentials.read().await;
@@ -1455,6 +1555,7 @@ use self::stream::{OpenAIResponsesStream, parse_openai_response_event};
 use self::stream::{handle_openai_output_item, parse_text_wrapped_tool_call};
 
 mod chatgpt_web;
+mod native_web_search;
 #[path = "openai_provider_impl.rs"]
 mod openai_provider_impl;
 #[path = "openai_stream_runtime.rs"]

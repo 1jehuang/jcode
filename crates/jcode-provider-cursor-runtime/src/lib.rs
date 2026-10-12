@@ -14,15 +14,17 @@ use chrono::Utc;
 use jcode_base::auth::cursor as cursor_auth;
 use jcode_base::provider::cursor::{AVAILABLE_MODELS, DEFAULT_MODEL};
 use jcode_message_types::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
-use jcode_provider_core::{EventStream, Provider};
+use jcode_provider_core::{EventStream, NativeToolResult, NativeToolResultSender, Provider};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 mod agent_transport;
+pub mod wire;
 
 const MODELS_API_URL: &str = "https://api.cursor.com/v0/models";
 const MAX_AGENT_MODELS_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
@@ -87,6 +89,7 @@ fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
                 ContentBlock::OpenAICompaction { .. } => {
                     out.push_str("[openai native compaction]\n");
                 }
+                ContentBlock::ToolReference { .. } | ContentBlock::ProviderNative { .. } => {}
             }
         }
         out.push('\n');
@@ -362,10 +365,71 @@ fn runtime_cursor_api_key() -> Option<String> {
     jcode_base::auth::cursor::load_api_key().ok()
 }
 
+#[derive(Clone, Default)]
+pub struct ToolResultMultiplexer {
+    routes: Arc<Mutex<HashMap<String, mpsc::Sender<NativeToolResult>>>>,
+}
+
+impl ToolResultMultiplexer {
+    pub fn new() -> Self {
+        Self {
+            routes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn register(&self, stream_uuid: &str, tx: mpsc::Sender<NativeToolResult>) -> StreamGuard {
+        if let Ok(mut routes) = self.routes.lock() {
+            routes.insert(stream_uuid.to_string(), tx);
+        }
+        StreamGuard {
+            stream_uuid: stream_uuid.to_string(),
+            routes: self.routes.clone(),
+        }
+    }
+
+    pub fn dispatch(&self, result: NativeToolResult) {
+        let stream_uuid = result
+            .request_id
+            .split(':')
+            .next()
+            .unwrap_or(&result.request_id);
+        let sender = self
+            .routes
+            .lock()
+            .ok()
+            .and_then(|routes| routes.get(stream_uuid).cloned());
+        if let Some(sender) = sender {
+            tokio::spawn(async move {
+                let _ = sender.send(result).await;
+            });
+        }
+    }
+}
+
+pub struct StreamGuard {
+    stream_uuid: String,
+    routes: Arc<Mutex<HashMap<String, mpsc::Sender<NativeToolResult>>>>,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        if let Ok(mut routes) = self.routes.lock() {
+            routes.remove(&self.stream_uuid);
+        }
+    }
+}
+
 pub struct CursorCliProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
+    /// `/fast` override. `None` keeps the model's own default (Composer runs
+    /// Fast, other models run Standard unless their id carries `-fast`).
+    fast: Arc<RwLock<Option<bool>>>,
+    multiplexer: ToolResultMultiplexer,
+    result_tx: NativeToolResultSender,
+    loop_started: Arc<std::sync::atomic::AtomicBool>,
+    result_rx: Arc<Mutex<Option<mpsc::Receiver<NativeToolResult>>>>,
 }
 
 impl CursorCliProvider {
@@ -408,12 +472,35 @@ impl CursorCliProvider {
         }
     }
 
+    fn ensure_forwarder_loop(&self) {
+        if !self
+            .loop_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+            && let Ok(mut rx_opt) = self.result_rx.lock()
+            && let Some(mut rx) = rx_opt.take()
+        {
+            let multiplexer = self.multiplexer.clone();
+            tokio::spawn(async move {
+                while let Some(result) = rx.recv().await {
+                    multiplexer.dispatch(result);
+                }
+            });
+        }
+    }
+
     pub fn new() -> Self {
         let model = std::env::var("JCODE_CURSOR_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+        let multiplexer = ToolResultMultiplexer::new();
+        let (result_tx, result_rx) = mpsc::channel::<NativeToolResult>(64);
         let provider = Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(model)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
+            fast: Arc::new(RwLock::new(None)),
+            multiplexer,
+            result_tx,
+            loop_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            result_rx: Arc::new(Mutex::new(Some(result_rx))),
         };
         provider.seed_cached_catalog();
         provider
@@ -431,9 +518,9 @@ impl Provider for CursorCliProvider {
     async fn complete(
         &self,
         messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         system: &str,
-        _resume_session_id: Option<&str>,
+        resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let prompt = build_cli_prompt(system, messages);
         let model = self
@@ -459,14 +546,45 @@ impl Provider for CursorCliProvider {
             Some(0),
             &[
                 ("logical_message_count", messages.len().to_string()),
-                ("ignored_tool_count", _tools.len().to_string()),
+                ("advertised_tool_count", tools.len().to_string()),
             ],
         );
         let client = self.client.clone();
+        let resume_session_id = resume_session_id.map(str::to_string);
         let (tx, rx) = mpsc::channel::<Result<jcode_message_types::StreamEvent>>(100);
+        let stream_uuid = uuid::Uuid::new_v4().to_string();
+        let (tool_result_tx, tool_result_rx) = mpsc::channel::<NativeToolResult>(16);
+        let stream_guard = self.multiplexer.register(&stream_uuid, tool_result_tx);
+        let tools = tools.to_vec();
+        let system = system.to_string();
+        self.ensure_forwarder_loop();
+        let fast_override = *self
+            .fast
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model_catalog = self
+            .fetched_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
 
         tokio::spawn(async move {
-            let result = run_native_text_command(client, tx.clone(), &prompt, &model, None).await;
+            let _stream_guard = stream_guard;
+            let result = run_native_text_command(
+                client,
+                tx.clone(),
+                &prompt,
+                &model,
+                fast_override,
+                &model_catalog,
+                None,
+                resume_session_id.as_deref(),
+                &stream_uuid,
+                &tools,
+                &system,
+                tool_result_rx,
+            )
+            .await;
 
             if let Err(err) = result {
                 let _ = tx.send(Err(err)).await;
@@ -479,9 +597,9 @@ impl Provider for CursorCliProvider {
     async fn complete_for_account(
         &self,
         messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         system: &str,
-        _resume_session_id: Option<&str>,
+        resume_session_id: Option<&str>,
         account_label: &str,
     ) -> Result<EventStream> {
         let prompt = build_cli_prompt(system, messages);
@@ -491,13 +609,42 @@ impl Provider for CursorCliProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         let client = self.client.clone();
-        let account_label = account_label.to_string();
+        let resume_session_id = resume_session_id.map(str::to_string);
         let (tx, rx) = mpsc::channel::<Result<jcode_message_types::StreamEvent>>(100);
+        let stream_uuid = uuid::Uuid::new_v4().to_string();
+        let (tool_result_tx, tool_result_rx) = mpsc::channel::<NativeToolResult>(16);
+        let stream_guard = self.multiplexer.register(&stream_uuid, tool_result_tx);
+        let tools = tools.to_vec();
+        let system = system.to_string();
+        self.ensure_forwarder_loop();
+        let fast_override = *self
+            .fast
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model_catalog = self
+            .fetched_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let account_label = account_label.to_string();
 
         tokio::spawn(async move {
-            let result =
-                run_native_text_command(client, tx.clone(), &prompt, &model, Some(&account_label))
-                    .await;
+            let _stream_guard = stream_guard;
+            let result = run_native_text_command(
+                client,
+                tx.clone(),
+                &prompt,
+                &model,
+                fast_override,
+                &model_catalog,
+                Some(&account_label),
+                resume_session_id.as_deref(),
+                &stream_uuid,
+                &tools,
+                &system,
+                tool_result_rx,
+            )
+            .await;
 
             if let Err(err) = result {
                 let _ = tx.send(Err(err)).await;
@@ -625,10 +772,13 @@ impl Provider for CursorCliProvider {
     }
 
     fn handles_tools_internally(&self) -> bool {
-        false
+        true
     }
 
     fn supports_compaction(&self) -> bool {
+        // complete_simple uses build_cli_prompt, which truncates long prompts.
+        // Do not mark history summarized when the summary request can silently
+        // omit its oldest messages. Enable only with a non-truncating path.
         false
     }
 
@@ -637,16 +787,72 @@ impl Provider for CursorCliProvider {
             client: self.client.clone(),
             model: Arc::new(RwLock::new(self.model())),
             fetched_models: self.fetched_models.clone(),
+            fast: Arc::new(RwLock::new(
+                *self
+                    .fast
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            )),
+            multiplexer: self.multiplexer.clone(),
+            result_tx: self.result_tx.clone(),
+            loop_started: self.loop_started.clone(),
+            result_rx: self.result_rx.clone(),
         })
+    }
+
+    fn native_result_sender(&self) -> Option<NativeToolResultSender> {
+        self.ensure_forwarder_loop();
+        Some(self.result_tx.clone())
+    }
+
+    /// Cursor carries speed as a separate `fast` model param rather than as a
+    /// service tier, but `/fast` maps onto it naturally: `priority` pins Fast,
+    /// `off` pins Standard. Report the effective state for the current model.
+    fn service_tier(&self) -> Option<String> {
+        let fast_override = *self
+            .fast
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        agent_transport::resolve_model_id(&self.model(), fast_override)
+            .fast
+            .then(|| "priority".to_string())
+    }
+
+    fn set_service_tier(&self, service_tier: &str) -> Result<()> {
+        let value = match service_tier.trim().to_ascii_lowercase().as_str() {
+            "priority" | "fast" | "on" | "true" => Some(true),
+            "off" | "standard" | "false" | "none" => Some(false),
+            "default" | "auto" | "" => None,
+            other => anyhow::bail!(
+                "Unsupported Cursor speed '{other}'. Use 'priority' (fast) or 'off' (standard)."
+            ),
+        };
+        *self
+            .fast
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
+        Ok(())
+    }
+
+    fn available_service_tiers(&self) -> Vec<&'static str> {
+        vec!["priority", "off"]
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_native_text_command(
     client: reqwest::Client,
     tx: mpsc::Sender<Result<StreamEvent>>,
     prompt: &str,
     model: &str,
+    fast_override: Option<bool>,
+    model_catalog: &[String],
     account_label: Option<&str>,
+    resume_session_id: Option<&str>,
+    stream_uuid: &str,
+    tools: &[ToolDefinition],
+    system: &str,
+    mut tool_result_rx: mpsc::Receiver<NativeToolResult>,
 ) -> Result<()> {
     let tokens = match account_label {
         Some(label) => {
@@ -657,13 +863,43 @@ async fn run_native_text_command(
         None => cursor_auth::resolve_direct_tokens(&client).await?,
     };
 
+    // Cursor rejects some bare base ids (`grok-4.6`, `claude-opus-5-5`) and only
+    // serves the exact ids in its catalog, so model resolution needs it. The
+    // catalog is normally prefetched in the background, but a first turn can
+    // race that. Fetch it inline (bounded) when we have nothing yet.
+    let fetched_catalog;
+    let model_catalog = if model_catalog.is_empty() {
+        fetched_catalog = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_agent_models(&client, &tokens.access_token),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+        fetched_catalog.as_slice()
+    } else {
+        model_catalog
+    };
+
     // The current Cursor agent transport (`agent.v1.AgentService/Run`) is a
     // paced bidirectional Connect/HTTP2 stream. The old
     // `ChatService/StreamUnifiedChatWithTools` endpoint was decommissioned for
     // API-key / CLI tokens and now returns "Update Required"/payment errors.
-    let first_result =
-        crate::agent_transport::run_agent_turn(&tokens.access_token, prompt, model, tx.clone())
-            .await;
+    let first_result = crate::agent_transport::run_agent_turn(
+        &tokens.access_token,
+        prompt,
+        model,
+        fast_override,
+        model_catalog,
+        resume_session_id,
+        stream_uuid,
+        tools,
+        system,
+        &mut tool_result_rx,
+        tx.clone(),
+    )
+    .await;
 
     match first_result {
         Ok(()) => Ok(()),
@@ -673,7 +909,20 @@ async fn run_native_text_command(
                 .with_context(|| {
                     format!("Cursor token was rejected and refresh also failed after: {err:#}")
                 })?;
-            crate::agent_transport::run_agent_turn(&refreshed.access_token, prompt, model, tx).await
+            crate::agent_transport::run_agent_turn(
+                &refreshed.access_token,
+                prompt,
+                model,
+                fast_override,
+                model_catalog,
+                resume_session_id,
+                stream_uuid,
+                tools,
+                system,
+                &mut tool_result_rx,
+                tx,
+            )
+            .await
         }
         Err(err) => Err(err),
     }

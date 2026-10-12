@@ -1,0 +1,21 @@
+{
+  "version": "0.87.0",
+  "date": "2026-09-22",
+  "title": "Claude Opus 5.5 and independent Anthropic model discovery",
+  "highlights": [
+    "Use Claude Opus 5.5 directly through Anthropic, with explicit API-key and Claude-login routes in the model picker",
+    "API-key and OAuth model catalogs refresh independently, so one account or authentication method cannot hide models available on the other",
+    "Update Claude OAuth client compatibility to Claude Code 2.1.280 for the latest model release"
+  ],
+  "improvements": [
+    "Support Opus 5.5 mandatory adaptive thinking, progress summaries, and documented conversation-bound thinking controls",
+    "Keep the last usable catalog during refresh failures and separate cached API-key catalogs by credential fingerprint",
+    "Show distinct missing API key and missing Claude login labels rather than hiding the direct API route",
+    "Add Opus 5.5 context, output-limit, reasoning-effort and pricing metadata without changing saved model selections"
+  ],
+  "fixes": [
+    "API-key long-context availability no longer depends on Claude subscription extra-usage settings",
+    "Server replacement-model recommendations preserve decimal versions such as Opus 4.8 and Opus 5.5",
+    "Share the bundled Anthropic model list between provider layers to prevent discovery fallback drift"
+  ]
+}

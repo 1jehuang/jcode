@@ -26,10 +26,6 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Jcode.as_arg_value(), "jcode");
     assert_eq!(ProviderChoice::Claude.as_arg_value(), "claude");
     assert_eq!(ProviderChoice::AnthropicApi.as_arg_value(), "anthropic-api");
-    assert_eq!(
-        ProviderChoice::ClaudeSubprocess.as_arg_value(),
-        "claude-subprocess"
-    );
     assert_eq!(ProviderChoice::Openai.as_arg_value(), "openai");
     assert_eq!(ProviderChoice::OpenaiApi.as_arg_value(), "openai-api");
     assert_eq!(ProviderChoice::Openrouter.as_arg_value(), "openrouter");
@@ -304,7 +300,11 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Hosted Models");
+    // Display name is Jcode Subscription since b7b5977f8 (subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME).
+    assert_eq!(
+        provider.name(),
+        crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
+    );
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
@@ -1027,6 +1027,22 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "auto mode should skip untrusted external auth, not fail with the consent prompt error: {message}"
     );
 
+    // Production `serve` must bind before Desktop can sign in, without a
+    // launcher-specific deferred-auth environment variable.
+    let daemon_provider = init_provider_for_serve(&ProviderChoice::Auto, None)
+        .await
+        .expect("credential-free daemon should support onboarding");
+    let request_error = match daemon_provider.complete(&[], &[], "test", None).await {
+        Ok(_) => panic!("model work must not succeed without credentials"),
+        Err(err) => err.to_string(),
+    };
+    assert!(request_error.contains("not configured"), "{request_error}");
+    assert!(request_error.contains("/login"), "{request_error}");
+
+    // Serve opts in locally, rather than leaking a process-wide exemption.
+    assert!(std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_none());
+    assert!(init_provider(&ProviderChoice::Auto, None).await.is_err());
+
     for (key, value) in saved {
         if let Some(value) = value {
             crate::env::set_var(&key, value);
@@ -1093,4 +1109,27 @@ fn pending_external_auth_review_candidates_include_shared_and_legacy_sources() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn env_model_for_choice_only_targets_openrouter_slot_runtimes() {
+    let env = Some("mistralai/mistral-large-4-0");
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Openrouter, env),
+        env
+    );
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Deepseek, env),
+        env
+    );
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Claude, env),
+        None
+    );
+    assert_eq!(env_model_for_choice_from(&ProviderChoice::Auto, env), None);
+    assert_eq!(env_model_for_choice_from(&ProviderChoice::Jcode, env), None);
+    assert_eq!(
+        env_model_for_choice_from(&ProviderChoice::Openrouter, None),
+        None
+    );
 }

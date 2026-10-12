@@ -315,6 +315,16 @@ fn quote_hook_executable(path: &Path) -> String {
     }
 }
 
+// Keep setup hints independent of app-core/base while waiting off the caller's path.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reap_notification_child(mut child: std::process::Child) {
+    let _ = std::thread::Builder::new()
+        .name("jcode-notification-child".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+}
+
 fn send_desktop_notification(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -326,24 +336,30 @@ fn send_desktop_notification(title: &str, body: &str) {
             escape(body),
             escape(title)
         );
-        let _ = std::process::Command::new("osascript")
+        if let Ok(child) = std::process::Command::new("osascript")
             .args(["-e", &script])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            reap_notification_child(child);
+        }
     }
 
     #[cfg(target_os = "linux")]
     {
-        let _ = std::process::Command::new("notify-send")
+        if let Ok(child) = std::process::Command::new("notify-send")
             .arg("--app-name=jcode")
             .arg(title)
             .arg(body)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            reap_notification_child(child);
+        }
     }
 
     #[cfg(windows)]
@@ -521,4 +537,12 @@ mod tests {
             "'/tmp/Jcode'\\''s bin/jcode'"
         );
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod notification_process_tests {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/notification_reaping.rs"
+    ));
 }

@@ -59,9 +59,16 @@ pub(super) fn same_provider_account_candidates(
     provider: ActiveProvider,
     model: Option<&str>,
 ) -> Vec<String> {
+    let prefix = match provider {
+        ActiveProvider::Claude => "claude",
+        ActiveProvider::OpenAI => "openai",
+        ActiveProvider::Antigravity => "antigravity",
+        ActiveProvider::Cursor => "cursor",
+        _ => return Vec::new(),
+    };
     let current_label = active_account_label_for_provider(provider);
-    let mut labels = Vec::new();
-
+    let mut labels: Vec<String> = Vec::new();
+    let mut exhausted: Vec<String> = Vec::new();
     let mut push_unique = |label: String| {
         if current_label.as_deref() == Some(label.as_str()) {
             return;
@@ -94,6 +101,9 @@ pub(super) fn same_provider_account_candidates(
         }
 
         for account in probe.accounts {
+            if account.exhausted || account.error.is_some() {
+                exhausted.push(account.label.clone());
+            }
             push_unique(account.label);
         }
     }
@@ -122,7 +132,17 @@ pub(super) fn same_provider_account_candidates(
         _ => {}
     }
 
-    labels
+    // Only auto-switch pool members rotate, cycling in the user's order from
+    // the account after the current one. Known-exhausted accounts go last.
+    let rotation = crate::auth::account_pool::AccountPool::load().rotation(
+        prefix,
+        current_label.as_deref(),
+        &labels,
+    );
+    let (ready, spent): (Vec<_>, Vec<_>) = rotation
+        .into_iter()
+        .partition(|label| !exhausted.contains(label));
+    ready.into_iter().chain(spent).collect()
 }
 
 fn managed_pool_candidates(provider: &str, model: Option<&str>) -> Vec<String> {

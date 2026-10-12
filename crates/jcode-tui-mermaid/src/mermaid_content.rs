@@ -297,81 +297,6 @@ fn result_to_lines_with_capabilities(
     }
 }
 
-#[cfg(test)]
-mod fallback_note_tests {
-    use super::*;
-
-    #[test]
-    fn fallback_note_explains_why_the_image_is_text() {
-        let text = text_image_fallback_note_line()
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(text.contains("terminal cannot render inline images"));
-        assert!(text.contains("text fallback"));
-    }
-
-    fn image_result() -> RenderResult {
-        RenderResult::Image {
-            hash: 0x1234,
-            path: PathBuf::from("test.png"),
-            width: 640,
-            height: 480,
-        }
-    }
-
-    #[test]
-    fn clicked_mermaid_expand_level_changes_placeholder_height() {
-        let hash = 0x9a11_ce55_u64;
-        let result = || RenderResult::Image {
-            hash,
-            path: PathBuf::from("diagram.png"),
-            width: 1500,
-            height: 1125,
-        };
-
-        crate::set_mermaid_inline_expand_level(hash, 0);
-        let fit = result_to_lines_with_capabilities(result(), Some(95), false, true, false);
-        crate::set_mermaid_inline_expand_level(hash, 1);
-        let large = result_to_lines_with_capabilities(result(), Some(95), false, true, false);
-        crate::set_mermaid_inline_expand_level(hash, 0);
-
-        assert!(
-            large.len() > fit.len(),
-            "click expansion must change Mermaid placeholder height: fit={}, large={}",
-            fit.len(),
-            large.len()
-        );
-    }
-
-    #[test]
-    fn halfblock_result_attaches_note_after_image_placeholder() {
-        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, true);
-        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
-        let note = lines
-            .last()
-            .expect("fallback result should end with a note")
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert!(note.contains(TERMINAL_IMAGE_FALLBACK_NOTE));
-    }
-
-    #[test]
-    fn native_protocol_result_starts_with_image_placeholder_without_note() {
-        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, false);
-        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
-        assert!(lines.iter().all(|line| {
-            !line
-                .spans
-                .iter()
-                .any(|span| span.content.contains(TERMINAL_IMAGE_FALLBACK_NOTE))
-        }));
-    }
-}
-
 /// Marker prefix for mermaid image placeholders
 const MERMAID_MARKER_PREFIX: &str = "\x00MERMAID_IMAGE:";
 const MERMAID_MARKER_SUFFIX: &str = "\x00";
@@ -654,5 +579,80 @@ pub fn terminal_theme() -> Theme {
         pie_outer_stroke_width: 1.6,
         pie_outer_stroke_color: "#45475a".to_string(),
         pie_opacity: 0.92,
+    }
+}
+
+#[cfg(test)]
+mod fallback_note_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_note_explains_why_the_image_is_text() {
+        let text = text_image_fallback_note_line()
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("terminal cannot render inline images"));
+        assert!(text.contains("text fallback"));
+    }
+
+    fn image_result() -> RenderResult {
+        RenderResult::Image {
+            hash: 0x1234,
+            path: PathBuf::from("test.png"),
+            width: 640,
+            height: 480,
+        }
+    }
+
+    #[test]
+    fn clicked_mermaid_expand_level_changes_placeholder_height() {
+        let hash = 0x9a11_ce55_u64;
+        let result = || RenderResult::Image {
+            hash,
+            path: PathBuf::from("diagram.png"),
+            width: 1500,
+            height: 1125,
+        };
+
+        crate::set_mermaid_inline_expand_level(hash, 0);
+        let fit = result_to_lines_with_capabilities(result(), Some(95), false, true, false);
+        crate::set_mermaid_inline_expand_level(hash, 1);
+        let large = result_to_lines_with_capabilities(result(), Some(95), false, true, false);
+        crate::set_mermaid_inline_expand_level(hash, 0);
+
+        assert!(
+            large.len() > fit.len(),
+            "click expansion must change Mermaid placeholder height: fit={}, large={}",
+            fit.len(),
+            large.len()
+        );
+    }
+
+    #[test]
+    fn halfblock_result_attaches_note_after_image_placeholder() {
+        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, true);
+        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
+        let note = lines
+            .last()
+            .expect("fallback result should end with a note")
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(note.contains(TERMINAL_IMAGE_FALLBACK_NOTE));
+    }
+
+    #[test]
+    fn native_protocol_result_starts_with_image_placeholder_without_note() {
+        let lines = result_to_lines_with_capabilities(image_result(), Some(80), false, true, false);
+        assert!(parse_inline_image_placeholder(&lines[0]).is_some());
+        assert!(lines.iter().all(|line| {
+            !line
+                .spans
+                .iter()
+                .any(|span| span.content.contains(TERMINAL_IMAGE_FALLBACK_NOTE))
+        }));
     }
 }

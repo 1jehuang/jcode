@@ -272,8 +272,75 @@ fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
 }
 
 #[test]
+fn test_grok_build_set_route_is_wire_safe() -> Result<()> {
+    let request = Request::SetRoute {
+        id: 9,
+        selection: jcode_provider_core::RouteSelection {
+            model: "grok-build:grok-4.6".to_string(),
+            runtime_key: jcode_provider_core::RuntimeKey::GrokBuild,
+            api_method: "grok-build-acp".to_string(),
+            provider_label: "Grok Build".to_string(),
+            detail: "Grok Build subscription via Jcode-managed ACP".to_string(),
+        },
+    };
+
+    let line = serde_json::to_string(&request)?;
+    assert!(line.contains("\"type\":\"set_route\""));
+    assert!(line.contains("\"kind\":\"grok-build\""));
+
+    let decoded = decode_request(&line)?;
+    let Request::SetRoute { id, selection } = decoded else {
+        return Err(anyhow!("expected Grok Build SetRoute, got {decoded:?}"));
+    };
+    assert_eq!(id, 9);
+    assert_eq!(selection.model, "grok-build:grok-4.6");
+    assert_eq!(
+        selection.runtime_key,
+        jcode_provider_core::RuntimeKey::GrokBuild
+    );
+    assert_eq!(selection.routed_model_spec(), "grok-build:grok-4.6");
+    Ok(())
+}
+
+#[test]
+fn test_unknown_runtime_key_other_set_route_is_wire_safe() -> Result<()> {
+    let request = Request::SetRoute {
+        id: 10,
+        selection: jcode_provider_core::RouteSelection {
+            model: "custom-model".to_string(),
+            runtime_key: jcode_provider_core::RuntimeKey::Other {
+                method: "custom-acp".to_string(),
+            },
+            api_method: "custom-acp".to_string(),
+            provider_label: "Custom".to_string(),
+            detail: String::new(),
+        },
+    };
+
+    let line = serde_json::to_string(&request)
+        .map_err(|error| anyhow!("Other runtime key must serialize: {error}"))?;
+    assert!(line.contains("\"type\":\"set_route\""));
+    assert!(line.contains("\"kind\":\"other\""));
+    assert!(line.contains("\"method\":\"custom-acp\""));
+
+    let decoded = decode_request(&line)?;
+    let Request::SetRoute { selection, .. } = decoded else {
+        return Err(anyhow!("expected Other SetRoute, got {decoded:?}"));
+    };
+    assert_eq!(
+        selection.runtime_key,
+        jcode_provider_core::RuntimeKey::Other {
+            method: "custom-acp".to_string()
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result<()> {
     let req = Request::Subscribe {
+        system_prompt: None,
+        supports_pdf_panels: true,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
@@ -289,6 +356,8 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     assert!(json.contains("\"type\":\"subscribe\""));
     let decoded = parse_request_json(&json)?;
     let Request::Subscribe {
+        system_prompt: _,
+        supports_pdf_panels,
         id,
         working_dir,
         selfdev,
@@ -304,6 +373,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         return Err(anyhow!("expected Subscribe"));
     };
     assert_eq!(id, 89);
+    assert!(supports_pdf_panels);
     assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
     assert_eq!(selfdev, Some(true));
     assert_eq!(target_session_id.as_deref(), Some("sess_target"));
@@ -324,6 +394,8 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     let json = r#"{"type":"subscribe","id":91}"#;
     let decoded = parse_request_json(json)?;
     let Request::Subscribe {
+        system_prompt: _,
+        supports_pdf_panels,
         id,
         working_dir,
         selfdev,
@@ -339,6 +411,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         return Err(anyhow!("expected Subscribe"));
     };
     assert_eq!(id, 91);
+    assert!(!supports_pdf_panels);
     assert_eq!(working_dir, None);
     assert_eq!(selfdev, None);
     assert_eq!(target_session_id, None);
@@ -519,12 +592,14 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         legacy,
         ServerEvent::Pong {
             id: 7,
-            native_ssh_protocol: None
+            native_ssh_protocol: None,
+            ..
         }
     ));
     let modern = ServerEvent::Pong {
         id: 7,
         native_ssh_protocol: Some(1),
+        capabilities: vec!["session_tools".into()],
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);
@@ -532,13 +607,33 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         serde_json::from_value::<ServerEvent>(json)?,
         ServerEvent::Pong {
             id: 7,
-            native_ssh_protocol: Some(1)
+            native_ssh_protocol: Some(1),
+            ..
         }
     ));
     assert!(
         serde_json::to_value(&legacy)?
             .get("native_ssh_protocol")
             .is_none()
+    );
+    Ok(())
+}
+
+#[test]
+fn tool_input_optional_id_preserves_legacy_wire_format() -> Result<()> {
+    let legacy = parse_event_json(r#"{"type":"tool_input","delta":"{"}"#)?;
+    assert!(matches!(&legacy, ServerEvent::ToolInput { id: None, delta } if delta == "{"));
+    assert_eq!(
+        serde_json::to_value(legacy)?,
+        serde_json::json!({"type":"tool_input","delta":"{"})
+    );
+    let keyed = parse_event_json(r#"{"type":"tool_input","id":"a","delta":"{}"}"#)?;
+    assert!(
+        matches!(&keyed, ServerEvent::ToolInput { id: Some(id), delta } if id == "a" && delta == "{}")
+    );
+    assert_eq!(
+        serde_json::to_value(keyed)?,
+        serde_json::json!({"type":"tool_input","id":"a","delta":"{}"})
     );
     Ok(())
 }

@@ -45,7 +45,29 @@ pub enum ApiEvent {
 
     // --- Streaming events (carry session_id, not tied to a request id) ---
     /// Assistant text delta.
-    TextDelta { session_id: String, text: String },
+    TextDelta {
+        session_id: String,
+        text: String,
+        /// Stream correlation id, not a persisted history message id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
+
+    /// Assistant message text ended. Reasoning alone is not a boundary.
+    TextDone {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
+
+    /// Replace previously streamed text for this message, including rollback.
+    /// An empty replacement retracts the message, even after TextDone.
+    TextReplace {
+        session_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
 
     /// Model reasoning delta (render dim/italic; safe to ignore).
     ReasoningDelta { session_id: String, text: String },
@@ -57,12 +79,30 @@ pub enum ApiEvent {
         duration_secs: Option<f64>,
     },
 
-    /// Tool call streaming lifecycle.
+    /// Effective tool inventory, in reply to `ListTools`.
+    Tools {
+        session_id: String,
+        tools: Vec<crate::SessionToolDefinition>,
+    },
+
+    /// Custom tool execution requested from the owning client.
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+
+    /// A tool name is known, even if no argument bytes have arrived yet.
+    /// Parallel calls may start before earlier calls finish streaming input.
     ToolStart {
         session_id: String,
         call_id: String,
         name: String,
     },
+    /// Incremental, potentially incomplete JSON. A nonempty `call_id` identifies
+    /// the call independently of event interleaving. Empty IDs are legacy input
+    /// for the most recently started call.
     ToolInputDelta {
         session_id: String,
         call_id: String,
@@ -89,6 +129,22 @@ pub enum ApiEvent {
         images: Vec<RenderedImage>,
     },
 
+    /// Complete session-scoped Markdown side-panel state. Replace the previous
+    /// snapshot, including when pages is empty. Sent live and during attachment
+    /// hydration, possibly before `Attached`. Subscribe before attaching.
+    SidePanelState {
+        session_id: String,
+        snapshot: crate::SidePanelSnapshot,
+    },
+
+    /// Complete set of agent-mounted applet instances for a session. Replace
+    /// the previous snapshot, including when empty. Sent live and during
+    /// attachment hydration, like `SidePanelState`.
+    AppletState {
+        session_id: String,
+        snapshot: jcode_applet_types::AgentApplets,
+    },
+
     /// Usage for the latest provider call, not cumulative session or turn totals.
     /// Input/cache accounting is provider-specific: Anthropic reports cache
     /// reads and writes separately, while OpenAI includes cache reads in input.
@@ -102,8 +158,88 @@ pub enum ApiEvent {
         cache_creation_input: Option<u64>,
     },
 
+    /// The provider request that just completed missed the KV (prompt) cache:
+    /// a meaningful part of the previously cached prefix had to be resent.
+    /// Follows the request's `TokenUsage`. `harness_caused` misses (the
+    /// harness mutated the prefix) should be rendered prominently; switches
+    /// and expiry are informational.
+    KvCacheMiss {
+        session_id: String,
+        /// Stable snake_case id, e.g. `prefix_changed`, `expired`.
+        reason: String,
+        harness_caused: bool,
+        missed_tokens: u64,
+        expected_tokens: u64,
+        read_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        documented_cause: Option<String>,
+        /// Ready-to-display one-line summary.
+        message: String,
+    },
+
+    /// An abnormal stop, never emitted for natural completion. This precedes
+    /// TurnDone (and Error for failures). Render as status, not assistant text.
+    /// Transport loss alone does not establish a Crash.
+    TurnStopped {
+        session_id: String,
+        reason: crate::TurnStopReason,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_stop_reason: Option<String>,
+    },
+
     /// The turn finished; the agent is idle.
-    TurnDone { session_id: String },
+    TurnDone {
+        session_id: String,
+        /// Soft interrupts still queued and not seen by this turn. Present only
+        /// when nonzero and the bridge advertises `soft_interrupt_ids`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_soft_interrupts: Option<u32>,
+    },
+
+    /// Queued soft interrupts were delivered to the model. Everything the
+    /// model writes after this event is written having seen them, and any
+    /// interrupt still queued has not been seen yet.
+    ///
+    /// Emitted in stream order: after the last `tool_done` of the batch and
+    /// before the first output of the response that sees the messages.
+    SoftInterruptInjected {
+        session_id: String,
+        /// Ids from `soft_interrupt.client_id`, in queue order. Several queued
+        /// messages are delivered as one user message. Empty when none of the
+        /// delivered messages carried an id.
+        #[serde(default)]
+        client_ids: Vec<String>,
+        /// `B` (turn would have ended), `C` (urgent, between tools), `D`
+        /// (after all tools), or `turn_start` (sent while idle, so it started
+        /// a new turn).
+        point: String,
+        /// Tools skipped by an urgent interrupt at point C.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools_skipped: Option<u32>,
+        /// `system` or `background_task` for daemon-originated injections.
+        /// Absent for user messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_role: Option<String>,
+    },
+
+    /// Reply to `CancelSoftInterrupts` with `client_ids`.
+    SoftInterruptsCancelled {
+        /// Ids removed before delivery.
+        cancelled: Vec<String>,
+        /// Ids that were not queued: already delivered, or never queued.
+        not_queued: Vec<String>,
+    },
+
+    /// Reply to `BackgroundTool`.
+    BackgroundToolResult {
+        /// Whether a running tool call was moved to the background.
+        moved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+    },
 
     /// The daemon requests that its external operator decide when to run the
     /// session. Emitted only when external wake ownership is configured.
@@ -167,7 +303,14 @@ pub enum ApiEvent {
     },
 
     /// Session-level status change (idle, generating, tool_running, ...).
-    SessionStatus { session_id: String, status: String },
+    SessionStatus {
+        session_id: String,
+        status: String,
+        /// Soft interrupts queued and not yet delivered, on the snapshot
+        /// statuses sent after attach or reconnect. Absent when unknown.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_soft_interrupts: Option<u32>,
+    },
 
     /// Provider request lifecycle. The value uses the daemon's stable display
     /// vocabulary, for example `connecting`, `sending request`, `waiting for
@@ -193,6 +336,11 @@ pub enum ApiEvent {
         /// Reasoning effort, e.g. `high`, for providers that expose it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
+        /// Credential the session bills against, as resolved by the daemon:
+        /// `oauth` or `api_key`. `None` when the provider has no such split
+        /// or the daemon did not report it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_method: Option<String>,
     },
 
     /// Reply to `ListModels`: the models this session can switch to.
@@ -215,6 +363,12 @@ pub enum ApiEvent {
         /// Reasoning effort, e.g. `high`, for providers that expose it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
+        /// Credential the session bills against (`oauth` or `api_key`), as
+        /// resolved by the daemon. Clients must prefer this over guessing
+        /// from `routes`, where one model can have both an OAuth and an API
+        /// key route.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_method: Option<String>,
         routes: Vec<ModelRouteInfo>,
     },
 
@@ -252,6 +406,12 @@ pub enum ApiEvent {
         size: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         modified_ms: Option<u64>,
+    },
+
+    /// Reply to `GetTodoState`.
+    TodoState {
+        session_id: String,
+        state: jcode_todo_policy::TodoSnapshot,
     },
 
     /// Reply to `Compact`: compaction was scheduled.
@@ -293,6 +453,9 @@ pub enum ErrorCode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionInfo {
+    /// Cumulative built-in file-tool changes. Absent when unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_stats: Option<crate::SessionEditStats>,
     pub session_id: String,
     /// Swarm owner this agent reports to, not the transcript's fork parent.
     /// Absent for ordinary sessions and user-created forks.
@@ -327,6 +490,10 @@ pub struct SessionInfo {
     /// ordinary sessions in every first-party session picker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub saved: bool,
+    /// Optional label given with `/save <label>`. Pickers display and search it
+    /// alongside the title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_label: Option<String>,
     /// Persisted transcript update time, used for newest-first ordering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at_ms: Option<i64>,

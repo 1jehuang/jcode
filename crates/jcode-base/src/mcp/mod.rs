@@ -4,6 +4,7 @@
 //! Supports shared server pools so multiple sessions reuse the same
 //! MCP server processes instead of spawning duplicates.
 
+pub mod budget;
 mod client;
 mod manager;
 pub mod pool;
@@ -16,4 +17,7 @@ pub use manager::McpManager;
 pub use pool::{SharedMcpPool, get_shared_pool, init_shared_pool};
 pub use protocol::*;
 pub use schema_cache::{McpSchemaCache, fingerprint_config};
-pub use tool::{McpTool, create_mcp_tools, create_mcp_tools_from_cached, dispatch_name};
+pub use tool::{
+    McpTool, create_mcp_tools, create_mcp_tools_from_cached, create_mcp_tools_from_cached_many,
+    dispatch_name, dispatch_names, take_accept_large_output,
+};

@@ -32,10 +32,41 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// SDK-owned session tool declaration. Parameters is a JSON schema object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// Replaces the session SDK overlay. None inherits normal selection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionToolConfig {
+    #[serde(default)]
+    pub enabled: Option<Vec<String>>,
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    #[serde(default)]
+    pub custom: Vec<SessionToolDefinition>,
+}
+
 /// Client request to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    #[serde(rename = "configure_tools")]
+    ConfigureTools { id: u64, tools: SessionToolConfig },
+    #[serde(rename = "list_tools")]
+    ListTools { id: u64 },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        id: u64,
+        call_id: String,
+        output: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// Send a message to the agent
     #[serde(rename = "message")]
     Message {
@@ -73,11 +104,23 @@ pub enum Request {
         /// If true, can skip remaining tools at injection point C
         #[serde(default)]
         urgent: bool,
+        /// Opaque caller id, echoed in `soft_interrupt_injected` and accepted
+        /// by a filtered `cancel_soft_interrupts`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
     },
 
-    /// Cancel all pending soft interrupts (remove from server queue before injection)
+    /// Cancel pending soft interrupts (remove from server queue before injection).
+    ///
+    /// Without `client_ids` every queued interrupt is dropped and the request
+    /// is acknowledged. With `client_ids` only the matching ones are dropped,
+    /// and the daemon answers with `soft_interrupts_cancelled`.
     #[serde(rename = "cancel_soft_interrupts")]
-    CancelSoftInterrupts { id: u64 },
+    CancelSoftInterrupts {
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_ids: Option<Vec<String>>,
+    },
 
     /// Clear conversation history
     #[serde(rename = "clear")]
@@ -120,6 +163,12 @@ pub enum Request {
     #[serde(rename = "subscribe")]
     Subscribe {
         id: u64,
+        /// Full system prompt override for a new session only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
+        /// Opt in to PDF panel payloads. Older clients only accept Markdown.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_pdf_panels: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -218,6 +267,29 @@ pub enum Request {
         message: String,
     },
 
+    /// The user pressed something in an agent-mounted applet instance. The
+    /// server stores `state`, then wakes the agent (or resolves a waiting
+    /// `applet` tool call).
+    #[serde(rename = "applet_action")]
+    AppletAction {
+        id: u64,
+        session_id: String,
+        instance: String,
+        action: jcode_applet_types::Action,
+        #[serde(default)]
+        state: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_key: Option<String>,
+    },
+
+    /// The user closed an agent-mounted applet instance. No agent wake.
+    #[serde(rename = "close_applet")]
+    CloseApplet {
+        id: u64,
+        session_id: String,
+        instance: String,
+    },
+
     /// Inject externally transcribed text into a live TUI session.
     #[serde(rename = "transcript")]
     Transcript {
@@ -270,6 +342,19 @@ pub enum Request {
         id: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+    },
+
+    /// Set routing for a worker role. None clears to the global default.
+    /// With `global`, the server updates its own configuration instead of the
+    /// session, so remote clients never write a default only they can see.
+    #[serde(rename = "set_agent_model")]
+    SetAgentModel {
+        id: u64,
+        target: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        global: bool,
     },
 
     /// Launch a subagent immediately in the active session.
@@ -328,6 +413,17 @@ pub enum Request {
         title: Option<String>,
     },
 
+    /// Bookmark (`saved: true`, optional label) or unbookmark the active
+    /// session. Routed through the daemon so its in-memory session, which
+    /// owns later writes, does not overwrite the flag.
+    #[serde(rename = "set_session_saved")]
+    SetSessionSaved {
+        id: u64,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Split the current session — clone conversation into a new session
     #[serde(rename = "split")]
     Split { id: u64 },
@@ -374,6 +470,24 @@ pub enum Request {
     /// This keeps account overrides and provider credential caches in sync.
     #[serde(rename = "switch_openai_account")]
     SwitchOpenAiAccount { id: u64, label: String },
+
+    /// Invalidate daemon-local usage and quota cooldown state after a banked reset.
+    /// This never redeems a reset or switches accounts. `None` pins the default
+    /// account scope, not whichever account is active when the request arrives.
+    #[serde(rename = "invalidate_openai_usage")]
+    InvalidateOpenAiUsage {
+        id: u64,
+        account_label: Option<String>,
+    },
+
+    /// Invalidate daemon-local usage and quota cooldown state after a Claude
+    /// session-limit reset. Like the OpenAI variant it never claims a reset.
+    /// `None` pins the default account scope.
+    #[serde(rename = "invalidate_anthropic_usage")]
+    InvalidateAnthropicUsage {
+        id: u64,
+        account_label: Option<String>,
+    },
 
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
@@ -454,6 +568,26 @@ pub enum Request {
         /// message bodies collapsed to this with an expand control.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tldr: Option<String>,
+        /// Cross-swarm target: a swarm label or swarm id other than the
+        /// sender's own. When set, the message is a cross-swarm DM delivered
+        /// to `to_session` inside that swarm, or to its coordinator when
+        /// `to_session` is omitted. Channels and broadcasts never cross swarms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_swarm: Option<String>,
+    },
+
+    /// List every live swarm (id, label, coordinator, member count) so agents
+    /// can discover cross-swarm DM targets.
+    #[serde(rename = "comm_list_swarms")]
+    CommListSwarms { id: u64, session_id: String },
+
+    /// Set (or clear, with an empty label) the human-readable label of the
+    /// caller's swarm. Labels are unique across swarms.
+    #[serde(rename = "comm_set_swarm_label")]
+    CommSetSwarmLabel {
+        id: u64,
+        session_id: String,
+        label: String,
     },
 
     /// List agents and their activity
@@ -755,6 +889,18 @@ pub enum Request {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "tools")]
+    Tools {
+        id: u64,
+        tools: Vec<SessionToolDefinition>,
+    },
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        name: String,
+        input: serde_json::Value,
+    },
     /// An autonomous wake was requested. In external wake mode this event is
     /// emitted instead of starting or injecting into a turn.
     #[serde(rename = "wake_requested")]
@@ -768,9 +914,22 @@ pub enum ServerEvent {
     #[serde(rename = "ack")]
     Ack { id: u64 },
 
+    /// Authoritative worker routing after a successful session preference update.
+    #[serde(rename = "agent_models_changed")]
+    AgentModelsChanged {
+        id: u64,
+        session_id: String,
+        #[serde(default)]
+        overrides: std::collections::BTreeMap<String, String>,
+    },
+
     /// Streaming text delta
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
+
+    /// Assistant text message boundary within a provider response.
+    #[serde(rename = "text_done")]
+    TextDone,
 
     /// Streaming reasoning/thinking delta (raw, unformatted model text).
     ///
@@ -805,7 +964,11 @@ pub enum ServerEvent {
 
     /// Tool input delta (streaming JSON)
     #[serde(rename = "tool_input")]
-    ToolInput { delta: String },
+    ToolInput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        delta: String,
+    },
 
     /// Tool call ended, now executing
     #[serde(rename = "tool_exec")]
@@ -880,6 +1043,24 @@ pub enum ServerEvent {
         ephemeral_chars: usize,
         #[serde(default)]
         ephemeral_message_count: usize,
+    },
+
+    /// Daemon-classified KV (prompt) cache miss for the request that just
+    /// completed. Emitted after `tokens`. `reason` is a stable snake_case id
+    /// (e.g. `prefix_changed`, `tools_changed`, `expired`, `model_switch`).
+    #[serde(rename = "kv_cache_miss")]
+    KvCacheMiss {
+        reason: String,
+        /// True when the harness itself changed the cached prefix.
+        harness_caused: bool,
+        missed_tokens: u64,
+        expected_tokens: u64,
+        read_tokens: u64,
+        /// Documented intentional invalidation that explains the miss.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        documented_cause: Option<String>,
+        /// Ready-to-display one-line summary.
+        message: String,
     },
 
     /// Active transport/connection type for the current stream
@@ -964,6 +1145,48 @@ pub enum ServerEvent {
         /// Number of tools skipped (only for urgent interrupt at point C)
         #[serde(skip_serializing_if = "Option::is_none")]
         tools_skipped: Option<usize>,
+        /// Caller ids of the queued messages combined into this injection, in
+        /// queue order. Messages queued without an id contribute nothing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        client_ids: Vec<String>,
+    },
+
+    /// Reply to a `cancel_soft_interrupts` that named `client_ids`. Decided
+    /// under the queue lock, so an id is never both cancelled and injected.
+    #[serde(rename = "soft_interrupts_cancelled")]
+    SoftInterruptsCancelled {
+        id: u64,
+        /// Requested ids that were still queued and are now removed.
+        cancelled: Vec<String>,
+        /// Requested ids that were not queued: already injected, or unknown.
+        not_queued: Vec<String>,
+    },
+
+    /// Reply to `background_tool`.
+    #[serde(rename = "background_tool_result")]
+    BackgroundToolResult {
+        id: u64,
+        /// A tool was executing and has been signalled to move to the
+        /// background. A tool finishing in the same instant completes normally.
+        moved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+    },
+
+    /// Soft interrupts still queued when a turn ended. Sent immediately before
+    /// the turn's terminal `done`/`error` on the same ordered stream.
+    #[serde(rename = "soft_interrupt_queue")]
+    SoftInterruptQueue { pending: usize },
+
+    /// Structured abnormal turn outcome, emitted before the terminal Done/Error.
+    #[serde(rename = "turn_stopped")]
+    TurnStopped {
+        reason: TurnStopReason,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_stop_reason: Option<String>,
     },
 
     /// Current turn was interrupted by explicit user cancel.
@@ -1068,6 +1291,8 @@ pub enum ServerEvent {
         /// Omitted by older daemons, which a new SSH bridge must reject.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_ssh_protocol: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
 
     /// Current state (debug)
@@ -1077,6 +1302,9 @@ pub enum ServerEvent {
         session_id: String,
         message_count: usize,
         is_processing: bool,
+        /// Soft interrupts queued and not yet injected. Omitted by older daemons.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_soft_interrupts: Option<usize>,
     },
 
     /// Response for debug command
@@ -1194,6 +1422,8 @@ pub enum ServerEvent {
         /// Session-scoped preferred model for subagents.
         #[serde(skip_serializing_if = "Option::is_none")]
         subagent_model: Option<String>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        agent_model_overrides: std::collections::BTreeMap<String, String>,
         /// Session-scoped automatic review toggle.
         #[serde(skip_serializing_if = "Option::is_none")]
         autoreview_enabled: Option<bool>,
@@ -1209,6 +1439,9 @@ pub enum ServerEvent {
         /// Session-scoped side panel pages and active focus state
         #[serde(default, skip_serializing_if = "snapshot_is_empty")]
         side_panel: SidePanelSnapshot,
+        /// Session-scoped agent applet instances.
+        #[serde(default, skip_serializing_if = "applets_is_empty")]
+        applets: jcode_applet_types::AgentApplets,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).
@@ -1229,6 +1462,13 @@ pub enum ServerEvent {
     /// Side panel state changed for the active session
     #[serde(rename = "side_panel_state")]
     SidePanelState { snapshot: SidePanelSnapshot },
+
+    /// Agent applet instances changed for the active session (full snapshot).
+    #[serde(rename = "applet_state")]
+    AppletState {
+        session_id: String,
+        snapshot: jcode_applet_types::AgentApplets,
+    },
 
     /// Server is reloading (clients should reconnect)
     #[serde(rename = "reloading")]
@@ -1260,8 +1500,30 @@ pub enum ServerEvent {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
+        /// The server's resolved context window for the active route, in tokens.
+        ///
+        /// A remote client cannot derive this itself: its local provider is an
+        /// inert placeholder with no model catalog, so asking it returns the
+        /// generic 200K default. The server owns the real provider, so it
+        /// reports the number directly. Measured on a pinned
+        /// `stealth/space-bunny-alpha@Stealth` route whose catalog entry carries
+        /// context_length 1000000, the panel showed 200000 with this absent.
+        ///
+        /// Omitted when unknown, so older peers stay compatible.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Credential the switched-to route will bill against (OAuth vs API
+        /// key). Lets clients update the auth badge on an OAuth<->API switch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+        /// Effort the switched-to model runs with. A switch can clear an
+        /// effort the new model does not advertise, so clients must not keep
+        /// showing the old one. Always serialized (`null` = no effort) so a
+        /// client can tell "cleared" from an older server that omits it.
+        #[serde(default)]
+        reasoning_effort: Option<String>,
     },
 
     /// Reasoning effort changed (response to set_reasoning_effort)
@@ -1305,7 +1567,9 @@ pub enum ServerEvent {
 
     /// Usage delta for a route, independent of catalog availability or Agent locks.
     #[serde(rename = "model_usage_updated")]
-    ModelUsageUpdated { route: jcode_provider_core::ModelRoute },
+    ModelUsageUpdated {
+        route: jcode_provider_core::ModelRoute,
+    },
 
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]
@@ -1352,6 +1616,10 @@ pub enum ServerEvent {
     /// Response to comm_list request
     #[serde(rename = "comm_members")]
     CommMembers { id: u64, members: Vec<AgentInfo> },
+
+    /// Response to comm_list_swarms and comm_set_swarm_label requests
+    #[serde(rename = "comm_swarms")]
+    CommSwarms { id: u64, swarms: Vec<SwarmInfo> },
 
     /// Response to comm_list_channels request
     #[serde(rename = "comm_channels")]

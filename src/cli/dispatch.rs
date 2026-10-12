@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Instant;
@@ -118,7 +118,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         provider_catalog::apply_named_provider_profile_env(profile_name)?;
         crate::env::set_var("JCODE_PROVIDER_PROFILE_NAME", profile_name);
         crate::env::set_var("JCODE_PROVIDER_PROFILE_ACTIVE", "1");
-        args.provider = ProviderChoice::OpenaiCompatible;
+        args.provider = provider_choice_for_named_profile(profile_name);
     }
 
     if let Some(tool_profile) = args.tool_profile.as_deref() {
@@ -163,7 +163,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             }
             let provider_start = Instant::now();
             let provider =
-                provider_init::init_provider(&args.provider, args.model.as_deref()).await?;
+                provider_init::init_provider_for_serve(&args.provider, args.model.as_deref())
+                    .await?;
             let provider_ms = provider_start.elapsed().as_millis();
             let server_new_start = Instant::now();
             let server = server::Server::new_with_name(provider, server_name);
@@ -299,6 +300,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             json,
             ndjson,
         }) => {
+            register_on_demand_server_spawner_for_run(
+                args.provider,
+                args.model.clone(),
+                args.provider_profile.clone(),
+            );
             commands::run_single_message_command(
                 &args.provider,
                 args.model.as_deref(),
@@ -321,37 +327,32 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             flow_id,
             cancel,
             no_validate,
-            google_access_tier,
+            google,
             api_base,
             api_key,
             api_key_env,
         }) => {
+            let mut options = login::LoginOptions {
+                no_browser,
+                print_auth_url,
+                callback_url,
+                auth_code,
+                json,
+                complete,
+                flow_id,
+                cancel,
+                no_validate,
+                openai_compatible_api_base: api_base,
+                openai_compatible_api_key: api_key,
+                openai_compatible_api_key_env: api_key_env,
+                openai_compatible_default_model: args.model.clone(),
+                ..Default::default()
+            };
+            google.apply(&mut options)?;
             login::run_login(
                 &login_provider.unwrap_or(args.provider),
                 account.as_deref(),
-                login::LoginOptions {
-                    no_browser,
-                    print_auth_url,
-                    callback_url,
-                    auth_code,
-                    json,
-                    complete,
-                    flow_id,
-                    cancel,
-                    no_validate,
-                    google_access_tier: google_access_tier.map(|tier| match tier {
-                        super::args::GoogleAccessTierArg::Full => {
-                            auth::google::GmailAccessTier::Full
-                        }
-                        super::args::GoogleAccessTierArg::Readonly => {
-                            auth::google::GmailAccessTier::ReadOnly
-                        }
-                    }),
-                    openai_compatible_api_base: api_base,
-                    openai_compatible_api_key: api_key,
-                    openai_compatible_api_key_env: api_key_env,
-                    openai_compatible_default_model: args.model.clone(),
-                },
+                options,
             )
             .await?;
         }
@@ -455,7 +456,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             }
         },
         Some(Command::Memory(subcmd)) => {
-            commands::run_memory_command(map_memory_subcommand(subcmd))?;
+            commands::run_memory_command(map_memory_subcommand(subcmd)).await?;
         }
         Some(Command::Session(subcmd)) => match subcmd {
             SessionCommand::Rename {
@@ -468,8 +469,13 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Ambient(subcmd)) => {
             commands::run_ambient_command(map_ambient_subcommand(subcmd)).await?;
         }
+        Some(Command::Cloud(CloudCommand::Sessions { action })) => {
+            commands::run_cloud_command(commands::CloudSubcommand::Sessions(
+                map_cloud_sessions_subcommand(action),
+            ))?;
+        }
         Some(Command::Cloud(subcmd)) => {
-            commands::run_cloud_command(map_cloud_subcommand(subcmd))?;
+            super::cloud_move::run_cli(subcmd)?;
         }
         Some(Command::Pair { list, revoke }) => {
             commands::run_pair_command(list, revoke)?;
@@ -483,6 +489,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             session,
         }) => {
             commands::run_transcript_command(text, map_transcript_mode(mode), session).await?;
+        }
+        Some(Command::Companion { status, no_voice }) => {
+            commands::run_companion_command(status, no_voice).await?;
         }
         Some(Command::Dictate { r#type }) => {
             commands::run_dictate_command(r#type).await?;
@@ -503,8 +512,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::SetupLauncher) => {
             setup_hints::run_setup_launcher()?;
         }
-        Some(Command::Browser { action }) => {
-            commands::run_browser(&action).await?;
+        Some(Command::Browser { action, browser }) => {
+            commands::run_browser(&action, browser.as_deref()).await?;
         }
         Some(Command::Replay {
             session,
@@ -654,6 +663,39 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Transport for `--provider-profile <name>` (issue #1560: this used to force
+/// OpenAI-compatible unconditionally). Anthropic-compatible profiles go
+/// through `Auto`, the same path as `default_provider = "<name>"`: the env
+/// applied by `apply_named_provider_profile_env` already selects the
+/// Anthropic Messages runtime with the profile's base URL and auth, while
+/// `AnthropicApi` would pin an Anthropic API-key credential the profile may
+/// not have (e.g. `auth = "none"`).
+fn provider_choice_for_named_profile(profile_name: &str) -> ProviderChoice {
+    // Same source as `apply_named_provider_profile_env`, which already
+    // validated that the profile exists.
+    match crate::config::Config::load_strict() {
+        Ok(config) => provider_choice_for_named_profile_in(profile_name, &config),
+        Err(_) => provider_choice_for_named_profile_in(profile_name, crate::config::config()),
+    }
+}
+
+fn provider_choice_for_named_profile_in(
+    profile_name: &str,
+    config: &crate::config::Config,
+) -> ProviderChoice {
+    match config.providers.get(profile_name) {
+        Some(profile)
+            if matches!(
+                profile.provider_type,
+                crate::config::NamedProviderType::AnthropicCompatible
+            ) =>
+        {
+            ProviderChoice::Auto
+        }
+        _ => ProviderChoice::OpenaiCompatible,
+    }
+}
+
 fn auth_doctor_provider_arg<'a>(
     positional_provider: Option<&'a str>,
     global_provider: &'a ProviderChoice,
@@ -778,14 +820,6 @@ fn map_ambient_subcommand(subcmd: AmbientCommand) -> commands::AmbientSubcommand
         AmbientCommand::Trigger => commands::AmbientSubcommand::Trigger,
         AmbientCommand::Stop => commands::AmbientSubcommand::Stop,
         AmbientCommand::RunVisible => commands::AmbientSubcommand::RunVisible,
-    }
-}
-
-fn map_cloud_subcommand(subcmd: CloudCommand) -> commands::CloudSubcommand {
-    match subcmd {
-        CloudCommand::Sessions { action } => {
-            commands::CloudSubcommand::Sessions(map_cloud_sessions_subcommand(action))
-        }
     }
 }
 
@@ -926,6 +960,9 @@ fn map_transcript_mode(mode: TranscriptModeArg) -> crate::protocol::TranscriptMo
 
 async fn run_default_command(args: Args) -> Result<()> {
     startup_profile::mark("run_main_none_branch");
+    // The TUI's first frame reads the auth snapshot (welcome/onboarding gate).
+    // Probe it now on a side thread so it overlaps the setup work below.
+    crate::auth::AuthStatus::prewarm_fast_in_background();
 
     let explicit_provider_or_model = args.provider != ProviderChoice::Auto
         || args.model.is_some()
@@ -1215,6 +1252,18 @@ fn try_acquire_spawn_lock(path: &std::path::Path) -> Result<Option<SpawnLockGuar
     use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
 
+    // The client acquires this lock before the daemon creates its socket directory.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create JCode runtime directory {}",
+                parent.display()
+            )
+        })?;
+    }
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -1354,11 +1403,121 @@ pub(crate) async fn spawn_server(
     spawn_server_with_executable(provider_choice, model, provider_profile, None).await
 }
 
+/// Lifecycle of a spawned `jcode serve` child.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ServerLifetime {
+    /// The long-lived shared daemon: survives this process and serves later
+    /// clients.
+    #[default]
+    Shared,
+    /// A server owned by this process: `jcode serve --temporary-server
+    /// --owner-pid <pid>` self-destructs once the owner exits, so a one-shot
+    /// run leaves no daemon behind.
+    OwnedByThisProcess,
+}
+
 async fn spawn_server_with_executable(
     provider_choice: &ProviderChoice,
     model: Option<&str>,
     provider_profile: Option<&str>,
     executable: Option<std::path::PathBuf>,
+) -> Result<()> {
+    spawn_server_with_lifetime(
+        provider_choice,
+        model,
+        provider_profile,
+        executable,
+        ServerLifetime::Shared,
+    )
+    .await
+}
+
+/// Start an ephemeral server owned by this process on the socket it dials.
+///
+/// Headless `jcode run` runs its agent in-process, so `--socket X` selects a
+/// path that nothing ever binds and the `swarm` tool has no server to talk to
+/// (issue #1748). This gives that run a server for as long as it lives: the
+/// child is marked `--temporary-server --owner-pid <our pid>`, so it shuts
+/// itself down within seconds of the run exiting.
+///
+/// The current executable is used deliberately instead of the shared-server
+/// update candidate: a run started from a locally built binary must be served
+/// by that same binary, or `--socket`-isolated self-dev checks would silently
+/// measure the installed build (see AGENTS.md, "Verifying a change at
+/// runtime").
+pub(crate) async fn spawn_owned_server(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+) -> Result<()> {
+    spawn_server_with_lifetime(
+        provider_choice,
+        model,
+        provider_profile,
+        std::env::current_exe().ok(),
+        ServerLifetime::OwnedByThisProcess,
+    )
+    .await
+}
+
+/// Let a headless one-shot `jcode run` start a server on demand.
+///
+/// `jcode run` hosts its agent in-process, so there is no server for tools
+/// that need one. Registering the spawner here (rather than at startup) keeps
+/// it to the `run` command: interactive and client launches already bootstrap
+/// a daemon through their own paths. Nothing is started by registering. The
+/// first tool that cannot reach a server triggers the spawn, so runs that never
+/// use `swarm` keep their current startup cost.
+///
+/// Which server gets started follows the dialed socket:
+///
+/// - Shared socket (no `--socket`): the long-lived daemon, exactly as
+///   `jcode server start` or a TUI launch would start it. An ephemeral server
+///   here would squat the path every later client uses and then vanish with
+///   this run.
+/// - Custom `--socket`: a server owned by this run. The caller asked for an
+///   isolated socket, so nobody else is waiting on it, and the run must not
+///   leave a daemon behind on a one-off path.
+fn register_on_demand_server_spawner_for_run(
+    provider_choice: ProviderChoice,
+    model: Option<String>,
+    provider_profile: Option<String>,
+) {
+    crate::server_spawn::register_on_demand_server_spawner(Box::new(move || {
+        let model = model.clone();
+        let provider_profile = provider_profile.clone();
+        Box::pin(async move {
+            let model = model.as_deref();
+            let provider_profile = provider_profile.as_deref();
+            if server::socket_path_is_custom() {
+                spawn_owned_server(&provider_choice, model, provider_profile).await
+            } else {
+                spawn_server(&provider_choice, model, provider_profile).await
+            }
+        })
+    }));
+}
+
+/// The `serve` subcommand argv for a spawned server of the given lifetime.
+///
+/// Split out so the contract with `Command::Serve` is testable without
+/// starting a process.
+fn serve_subcommand_args(lifetime: ServerLifetime, owner_pid: u32) -> Vec<String> {
+    let mut args = vec!["serve".to_string()];
+    if lifetime == ServerLifetime::OwnedByThisProcess {
+        args.push("--temporary-server".to_string());
+        args.push("--owner-pid".to_string());
+        args.push(owner_pid.to_string());
+    }
+    args
+}
+
+async fn spawn_server_with_lifetime(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+    executable: Option<std::path::PathBuf>,
+    lifetime: ServerLifetime,
 ) -> Result<()> {
     let socket_path = server::socket_path();
     if server_is_running_at(&socket_path).await {
@@ -1366,7 +1525,12 @@ async fn spawn_server_with_executable(
         return Ok(());
     }
 
-    if wait_for_existing_reload_server("server spawn").await {
+    // The reload marker describes the shared daemon's handoff. An owned server
+    // has no predecessor to wait for, and waiting on a marker written by the
+    // shared daemon would stall this run for the handoff timeout.
+    let awaits_reload_handoff = lifetime == ServerLifetime::Shared;
+
+    if awaits_reload_handoff && wait_for_existing_reload_server("server spawn").await {
         startup_profile::mark("server_ready");
         return Ok(());
     }
@@ -1379,13 +1543,19 @@ async fn spawn_server_with_executable(
         return Ok(());
     }
 
-    if wait_for_existing_reload_server("server spawn after lock").await {
+    if awaits_reload_handoff && wait_for_existing_reload_server("server spawn after lock").await {
         startup_profile::mark("server_ready");
         return Ok(());
     }
 
     startup_profile::mark("server_spawn_start");
-    output::stderr_info("Starting server...");
+    match lifetime {
+        ServerLifetime::Shared => output::stderr_info("Starting server..."),
+        ServerLifetime::OwnedByThisProcess => output::stderr_info(format!(
+            "Starting a temporary server on {} for this run...",
+            socket_path.display()
+        )),
+    }
     let client_requested_selfdev = selfdev::client_selfdev_requested();
     let exe = executable
         .or_else(|| {
@@ -1410,9 +1580,8 @@ async fn spawn_server_with_executable(
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg("serve")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+    cmd.args(serve_subcommand_args(lifetime, std::process::id()));
+    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
 
     #[cfg(unix)]
     {

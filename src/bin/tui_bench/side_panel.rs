@@ -74,6 +74,7 @@ pub(super) fn make_bench_side_panel(
     bench_file_paths.push(file_path.clone());
 
     Ok(SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("bench_side_panel".to_string()),
         pages: vec![SidePanelPage {
             id: "bench_side_panel".to_string(),
@@ -86,6 +87,7 @@ pub(super) fn make_bench_side_panel(
             ),
             file_path: file_path.display().to_string(),
             format: SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: source_kind,
             content,
             updated_at_ms: 1,
