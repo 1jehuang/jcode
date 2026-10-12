@@ -400,21 +400,7 @@ async fn stream_response(
 /// (e.g. `status: 402 Payment Required`). The input may be lowercased before
 /// it reaches here, so matching is case-insensitive.
 fn parsed_http_status(error_str: &str) -> Option<u16> {
-    let lower = error_str.to_ascii_lowercase();
-    // `status: 503 ...` from this module, or `HTTP 503: ...` when a proxy
-    // relays the upstream failure inside the stream.
-    let rest = if let Some(idx) = lower.find("status:") {
-        lower[idx + "status:".len()..].trim_start()
-    } else {
-        let idx = lower.find("http ")?;
-        &lower[idx + "http ".len()..]
-    };
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.len() == 3 {
-        digits.parse().ok()
-    } else {
-        None
-    }
+    jcode_provider_core::parse_http_status_message(error_str)
 }
 
 fn is_retryable_error(error_str: &str) -> bool {
@@ -573,6 +559,17 @@ mod tests {
         assert_eq!(parsed_http_status("no status here"), None);
         // Embedded numbers elsewhere must not be misread as a status.
         assert_eq!(parsed_http_status("you requested 65536 tokens"), None);
+    }
+
+    #[test]
+    fn shared_status_adapter_ignores_metadata_before_permanent_failure() {
+        let error = "endpoint: HTTP 529\nmodel: status: 503\nauth: HTTP 402\nHTTP 401: temporarily unavailable";
+        assert!(!is_retryable_error(error));
+    }
+
+    #[test]
+    fn shared_status_adapter_retries_relayed_529() {
+        assert!(is_retryable_error("HTTP 529: upstream busy"));
     }
 
     #[test]
