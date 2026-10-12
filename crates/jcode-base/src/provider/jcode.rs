@@ -15,9 +15,15 @@ impl JcodeProvider {
         // Subscription model ids overlap with direct providers (for example,
         // `claude-*` and `gpt-*`). Passing a bare id to MultiProvider lets its
         // family heuristic escape to the user's Anthropic/OpenAI credentials.
-        // Pin the managed OpenRouter slot, whose transport is configured below
-        // as `jcode-subscription`, for every curated model.
-        format!("openrouter:{}", model.trim())
+        //
+        // Use the explicit `jcode-subscription:` spec, never `openrouter:`.
+        // The OpenRouter branch rebinds a slot that currently holds the
+        // subscription runtime to the user's own OPENROUTER_API_KEY runtime
+        // whenever its routes memo does not (yet) list the model, which sent
+        // subscription turns to openrouter.ai on the user's personal key. The
+        // subscription spec always builds a fresh managed runtime and refuses
+        // to proceed unless its identity is the jcode subscription.
+        format!("jcode-subscription:{}", model.trim())
     }
 
     pub fn new() -> Self {
@@ -337,16 +343,24 @@ mod tests {
     fn jcode_models_are_pinned_to_the_managed_transport() {
         assert_eq!(
             JcodeProvider::runtime_model_spec("claude-opus-5-5"),
-            "openrouter:claude-opus-5-5"
+            "jcode-subscription:claude-opus-5-5"
         );
         assert_eq!(
             JcodeProvider::runtime_model_spec("claude-haiku-5-5"),
-            "openrouter:claude-haiku-5-5"
+            "jcode-subscription:claude-haiku-5-5"
         );
         assert_eq!(
             JcodeProvider::runtime_model_spec("minimax-m2.5"),
-            "openrouter:minimax-m2.5"
+            "jcode-subscription:minimax-m2.5"
         );
+        for model in crate::subscription_catalog::curated_models() {
+            let spec = JcodeProvider::runtime_model_spec(model.id);
+            assert_eq!(
+                crate::provider::jcode_subscription_model_prefix(&spec),
+                Some(model.id),
+                "{spec} must dispatch to the managed subscription runtime"
+            );
+        }
     }
 
     #[test]
