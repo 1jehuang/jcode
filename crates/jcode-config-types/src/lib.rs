@@ -911,6 +911,62 @@ impl<'de> Deserialize<'de> for HookCommands {
     }
 }
 
+/// System prompt configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PromptConfig {
+    /// Extra prompt-overlay files appended to the system prompt, after the
+    /// conventional `./.jcode/prompt-overlay.md` and
+    /// `~/.jcode/prompt-overlay.md`. Accepts a single path or a list; paths
+    /// are loaded in order and missing files are skipped. A leading `~/` is
+    /// expanded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay_files: Option<OverlayFiles>,
+}
+
+/// One overlay path or many. Accepts either a scalar string or an array in
+/// config, mirroring `HookCommands`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayFiles(Vec<String>);
+
+impl OverlayFiles {
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+}
+
+impl Serialize for OverlayFiles {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if let [path] = self.0.as_slice() {
+            path.serialize(serializer)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OverlayFiles {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+
+        Ok(match OneOrMany::deserialize(deserializer)? {
+            OneOrMany::One(path) => Self(vec![path]),
+            OneOrMany::Many(paths) => Self(paths),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {

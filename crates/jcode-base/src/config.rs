@@ -10,7 +10,7 @@ pub use jcode_config_types::{
     KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
     MarkdownSpacingMode, MenubarConfig, NamedProviderAuth, NamedProviderConfig,
     NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
-    PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
+    PowerConfig, PromptConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
     SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
     WebSearchConfig, WebSearchEngine,
 };
@@ -541,6 +541,9 @@ pub struct Config {
 
     /// Lifecycle hooks (external commands at turn/session/tool boundaries)
     pub hooks: HooksConfig,
+
+    /// System prompt configuration (extra overlay files)
+    pub prompt: PromptConfig,
 
     /// Ambient mode configuration
     pub ambient: AmbientConfig,

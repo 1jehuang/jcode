@@ -614,6 +614,14 @@ swarm_stall_after_secs = 600
 # "Hero"). Empty string disables the sound. Ignored on non-macOS. (default: "Glass")
 # turn_complete_sound = "Glass"
 
+[prompt]
+# Extra prompt-overlay files appended to the system prompt, after the
+# conventional ./.jcode/prompt-overlay.md and ~/.jcode/prompt-overlay.md.
+# A single path or a list; loaded in order, missing files are skipped,
+# leading ~/ is expanded. Useful for plugins that own their own guidance
+# file instead of writing into the shared overlay files.
+# overlay_files = ["~/.jcode/overlays/oh-am.md"]
+
 [hooks]
 # Synchronous tool-input transformers. Each receives the tool input JSON on
 # stdin and may print replacement JSON on stdout. Failures and empty output

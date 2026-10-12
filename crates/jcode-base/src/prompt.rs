@@ -485,7 +485,10 @@ pub fn build_system_prompt_full_with_capabilities(
     info.global_agents_md_chars = md_info.global_agents_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
+    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(
+        working_dir,
+        crate::config::config().prompt.overlay_files.as_ref(),
+    );
     if let Some(content) = overlay_content {
         info.prompt_overlay_chars = overlay_chars;
         parts.push(content);
@@ -623,7 +626,10 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     info.global_agents_md_chars = md_info.global_agents_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
-    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
+    let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(
+        working_dir,
+        crate::config::config().prompt.overlay_files.as_ref(),
+    );
     if let Some(content) = overlay_content {
         info.prompt_overlay_chars = overlay_chars;
         static_parts.push(content);
@@ -1006,7 +1012,10 @@ pub fn load_agents_md_files_from_dir(working_dir: Option<&Path>) -> (Option<Stri
 }
 
 /// Load optional prompt overlay markdown from ~/.jcode/ and ./.jcode/
-fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, usize) {
+fn load_prompt_overlay_files_from_dir(
+    working_dir: Option<&Path>,
+    extra_files: Option<&jcode_config_types::OverlayFiles>,
+) -> (Option<String>, usize) {
     let mut contents = vec![];
     let mut total_chars = 0usize;
 
@@ -1043,6 +1052,16 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
         contents.push(content);
     }
 
+    if let Some(files) = extra_files {
+        for path_str in files.iter() {
+            let path = expand_home_path(path_str);
+            if let Some((content, size)) = load_file(&path, &path.display().to_string()) {
+                total_chars += size;
+                contents.push(content);
+            }
+        }
+    }
+
     if contents.is_empty() {
         (None, 0)
     } else {
@@ -1050,6 +1069,14 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
     }
 }
 
+fn expand_home_path(path_str: &str) -> std::path::PathBuf {
+    if let Some(rest) = path_str.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    std::path::PathBuf::from(path_str)
+}
 /// Load optional preferred-tool guidance from ~/.jcode/ and ./.jcode/
 fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<String>, usize) {
     let mut contents = vec![];

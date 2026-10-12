@@ -364,7 +364,7 @@ fn test_prompt_overlay_files_are_loaded_from_project_and_global_jcode_dirs() {
     )
     .unwrap();
 
-    let direct = load_prompt_overlay_files_from_dir(Some(project_dir.path()));
+    let direct = load_prompt_overlay_files_from_dir(Some(project_dir.path()), None);
 
     assert!(direct.0.is_some(), "expected prompt overlay content");
     let direct_content = direct.0.unwrap();
@@ -836,7 +836,7 @@ fn prompt_guidance_symlink_aliases_are_loaded_once() {
             std::os::unix::fs::symlink(&global, project.path().join(".jcode").join(name)).unwrap();
         }
         for (content, size) in [
-            load_prompt_overlay_files_from_dir(Some(project.path())),
+            load_prompt_overlay_files_from_dir(Some(project.path()), None),
             load_preferred_tools_files_from_dir(Some(project.path())),
         ] {
             let content = content.unwrap();
@@ -859,7 +859,7 @@ fn prompt_guidance_distinct_files_with_identical_contents_are_both_loaded() {
             }
         }
         for (content, size) in [
-            load_prompt_overlay_files_from_dir(Some(project.path())),
+            load_prompt_overlay_files_from_dir(Some(project.path()), None),
             load_preferred_tools_files_from_dir(Some(project.path())),
         ] {
             let content = content.unwrap();
@@ -885,7 +885,7 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
                 }
             }
             for (content, size) in [
-                load_prompt_overlay_files_from_dir(Some(project.path())),
+                load_prompt_overlay_files_from_dir(Some(project.path()), None),
                 load_preferred_tools_files_from_dir(Some(project.path())),
             ] {
                 let content = content.unwrap();
@@ -896,4 +896,39 @@ fn prompt_guidance_missing_or_unreadable_project_keeps_global_content() {
             }
         }
     });
+}
+
+fn overlay_files_from_value(value: serde_json::Value) -> jcode_config_types::OverlayFiles {
+    use serde::Deserialize as _;
+    jcode_config_types::OverlayFiles::deserialize(value).unwrap()
+}
+
+#[test]
+fn test_configured_overlay_files_are_appended_in_order() {
+    let _guard = crate::storage::lock_test_env();
+    let first = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(first.path(), "extra overlay one").unwrap();
+    let second = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(second.path(), "extra overlay two").unwrap();
+
+    let files = overlay_files_from_value(serde_json::json!([
+        first.path().to_string_lossy(),
+        second.path().to_string_lossy(),
+    ]));
+
+    let (content, size) = load_prompt_overlay_files_from_dir(None, Some(&files));
+    let content = content.expect("expected overlay content");
+    let one = content.find("extra overlay one").expect("first file loaded");
+    let two = content.find("extra overlay two").expect("second file loaded");
+    assert!(one < two, "files must appear in declaration order");
+    assert!(size > 0);
+}
+
+#[test]
+fn test_configured_overlay_files_accept_single_string_and_skip_missing() {
+    let missing = std::env::temp_dir().join(format!("jcode-missing-overlay-{}.md", std::process::id()));
+    let files = overlay_files_from_value(serde_json::Value::from(missing.to_string_lossy()));
+    let (content, size) = load_prompt_overlay_files_from_dir(None, Some(&files));
+    assert!(content.is_none(), "missing file should be skipped");
+    assert_eq!(size, 0);
 }
