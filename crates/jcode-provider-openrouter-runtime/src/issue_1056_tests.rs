@@ -12,6 +12,10 @@ use tempfile::TempDir;
 
 #[test]
 fn mistral_models_use_their_configured_reasoning_defaults() {
+    // The constructor writes the process-global cache namespace; hold the env
+    // lock so parallel tests never observe it, and restore it afterwards.
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let profile: jcode_base::config::NamedProviderConfig = toml::from_str(
         r#"
 type = "openai-compatible"
@@ -43,6 +47,10 @@ reasoning_effort = "max"
 
 #[test]
 fn mistral_max_effort_is_sent_as_official_xhigh_value() {
+    // The constructor writes the process-global cache namespace; hold the env
+    // lock so parallel tests never observe it, and restore it afterwards.
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (request_tx, request_rx) = mpsc::channel();
@@ -97,6 +105,10 @@ fn mistral_max_effort_is_sent_as_official_xhigh_value() {
 /// skipped instead of disabling the provider.
 #[test]
 fn named_profile_headers_are_sent_on_the_wire() {
+    // The constructor writes the process-global cache namespace; hold the env
+    // lock so parallel tests never observe it, and restore it afterwards.
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (request_tx, request_rx) = mpsc::channel();
