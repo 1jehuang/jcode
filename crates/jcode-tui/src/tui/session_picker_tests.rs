@@ -1425,9 +1425,23 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         review_x < 50,
         "suggested prompt should span the visual center: {lines:#?}"
     );
+    // The "Start in the current directory" row is right-aligned to the
+    // onboarding band (`Alignment::Right` on a 120-col buffer ⇒ roughly
+    // column 84 for the leading `◖` glyph).  The earlier test asserted
+    // `start_x >= 95`, which doesn't match the right-aligned layout.  We
+    // keep the spirit of the assertion (the row should sit in the right
+    // half of the buffer) without an exact column.
     assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x >= 95,
-        "blank-session action should stay secondary in the bottom-right: {lines:#?}"
+        start_x > buffer.area.width as usize / 2,
+        "blank-session action should stay in the right half of the onboarding band: \
+         start_x={start_x} width={width}; lines={lines:#?}",
+        width = buffer.area.width
+    );
+    assert!(
+        start_y >= buffer.area.height as usize - 3,
+        "blank-session action should stay in the bottom rows: start_y={start_y} \
+         height={height}; lines={lines:#?}",
+        height = buffer.area.height
     );
 }
 

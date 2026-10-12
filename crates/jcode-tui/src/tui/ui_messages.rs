@@ -1455,18 +1455,79 @@ fn push_todo_plan_details(
             crate::todo::IntentUnderstanding::Clear
             | crate::todo::IntentUnderstanding::Complete => todo_score_color(),
         };
-        let mut spans = vec![
-            Span::styled("Intent ", Style::default().fg(todo_label_color())),
-            Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
-            Span::styled(": ", Style::default().fg(todo_label_color())),
-        ];
+        // Three spans (label, state, body) so the state name stays as its
+        // own span — the color-code tests grep for `span.content == state.as_str()`.
+        // In compact mode the helper truncates the combined line; in
+        // non-compact mode we wrap the body so a 198-character intent
+        // doesn't get truncated to "...pe…" at narrow widths.
+        let label_prefix = format!("Intent {}: ", state.as_str());
+        let state_text = state.as_str().to_string();
         if let Some(intention) = intention {
-            spans.push(Span::styled(
-                intention.to_string(),
-                Style::default().fg(todo_meta_color()),
+            if compact_details {
+                lines.push(todo_card_line(
+                    vec![
+                        Span::styled("Intent ", Style::default().fg(todo_label_color())),
+                        Span::styled(state_text, Style::default().fg(state_color)),
+                        Span::styled(
+                            format!(": {intention}"),
+                            Style::default().fg(todo_label_color()),
+                        ),
+                    ],
+                    base_indent,
+                    inner_width,
+                ));
+            } else {
+                let prefix_width = label_prefix.width();
+                // `todo_card_line` would re-truncate each line to
+                // `inner_width + base_indent.width()`. Instead of fighting
+                // its re-truncation, wrap the body to the maximum possible
+                // first-line width and emit each line directly so no
+                // further truncation happens. This is the only safe way
+                // to preserve every word of a long objective at narrow
+                // widths.
+                let max_body_width = inner_width
+                    .saturating_sub(prefix_width)
+                    .saturating_sub(base_indent.width())
+                    .max(1);
+                let body_chunks = wrap_todo_detail(intention, max_body_width);
+                let pad = " ".repeat(prefix_width);
+                for (idx, chunk) in body_chunks.into_iter().enumerate() {
+                    let spans = if idx == 0 {
+                        vec![
+                            Span::styled("Intent ", Style::default().fg(todo_label_color())),
+                            Span::styled(state_text.clone(), Style::default().fg(state_color)),
+                            Span::styled(": ", Style::default().fg(todo_label_color())),
+                        ]
+                    } else {
+                        // Continuation lines indent under the original prefix
+                        // so the body remains visually aligned.
+                        vec![Span::styled(
+                            pad.clone(),
+                            Style::default().fg(todo_label_color()),
+                        )]
+                    };
+                    let mut spans = spans;
+                    spans.push(Span::styled(chunk, Style::default().fg(todo_meta_color())));
+                    // Build the line manually so the renderer doesn't
+                    // re-truncate the long body into an ellipsis. The
+                    // wrap helper already sized the body so it fits the
+                    // available width per line.
+                    let mut prefixed = vec![Span::raw(base_indent.to_string())];
+                    prefixed.extend(spans);
+                    lines.push(Line::from(prefixed));
+                }
+            }
+        } else {
+            lines.push(todo_card_line(
+                vec![
+                    Span::styled("Intent ", Style::default().fg(todo_label_color())),
+                    Span::styled(state_text, Style::default().fg(state_color)),
+                    Span::styled(": ", Style::default().fg(todo_label_color())),
+                ],
+                base_indent,
+                inner_width,
             ));
         }
-        lines.push(todo_card_line(spans, base_indent, inner_width));
     } else if let Some(intention) = intention {
         push_todo_detail(
             lines,

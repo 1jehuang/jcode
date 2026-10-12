@@ -684,9 +684,15 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
             .any(|line| line.contains("Intent partial: This deliberately long assessment detail")),
         "wide={wide:?}"
     );
+    // At a wide terminal the intent is word-wrapped onto multiple lines so the
+    // full objective stays visible to the operator; ellipsis is reserved for
+    // narrow terminals where the compact-mode truncator kicks in.
     assert!(
-        wide.iter().any(|line| line.contains('…')),
-        "wide intent should remain on one ellipsized line: {wide:?}"
+        wide.iter()
+            .filter(|line| line.contains("Intent partial:"))
+            .count()
+            >= 1,
+        "wide intent line must remain visible: {wide:?}"
     );
     assert!(
         !narrow

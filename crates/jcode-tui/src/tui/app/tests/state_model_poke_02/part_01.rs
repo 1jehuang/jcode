@@ -1016,14 +1016,19 @@ fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
             })
             .unwrap();
         }
-        crate::auth::claude::set_active_account("claude-3").unwrap();
+        crate::auth::claude::set_active_account("claude-panda").unwrap();
 
         let labels: Vec<_> = crate::auth::claude::list_accounts()
             .unwrap()
             .into_iter()
             .map(|account| account.label)
             .collect();
-        assert_eq!(labels, vec!["claude-1", "claude-2", "claude-3"]);
+        // Account labels are assigned from a stable animal pool (see
+        // crates/kcode-base/src/auth/account_store.rs::canonical_account_label):
+        // the 1st account is "claude-otter", the 2nd is "claude-fox", etc.
+        // The `requested-{index}` input labels are placeholders that
+        // `upsert_account` rewrites; the test then activates the third.
+        assert_eq!(labels, vec!["claude-otter", "claude-fox", "claude-panda"]);
 
         assert_eq!(crate::auth::claude::clear_accounts().unwrap(), 3);
         assert!(crate::auth::claude::list_accounts().unwrap().is_empty());

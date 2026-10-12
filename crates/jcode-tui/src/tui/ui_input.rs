@@ -1253,16 +1253,20 @@ mod tests {
 
     #[test]
     fn truncate_line_for_narrow_long_text_truncated_with_ellipsis() {
+        use unicode_width::UnicodeWidthStr;
         let text = "[sending] 4.2s · ↑120 ↓340";
         let line = Line::from(vec![Span::styled(text, Style::default())]);
         let truncated = truncate_line_for_narrow(line, 15);
-        // Should be truncated to fit within 15 display columns.
-        let rendered: String = truncated
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(rendered.len() <= 15, "got {}: {rendered}", rendered.len());
+        // The function clips display width, not byte length.  The string
+        // contains a 2-byte '·' (U+00B7) so the UTF-8 byte count can exceed
+        // `max_cols` even when the display width is exactly `max_cols`.
+        let rendered: String = truncated.spans.iter().map(|s| s.content.as_ref()).collect();
+        let display_cols = UnicodeWidthStr::width(rendered.as_str());
+        assert!(
+            display_cols <= 15,
+            "got display_cols={display_cols} (bytes={}): {rendered}",
+            rendered.len()
+        );
         assert!(rendered.ends_with('…'), "expected ellipsis: {rendered}");
     }
 
@@ -1278,10 +1282,17 @@ mod tests {
             .iter()
             .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
-        // After fix: span 1 uses 2 cols, span 2 truncated to remaining 6 cols.
-        // '…' (U+2026) has display width 1 via unicode_width, so [send…] = 5 cols.
-        // Total = 2 + 5 = 7 display cols (fits within max_cols=8).
-        assert_eq!(total_width, 7, "exact cumulative width: got {total_width}");
+        // Span 1 "⏳ " = 2 display cols; span 2 is truncated to the
+        // remaining 6 display cols, which fills 5 ASCII chars ('[send')
+        // plus a 1-col '…' ellipsis.  Total = 2 + 6 = 8 display cols.
+        assert_eq!(total_width, 8, "exact cumulative width: got {total_width}");
+        // Sanity: at least one span must end with the ellipsis so the
+        // truncation is visible to the operator.
+        let rendered: String = truncated.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            rendered.ends_with('…'),
+            "expected ellipsis in truncated line: {rendered}"
+        );
     }
 
     #[test]

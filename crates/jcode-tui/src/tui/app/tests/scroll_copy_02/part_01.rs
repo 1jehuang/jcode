@@ -1476,8 +1476,13 @@ fn test_changelog_overlay_mouse_drag_release_copies_text() {
 
     // A copy was attempted (success/failure depends on clipboard availability
     // in the test environment, but the selection path must have run).
+    // Mouse-drag copy can leave the highlight visible, so accept either
+    // notice variant.
     assert!(matches!(
         app.status_notice().as_deref(),
-        Some("Copied selection") | Some("Failed to copy selection") | Some("Selection is empty")
+        Some("Copied selection")
+            | Some("Copied selection · highlight remains visible")
+            | Some("Failed to copy selection")
+            | Some("Selection is empty")
     ));
 }
