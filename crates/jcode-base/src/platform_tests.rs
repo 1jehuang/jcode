@@ -12,16 +12,26 @@ fn desired_nofile_soft_limit_only_raises_when_possible() {
 fn spawn_detached_creates_new_session() {
     use tempfile::NamedTempFile;
 
+    const OUTPUT_ENV: &str = "JCODE_TEST_DETACHED_SESSION_OUTPUT";
+    if let Some(output_path) = std::env::var_os(OUTPUT_ENV) {
+        let sid = unsafe { libc::getsid(0) };
+        assert!(sid > 0, "read detached child session id");
+        std::fs::write(output_path, sid.to_string()).expect("write child session id");
+        return;
+    }
+
     let output = NamedTempFile::new().expect("temp file");
     let output_path = output.path().to_string_lossy().to_string();
     let parent_sid = unsafe { libc::getsid(0) };
 
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg("ps -o sid= -p $$ > \"$JCODE_TEST_OUTPUT\"")
-        .env("JCODE_TEST_OUTPUT", &output_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    let mut cmd = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    cmd.args([
+        "--exact",
+        "platform::platform_tests::spawn_detached_creates_new_session",
+    ])
+    .env(OUTPUT_ENV, &output_path)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
 
     let mut child = super::spawn_detached(&mut cmd).expect("spawn detached child");
     let status = child.wait().expect("wait for child");
