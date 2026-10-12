@@ -81,14 +81,11 @@ async fn custom_prompt_recovery_reminder_reaches_both_agent_request_paths() {
                 cache_control: None,
             }],
         );
+        agent.current_turn_system_reminder = reminder;
         if streaming {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            agent
-                .resume_turn_streaming_mpsc(reminder, tx)
-                .await
-                .unwrap();
+            agent.run_turn_streaming_mpsc(tx).await.unwrap();
         } else {
-            agent.current_turn_system_reminder = reminder;
             agent.run_turn(false).await.unwrap();
         }
     }
