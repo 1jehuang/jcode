@@ -446,8 +446,8 @@ pub(super) fn run_version_command(emit_json: bool) -> Result<()> {
         git_date: jcode_build_meta::git_date().to_string(),
         release_build: jcode_build_meta::is_release_build(),
         build_channel: jcode_build_meta::build_channel().to_string(),
-        external_provider_protocol_version:
-            jcode_build_meta::EXTERNAL_PROVIDER_PROTOCOL_VERSION.to_string(),
+        external_provider_protocol_version: jcode_build_meta::EXTERNAL_PROVIDER_PROTOCOL_VERSION
+            .to_string(),
     };
 
     if emit_json {
