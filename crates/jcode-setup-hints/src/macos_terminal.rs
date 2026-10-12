@@ -158,6 +158,7 @@ pub(super) fn escape_applescript_text(input: &str) -> String {
     input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+#[cfg(test)]
 pub(super) fn paused_jcode_shell_command(exe_path: &str) -> String {
     paused_jcode_shell_command_with_args(exe_path, &[])
 }

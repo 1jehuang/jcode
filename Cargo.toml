@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.84.0"
+version = "0.95.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -43,6 +43,7 @@ members = [
     "crates/jcode-setup-hints",
     "crates/jcode-storage",
     "crates/jcode-side-panel-types",
+    "crates/jcode-applet-types",
     "crates/jcode-azure-auth",
     "crates/jcode-notify-email",
     "crates/jcode-provider-metadata",
@@ -62,7 +63,6 @@ members = [
     "crates/jcode-provider-command-code",
     "crates/jcode-provider-command-code-runtime",
     "crates/jcode-provider-copilot-runtime",
-    "crates/jcode-provider-claude-cli-runtime",
     "crates/jcode-provider-openrouter-runtime",
     "crates/jcode-provider-anthropic-runtime",
     "crates/jcode-provider-openai-runtime",
@@ -74,7 +74,9 @@ members = [
     "crates/jcode-tui-core",
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
+    "crates/jcode-todo-policy",
     "crates/jcode-transport",
+    "crates/jcode-codemode",
     "crates/jcode-tool-core",
     "crates/jcode-tool-types",
     "crates/jcode-tui-account-picker",
@@ -89,6 +91,10 @@ members = [
     "crates/jcode-update-core",
     "crates/jcode-terminal-launch",
     "crates/jcode-terminal-image",
+    "crates/jcode-terminal-prompt",
+    "crates/jcode-voice",
+    "crates/jcode-desktop-open",
+    "crates/jcode-companion",
     "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
     "crates/jcode-render-core",
@@ -175,6 +181,7 @@ tokio-stream = "0.1"
 # TUI
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
+unicode-width = "0.2"
 
 # Markdown & syntax highlighting
 
@@ -188,6 +195,9 @@ jcode-build-meta = { path = "crates/jcode-build-meta" }
 # so the root feature set fully controls the downstream features (see
 # [features]).
 jcode-tui = { path = "crates/jcode-tui", default-features = false }
+jcode-terminal-prompt = { path = "crates/jcode-terminal-prompt" }
+jcode-voice = { path = "crates/jcode-voice" }
+jcode-companion = { path = "crates/jcode-companion" }
 # `jcode provider-doctor` / provider diagnostics; sits downstream of jcode-base
 # so doctor edits do not rebuild the base -> app-core -> tui spine.
 jcode-provider-doctor = { path = "crates/jcode-provider-doctor" }
@@ -199,7 +209,6 @@ jcode-provider-cursor-runtime = { path = "crates/jcode-provider-cursor-runtime" 
 jcode-provider-antigravity-runtime = { path = "crates/jcode-provider-antigravity-runtime" }
 jcode-provider-command-code-runtime = { path = "crates/jcode-provider-command-code-runtime" }
 jcode-provider-copilot-runtime = { path = "crates/jcode-provider-copilot-runtime" }
-jcode-provider-claude-cli-runtime = { path = "crates/jcode-provider-claude-cli-runtime" }
 jcode-provider-openrouter-runtime = { path = "crates/jcode-provider-openrouter-runtime" }
 jcode-provider-anthropic-runtime = { path = "crates/jcode-provider-anthropic-runtime" }
 jcode-provider-openai-runtime = { path = "crates/jcode-provider-openai-runtime" }
@@ -210,11 +219,9 @@ jcode-selfdev-types = { path = "crates/jcode-selfdev-types" }
 tempfile = "3"
 
 [features]
-# Include local ONNX/tokenizer embeddings in default builds so memory recall,
-# semantic retrieval, and embedding-backed features work out of the box.
-# Use `JCODE_DEV_FEATURE_PROFILE=minimal` for compile-speed probes that need
-# to skip optional default feature stacks.
-default = ["pdf", "embeddings", "bedrock"]
+# Memory recall uses Jev Decisions and needs no local inference stack.
+# Keep embeddings opt-in for historical benchmarks/debugging only.
+default = ["pdf", "bedrock"]
 dev-bins = ["jcode-tui/dev-bins"]
 jemalloc = [
     "dep:tikv-jemallocator",

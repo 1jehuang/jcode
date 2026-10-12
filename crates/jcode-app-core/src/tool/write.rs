@@ -67,6 +67,7 @@ impl Tool for WriteTool {
         }
 
         // Check if file existed before and read old content for diff
+        let _lock = super::file_lock::lock(&path).await;
         let existed = path.exists();
         let old_content = if existed {
             tokio::fs::read_to_string(&path).await.ok()
@@ -76,6 +77,13 @@ impl Tool for WriteTool {
 
         // Write the file
         tokio::fs::write(&path, &params.content).await?;
+        super::edit_stats::record(
+            &ctx,
+            old_content.as_deref().unwrap_or(""),
+            &params.content,
+            existed && old_content.is_none(),
+        )
+        .await;
 
         let _new_len = params.content.len();
         let line_count = params.content.lines().count();
@@ -130,7 +138,25 @@ impl Tool for WriteTool {
             &params.content,
         );
 
-        Ok(ToolOutput::new(body).with_title(params.file_path.clone()))
+        let output = ToolOutput::new(body).with_title(params.file_path.clone());
+        // Do not claim an authoritative diff when the old file was unreadable.
+        Ok(if !existed || old_content.is_some() {
+            super::file_diff::attach(
+                output,
+                super::file_diff::unified(
+                    if existed {
+                        &params.file_path
+                    } else {
+                        "/dev/null"
+                    },
+                    &params.file_path,
+                    old_content.as_deref().unwrap_or(""),
+                    &params.content,
+                ),
+            )
+        } else {
+            output
+        })
     }
 }
 

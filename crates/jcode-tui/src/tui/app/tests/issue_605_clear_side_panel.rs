@@ -11,12 +11,14 @@ use crate::tui::app::tests::create_test_app;
 
 fn side_panel_snapshot_with_one_page() -> crate::side_panel::SidePanelSnapshot {
     crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("page-from-old-session".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "page-from-old-session".to_string(),
             title: "Old session goals".to_string(),
             file_path: "/tmp/old-session-goals.md".to_string(),
             format: Default::default(),
+            pdf_data: None,
             source: Default::default(),
             content: "leftover content".to_string(),
             updated_at_ms: 1,

@@ -67,10 +67,7 @@ impl App {
                 .as_deref()
                 .or(self.resume_session_id.as_deref())
                 .unwrap_or("connecting");
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::SetTitle(format!("jcode SSH {host} {session}"))
-            );
+            self.set_terminal_title_base(session, format!("jcode SSH {host} {session}"));
             return;
         }
         let session_id = if self.is_remote {
@@ -126,10 +123,7 @@ impl App {
             Some(&fallback_label),
             is_canary,
         );
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::SetTitle(window_title)
-        );
+        self.set_terminal_title_base(session_id, window_title);
     }
 
     pub(super) fn reconnect_target_session_id(&self) -> Option<String> {
@@ -261,7 +255,10 @@ impl App {
             crate::logging::info(&format!("MCP: Found {} server(s) in config", server_count));
 
             let (successes, failures) = {
-                let manager = self.mcp_manager.write().await;
+                // `connect_all` uses the manager's internal locks. Keep only a
+                // read guard here so MCP management reads are not blocked by a
+                // slow initialize handshake.
+                let manager = self.mcp_manager.read().await;
                 let result = manager.connect_all().await.unwrap_or((0, Vec::new()));
                 // Cache server names with tool counts
                 let servers = manager.connected_servers().await;
@@ -342,29 +339,29 @@ impl App {
             self.session.provider_session_id = None;
             let mut restored_model = false;
             if let Some(model) = self.session.model.clone() {
-                let model_request =
-                    crate::provider::MultiProvider::model_switch_request_for_session_route(
-                        &model,
-                        self.session.provider_key.as_deref(),
-                        self.session.route_api_method.as_deref(),
-                    );
-                if let Err(e) = crate::provider::set_model_with_auth_refresh(
+                match crate::provider::restore_session_model(
                     self.provider.as_ref(),
-                    &model_request,
+                    &model,
+                    self.session.provider_key.as_deref(),
+                    self.session.route_api_method.as_deref(),
                 ) {
-                    self.push_display_message(DisplayMessage {
-                        role: "system".to_string(),
-                        content: format!(
-                            "⚠ Failed to restore model '{}' via '{}': {}",
-                            model, model_request, e
-                        ),
-                        tool_calls: vec![],
-                        duration_secs: None,
-                        title: None,
-                        tool_data: None,
-                    });
-                } else {
-                    restored_model = true;
+                    Err(e) => {
+                        self.push_display_message(DisplayMessage {
+                            role: "system".to_string(),
+                            content: format!("⚠ Failed to restore model '{}': {}", model, e),
+                            tool_calls: vec![],
+                            duration_secs: None,
+                            title: None,
+                            tool_data: None,
+                        });
+                    }
+                    Ok(restore) => {
+                        if let Some(healed) = restore.healed_route {
+                            self.session.provider_key = healed.provider_key;
+                            self.session.route_api_method = healed.route_api_method;
+                        }
+                        restored_model = true;
+                    }
                 }
             }
 
@@ -372,7 +369,7 @@ impl App {
             if restored_model || self.session.model.is_none() {
                 self.session.model = Some(active_model.clone());
             }
-            self.update_context_limit_for_model(&active_model);
+            self.update_context_limit_for_model(&active_model, None);
             // Mark session as active now that it's being used again
             self.session.mark_active();
             self.set_side_panel_snapshot(
@@ -580,19 +577,16 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
                     "off"
                 };
                 app.push_display_message(DisplayMessage::system(format!(
-                    "Onboarding simulator is {status}. Alt+5 resets and opens it; Cmd+5 toggles it; `/onboarding-sim on` / `off` also work. While active: Tab/→ next screen, Shift+Tab/← previous, h/l preview the highlight, Esc exits."
+                    "Onboarding rehearsal is {status}. Alt+5 starts it over; Cmd+5 toggles it; `/onboarding-sim on` / `off` also work. It runs the real first-run flow as if jcode were new on this machine. Esc skips onboarding, as it does for new users."
                 )));
             }
             "" | "on" => {
                 app.start_onboarding_simulator();
-                app.push_display_message(DisplayMessage::system(
-                    "Onboarding simulator started. Step screens with Tab/→, press Alt+5 to reset to the first screen, or Cmd+5 to toggle. On the import screen Up/Down move the checkbox cursor; h/l preview the highlight; Esc exits. Nothing real is logged in or imported.".to_string(),
-                ));
             }
             "off" => {
                 app.stop_onboarding_simulator();
                 app.push_display_message(DisplayMessage::system(
-                    "Onboarding simulator stopped.".to_string(),
+                    "Onboarding rehearsal stopped.".to_string(),
                 ));
             }
             _ => unreachable!("guarded by command matcher"),
@@ -648,10 +642,10 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
             app.cursor_pos = 0;
             app.clear_input_undo_history();
             app.follow_chat_bottom();
-            app.force_full_redraw = true;
+            app.request_full_repaint();
             app.set_status_notice("Onboarding preview: on");
         } else {
-            app.force_full_redraw = true;
+            app.request_full_repaint();
             app.set_status_notice("Onboarding preview: off");
         }
         return true;

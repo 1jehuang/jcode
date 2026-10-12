@@ -8,6 +8,7 @@ import { NdjsonDecoder, encodeFrame } from "./framing.js";
 import { apiSocketPath, transportEndpoint } from "./sockets.js";
 import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./launch.js";
 import { HarnessError } from "./errors.js";
+import { ToolCallbacks, prepareTools, type SessionToolsOptions, type ToolResult } from "./tools.js";
 import {
   assertRetryCount,
   buildStructuredCorrectionPrompt,
@@ -20,6 +21,7 @@ import {
 } from "./structured.js";
 import {
   API_VERSION_MAJOR,
+  type AppletAction,
   type AnyApiEvent,
   type ApiEvent,
   type ApiRequest,
@@ -30,7 +32,11 @@ import {
   type RenderedImage,
   type ServerFrame,
   type SessionInfo,
+  type SessionToolDefinition,
   type TextMatch,
+  type TodoEffects,
+  type TodoSnapshot,
+  type TurnStopReason,
 } from "./protocol.js";
 
 export interface RuntimeInfo {
@@ -145,6 +151,19 @@ export interface ConnectOptions {
   requestTimeoutMs?: number;
 }
 
+export interface CreateSessionOptions {
+  workingDir?: string;
+  /**
+   * Replace the entire assembled system prompt, not just its base text.
+   * Default instructions and assembled instruction/context additions are not appended.
+   * Immutable after creation and persisted by the runtime for resume.
+   * Omit for normal prompt assembly. An empty string explicitly overrides with no text.
+   */
+  systemPrompt?: string;
+  /** Configured before createSession resolves, before any model turn starts. */
+  tools?: SessionToolsOptions;
+}
+
 export interface GlobalEventsOptions {
   /** Stop discovery and close every per-session child connection. */
   signal?: AbortSignal;
@@ -188,6 +207,7 @@ interface Pending {
   resolve: (frame: ServerFrame) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
+  onReply?: (frame: ServerFrame) => void;
 }
 
 /**
@@ -207,6 +227,11 @@ export class JcodeClient extends EventEmitter {
   private nextId = 1;
   private closed = false;
   private closeError?: Error;
+  private readonly configuringTools = new Set<string>();
+  private readonly toolCallbacks = new ToolCallbacks(
+    (sessionId, callId, result) => this.submitToolResult(sessionId, callId, result),
+    (error) => this.emitSafe("error", error),
+  );
 
   /** Server identity from the handshake, e.g. "jcode-harness-api-bridge/0.1.0". */
   server = "";
@@ -326,8 +351,19 @@ export class JcodeClient extends EventEmitter {
         const waiter = this.pending.get(replyTo)!;
         this.pending.delete(replyTo);
         if (waiter.timer) clearTimeout(waiter.timer);
+        if (frame.ev === "attached" || frame.ev === "session_forked") {
+          // One attachment per connection. Old-session callbacks must not survive a switch.
+          this.toolCallbacks.close();
+        }
+        waiter.onReply?.(frame);
         waiter.resolve(frame);
         continue;
+      }
+      if (frame.ev === "tool_call" && typeof frame.session_id === "string"
+        && typeof frame.call_id === "string" && typeof frame.name === "string") {
+        this.toolCallbacks.dispatch(frame.session_id, frame.call_id, frame.name, frame.input);
+      } else if (frame.ev === "turn_done" && typeof frame.session_id === "string") {
+        this.toolCallbacks.abort(frame.session_id);
       }
       this.emit("event", frame);
       // Unknown kinds still land on `event` so a client can log them, but
@@ -350,6 +386,7 @@ export class JcodeClient extends EventEmitter {
 
   private handleClose(error?: Error): void {
     this.closed = true;
+    this.toolCallbacks.close();
     this.closeError = error ?? new Error("harness connection closed");
     for (const [, waiter] of this.pending) {
       if (waiter.timer) clearTimeout(waiter.timer);
@@ -361,10 +398,14 @@ export class JcodeClient extends EventEmitter {
 
   /** Send a raw request and await its reply frame. */
   request(request: ApiRequest): Promise<ServerFrame> {
+    return this.requestFrame(request);
+  }
+
+  private requestFrame(request: ApiRequest, onReply?: (frame: ServerFrame) => void): Promise<ServerFrame> {
     if (this.closed) return Promise.reject(this.closeError ?? new Error("client closed"));
     const id = this.nextId++;
     return new Promise<ServerFrame>((resolve, reject) => {
-      const entry: Pending = { resolve, reject };
+      const entry: Pending = { resolve, reject, onReply };
       if (this.requestTimeoutMs > 0) {
         entry.timer = setTimeout(() => {
           this.pending.delete(id);
@@ -438,12 +479,67 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_retention_policy", archive_after_days: archiveAfterDays });
   }
 
-  async createSession(workingDir?: string): Promise<SessionInfo> {
+  async createSession(options?: string | CreateSessionOptions): Promise<SessionInfo> {
+    const { workingDir, systemPrompt, tools } = typeof options === "string" ? { workingDir: options } : (options ?? {});
+    if (tools) {
+      this.requireSessionTools();
+      prepareTools(tools);
+    }
     const frame = await this.expectReply(
-      { req: "create_session", working_dir: workingDir },
+      { req: "create_session", working_dir: workingDir, system_prompt: systemPrompt },
       "attached",
     );
+    if (tools) await this.configureTools(frame.session.session_id, tools);
     return frame.session;
+  }
+
+  private requireSessionTools(): void {
+    if (!this.supports("session_tools")) {
+      throw new HarnessError("unsupported", "This harness does not support session_tools. Update the jcode runtime and API bridge.");
+    }
+  }
+
+  /** Replace the session tool policy while idle. Await before sending another message. */
+  async configureTools(sessionId: string, options: SessionToolsOptions): Promise<void> {
+    this.requireSessionTools();
+    if (this.configuringTools.has(sessionId)) {
+      throw new HarnessError("busy", "A tool configuration request is already in flight for this session");
+    }
+    const prepared = prepareTools(options);
+    this.configuringTools.add(sessionId);
+    try {
+      const frame = await this.requestFrame(
+        { req: "configure_tools", session_id: sessionId, tools: prepared.wire },
+        (reply) => {
+          // Synchronous with ingest: a callback in the same network chunk sees the new table.
+          // Until this ack, an existing turn must continue using the old table.
+          if (reply.ev === "ok") this.toolCallbacks.sessions.set(sessionId, prepared.handlers);
+        },
+      );
+      if (frame.ev === "error") throw new HarnessError(String(frame.code), String(frame.message));
+      if (frame.ev !== "ok") throw new HarnessError("unexpected_reply", `expected ok, got ${frame.ev}`);
+    } catch (error) {
+      // An ambiguous outcome must not pair new remote definitions with old callbacks.
+      if (error instanceof HarnessError && (error.code === "timeout" || error.code === "unexpected_reply")) {
+        void this.close();
+      }
+      throw error;
+    } finally {
+      this.configuringTools.delete(sessionId);
+    }
+  }
+
+  /** Inspect the effective model-visible tool definitions. */
+  async listTools(sessionId: string): Promise<SessionToolDefinition[]> {
+    this.requireSessionTools();
+    return (await this.expectReply({ req: "list_tools", session_id: sessionId }, "tools")).tools;
+  }
+
+  /** Low-level response API for applications handling tool_call events themselves. */
+  async submitToolResult(sessionId: string, callId: string, result: string | ToolResult): Promise<void> {
+    const value = typeof result === "string" ? { output: result } : result;
+    await this.expectReply({ req: "tool_result", session_id: sessionId, call_id: callId,
+      output: value.output, error: value.error }, "ok");
   }
 
   async attachSession(sessionId: string): Promise<SessionInfo> {
@@ -465,6 +561,8 @@ export class JcodeClient extends EventEmitter {
 
   async detachSession(sessionId: string): Promise<void> {
     await this.requestOk({ req: "detach_session", session_id: sessionId });
+    this.toolCallbacks.abort(sessionId);
+    this.toolCallbacks.sessions.delete(sessionId);
   }
 
   /**
@@ -523,6 +621,36 @@ export class JcodeClient extends EventEmitter {
     this.notify({ req: "send_message", session_id: sessionId, content: "", system_reminder: reminder });
   }
 
+  /**
+   * Send a user message with a hidden system reminder for this turn only,
+   * such as a collection's instructions. The reminder guides the model
+   * without appearing in the visible transcript.
+   */
+  async sendMessageWithReminder(
+    sessionId: string,
+    content: string,
+    images: ImageAttachment[] = [],
+    systemReminder?: string,
+    options: Pick<SendMessageOptions, "waitForAccept" | "acceptTimeoutMs"> = {},
+  ): Promise<void> {
+    const reminder = systemReminder?.trim();
+    const waitForAccept = options.waitForAccept ?? true;
+    const accepted = waitForAccept
+      ? this.waitForEvent(
+          (frame) => frame.ev === "message_accepted" && frame.session_id === sessionId,
+          options.acceptTimeoutMs ?? 10_000,
+        )
+      : undefined;
+    this.notify({
+      req: "send_message",
+      session_id: sessionId,
+      content,
+      images,
+      ...(reminder ? { system_reminder: reminder } : {}),
+    });
+    await accepted;
+  }
+
   /** Write a request without expecting a request-level reply. */
   notify(request: ApiRequest): void {
     if (this.closed) throw this.closeError ?? new Error("client closed");
@@ -556,6 +684,7 @@ export class JcodeClient extends EventEmitter {
 
   async cancel(sessionId: string): Promise<void> {
     await this.requestOk({ req: "cancel", session_id: sessionId });
+    this.toolCallbacks.abort(sessionId);
   }
 
   async softInterrupt(sessionId: string, content: string, urgent = false): Promise<void> {
@@ -568,12 +697,30 @@ export class JcodeClient extends EventEmitter {
     images: ImageAttachment[],
     urgent = false,
   ): Promise<void> {
+    await this.softInterruptWithId(sessionId, content, { images, urgent });
+  }
+
+  /**
+   * Queue a message for the running turn, tagged with an opaque `clientId`.
+   *
+   * The id comes back in a `soft_interrupt_injected` event once the model has
+   * the message, and {@link cancelSoftInterrupt} can take it back before then.
+   * Needs the `soft_interrupt_ids` capability; an older server accepts the
+   * message but drops the id.
+   */
+  async softInterruptWithId(
+    sessionId: string,
+    content: string,
+    options: { clientId?: string; images?: ImageAttachment[]; urgent?: boolean } = {},
+  ): Promise<void> {
+    const images = options.images ?? [];
     await this.requestOk({
       req: "soft_interrupt",
       session_id: sessionId,
       content,
       images: images.length > 0 ? images : undefined,
-      urgent,
+      urgent: options.urgent ?? false,
+      client_id: options.clientId,
     });
   }
 
@@ -673,6 +820,19 @@ export class JcodeClient extends EventEmitter {
     await this.expectReply({ req: "notify_auth_changed", provider }, "ok");
   }
 
+  /**
+   * Tell the daemon a banked usage reset was redeemed for one subscription
+   * login (`claude` or `openai`) so it refetches quota. Carries no credentials.
+   */
+  async invalidateUsage(provider: string, accountLabel?: string): Promise<void> {
+    await this.expectReply(
+      accountLabel === undefined
+        ? { req: "invalidate_usage", provider }
+        : { req: "invalidate_usage", provider, account_label: accountLabel },
+      "ok",
+    );
+  }
+
   async readFile(sessionId: string, path: string, maxBytes?: number): Promise<FileContent> {
     const frame = await this.expectReply(
       { req: "read_file", session_id: sessionId, path, max_bytes: maxBytes },
@@ -699,6 +859,27 @@ export class JcodeClient extends EventEmitter {
       "text_matches",
     );
     return frame.matches;
+  }
+
+  /** Persisted todo state for client-side auto-poke and quality gates.
+   * Requires the `todo_state` capability. */
+  async todoState(sessionId: string): Promise<TodoSnapshot> {
+    const frame = await this.expectReply(
+      { req: "get_todo_state", session_id: sessionId },
+      "todo_state",
+    );
+    return frame.state;
+  }
+
+  /** Apply a follow-up decision's persistent effects. */
+  async ackTodoFollowUp(sessionId: string, effects: TodoEffects): Promise<void> {
+    if (!effects.clear_gate_observations && !effects.mark_long_session_review_delivered) {
+      return;
+    }
+    await this.expectReply(
+      { req: "ack_todo_follow_up", session_id: sessionId, effects },
+      "ok",
+    );
   }
 
   async fileStatus(sessionId: string, path: string): Promise<FileStatus> {
@@ -755,6 +936,34 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "rename_session", session_id: sessionId, title });
   }
 
+  /** Bookmark or unbookmark a session. A label also becomes its title. */
+  async setSessionSaved(sessionId: string, saved: boolean, label?: string): Promise<void> {
+    await this.requestOk({ req: "set_session_saved", session_id: sessionId, saved, label });
+  }
+
+  /** Report a user action in an agent applet instance. */
+  async appletAction(
+    sessionId: string,
+    instance: string,
+    action: AppletAction,
+    state: Record<string, unknown> = {},
+    sourceKey?: string,
+  ): Promise<void> {
+    await this.requestOk({
+      req: "applet_action",
+      session_id: sessionId,
+      instance,
+      action,
+      state,
+      source_key: sourceKey,
+    });
+  }
+
+  /** Close an agent applet instance. The agent is not woken. */
+  async closeApplet(sessionId: string, instance: string): Promise<void> {
+    await this.requestOk({ req: "close_applet", session_id: sessionId, instance });
+  }
+
   /** Restore the history the last `rewind` removed. */
   async rewindUndo(sessionId: string): Promise<void> {
     await this.requestOk({ req: "rewind_undo", session_id: sessionId });
@@ -763,6 +972,56 @@ export class JcodeClient extends EventEmitter {
   /** Drop soft interrupts that are queued but not yet delivered. */
   async cancelSoftInterrupts(sessionId: string): Promise<void> {
     await this.requestOk({ req: "cancel_soft_interrupts", session_id: sessionId });
+  }
+
+  /**
+   * Take back specific queued soft interrupts by `client_id`.
+   *
+   * Decided atomically against delivery: an id in `cancelled` never reached
+   * the model, and one in `notQueued` already did (or was never queued).
+   * Needs the `soft_interrupt_ids` capability.
+   */
+  async cancelSoftInterruptsById(
+    sessionId: string,
+    clientIds: string[],
+  ): Promise<{ cancelled: string[]; notQueued: string[] }> {
+    const frame = await this.expectReply(
+      { req: "cancel_soft_interrupts", session_id: sessionId, client_ids: clientIds },
+      "soft_interrupts_cancelled",
+    );
+    return { cancelled: frame.cancelled ?? [], notQueued: frame.not_queued ?? [] };
+  }
+
+  /**
+   * Take back one queued soft interrupt. Resolves `true` when it was removed
+   * before the model saw it, `false` when it was already delivered.
+   */
+  async cancelSoftInterrupt(sessionId: string, clientId: string): Promise<boolean> {
+    const { cancelled } = await this.cancelSoftInterruptsById(sessionId, [clientId]);
+    return cancelled.includes(clientId);
+  }
+
+  /** Move the running tool call to the background (the TUI's Alt+B). */
+  async backgroundTool(sessionId: string): Promise<void> {
+    await this.backgroundToolResult(sessionId);
+  }
+
+  /**
+   * Move the running tool call to the background and report what moved.
+   * A server without the `background_tool_result` capability only answers
+   * `ok`, reported as `{ moved: false }` even if a tool was moved.
+   */
+  async backgroundToolResult(
+    sessionId: string,
+  ): Promise<{ moved: boolean; toolCallId?: string; toolName?: string }> {
+    const frame = await this.requestOk({ req: "background_tool", session_id: sessionId });
+    if (frame.ev !== "background_tool_result") return { moved: false };
+    const result: { moved: boolean; toolCallId?: string; toolName?: string } = {
+      moved: frame.moved === true,
+    };
+    if (typeof frame.tool_call_id === "string") result.toolCallId = frame.tool_call_id;
+    if (typeof frame.tool_name === "string") result.toolName = frame.tool_name;
+    return result;
   }
 
   async ping(): Promise<void> {
@@ -1057,7 +1316,9 @@ export class JcodeClient extends EventEmitter {
    * Send a message and collect the assistant reply until the turn ends.
    *
    * The convenience path for scripts: one call in, the text and tool calls of
-   * one turn out. Streaming consumers should use `events()` instead.
+   * one turn out. `text` includes all narration in the turn. Use `finalText`
+   * for the last framed assistant message. Streaming consumers should use
+   * `events()` instead.
    */
   async run(
     sessionId: string,
@@ -1066,7 +1327,29 @@ export class JcodeClient extends EventEmitter {
   ): Promise<TurnResult> {
     const stream = this.events(sessionId);
     await this.sendMessage(sessionId, content, options.images ?? []);
-    const result: TurnResult = { text: "", reasoning: "", toolCalls: [], usage: undefined };
+    const result: TurnResult = {
+      text: "", finalText: "", messages: [], reasoning: "", toolCalls: [], usage: undefined,
+    };
+    const parts: AssistantTextMessage[] = [];
+    const messagesById = new Map<string, AssistantTextMessage>();
+    const completed = new Set<AssistantTextMessage>();
+    const messageFor = (id?: string): AssistantTextMessage => {
+      const key = id ?? "";
+      let message = messagesById.get(key);
+      if (!message) {
+        message = { text: "", ...(id === undefined ? {} : { messageId: id }) };
+        messagesById.set(key, message);
+        parts.push(message);
+      }
+      return message;
+    };
+    const finish = (): TurnResult => {
+      result.messages = parts.filter((message) => completed.has(message) && message.text.length > 0);
+      // Older bridges have no text_done. Do not guess boundaries from
+      // reasoning or tools: retain the historical whole-turn result.
+      result.finalText = result.messages.at(-1)?.text ?? result.text;
+      return result;
+    };
     for await (const event of stream) {
       options.onEvent?.(event);
       switch (event.ev) {
@@ -1075,7 +1358,21 @@ export class JcodeClient extends EventEmitter {
         // also what stops a renamed wire field from compiling.
         case "text_delta":
           result.text += event.text;
+          messageFor(event.message_id).text += event.text;
           break;
+        case "text_replace":
+          messageFor(event.message_id).text = event.text;
+          result.text = parts.map((message) => message.text).join("");
+          break;
+        case "text_done": {
+          const key = event.message_id ?? "";
+          const message = messagesById.get(key);
+          if (message) completed.add(message);
+          // Id-less framing still separates sequential messages. Keep keyed
+          // messages addressable for authoritative corrections after completion.
+          if (event.message_id === undefined) messagesById.delete(key);
+          break;
+        }
         case "reasoning_delta":
           result.reasoning += event.text;
           break;
@@ -1099,15 +1396,19 @@ export class JcodeClient extends EventEmitter {
             await this.respondToPermission(sessionId, event.request_id, "allow");
           }
           break;
+        case "turn_stopped":
+          result.stopReason = event.reason;
+          result.stopMessage = event.message;
+          break;
         case "turn_done":
           await stream.return?.(undefined as never);
-          return result;
+          return finish();
         case "error":
           await stream.return?.(undefined as never);
           throw new HarnessError(event.code ?? "internal", event.message ?? "harness error");
       }
     }
-    return result;
+    return finish();
   }
 
   /**
@@ -1131,10 +1432,10 @@ export class JcodeClient extends EventEmitter {
 
     for (let attemptNumber = 1; attemptNumber <= maxRetries + 1; attemptNumber += 1) {
       const turn = await this.run(sessionId, prompt, runOptions);
-      const validation = validateStructuredText(turn.text, validate);
+      const validation = validateStructuredText(turn.finalText, validate);
       const attempt: StructuredOutputAttempt = {
         attempt: attemptNumber,
-        text: turn.text,
+        text: turn.finalText,
         errors: validation.errors,
       };
       attempts.push(attempt);
@@ -1152,6 +1453,7 @@ export class JcodeClient extends EventEmitter {
    * plain `connect()` client it resolves immediately and can be ignored.
    */
   close(): Promise<void> {
+    this.toolCallbacks.close();
     this.transport.close();
     const instance = this.instance;
     this.instance = undefined;
@@ -1160,10 +1462,24 @@ export class JcodeClient extends EventEmitter {
 }
 
 export interface TurnResult {
+  /** Absent for natural completion. Failures still throw after onEvent. */
+  stopReason?: TurnStopReason;
+  stopMessage?: string;
+  /** All assistant text deltas in the turn, including process narration. */
   text: string;
+  /** Last completed assistant message, or whole-turn text on older bridges. */
+  finalText: string;
+  /** Completed text messages. Empty when the bridge does not support framing. */
+  messages: AssistantTextMessage[];
   reasoning: string;
   toolCalls: Array<{ callId: string; name: string; output: string; error?: string }>;
   usage?: { input: number; output: number; cacheReadInput?: number };
+}
+
+export interface AssistantTextMessage {
+  /** Stream-local correlation id, not a persisted history message id. */
+  messageId?: string;
+  text: string;
 }
 
 export interface StructuredTurnResult<T> extends TurnResult {

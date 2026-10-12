@@ -53,6 +53,32 @@ pub fn has_api_key() -> bool {
     api_key().is_some()
 }
 
+/// True when the `gemini` provider must stay on Code Assist OAuth even though
+/// an API key exists (`JCODE_GEMINI_FORCE_OAUTH`, or `[provider]
+/// gemini_force_oauth = true`). Explicit environment overrides are applied by
+/// the reloadable config loader. `gemini-api` always uses the key.
+pub fn force_oauth() -> bool {
+    crate::config::config().provider.gemini_force_oauth
+}
+
+/// Configured Code Assist project, with explicit environment precedence.
+pub fn cloud_project() -> Option<String> {
+    crate::config::config()
+        .provider
+        .gemini_project
+        .as_deref()
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
+        .map(str::to_owned)
+}
+
+/// True when the `gemini` provider will actually send with an API key: a key
+/// is present and OAuth is not pinned. Use this, not `has_api_key`, when the
+/// question is "which route will `gemini` take".
+pub fn uses_api_key() -> bool {
+    !force_oauth() && has_api_key()
+}
+
 /// Persist a Gemini Developer API key to the `gemini.env` config file under the
 /// canonical `GEMINI_API_KEY` name.
 pub fn save_api_key(key: &str) -> Result<()> {
@@ -60,10 +86,10 @@ pub fn save_api_key(key: &str) -> Result<()> {
     if key.is_empty() {
         anyhow::bail!("Gemini API key cannot be empty");
     }
-    crate::provider_catalog::save_env_value_to_env_file(
-        GEMINI_API_KEY_ENV_VARS[0],
+    crate::provider_catalog::save_named_api_key(
         GEMINI_API_KEY_ENV_FILE,
-        Some(key),
+        GEMINI_API_KEY_ENV_VARS[0],
+        key,
     )?;
     super::AuthStatus::invalidate_cache();
     Ok(())
@@ -337,7 +363,7 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
 
         eprintln!("\nOpening browser for Gemini login...\n");
         eprintln!("If the browser didn't open, visit:\n{}\n", auth_url);
-        if let Some(qr) = crate::login_qr::indented_section(
+        if let Some(qr) = crate::auth::login_ui::qr_section(
             &auth_url,
             "Scan this QR on another device if this machine has no browser:",
             "    ",
@@ -346,7 +372,7 @@ pub async fn login(no_browser: bool) -> Result<GeminiTokens> {
             eprintln!("{qr}\n");
         }
 
-        let browser_opened = open::that(&auth_url).is_ok();
+        let browser_opened = crate::companion_client::open_url(&auth_url);
         if browser_opened {
             eprintln!(
                 "Waiting up to 300s for automatic callback on {}",
@@ -404,7 +430,7 @@ async fn manual_login(
     let auth_url = build_manual_auth_url(GEMINI_MANUAL_REDIRECT_URI, challenge, state)?;
     eprintln!("\nManual Gemini auth required.\n");
     eprintln!("Open this URL in your browser:\n\n{}\n", auth_url);
-    if let Some(qr) = crate::login_qr::indented_section(
+    if let Some(qr) = crate::auth::login_ui::qr_section(
         &auth_url,
         "Scan this QR on another device if needed:",
         "    ",
@@ -413,12 +439,12 @@ async fn manual_login(
         eprintln!("{qr}\n");
     }
     if !crate::auth::browser_suppressed(no_browser) {
-        let _ = open::that(&auth_url);
+        let _ = crate::companion_client::open_url(&auth_url);
     }
     eprintln!("After approving access, Google will show an authorization code. Paste it below.\n");
     eprint!("Authorization code: ");
     io::stdout().flush()?;
-    let code = crate::secret_input::read_secret_line()?;
+    let code = crate::auth::login_ui::read_secret_line()?;
     if code.trim().is_empty() {
         anyhow::bail!("No authorization code provided.");
     }

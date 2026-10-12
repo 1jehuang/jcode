@@ -882,6 +882,52 @@ fn render_todos_message_wraps_goal_scores_at_narrow_widths() {
 }
 
 #[test]
+fn render_todos_message_packs_multiple_goal_gates_per_row() {
+    let todos = vec![crate::todo::TodoItem {
+        id: "1".to_string(),
+        content: "Render the card".to_string(),
+        status: "in_progress".to_string(),
+        priority: "high".to_string(),
+        group: Some("todo rendering".to_string()),
+        confidence: Some(crate::todo::ConfidenceState::from_legacy_score(85)),
+        completion_confidence: None,
+        confidence_history: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    let goals = vec![crate::todo::TodoGoal {
+        group: Some("todo rendering".to_string()),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Usable),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+        delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+        ..Default::default()
+    }];
+    let msg =
+        DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
+
+    let lines = render_todos_message(&msg, 80, crate::config::DiffDisplayMode::Off);
+    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
+    let gate_rows: Vec<&String> = rendered
+        .iter()
+        .filter(|line| {
+            ["Closed feedback loop", "Relevance", "Coverage", "Delivery"]
+                .iter()
+                .any(|label| line.contains(label))
+        })
+        .collect();
+    assert!(
+        gate_rows.len() < 4,
+        "gates should share rows instead of one per line: {rendered:#?}"
+    );
+    assert!(
+        gate_rows.iter().any(|line| line.contains(" · ")),
+        "{rendered:#?}"
+    );
+    assert!(lines.iter().all(|line| line.width() <= 78), "{rendered:#?}");
+}
+
+#[test]
 fn render_todos_message_empty_list_shows_placeholder() {
     let msg = DisplayMessage::todos("[]");
     let plain = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off)
@@ -1381,9 +1427,19 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
 
     assert!(rendered.contains("✓ todo"), "{rendered}");
     assert!(rendered.contains("pelican-bike"), "{rendered}");
+    // The plan intent renders inline with the understanding state on a single
+    // ellipsized line (2e847827f). The full text lives in the todo payload.
+    let intent_line = rendered
+        .lines()
+        .find(|line| line.contains("Intent clear:"))
+        .expect("batched todo card should show the plan intent");
+    let shown = intent_line
+        .split_once("Intent clear:")
+        .map(|(_, rest)| rest.trim().trim_end_matches('…'))
+        .unwrap_or_default();
     assert!(
-        compact.contains(&without_whitespace(OBJECTIVE)),
-        "batched todo plan intention was truncated:\n{rendered}"
+        shown.len() > 20 && OBJECTIVE.starts_with(shown),
+        "batched todo plan intent should show the objective prefix:\n{rendered}"
     );
     // Compact transcript cards show the goal's quality assessments rather than
     // repeating its potentially long feedback-loop prose. The full prose remains
@@ -1626,122 +1682,35 @@ fn split_plan_segments_returns_none_without_plan_block() {
 }
 
 #[test]
-fn render_assistant_message_truncates_tool_calls_to_single_line() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(false);
-    let msg = DisplayMessage {
+fn transcript_assistant_message_omits_tool_summary_restored_from_history() {
+    // History restore fills `tool_calls`, live turns do not. The transcript
+    // must look the same either way, so no `tool:` line in the chat view.
+    let restored = DisplayMessage {
         role: "assistant".to_string(),
-        content: "Done.".to_string(),
-        tool_calls: vec![
-            "read".to_string(),
-            "grep".to_string(),
-            "apply_patch".to_string(),
-            "batch".to_string(),
-        ],
+        content: "Formatting touched 2 extra files.".to_string(),
+        tool_calls: vec!["bash".to_string(), "todo".to_string()],
         duration_secs: None,
         title: None,
         tool_data: None,
     };
-
-    let lines = render_assistant_message(&msg, 20, crate::config::DiffDisplayMode::Off);
-    assert_eq!(extract_line_text(&lines[1]), "");
-    let tool_lines: Vec<String> = lines
-        .iter()
-        .skip(2)
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
-        })
-        .collect();
-
-    assert!(
-        tool_lines.len() == 1,
-        "expected single-line tool-call summary: {tool_lines:?}"
-    );
-    assert!(
-        tool_lines[0].contains("tools:"),
-        "expected tool summary label on first line: {tool_lines:?}"
-    );
-    assert!(
-        tool_lines.iter().all(|line| line.width() <= 20),
-        "tool-call summary line should respect available width: {tool_lines:?}"
-    );
-    crate::tui::markdown::set_center_code_blocks(saved);
-}
-
-#[test]
-fn render_assistant_message_centers_single_line_tool_summary() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(true);
-    let msg = DisplayMessage {
-        role: "assistant".to_string(),
-        content: "Done.".to_string(),
-        tool_calls: vec![
-            "read".to_string(),
-            "grep".to_string(),
-            "apply_patch".to_string(),
-            "batch".to_string(),
-        ],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
+    let live = DisplayMessage {
+        tool_calls: Vec::new(),
+        ..restored.clone()
     };
-
-    let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
-    assert_eq!(extract_line_text(&lines[1]), "");
-    let tool_lines: Vec<String> = lines
-        .iter()
-        .skip(2)
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect()
-        })
-        .collect();
-
-    assert!(
-        tool_lines.len() == 1,
-        "expected single-line tool-call summary: {tool_lines:?}"
-    );
-    let first_pad = tool_lines[0].chars().take_while(|c| *c == ' ').count();
-    assert!(
-        first_pad > 0,
-        "tool summary should still be padded/centered as a block: {tool_lines:?}"
-    );
-    assert!(
-        lines
+    let render = |msg: &DisplayMessage| -> Vec<String> {
+        render_assistant_message(msg, 80, crate::config::DiffDisplayMode::Off)
             .iter()
-            .skip(2)
-            .all(|line| line.alignment == Some(ratatui::layout::Alignment::Left)),
-        "centered tool summary should use a shared left-aligned block pad"
-    );
-
-    crate::tui::markdown::set_center_code_blocks(saved);
-}
-
-#[test]
-fn render_assistant_message_without_body_does_not_add_extra_blank_line_before_tool_summary() {
-    let saved = crate::tui::markdown::center_code_blocks();
-    crate::tui::markdown::set_center_code_blocks(false);
-    let msg = DisplayMessage {
-        role: "assistant".to_string(),
-        content: String::new(),
-        tool_calls: vec!["read".to_string()],
-        duration_secs: None,
-        title: None,
-        tool_data: None,
+            .map(extract_line_text)
+            .collect()
     };
-
-    let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
-    let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
-
-    assert_eq!(rendered.len(), 1, "rendered={rendered:?}");
-    assert!(rendered[0].contains("tool:"), "rendered={rendered:?}");
-
-    crate::tui::markdown::set_center_code_blocks(saved);
+    let restored_lines = render(&restored);
+    assert!(
+        restored_lines
+            .iter()
+            .all(|line| !line.contains("tool:") && !line.contains("tools:")),
+        "{restored_lines:?}"
+    );
+    assert_eq!(restored_lines, render(&live));
 }
 
 #[test]
@@ -3341,4 +3310,52 @@ fn render_empty_todo_tool_result_collapses_to_compact_line() {
 
     assert!(!plain.contains("No tasks yet"), "{plain}");
     assert!(plain.contains("no tasks"), "{plain}");
+}
+
+/// The edit row must not repeat the file path that the inline diff header
+/// directly below already shows. With an intent it reads like any other tool
+/// row, and without one it falls back to the bare name plus change counts.
+#[test]
+fn render_tool_message_edit_row_does_not_duplicate_diff_header_path() {
+    for intent in [Some("Fix the network hint"), None] {
+        let msg = DisplayMessage {
+            role: "tool".to_string(),
+            content: "Edited".to_string(),
+            tool_calls: Vec::new(),
+            duration_secs: None,
+            title: None,
+            tool_data: Some(crate::message::ToolCall {
+                id: "call_edit".to_string(),
+                name: "edit".to_string(),
+                input: serde_json::json!({
+                    "file_path": "/repo/src/very_specific_name.rs",
+                    "old_string": "old\n",
+                    "new_string": "new\n",
+                }),
+                intent: intent.map(str::to_string),
+                thought_signature: None,
+            }),
+        };
+
+        let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Inline);
+        let text: Vec<String> = lines.iter().map(extract_line_text).collect();
+        let occurrences = text
+            .iter()
+            .filter(|line| line.contains("very_specific_name.rs"))
+            .count();
+        assert_eq!(occurrences, 1, "path should appear once: {text:#?}");
+        assert!(
+            text[1].contains("diff · /repo/src/very_specific_name.rs"),
+            "{text:#?}"
+        );
+        if let Some(intent) = intent {
+            assert!(text[0].contains(&format!("edit · {intent}")), "{text:#?}");
+        }
+
+        // With diffs hidden the row is the only place the path can appear.
+        let lines = render_tool_message(&msg, 160, crate::config::DiffDisplayMode::Off);
+        if intent.is_none() {
+            assert!(extract_line_text(&lines[0]).contains("very_specific_name.rs"));
+        }
+    }
 }

@@ -26,8 +26,9 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "blocking", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "blocking", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -87,13 +88,15 @@ jcode-terminal-image = { path = "../jcode-terminal-image" }
 jcode-telemetry-core = { path = "../jcode-telemetry-core" }
 jcode-usage-types = { path = "../jcode-usage-types" }
 
+# NOTE: microphone capture and transcription live in `jcode-voice`, a
+# client-only crate. The shared runtime never opens a microphone.
+
 # Streaming
 
-# Terminal I/O (event stream for interactive auth/secret prompts). NOTE: the
-# heavier presentation deps (ratatui widgets, arboard clipboard) were dropped
-# from this foundation layer; they are unused here and live only in `jcode-tui`.
-crossterm = { version = "0.29", features = ["event-stream"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }  # Only PNG/JPEG (skip avif/rav1e, exr, gif, tiff, etc)
+# NOTE: no terminal crates (crossterm, ratatui, qrcode). Interactive login
+# prompts and QR rendering are client concerns: the CLI installs a presenter
+# from `jcode-terminal-prompt` into `auth::login_ui`.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "ico", "tiff"] }  # PNG/JPEG plus BMP/ICO/TIFF decoding so they can be re-encoded to PNG for providers (#1712). Skip avif/rav1e, exr, etc.
 
 # NOTE: PDF text extraction (jcode-pdf) lives in the upper jcode-app-core crate
 # (tool/read.rs), not here.
@@ -108,18 +111,21 @@ jcode-message-types = { path = "../jcode-message-types" }
 jcode-plan = { path = "../jcode-plan" }
 jcode-protocol = { path = "../jcode-protocol" }
 jcode-session-types = { path = "../jcode-session-types" }
+jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-storage = { path = "../jcode-storage" }
 jcode-task-types = { path = "../jcode-task-types" }
+jcode-todo-policy = { path = "../jcode-todo-policy" }
 jcode-tool-core = { path = "../jcode-tool-core" }
 jcode-tool-types = { path = "../jcode-tool-types" }
 jcode-side-panel-types = { path = "../jcode-side-panel-types" }
+jcode-applet-types = { path = "../jcode-applet-types" }
 
-# Gzip decoding (used by provider import/helpers)
+# Gzip/deflate decoding (provider import helpers, browser extension unzip)
+flate2 = "1"
 tempfile = "3"
-qrcode = { version = "0.14.1", default-features = false }
 
 [features]
-default = ["embeddings", "bedrock"]
+default = ["bedrock"]
 # Compiles the in-crate test helpers (storage::lock_test_env,
 # auth::test_sandbox, bus::reset_models_updated_publish_state_for_tests, ...) as
 # `pub` so downstream crates' test targets can reach them. Enabled as a
@@ -142,15 +148,18 @@ embeddings = ["dep:jcode-embedding"]
 bedrock = ["jcode-provider-bedrock/aws-sdk"]
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Registry", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 global-hotkey = "0.7"
 
 [dev-dependencies]
+# The browserless login integration test installs the real terminal presenter.
+jcode-terminal-prompt = { path = "../jcode-terminal-prompt" }
 # Dev-only cycle (cargo permits dev-dependencies on dependents): base's
 # MultiProvider routing tests exercise the real OpenRouter/OpenAI-compatible
 # runtime through the composition-root registry, exactly like the binary.
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
 tokio = { version = "1", features = ["test-util"] }
+

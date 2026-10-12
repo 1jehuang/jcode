@@ -67,6 +67,59 @@ fn test_code_block() {
 }
 
 #[test]
+fn unicode_display_math_copy_target_yields_latex_source() {
+    let lines = math_display_lines(r"\frac{\partial L}{\partial \theta_{17}}");
+    let targets = crate::extract_copy_targets_from_rendered_lines(&lines);
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].kind, crate::CopyTargetKind::Math { display: true });
+    assert_eq!(
+        targets[0].content,
+        "$$\n\\frac{\\partial L}{\\partial \\theta_{17}}\n$$"
+    );
+}
+
+#[test]
+fn unicode_inline_math_spans_map_back_to_latex_source() {
+    let lines = render_markdown_with_width(r"Euler: $e^{i\pi_{93}} + 1 = 0$ ok", Some(80));
+    let line = lines
+        .iter()
+        .find(|line| line_to_string(line).starts_with("Euler"))
+        .expect("prose line");
+    let plain = line_to_string(line);
+    let spans = crate::inline_math_spans_for_plain_line(&plain).expect("recorded spans");
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].source, r"e^{i\pi_{93}} + 1 = 0");
+    assert_eq!(spans[0].start_col, "Euler: ".len());
+}
+
+#[test]
+fn missing_tex_toolchain_shows_install_hint_once_in_image_mode() {
+    let md = "$$\n\\frac{a_{41}}{b}\n$$\n\ntext\n\n$$\n\\sqrt{c_{41}}\n$$";
+    let render = |missing| {
+        crate::latex_image::with_toolchain_missing_override(missing, || {
+            mermaid::with_image_protocol_override(Some(true), || {
+                lines_to_string(&render_markdown_with_width(md, Some(80)))
+            })
+        })
+    };
+    let missing = render(true);
+    assert_eq!(missing.matches(crate::LATEX_INSTALL_HINT_TEXT).count(), 1, "{missing}");
+    let lazy = crate::latex_image::with_toolchain_missing_override(true, || {
+        mermaid::with_image_protocol_override(Some(true), || {
+            lines_to_string(&render_markdown_lazy(md, Some(80), 0..100))
+        })
+    });
+    assert_eq!(lazy.matches(crate::LATEX_INSTALL_HINT_TEXT).count(), 1, "{lazy}");
+    // Without an image-capable terminal the hint would be misleading.
+    let no_protocol = crate::latex_image::with_toolchain_missing_override(true, || {
+        mermaid::with_image_protocol_override(Some(false), || {
+            lines_to_string(&render_markdown_with_width(md, Some(80)))
+        })
+    });
+    assert!(!no_protocol.contains(crate::LATEX_INSTALL_HINT_TEXT));
+}
+
+#[test]
 fn test_common_latex_containers_render_as_terminal_math() {
     let cases = [
         r"Inline \(\alpha_2 + x^2\).",

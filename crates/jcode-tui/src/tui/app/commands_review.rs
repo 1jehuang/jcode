@@ -173,7 +173,25 @@ fn judge_visible_tool_summary(tool: &ToolCall) -> Option<String> {
 fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<StoredMessage> {
     let mut transcript = Vec::new();
 
-    for rendered in crate::session::render_messages(parent_session) {
+    // The judge sees only what the user saw as the answer. Rendering honors the
+    // user's `reasoning_display` mode, so strip reasoning up front rather than
+    // letting a `Full` display preference leak hidden reasoning to the judge.
+    let mut visible_parent = parent_session.clone();
+    let mut messages = std::mem::take(&mut visible_parent.messages);
+    for message in &mut messages {
+        message.content.retain(|block| {
+            !matches!(
+                block,
+                ContentBlock::Reasoning { .. }
+                    | ContentBlock::ReasoningTrace { .. }
+                    | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::OpenAIReasoning { .. }
+            )
+        });
+    }
+    visible_parent.replace_messages(messages);
+
+    for rendered in crate::session::render_messages(&visible_parent) {
         match rendered.role.as_str() {
             "user" => {
                 if !rendered.content.trim().is_empty() {
@@ -304,6 +322,7 @@ pub(super) fn reset_current_session(app: &mut App) {
     app.swarm_plan_version = None;
     app.swarm_plan_swarm_id = None;
     app.queued_messages.clear();
+    app.queued_commands.clear();
     app.pasted_contents.clear();
     app.pending_images.clear();
     app.clear_inline_image_state();
@@ -382,29 +401,27 @@ pub(super) fn handle_observe_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 fn current_autoreview_model_summary(app: &App) -> String {
-    crate::config::config()
-        .autoreview
-        .model
-        .clone()
+    current_autoreview_model_override(app)
         .or_else(|| app.session.model.clone())
         .unwrap_or_else(|| app.provider.model())
 }
 
-fn current_autoreview_model_override() -> Option<String> {
-    crate::config::config().autoreview.model.clone()
+pub(super) fn current_autoreview_model_override(app: &App) -> Option<String> {
+    app.session
+        .effective_agent_model("review", crate::config::Config::load().autoreview.model)
+        .filter(|model| model != "inherit")
 }
 
 fn current_autojudge_model_summary(app: &App) -> String {
-    crate::config::config()
-        .autojudge
-        .model
-        .clone()
+    current_autojudge_model_override(app)
         .or_else(|| app.session.model.clone())
         .unwrap_or_else(|| app.provider.model())
 }
 
-fn current_autojudge_model_override() -> Option<String> {
-    crate::config::config().autojudge.model.clone()
+pub(super) fn current_autojudge_model_override(app: &App) -> Option<String> {
+    app.session
+        .effective_agent_model("judge", crate::config::Config::load().autojudge.model)
+        .filter(|model| model != "inherit")
 }
 
 pub(super) fn autoreview_status_message(app: &App) -> String {
@@ -620,16 +637,31 @@ pub(super) fn preferred_one_shot_review_override() -> Option<(String, String)> {
     }
 }
 
-fn current_review_model_override() -> (Option<String>, Option<String>) {
+/// Any explicit choice, session or saved global (including "inherit"), wins
+/// over the built-in preferred reviewer. Only an unconfigured role uses it.
+fn feedback_model_override(
+    app: &App,
+    role: &str,
+    configured: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if let Some(choice) = app.session.effective_agent_model(role, configured) {
+        return ((choice != "inherit").then_some(choice), None);
+    }
     preferred_one_shot_review_override()
         .map(|(model, provider_key)| (Some(model), Some(provider_key)))
-        .unwrap_or_else(|| (current_autoreview_model_override(), None))
+        .unwrap_or((None, None))
 }
 
-fn current_judge_model_override() -> (Option<String>, Option<String>) {
-    preferred_one_shot_review_override()
-        .map(|(model, provider_key)| (Some(model), Some(provider_key)))
-        .unwrap_or_else(|| (current_autojudge_model_override(), None))
+pub(super) fn current_review_model_override(app: &App) -> (Option<String>, Option<String>) {
+    feedback_model_override(
+        app,
+        "review",
+        crate::config::Config::load().autoreview.model,
+    )
+}
+
+pub(super) fn current_judge_model_override(app: &App) -> (Option<String>, Option<String>) {
+    feedback_model_override(app, "judge", crate::config::Config::load().autojudge.model)
 }
 
 fn clone_session_for_review(
@@ -658,6 +690,7 @@ fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     let mut child = Session::create(Some(parent_session_id.clone()), None);
     child.replace_messages(app.session.messages.clone());
     child.compaction = app.session.compaction.clone();
+    child.system_prompt = app.session.system_prompt.clone();
     child.working_dir = app.session.working_dir.clone();
     child.model = app.session.model.clone();
     child.provider_key = app.session.provider_key.clone();
@@ -817,13 +850,13 @@ fn launch_autoreview_window_local(app: &mut App) -> anyhow::Result<bool> {
         "autoreview",
         "Autoreview",
         build_autoreview_startup_message(&parent_session_id),
-        current_autoreview_model_override(),
+        current_autoreview_model_override(app),
         None,
     )
 }
 
 fn launch_review_once_local(app: &mut App) -> anyhow::Result<bool> {
-    let (model_override, provider_key_override) = current_review_model_override();
+    let (model_override, provider_key_override) = current_review_model_override(app);
     let parent_session_id = current_feedback_target_session_id(app);
     launch_review_window_local(
         app,
@@ -842,13 +875,13 @@ fn launch_autojudge_window_local(app: &mut App) -> anyhow::Result<bool> {
         "autojudge",
         "Autojudge",
         build_autojudge_startup_message(&parent_session_id),
-        current_autojudge_model_override(),
+        current_autojudge_model_override(app),
         None,
     )
 }
 
 fn launch_judge_once_local(app: &mut App) -> anyhow::Result<bool> {
-    let (model_override, provider_key_override) = current_judge_model_override();
+    let (model_override, provider_key_override) = current_judge_model_override(app);
     let parent_session_id = current_feedback_target_session_id(app);
     launch_review_window_local(
         app,
@@ -892,7 +925,7 @@ pub(super) fn queue_autojudge_remote(app: &mut App) {
         "Autojudge",
         parent_session_id.clone(),
         build_autojudge_startup_message(&parent_session_id),
-        current_autojudge_model_override(),
+        current_autojudge_model_override(app),
         None,
     );
 }

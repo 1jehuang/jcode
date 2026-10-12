@@ -1,0 +1,25 @@
+{
+  "version": "0.91.0",
+  "date": "2026-10-05",
+  "title": "Google Calendar and speed tiers",
+  "highlights": [
+    "Google login lets you pick which services to connect and adds a built-in calendar tool for viewing, creating, updating, and deleting events",
+    "Guided Google OAuth app setup that detects existing gcloud credentials, validates generated project IDs, and imports the app automatically",
+    "Alt+Up/Down cycles the speed tier between Standard, Fast, and Ultrafast",
+    "New /desktop command opens the current session in Jcode Desktop"
+  ],
+  "improvements": [
+    "MCP tool results and mcp_search output are fitted to token budgets instead of fixed caps, and accept_large_output returns the full result",
+    "The mcp list action lists only tool names, and mcp_search ranks name matches first",
+    "Todo quality gates share rows instead of taking one line each"
+  ],
+  "fixes": [
+    "Browser actions target the right browser when several run the bridge extension",
+    "Interrupting a coordinator stops the swarm workers it spawned (thanks @SiavZ)",
+    "A per-call swarm spawn_mode of auto defers to your configured mode (thanks @SiavZ)",
+    "/restart and /reload from a remote client no longer wipe the server's transcript (thanks @SiavZ)",
+    "The shared server reloads after an install repoints the link it started from (thanks @SiavZ)",
+    "run --json and --ndjson report the local or direct profile instead of openrouter",
+    "Fixed swarm plan and status handlers that could stall the server"
+  ]
+}

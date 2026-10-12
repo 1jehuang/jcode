@@ -400,9 +400,15 @@ pub fn init_tui_runtime() -> Result<(ratatui::DefaultTerminal, TuiRuntimeGuard)>
         // The previous process intentionally preserved these modes across exec.
         // Reassert idempotent modes because terminals, multiplexers, or an older
         // process may have cleared them during the handoff. Do not push Kitty's
-        // stack-based keyboard enhancement flags again. A later normal exit must
-        // still disable every inherited mode, so retain them in the guard.
+        // stack-based keyboard enhancement flags again: the exec handoff left the
+        // previous process's entry on the stack, so record that this process
+        // now owns it and a later normal exit must pop it. Without adopting,
+        // every cleanup gate would skip the pop and leave the shell in CSI u
+        // mode after the restarted process exits.
         let modes = inherited_modes.unwrap_or(fallback_modes);
+        if modes.keyboard_enhanced {
+            tui::adopt_keyboard_enhancement_ownership();
+        }
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
         if modes.focus_change {
             crossterm::execute!(std::io::stdout(), crossterm::event::EnableFocusChange)?;
@@ -613,18 +619,142 @@ fn signal_crash_reason(sig: i32) -> String {
 fn handle_termination_signal(sig: i32) -> ! {
     mark_current_session_crashed(signal_crash_reason(sig));
 
-    let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(
-        std::io::stderr(),
-        crossterm::terminal::LeaveAlternateScreen,
-        crossterm::cursor::Show
-    );
+    // Record termination before the terminal cleanup runs. The cleanup may
+    // skip its restore while an editor owns the terminal and then release the
+    // kitty state lock while this process is still alive: an editor reclaim
+    // racing into that gap must observe the flag and refuse to re-arm modes,
+    // or the shell inherits escape sequences once jcode exits (greptile
+    // #4232838288). Recording first also keeps the normal path intact: a
+    // reclaim that slips in before the cleanup still leaves ownership clear,
+    // so the cleanup runs its full restore.
+    crate::tui::record_termination_started();
+
+    if signal_cleanup_terminal_modes_to(signal_cleanup_stream()) {
+        // The signal handler can fire at any point of the TUI lifetime, including
+        // while the kitty keyboard protocol is active (Ctrl+C races the cleanup
+        // below). Pop only when this process still owns an unbalanced kitty entry:
+        // the pop is a no-op on terminals with no kitty stack, and skipping it when
+        // a suspended editor already popped ours (or pushed its own) avoids
+        // removing someone else's keyboard settings. Leaving jcode's own entry
+        // unpopped would leave the terminal in CSI u mode so the following shell
+        // echoes raw key sequences like `e1;1:3u` after jcode exits (issue #898).
+        crate::tui::disable_keyboard_enhancement();
+    }
 
     if let Some(session_id) = get_current_session() {
         print_session_resume_hint(&session_id);
     }
 
     std::process::exit(128 + sig);
+}
+
+fn signal_cleanup_terminal_modes_to(mut writer: impl Write) -> bool {
+    // The ownership check and the restore writes run under the kitty state
+    // lock so an in-flight editor handoff cannot split them: the handoff
+    // publishes ownership under the same lock after its restores finished
+    // (greptile #4230626960). Without the lock, a signal could observe
+    // ownership set while jcode's modes were still armed, skip the cleanup,
+    // and exit leaving the shell in raw mode.
+    crate::tui::with_kitty_state_lock(|| {
+        if crate::tui::editor_owns_terminal() {
+            return false;
+        }
+
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            writer,
+            crossterm::event::DisableBracketedPaste,
+            crossterm::event::DisableFocusChange,
+            crossterm::event::DisableMouseCapture,
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+        true
+    })
+}
+
+/// Stream the signal cleanup must target: stdout, the interactive terminal
+/// the TUI requires, where `setup_terminal` enabled every mode this cleanup
+/// disables. Writing to stderr would miss the terminal whenever stderr is
+/// redirected and leave the modes armed after jcode exits.
+#[cfg(unix)]
+fn signal_cleanup_stream() -> std::io::Stdout {
+    std::io::stdout()
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod signal_cleanup_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that flip the shared editor ownership flag so one
+    /// test's clear cannot interleave with another's check.
+    static SIGNAL_CLEANUP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EditorOwnershipGuard;
+
+    impl EditorOwnershipGuard {
+        fn new(owns_terminal: bool) -> Self {
+            crate::tui::set_editor_terminal_ownership(owns_terminal);
+            Self
+        }
+    }
+
+    impl Drop for EditorOwnershipGuard {
+        fn drop(&mut self) {
+            crate::tui::set_editor_terminal_ownership(false);
+        }
+    }
+
+    #[test]
+    fn signal_cleanup_skips_terminal_modes_while_editor_owns_terminal() {
+        let _test_lock = SIGNAL_CLEANUP_TEST_LOCK.lock().unwrap();
+        let _ownership = EditorOwnershipGuard::new(true);
+        let mut output = Vec::new();
+
+        assert!(!signal_cleanup_terminal_modes_to(&mut output));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn signal_cleanup_waits_for_in_flight_editor_handoff() {
+        // Greptile #4230626960: the cleanup must not observe a half-applied
+        // handoff (flag published while jcode's modes are still armed). The
+        // publication and reclaim hold the kitty state lock, so the cleanup
+        // waits for them instead of racing the flag.
+        let _test_lock = SIGNAL_CLEANUP_TEST_LOCK.lock().unwrap();
+        let _ownership = EditorOwnershipGuard::new(false);
+
+        let cleanup = crate::tui::with_kitty_state_lock(|| {
+            let cleanup = std::thread::spawn(|| {
+                let mut sink = Vec::new();
+                let ran = signal_cleanup_terminal_modes_to(&mut sink);
+                (ran, sink.is_empty())
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(
+                !cleanup.is_finished(),
+                "cleanup ran without waiting for the handoff lock"
+            );
+            // Mark the editor as owning the terminal so the released cleanup
+            // takes the early-return path and writes nothing to the terminal.
+            crate::tui::set_editor_terminal_ownership(true);
+            cleanup
+        });
+
+        let (ran, sink_empty) = cleanup.join().expect("cleanup thread");
+        assert!(!ran);
+        assert!(sink_empty);
+    }
+
+    #[test]
+    fn signal_cleanup_targets_stdout_not_stderr() {
+        // Same stream object as setup_terminal enables modes on. A write via
+        // this handle lands on the interactive terminal even when stderr is
+        // redirected to a file or pipe.
+        let _stream = signal_cleanup_stream();
+    }
 }
 
 #[cfg(unix)]

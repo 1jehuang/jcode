@@ -544,6 +544,22 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    if let ServerEvent::Done { id } = &event
+        && app.usage_reset.invalidate_requests.remove(id).is_some()
+    {
+        app.usage_reset.refresh_usage = true;
+        return true;
+    }
+
+    if let ServerEvent::Error { id, message, .. } = &event
+        && app.usage_reset.invalidate_requests.remove(id).is_some()
+    {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Reset result is unchanged, but the daemon usage cache could not be refreshed: {message}. Reconnect to refresh daemon state."
+        )));
+        return true;
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -705,8 +721,8 @@ pub(in crate::tui::app) fn handle_server_event(
             });
             eager_stream_redraw
         }
-        ServerEvent::ToolInput { delta } => {
-            remote.handle_tool_input(&delta);
+        ServerEvent::ToolInput { id, delta } => {
+            remote.handle_tool_input(id.as_deref(), &delta);
             false
         }
         ServerEvent::ToolExec { id, name } => {
@@ -714,7 +730,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // snapshots often arrive later. Keep collecting deltas while excluding tool
             // runtime from the elapsed TPS denominator.
             app.pause_streaming_tps(true);
-            let parsed_input = remote.get_current_tool_input();
+            let parsed_input = remote.get_tool_input(&id);
             let tool_call = ToolCall {
                 id: id.clone(),
                 name: name.clone(),
@@ -808,6 +824,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 // local push_turn_footer path: this feeds the cache
                 // countdown/cold indicators as "what gets resent".
                 let effective = crate::tui::info_widget::effective_prompt_tokens(
+                    &app.kv_cache_provider_name(),
                     input,
                     app.streaming.streaming_cache_read_tokens.unwrap_or(0),
                     app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
@@ -843,6 +860,23 @@ pub(in crate::tui::app) fn handle_server_event(
                 let has_cache_telemetry = app.streaming.streaming_cache_read_tokens.is_some()
                     || app.streaming.streaming_cache_creation_tokens.is_some();
                 if has_cache_telemetry {
+                    let prompt = crate::tui::info_widget::effective_prompt_tokens(
+                        &app.kv_cache_provider_name(),
+                        input,
+                        app.streaming.streaming_cache_read_tokens.unwrap_or(0),
+                        app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+                    );
+                    let previous_prompt = if had_cache_telemetry {
+                        app.token_accounting.last_cache_prompt_tokens.unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    app.token_accounting.total_cache_prompt_tokens = app
+                        .token_accounting
+                        .total_cache_prompt_tokens
+                        .saturating_sub(previous_prompt)
+                        .saturating_add(prompt);
+                    app.token_accounting.last_cache_prompt_tokens = Some(prompt);
                     let reported_delta = if had_cache_telemetry {
                         input.saturating_sub(previous_input)
                     } else {
@@ -870,12 +904,13 @@ pub(in crate::tui::app) fn handle_server_event(
                         );
                     app.token_accounting.last_cache_reported_input_tokens = Some(input);
                     app.token_accounting.last_cache_read_tokens =
-                        Some(app.streaming.streaming_cache_read_tokens.unwrap_or(0));
+                        app.streaming.streaming_cache_read_tokens;
                     app.token_accounting.last_cache_creation_tokens =
-                        Some(app.streaming.streaming_cache_creation_tokens.unwrap_or(0));
+                        app.streaming.streaming_cache_creation_tokens;
                 }
 
                 let effective_prompt_tokens = crate::tui::info_widget::effective_prompt_tokens(
+                    &app.kv_cache_provider_name(),
                     input,
                     app.streaming.streaming_cache_read_tokens.unwrap_or(0),
                     app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
@@ -971,6 +1006,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.status_detail = Some(detail);
             eager_stream_redraw
         }
+        ServerEvent::TextDone => false,
         ServerEvent::MessageEnd { .. } => {
             app.pause_streaming_tps(true);
             app.stream_message_ended = true;
@@ -999,6 +1035,25 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::UpstreamProvider { provider } => {
             app.upstream_provider = Some(provider);
             false
+        }
+        ServerEvent::AgentModelsChanged {
+            id,
+            session_id,
+            overrides,
+        } => {
+            if app.remote_session_id.as_deref().unwrap_or(&app.session.id) != session_id {
+                return false;
+            }
+            app.session.agent_model_overrides = overrides;
+            if app.pending_agent_model_request_id == Some(id) {
+                app.pending_agent_model_request_id = None;
+                app.set_status_notice(if app.agent_models_global_scope {
+                    "Agent model saved [global on server]"
+                } else {
+                    "Agent model saved [session]"
+                });
+            }
+            true
         }
         ServerEvent::Ack { id } => {
             let _ = app.acknowledge_pending_soft_interrupt(id);
@@ -1053,6 +1108,13 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
             }
             app.schedule_queued_dispatch_after_interrupt();
+            // Esc redirect: the follow-up may live only in pending soft
+            // interrupts (not counted by has_queued_followups). Arm dispatch
+            // so recovery sends it as the next turn right away.
+            if app.remote_interrupt_ack_deadline.take().is_some() && app.has_pending_user_followup()
+            {
+                app.pending_queued_dispatch = true;
+            }
             app.push_display_message(DisplayMessage::system("Interrupted"));
             app.is_processing = false;
             app.status = ProcessingStatus::Idle;
@@ -1124,6 +1186,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 app.deferred_stream_done_id = None;
                 let turn_duration_secs = app.display_turn_duration_secs();
+                app.remember_terminal_title_work();
                 if completes_resumed_turn {
                     crate::logging::info(&format!(
                         "Treating Done id={} as completion for resumed remote activity",
@@ -1211,10 +1274,20 @@ pub(in crate::tui::app) fn handle_server_event(
             completed_current_message || auto_poked
         }
         ServerEvent::Error {
+            id,
             message,
             retry_after_secs,
             ..
         } => {
+            if app.pending_agent_model_request_id == Some(id) {
+                app.pending_agent_model_request_id = None;
+                app.push_display_message(DisplayMessage::error(format!(
+                    "Session agent model update failed: {message}"
+                )));
+                app.set_status_notice("Agent model update failed");
+                return false;
+            }
+            app.refresh_openai_usage_after_quota_error(&message);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history
@@ -1244,34 +1317,42 @@ pub(in crate::tui::app) fn handle_server_event(
                 );
                 return true;
             }
+            // Clamp server hints so a bogus value cannot park the turn for days.
             let reset_duration = retry_after_secs
-                .map(Duration::from_secs)
+                .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
                 .or_else(|| parse_rate_limit_error(&message));
-            if let Some(reset_duration) = reset_duration {
-                app.rate_limit_reset = Some(Instant::now() + reset_duration);
-                if let Some(is_system) = app
+            // A stale reset or a limit that never clears must not resend the
+            // same turn forever. Rate-limit holds share the per-turn retry
+            // budget, which begin_remote_send carries across resends.
+            let rate_limit_retry_exhausted = reset_duration.is_some()
+                && app
                     .rate_limit_pending_message
                     .as_ref()
-                    .map(|pending| pending.is_system)
-                {
-                    let rate_limit_line =
-                        app.rate_limit_notice_with_nudge(reset_duration.as_secs());
-                    app.push_display_message(DisplayMessage::system(rate_limit_line));
-                    if is_system {
-                        app.set_status_notice("Rate limited; queued system retry");
-                    } else {
-                        app.set_status_notice("Rate limited; queued retry");
-                    }
-                    app.is_processing = false;
-                    app.status = ProcessingStatus::Idle;
-                    app.stream_message_ended = false;
-                    app.processing_started = None;
-                    app.clear_visible_turn_started();
-                    app.current_message_id = None;
-                    remote.clear_pending();
-                    remote.reset_call_output_tokens_seen();
-                    return false;
+                    .is_some_and(|pending| pending.retry_attempts >= App::AUTO_RETRY_MAX_ATTEMPTS);
+            if let Some(reset_duration) = reset_duration
+                && !rate_limit_retry_exhausted
+                && let Some(is_system) = app.rate_limit_pending_message.as_mut().map(|pending| {
+                    pending.retry_attempts = pending.retry_attempts.saturating_add(1);
+                    pending.is_system
+                })
+            {
+                app.rate_limit_reset = Some(Instant::now() + reset_duration);
+                let rate_limit_line = app.rate_limit_notice_with_nudge(reset_duration.as_secs());
+                app.push_display_message(DisplayMessage::system(rate_limit_line));
+                if is_system {
+                    app.set_status_notice("Rate limited; queued system retry");
+                } else {
+                    app.set_status_notice("Rate limited; queued retry");
                 }
+                app.is_processing = false;
+                app.status = ProcessingStatus::Idle;
+                app.stream_message_ended = false;
+                app.processing_started = None;
+                app.clear_visible_turn_started();
+                app.current_message_id = None;
+                remote.clear_pending();
+                remote.reset_call_output_tokens_seen();
+                return false;
             }
             let is_failover_prompt =
                 crate::provider::parse_failover_prompt_message(&message).is_some();
@@ -1313,6 +1394,19 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             remote.clear_pending();
             remote.reset_call_output_tokens_seen();
+            if rate_limit_retry_exhausted {
+                // Do not fall through to the generic retry or turn-end
+                // auto-poke: either would immediately restart the loop.
+                app.pause_exhausted_auto_resume(
+                    format!(
+                        "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your message is back in the input box. Wait for the limit to reset, check the provider account, or switch with /model.",
+                        App::AUTO_RETRY_MAX_ATTEMPTS
+                    ),
+                    "Paused: provider limit did not clear",
+                );
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                return false;
+            }
             // Connectivity failures (DNS, connection reset, no route, transient
             // TLS, timeouts) are always transient: the request never reached the
             // provider. Hold the turn and resume when the network recovers,
@@ -1325,6 +1419,21 @@ pub(in crate::tui::app) fn handle_server_event(
             if is_connectivity_error
                 && app.schedule_pending_remote_network_wait_with_force(&message, true)
             {
+                return false;
+            }
+            if is_connectivity_error && app.rate_limit_pending_message.is_some() {
+                // The generic connectivity probe can succeed while this
+                // provider's host stays unreachable (for example a DNS
+                // failure for one endpoint). The budget is spent: pause
+                // instead of resending, and keep auto-poke from restarting it.
+                app.pause_exhausted_auto_resume(
+                    format!(
+                        "Connection retry limit reached after {} automatic resumes. Your message is back in the input box. Check the provider endpoint or DNS, then re-send or switch with /model.",
+                        App::AUTO_RETRY_MAX_ATTEMPTS
+                    ),
+                    "Paused: provider connection did not recover",
+                );
+                app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
             // Credential-failure circuit breaker: repeated auth failures mean
@@ -1509,6 +1618,7 @@ pub(in crate::tui::app) fn handle_server_event(
             provider_name,
             provider_model,
             subagent_model,
+            agent_model_overrides,
             autoreview_enabled,
             autojudge_enabled,
             available_models,
@@ -1647,10 +1757,12 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.streaming.streaming_cache_creation_tokens = None;
                 app.kv_cache.current_api_usage_recorded = false;
                 app.token_accounting.total_cache_reported_input_tokens = 0;
+                app.token_accounting.total_cache_prompt_tokens = 0;
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
                 app.token_accounting.last_cache_reported_input_tokens = None;
+                app.token_accounting.last_cache_prompt_tokens = None;
                 app.token_accounting.last_cache_read_tokens = None;
                 app.token_accounting.last_cache_creation_tokens = None;
                 app.token_accounting.last_cache_optimal_input_tokens = None;
@@ -1675,6 +1787,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.follow_chat_bottom();
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
+                    app.queued_commands.clear();
                     app.interleave_message = None;
                     app.interleave_images.clear();
                     app.clear_pending_soft_interrupt_tracking();
@@ -1689,6 +1802,20 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.swarm_plan_swarm_id = None;
                 remote.reset_call_output_tokens_seen();
             }
+            // Facts seeded from the last launch are only a first-frame guess.
+            // When History reports a different model, drop them so the snapshot
+            // below is applied exactly as on a cold start (including the
+            // context-window lookup that only runs on a model change). When it
+            // is the same model, keep the remembered server-resolved window:
+            // re-deriving it from the static catalog could briefly show a
+            // different value until the resume ModelChanged lands.
+            if app.remote_session_facts_provisional
+                && provider_model.as_deref() != app.remote_provider_model.as_deref()
+            {
+                app.remote_session_facts_provisional = false;
+                app.remote_provider_model = None;
+                app.remote_provider_name = None;
+            }
             let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
                 provider_name,
                 provider_model,
@@ -1696,8 +1823,12 @@ pub(in crate::tui::app) fn handle_server_event(
                 available_model_routes,
             );
             let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            // History is authoritative from here on: a later ModelChanged is a
+            // real switch and must announce itself.
+            app.remote_session_facts_provisional = false;
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
+            app.session.agent_model_overrides = agent_model_overrides;
             app.session.autoreview_enabled = autoreview_enabled;
             app.session.autojudge_enabled = autojudge_enabled;
             app.autoreview_enabled =
@@ -1721,6 +1852,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.remote_service_tier = service_tier;
             app.remote_compaction_mode = Some(compaction_mode);
+            app.persist_remote_header_hint();
             app.set_side_panel_snapshot(side_panel);
             if history_images_match_retained(&images, &app.remote_side_pane_images) {
                 // The already-retained image set is identical (count + per-image
@@ -1744,15 +1876,29 @@ pub(in crate::tui::app) fn handle_server_event(
             // was still loading. Replace that loading row as soon as history
             // supplies the authoritative snapshot.
             app.refresh_open_model_picker_after_catalog_update();
-            app.remote_skills = skills;
-            app.invalidate_command_candidates_cache();
-            app.remote_sessions = all_sessions;
-            app.remote_client_count = client_count;
-            app.remote_is_canary = is_canary;
-            app.remote_server_version = server_version;
-            app.remote_server_short_name = server_name.clone();
-            app.remote_server_icon = server_icon.clone();
-            app.remote_server_has_update = server_has_update;
+            // The model-catalog response reuses the History event shape with
+            // every server-identity and session-list field left empty. Applying
+            // those empties wiped the server name/icon/version/canary flag,
+            // skills, and session list for a frame right after startup, so the
+            // header and the Overview session row flickered (`peak hare` ->
+            // `hare`). Only overwrite what the event actually carries; a real
+            // session switch still resets everything.
+            let carries_server_identity =
+                server_name.is_some() || server_version.is_some() || is_canary.is_some();
+            let authoritative = session_changed || carries_server_identity;
+            if authoritative || !skills.is_empty() {
+                app.remote_skills = skills;
+                app.invalidate_command_candidates_cache();
+            }
+            if authoritative {
+                app.remote_sessions = all_sessions;
+                app.remote_client_count = client_count;
+                app.remote_is_canary = is_canary;
+                app.remote_server_version = server_version;
+                app.remote_server_short_name = server_name.clone();
+                app.remote_server_icon = server_icon.clone();
+                app.remote_server_has_update = server_has_update;
+            }
             let history_total_tokens = total_tokens.or_else(|| {
                 token_usage_totals.map(|totals| (totals.input_tokens, totals.output_tokens))
             });
@@ -1766,6 +1912,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.token_accounting.total_input_tokens = 0;
                 app.token_accounting.total_output_tokens = 0;
                 app.token_accounting.total_cache_reported_input_tokens = 0;
+                app.token_accounting.total_cache_prompt_tokens = 0;
                 app.token_accounting.total_cache_read_tokens = 0;
                 app.token_accounting.total_cache_creation_tokens = 0;
                 app.token_accounting.total_cache_optimal_input_tokens = 0;
@@ -1797,7 +1944,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.pending_server_reload = true;
                 app.set_status_notice("Server update available");
             }
-            app.remote_server_short_name = server_name;
+            if authoritative {
+                app.remote_server_short_name = server_name;
+            }
             if let Some(icon) = server_icon {
                 app.remote_server_icon = Some(icon);
             }
@@ -1805,6 +1954,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.update_terminal_title();
 
             if !mcp_servers.is_empty() {
+                let previous = std::mem::take(&mut app.mcp_server_names);
                 app.mcp_server_names = mcp_servers
                     .iter()
                     .filter_map(|s| {
@@ -1813,6 +1963,9 @@ pub(in crate::tui::app) fn handle_server_event(
                         Some((name.to_string(), count))
                     })
                     .collect();
+                if previous != app.mcp_server_names {
+                    app.persist_remote_header_hint();
+                }
             }
 
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
@@ -2259,6 +2412,9 @@ pub(in crate::tui::app) fn handle_server_event(
             model,
             provider_name,
             error,
+            resolved_credential,
+            reasoning_effort,
+            context_window,
             ..
         } => {
             app.remote_model_switch_in_flight = false;
@@ -2281,27 +2437,47 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
-                app.update_context_limit_for_model(&model);
+                // The server also re-sends ModelChanged on resume so the client
+                // learns the server-resolved context window. That is not a
+                // user-visible switch, so only announce an actual model change.
+                // A first-frame hint is not a model the user switched away from.
+                let had_provisional_facts =
+                    std::mem::take(&mut app.remote_session_facts_provisional);
+                let model_actually_changed = !had_provisional_facts
+                    && app.remote_provider_model.as_deref() != Some(model.as_str());
+                app.update_context_limit_for_model(&model, context_window);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                // Always replace: a switch to a provider with no OAuth/API
+                // distinction must clear the previous route's credential too.
+                app.remote_resolved_credential = resolved_credential;
+                // Always replace: the server reports the effort the new model
+                // runs with (`None` = cleared), so the chip must not keep the
+                // previous model's level.
+                app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
-                if !app.auth_catalog_refresh_pending {
+                app.persist_remote_header_hint();
+                if model_actually_changed && !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model
                     )));
                 }
-                app.set_status_notice(format!("Model → {}", model));
+                if model_actually_changed {
+                    app.set_status_notice(format!("Model → {}", model));
+                }
             }
             false
         }
         ServerEvent::ModelUsageUpdated { route } => {
             for cached in &mut app.remote_model_options {
-                if cached.model == route.model && cached.provider == route.provider
-                    && cached.api_method == route.api_method {
+                if cached.model == route.model
+                    && cached.provider == route.provider
+                    && cached.api_method == route.api_method
+                {
                     cached.usage = route.usage.clone();
                 }
             }
@@ -2396,7 +2572,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 )));
             } else {
                 app.remote_service_tier = service_tier.clone();
-                let enabled = service_tier.as_deref() == Some("priority");
+                let enabled = app_mod::service_tier_is_fast(service_tier.as_deref());
                 let label = service_tier
                     .as_deref()
                     .map(app_mod::service_tier_display_label)
@@ -2406,7 +2582,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app_mod::fast_mode_success_message(enabled, label, applies_next_request),
                 ));
                 app.set_status_notice(app_mod::fast_mode_status_notice(
-                    enabled,
+                    service_tier.as_deref(),
                     applies_next_request,
                 ));
             }
@@ -2453,6 +2629,7 @@ pub(in crate::tui::app) fn handle_server_event(
             display_role,
             point,
             tools_skipped,
+            ..
         } => {
             crate::logging::info(&format!(
                 "REMOTE_INTERRUPT_EVENT_RECEIVED kind=soft_interrupt_injected session={:?} point={} display_role={:?} tools_skipped={:?} content_bytes={} content_chars={} pending_soft_interrupts={}",
