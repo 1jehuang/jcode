@@ -836,54 +836,59 @@ pub(super) async fn spawn_swarm_agent(
             let event_history2 = Arc::clone(event_history);
             let event_counter2 = Arc::clone(event_counter);
             let swarm_event_tx2 = swarm_event_tx.clone();
+            let publication = super::swarm::begin_turn_publication(&new_session_id).await;
             tokio::spawn(async move {
-                update_member_status(
-                    &sid_clone,
-                    "running",
-                    Some(truncate_detail(&initial_msg, 120)),
-                    &swarm_members2,
-                    &swarms_by_id2,
-                    Some(&event_history2),
-                    Some(&event_counter2),
-                    Some(&swarm_event_tx2),
-                )
-                .await;
+                publication
+                    .publish_start(update_member_status(
+                        &sid_clone,
+                        "running",
+                        Some(truncate_detail(&initial_msg, 120)),
+                        &swarm_members2,
+                        &swarms_by_id2,
+                        Some(&event_history2),
+                        Some(&event_counter2),
+                        Some(&swarm_event_tx2),
+                    ))
+                    .await;
                 let event_tx = super::session_event_fanout_sender(
                     sid_clone.clone(),
                     Arc::clone(&swarm_members2),
                 );
-                let start_message_index = {
+                let (start_message_index, signal) = {
                     let agent = agent_arc.lock().await;
-                    agent.message_count()
+                    (agent.message_count(), agent.graceful_shutdown_signal())
                 };
-                let result = process_message_streaming_mpsc(
-                    Arc::clone(&agent_arc),
-                    &initial_msg,
-                    vec![],
-                    None,
-                    event_tx,
-                )
-                .await;
+                let result = publication
+                    .run(
+                        signal,
+                        process_message_streaming_mpsc(
+                            Arc::clone(&agent_arc),
+                            &initial_msg,
+                            vec![],
+                            None,
+                            event_tx,
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(()));
                 let completion_report = if result.is_ok() {
                     let agent = agent_arc.lock().await;
                     agent.latest_assistant_text_after(start_message_index)
                 } else {
                     None
                 };
-                let (new_status, new_detail) = match result {
-                    Ok(()) => ("ready", None),
-                    Err(ref error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
-                };
-                update_member_status_with_report(
+                complete_headless_turn(
                     &sid_clone,
-                    new_status,
-                    new_detail,
+                    &publication,
+                    result,
                     completion_report,
-                    &swarm_members2,
-                    &swarms_by_id2,
-                    Some(&event_history2),
-                    Some(&event_counter2),
-                    Some(&swarm_event_tx2),
+                    &super::live_turn::LiveTurnSwarmContext::new(
+                        &swarm_members2,
+                        &swarms_by_id2,
+                        &event_history2,
+                        &event_counter2,
+                        &swarm_event_tx2,
+                    ),
                 )
                 .await;
             });
@@ -891,6 +896,36 @@ pub(super) async fn spawn_swarm_agent(
     }
 
     Ok(new_session_id)
+}
+
+pub(super) async fn complete_headless_turn(
+    session_id: &str,
+    publication: &super::swarm::TurnPublication,
+    result: anyhow::Result<()>,
+    completion_report: Option<String>,
+    swarm: &super::live_turn::LiveTurnSwarmContext,
+) {
+    publication
+        .complete(async {
+            let completion_report = result.is_ok().then_some(completion_report).flatten();
+            let (new_status, new_detail) = match result {
+                Ok(()) => ("ready", None),
+                Err(ref error) => ("failed", Some(truncate_detail(&error.to_string(), 120))),
+            };
+            update_member_status_with_report(
+                session_id,
+                new_status,
+                new_detail,
+                completion_report,
+                &swarm.members,
+                &swarm.swarms_by_id,
+                Some(&swarm.event_history),
+                Some(&swarm.event_counter),
+                Some(&swarm.event_tx),
+            )
+            .await;
+        })
+        .await;
 }
 
 #[allow(clippy::too_many_arguments)]

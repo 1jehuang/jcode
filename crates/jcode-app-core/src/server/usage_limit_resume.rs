@@ -264,6 +264,65 @@ pub(super) async fn resume_turn_after_usage_limit(
     swarm: &LiveTurnSwarmContext,
     on_wait: OnUsageLimitWait<'_>,
 ) -> ResumeOutcome {
+    resume_turn_after_usage_limit_with_publication(
+        agent,
+        held,
+        session_id,
+        error,
+        system_reminder,
+        event_tx,
+        swarm,
+        on_wait,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn resume_turn_after_usage_limit_with_publication(
+    agent: Arc<AsyncMutex<Agent>>,
+    held: Option<OwnedMutexGuard<Agent>>,
+    session_id: &str,
+    error: anyhow::Error,
+    system_reminder: Option<String>,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm: &LiveTurnSwarmContext,
+    on_wait: OnUsageLimitWait<'_>,
+    publication: Option<&super::swarm::TurnPublication>,
+) -> ResumeOutcome {
+    let resume = resume_turn_after_usage_limit_inner(
+        agent,
+        held,
+        session_id,
+        error,
+        system_reminder,
+        event_tx,
+        swarm,
+        on_wait,
+        publication,
+    );
+    match publication {
+        Some(publication) => tokio::select! {
+            biased;
+            _ = publication.cancelled.cancelled() => ResumeOutcome::Superseded,
+            outcome = resume => outcome,
+        },
+        None => resume.await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resume_turn_after_usage_limit_inner(
+    agent: Arc<AsyncMutex<Agent>>,
+    held: Option<OwnedMutexGuard<Agent>>,
+    session_id: &str,
+    error: anyhow::Error,
+    system_reminder: Option<String>,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm: &LiveTurnSwarmContext,
+    on_wait: OnUsageLimitWait<'_>,
+    publication: Option<&super::swarm::TurnPublication>,
+) -> ResumeOutcome {
     let mut error = error;
     let mut held = held;
     let mut resumes_used = 0u32;
@@ -301,27 +360,36 @@ pub(super) async fn resume_turn_after_usage_limit(
             MAX_USAGE_LIMIT_RESUMES
         ));
         let ticket = register_pending_resume(session_id);
-        update_member_status(
-            session_id,
-            "rate_limited",
-            Some(plan.status_detail()),
-            &swarm.members,
-            &swarm.swarms_by_id,
-            Some(&swarm.event_history),
-            Some(&swarm.event_counter),
-            Some(&swarm.event_tx),
-        )
-        .await;
-        on_wait(&plan).await;
-        // `server_resumes` tells attached clients the server owns the
-        // resume, so they show when it resumes instead of an error and do
-        // not schedule a resend of their own. Terminal errors never set it.
-        let _ = event_tx.send(ServerEvent::Error {
-            id: 0,
-            message: crate::util::format_error_chain(&error),
-            retry_after_secs: Some(plan.delay_secs()),
-            server_resumes: true,
-        });
+        let announce_wait = async {
+            update_member_status(
+                session_id,
+                "rate_limited",
+                Some(plan.status_detail()),
+                &swarm.members,
+                &swarm.swarms_by_id,
+                Some(&swarm.event_history),
+                Some(&swarm.event_counter),
+                Some(&swarm.event_tx),
+            )
+            .await;
+            on_wait(&plan).await;
+            // `server_resumes` tells attached clients the server owns the
+            // resume, so they show when it resumes instead of an error and do
+            // not schedule a resend of their own. Terminal errors never set it.
+            let _ = event_tx.send(ServerEvent::Error {
+                id: 0,
+                message: crate::util::format_error_chain(&error),
+                retry_after_secs: Some(plan.delay_secs()),
+                server_resumes: true,
+            });
+        };
+        if let Some(publication) = publication {
+            if !publication.publish_start(announce_wait).await {
+                return ResumeOutcome::Superseded;
+            }
+        } else {
+            announce_wait.await;
+        }
         // Let the user use the session while this turn waits.
         drop(held.take());
 
@@ -340,7 +408,7 @@ pub(super) async fn resume_turn_after_usage_limit(
         drop(ticket);
         resumes_used += 1;
 
-        update_member_status(
+        let status = update_member_status(
             session_id,
             "running",
             Some(format!(
@@ -352,15 +420,33 @@ pub(super) async fn resume_turn_after_usage_limit(
             Some(&swarm.event_history),
             Some(&swarm.event_counter),
             Some(&swarm.event_tx),
-        )
-        .await;
+        );
+        if let Some(publication) = publication {
+            if !publication.publish_start(status).await {
+                return ResumeOutcome::Superseded;
+            }
+        } else {
+            status.await;
+        }
         let start_message_index = guard.message_count();
-        let result = std::panic::AssertUnwindSafe(
-            guard.resume_turn_streaming_mpsc(system_reminder.clone(), event_tx.clone()),
-        )
+        let signal = guard.graceful_shutdown_signal();
+        let turn = guard.resume_turn_streaming_mpsc(system_reminder.clone(), event_tx.clone());
+        let result = std::panic::AssertUnwindSafe(async {
+            match publication {
+                Some(publication) => publication.run(signal, turn).await,
+                None => Some(turn.await),
+            }
+        })
         .catch_unwind()
         .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("Processing task panicked while resuming")));
+        .unwrap_or_else(|_| {
+            Some(Err(anyhow::anyhow!(
+                "Processing task panicked while resuming"
+            )))
+        });
+        let Some(result) = result else {
+            return ResumeOutcome::Superseded;
+        };
         match result {
             Ok(()) => {
                 let completion_report = guard.latest_assistant_text_after(start_message_index);

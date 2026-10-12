@@ -853,7 +853,7 @@ pub(super) async fn handle_client(
                 }
             }
             done = processing_done_rx.recv() => {
-                if let Some((done_id, result, completion_report)) = done {
+                if let Some((done_id, result, _completion_report)) = done {
                     if Some(done_id) != processing_message_id {
                         crate::logging::warn(&format!(
                             "Done event id={} doesn't match processing_message_id={:?}, dropping",
@@ -877,17 +877,8 @@ pub(super) async fn handle_client(
                         }
                     }
 
-                    let done_session = processing_session_id.take();
-                    record_processing_completion(
-                        done_session.as_deref(), result, completion_report,
-                        &SwarmStatusRefs {
-                            members: &swarm_members,
-                            swarms_by_id: &swarms_by_id,
-                            event_history: &event_history,
-                            event_counter: &event_counter,
-                            event_tx: &swarm_event_tx,
-                        },
-                    ).await;
+                    // The task publishes status and terminal events under its turn lease.
+                    processing_session_id.take();
                 } else {
                     break;
                 }
@@ -3372,21 +3363,9 @@ pub(super) async fn handle_client(
                 client_session_id
             ));
             let _ = handle.await;
-            while let Ok((done_id, result, report)) = processing_done_rx.try_recv() {
+            while let Ok((done_id, _, _)) = processing_done_rx.try_recv() {
                 if Some(done_id) == processing_message_id {
-                    record_processing_completion(
-                        processing_session_id.as_deref(),
-                        result,
-                        report,
-                        &SwarmStatusRefs {
-                            members: &swarm_members,
-                            swarms_by_id: &swarms_by_id,
-                            event_history: &event_history,
-                            event_counter: &event_counter,
-                            event_tx: &swarm_event_tx,
-                        },
-                    )
-                    .await;
+                    processing_session_id.take();
                 }
             }
             client_is_processing = false;
@@ -3437,7 +3416,7 @@ pub(super) async fn handle_client(
 
 async fn record_processing_completion(
     done_session: Option<&str>,
-    result: Result<()>,
+    result: &Result<()>,
     completion_report: Option<String>,
     swarm: &SwarmStatusRefs<'_>,
 ) {
@@ -3598,23 +3577,26 @@ async fn start_processing_message(
         ));
     }
 
-    update_member_status(
-        client_session_id,
-        "running",
-        Some(truncate_detail(&content, 120)),
-        swarm.members,
-        swarm.swarms_by_id,
-        Some(swarm.event_history),
-        Some(swarm.event_counter),
-        Some(swarm.event_tx),
-    )
-    .await;
+    let publication = super::swarm::begin_turn_publication(client_session_id).await;
+    publication
+        .publish_start(update_member_status(
+            client_session_id,
+            "running",
+            Some(truncate_detail(&content, 120)),
+            swarm.members,
+            swarm.swarms_by_id,
+            Some(swarm.event_history),
+            Some(swarm.event_counter),
+            Some(swarm.event_tx),
+        ))
+        .await;
 
-    let (start_message_index, pending_queue) = {
+    let (start_message_index, pending_queue, signal) = {
         let agent_guard = agent.lock().await;
         (
             agent_guard.message_count(),
             agent_guard.soft_interrupt_queue(),
+            agent_guard.graceful_shutdown_signal(),
         )
     };
     let agent = Arc::clone(agent);
@@ -3625,13 +3607,35 @@ async fn start_processing_message(
         client_event_tx.clone(),
     );
     let done_tx = processing_done_tx.clone();
+    let completion_session_id = client_session_id.to_string();
+    let completion_swarm = super::live_turn::LiveTurnSwarmContext::new(
+        swarm.members,
+        swarm.swarms_by_id,
+        swarm.event_history,
+        swarm.event_counter,
+        swarm.event_tx,
+    );
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     *state.task = Some(tokio::spawn(async move {
         let event_tx = tx.clone();
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
+            async {
+                publication
+                    .run(
+                        signal,
+                        process_message_streaming_mpsc(
+                            agent,
+                            &content,
+                            images,
+                            system_reminder,
+                            event_tx,
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Ok(()))
+            },
         ))
         .catch_unwind()
         .await
@@ -3669,38 +3673,77 @@ async fn start_processing_message(
         } else {
             None
         };
-        // Keep the terminal event on the same ordered fanout channel as the
-        // stream. Sending it later from the owning client's event loop could
-        // race ahead of the final MessageEnd for newly attached clients.
-        if let Err(error) = &result {
-            let _ = tx.send(ServerEvent::TurnStopped {
-                reason: stop_reason,
-                message: crate::util::format_error_chain(error),
-                provider_stop_reason: None,
-            });
-        }
-        let terminal_event = match &result {
-            Ok(()) => ServerEvent::Done { id },
-            Err(error) => ServerEvent::Error {
-                id,
-                message: crate::util::format_error_chain(error),
-                // A usage limit carries its reset so the client holds the
-                // turn and resends at the reset.
-                retry_after_secs: super::usage_limit_resume::error_retry_after_secs(error),
-                server_resumes: false,
-            },
-        };
-        // Interrupts still queued here were never seen by this turn. Report
-        // them on the ordered stream so a client can reconcile its own view.
-        // Usually zero (the turn injects everything it can before ending), so
-        // skip the event then and let clients default to zero.
         let pending = pending_queue.lock().map(|queue| queue.len()).unwrap_or(0);
         if pending > 0 {
             let _ = tx.send(ServerEvent::SoftInterruptQueue { pending });
         }
-        let _ = tx.send(terminal_event);
+        complete_client_turn(
+            id,
+            &completion_session_id,
+            &publication,
+            &result,
+            completion_report.clone(),
+            stop_reason,
+            &tx,
+            &completion_swarm,
+        )
+        .await;
+        // This channel only releases connection-local bookkeeping. It must
+        // never replay the status publication after a successor has started.
         let _ = done_tx.send((id, result, completion_report));
     }));
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn complete_client_turn(
+    id: u64,
+    session_id: &str,
+    publication: &super::swarm::TurnPublication,
+    result: &Result<()>,
+    completion_report: Option<String>,
+    stop_reason: crate::protocol::TurnStopReason,
+    tx: &mpsc::UnboundedSender<ServerEvent>,
+    swarm: &super::live_turn::LiveTurnSwarmContext,
+) {
+    publication
+        .complete(async {
+            // Keep the terminal event on the same ordered fanout channel as the
+            // stream. Sending it later from the owning client's event loop could
+            // race ahead of the final MessageEnd for newly attached clients.
+            if let Err(error) = &result {
+                let _ = tx.send(ServerEvent::TurnStopped {
+                    reason: stop_reason,
+                    message: crate::util::format_error_chain(error),
+                    provider_stop_reason: None,
+                });
+            }
+            let terminal_event = match &result {
+                Ok(()) => ServerEvent::Done { id },
+                Err(error) => ServerEvent::Error {
+                    id,
+                    message: crate::util::format_error_chain(error),
+                    // A usage limit carries its reset so the client holds the
+                    // turn and resends at the reset.
+                    retry_after_secs: super::usage_limit_resume::error_retry_after_secs(error),
+                    server_resumes: false,
+                },
+            };
+            record_processing_completion(
+                Some(session_id),
+                result,
+                completion_report,
+                &SwarmStatusRefs {
+                    members: &swarm.members,
+                    swarms_by_id: &swarm.swarms_by_id,
+                    event_history: &swarm.event_history,
+                    event_counter: &swarm.event_counter,
+                    event_tx: &swarm.event_tx,
+                },
+            )
+            .await;
+            let _ = tx.send(terminal_event);
+        })
+        .await;
 }
 
 async fn cancel_processing_message(
