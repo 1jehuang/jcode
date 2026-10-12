@@ -182,19 +182,21 @@ fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
 
 #[test]
 fn test_mouse_scroll_events_are_classified_as_scroll_only() {
+    let _lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.diff_mode = crate::config::DiffDisplayMode::File;
 
+    // The fork renders file diffs inline. Exercise a real chat pane rather
+    // than a stale pinned-diff rectangle that cannot consume mouse scroll.
     crate::tui::ui::record_layout_snapshot(
         Rect::new(0, 0, 40, 20),
         None,
-        Some(Rect::new(40, 0, 20, 20)),
+        None,
         None,
     );
 
     let scroll_only = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::ScrollDown,
-        column: 45,
+        column: 10,
         row: 5,
         modifiers: KeyModifiers::empty(),
     });

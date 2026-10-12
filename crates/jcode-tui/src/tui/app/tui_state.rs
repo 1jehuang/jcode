@@ -1535,10 +1535,12 @@ impl crate::tui::TuiState for App {
             None
         };
 
-        // Gather background task info. Session-scoped rows come from task
-        // events (works when tasks run in the server process). The global
-        // manager only knows tasks spawned in this process.
-        let background_info = {
+        // Session-scoped task rows already have compact rows in the pinned
+        // band. Keep the overview fallback for local tasks that have not yet
+        // produced session events, without showing the same tasks twice.
+        let background_info = if !self.background_task_rows_ref().is_empty() {
+            None
+        } else {
             let bg_manager = crate::background::global();
             let (running_count, running_tasks, progress) = bg_manager.running_snapshot();
             let rows = self.background_task_rows_ref().to_vec();
