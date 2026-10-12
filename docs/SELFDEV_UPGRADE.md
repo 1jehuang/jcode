@@ -27,10 +27,14 @@ the tested source build to `current` while leaving `stable` unchanged. The
 shared server is advanced only when it is tracking stable, or when explicitly
 promoted by the self-dev reload flow.
 
-Never overwrite an immutable version in place. A failed reload records a
-pending activation and restores the previous `current` and `shared-server`
-versions. Keep the previous version until the replacement has started, passed
-its compatibility checks, and resumed the session.
+Never overwrite an immutable version in place. Reload writes a pending
+activation containing the previous `current` and `shared-server` versions
+before it repoints `current`. Publish, smoke-test, and reload failures restore
+both channels from that record. A hard stop after the link moves can leave the
+new `current` active, but the previous channel pair remains in the manifest
+for that rollback instead of being lost. Keep the previous version until the
+replacement has started, passed its compatibility checks, and resumed the
+session.
 
 ## What an application update preserves
 

@@ -283,40 +283,53 @@ impl SelfDevTool {
         };
         let hash = source.version_label.clone();
         let version_before = jcode_build_meta::version().to_string();
-        let published = if SelfDevTool::is_test_session() {
+        // Record the channel pair before publication. `publish_local_current_build_for_source`
+        // repoints `current` as soon as the versioned binary is installed, so a crash in that
+        // window used to leave the new channel active with no previous pair to restore.
+        let previous_current_version = if SelfDevTool::is_test_session() {
             None
         } else {
-            Some(build::publish_local_current_build_for_source(
-                &repo_dir, &source,
-            )?)
+            build::read_current_version()?
         };
         let previous_shared_server_version = if SelfDevTool::is_test_session() {
             None
         } else {
-            let published_build = published.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "published build metadata was missing after publish_local_current_build_for_source"
-                )
-            })?;
-            build::smoke_test_server_binary(&published_build.versioned_path)?;
             build::read_shared_server_version()?
         };
-
-        // Update manifest - track what we're testing
         let mut manifest = build::BuildManifest::load()?;
         manifest.canary = Some(hash.clone());
         manifest.canary_status = Some(build::CanaryStatus::Testing);
         manifest.set_pending_activation(build::PendingActivation {
             session_id: session_id.to_string(),
             new_version: hash.clone(),
-            previous_current_version: published
-                .as_ref()
-                .and_then(|published| published.previous_current_version.clone()),
+            previous_current_version,
             previous_shared_server_version,
             source_fingerprint: Some(source.fingerprint.clone()),
             requested_at: chrono::Utc::now(),
         })?;
-        manifest.save()?;
+
+        let published = if SelfDevTool::is_test_session() {
+            None
+        } else {
+            match build::publish_local_current_build_for_source(&repo_dir, &source) {
+                Ok(published) => Some(published),
+                Err(error) => {
+                    let _ = build::rollback_pending_activation_for_session(session_id);
+                    return Err(error);
+                }
+            }
+        };
+        if !SelfDevTool::is_test_session() {
+            let published_build = published.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "published build metadata was missing after publish_local_current_build_for_source"
+                )
+            })?;
+            if let Err(error) = build::smoke_test_server_binary(&published_build.versioned_path) {
+                let _ = build::rollback_pending_activation_for_session(session_id);
+                return Err(error);
+            }
+        }
 
         if !SelfDevTool::is_test_session()
             && let Err(error) = build::update_shared_server_symlink(&hash)
