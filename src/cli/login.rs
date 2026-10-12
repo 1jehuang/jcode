@@ -730,6 +730,14 @@ fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
         _ => return Ok(false),
     };
 
+    reuse_claude_code_native_snapshot(file_path, credentials, || {})
+}
+
+fn reuse_claude_code_native_snapshot(
+    file_path: &Path,
+    credentials: auth::claude::ClaudeCredentials,
+    before_validation: impl FnOnce(),
+) -> Result<bool> {
     let file_source = auth::claude::ExternalClaudeAuthSource::ClaudeCode;
     if crate::config::Config::external_auth_source_allowed_for_path(
         file_source.source_id(),
@@ -743,10 +751,17 @@ fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
         );
     }
 
-    if !credentials.refresh_token.trim().is_empty() {
-        let label = auth::claude::import_native_credentials_into_account_from(credentials.clone())?;
-        auth::claude::set_active_account(&label)?;
-    } else {
+    // Validate precedence using an in-memory candidate. A rejected attempt must
+    // not import an account, activate it, or change persistent native trust.
+    before_validation();
+    let selected = auth::claude::load_credentials_with_staged_native(&credentials)?;
+    anyhow::ensure!(
+        selected.access_token == credentials.access_token
+            && selected.refresh_token == credentials.refresh_token,
+        "Another trusted Claude credential source is taking precedence over this login. Review Jcode's trusted external auth sources before retrying."
+    );
+
+    if credentials.refresh_token.trim().is_empty() {
         anyhow::ensure!(
             std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
                 .ok()
@@ -761,14 +776,9 @@ fn reuse_claude_code_native(file_path: &Path) -> Result<bool> {
     if native_newly_trusted {
         auth::claude::trust_native_source()?;
     }
-    if let Err(err) = ensure_claude_code_credentials_selected(&credentials) {
-        if native_newly_trusted {
-            crate::config::Config::revoke_external_auth_source(
-                auth::claude::CLAUDE_CODE_NATIVE_AUTH_SOURCE_ID,
-            )?;
-            auth::AuthStatus::invalidate_cache();
-        }
-        return Err(err);
+    if !credentials.refresh_token.trim().is_empty() {
+        let label = auth::claude::import_native_credentials_into_account_from(credentials)?;
+        auth::claude::set_active_account(&label)?;
     }
     Ok(true)
 }
@@ -1685,3 +1695,7 @@ fn maybe_open_browser(target: &str, no_browser: bool) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "login/native_stage_tests.rs"]
+mod native_stage_tests;
