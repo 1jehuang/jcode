@@ -103,6 +103,9 @@ fn main() -> Result<()> {
 }
 
 fn run_main() -> Result<()> {
+    // Capture the launch target before runtime setup, provider awaits or an
+    // updater can repoint the channel symlink this process started through.
+    let _ = jcode::server::pin_running_binary();
     configure_system_allocator();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 

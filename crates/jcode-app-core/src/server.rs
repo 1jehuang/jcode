@@ -660,6 +660,13 @@ pub use self::socket::{
 use self::socket::{signal_ready_fd, socket_has_live_listener};
 
 pub use self::util::ServerIdentity;
+
+/// Pin this process's executable before asynchronous provider initialization.
+/// Repeated calls return the same launch target, even after an install moves
+/// the channel link. Binary entry points should call this before startup work.
+pub fn pin_running_binary() -> Option<std::path::PathBuf> {
+    self::util::running_server_binary()
+}
 pub(crate) use self::util::server_has_newer_binary;
 use self::util::{
     debug_control_allowed, embedding_idle_unload_secs, git_common_dir_for, reload_exec_target,
