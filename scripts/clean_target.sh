@@ -71,12 +71,37 @@ fi
 
 log() { printf 'clean_target: %s\n' "$*" >&2; }
 
-# `stat` output of "<mtime-epoch> <bytes> <path>", GNU or BSD flavour.
+# Paths never enter whitespace-delimited stat/sort/awk records.
 if stat -c '%Y' / >/dev/null 2>&1; then
-  stat_fmt=(-c '%Y %s %n')
+  stat_fmt=(-c '%Y %s')
 else
-  stat_fmt=(-f '%m %z %N')
+  stat_fmt=(-f '%m %z')
 fi
+
+# Resolve the trusted root once. Do not create a missing target, or allow a
+# filesystem root to become a recursive deletion boundary. The suffix prevents
+# command substitution from stripping newlines from a directory name.
+[[ -d "$target_dir" ]] || { log "no target directory: $target_dir"; exit 0; }
+target_dir=$(cd -P -- "$target_dir" && printf '%s/' "$PWD")
+target_dir=${target_dir%/}
+[[ "$target_dir" != / ]] || { log "refusing filesystem root"; exit 2; }
+
+path_is_contained() {
+  local path="$1" resolved parent
+  # Do not remove symlinks even when they currently point inside the target.
+  [[ ! -L "$path" ]] || { log "SKIP (symlink): $path"; return 1; }
+  if [[ -d "$path" ]]; then
+    resolved=$(cd -P -- "$path" && printf '%s/' "$PWD") || return 1
+    resolved=${resolved%/}
+  else
+    parent=$(cd -P -- "${path%/*}" && printf '%s/' "$PWD") || return 1
+    resolved="${parent}${path##*/}"
+  fi
+  case "$resolved" in
+    "$target_dir"/*) return 0 ;;
+    *) log "SKIP (outside canonical target): $path"; return 1 ;;
+  esac
+}
 
 # Epoch seconds `days` days ago (no GNU `date -d`).
 cutoff_epoch() {
@@ -90,7 +115,7 @@ human() {
 
 dir_bytes() {
   local kib
-  kib=$(du -sk "$1" 2>/dev/null | awk '{print $1}')
+  kib=$(du -sk "$1" 2>/dev/null | awk 'NR == 1 {print $1}')
   echo $(( ${kib:-0} * 1024 ))
 }
 
@@ -117,6 +142,7 @@ path_recently_active() {
 is_safe_to_remove() {
   local path="$1"
   [[ -d "$path" ]] || return 1
+  path_is_contained "$path" || return 1
   if path_has_active_process "$path"; then
     log "SKIP (active process): $path"
     return 1
@@ -140,7 +166,7 @@ remove_path() {
     return 0
   fi
   if [[ "$apply" == "true" ]]; then
-    if rm -rf "$path" 2>/dev/null; then
+    if path_is_contained "$path" && rm -rf -- "$path"; then
       log "removed ($reason): $path  [$(human "$bytes")]"
       total_reclaimed=$((total_reclaimed + bytes))
     else
@@ -167,43 +193,48 @@ done
 #    generation per (crate, extension) so the warm cache is preserved, and only
 #    deletes older generations whose mtime exceeds the --sweep day threshold.
 #    Cargo transparently rebuilds anything it still needs, so this is safe.
-list_stale_dep_generations() {
-  local deps="$1" days="$2"
-  find "$deps" -maxdepth 1 -type f -exec stat "${stat_fmt[@]}" {} + 2>/dev/null \
-    | sort -rn \
-    | awk -v cutoff="$(cutoff_epoch "$days")" '
-        {
-          path=$3; file=path; sub(/^.*\//, "", file)
-          base=file; ext=""
-          if (match(file, /\.[A-Za-z0-9]+$/)) {
-            ext=substr(file, RSTART)
-            base=substr(file, 1, RSTART - 1)
-          }
-          key=base; sub(/-[0-9a-f]{16,}$/, "", key); key=key ext
-          # Newest generation per key (input is mtime-descending): keep it.
-          if (!(key in seen)) { seen[key]=1; next }
-          if ($1 < cutoff) { print $2 "\t" $3 }
-        }'
-}
-
-# Incremental session dirs are named `<crate>-<hash>`; a crate collects one per
-# flag/feature combination it was ever built with. Keep the newest per crate
-# and list the rest that have been idle past the threshold.
-list_stale_incremental_dirs() {
-  local dir="$1" days="$2"
-  find "$dir" -mindepth 1 -maxdepth 1 -type d -exec stat "${stat_fmt[@]}" {} + 2>/dev/null \
-    | sort -rn \
-    | awk -v cutoff="$(cutoff_epoch "$days")" '
-        {
-          path=$3; key=path; sub(/^.*\//, "", key); sub(/-[^-]+$/, "", key)
-          if (!(key in seen)) { seen[key]=1; next }
-          if ($1 < cutoff) { print path }
-        }'
+# Bash 3 (macOS) has no associative arrays, and BSD sort has no portable -z.
+# Keep paths in an indexed array, sorting only numeric metadata and hex keys.
+# Emit NUL-delimited records so spaces, tabs and newlines survive end to end.
+list_stale_generations() {
+  local dir="$1" days="$2" kind="$3" path file key ext metadata index bytes
+  local paths=() records=()
+  path_is_contained "$dir" || return 0
+  while IFS= read -r -d '' path; do
+    metadata=$(stat "${stat_fmt[@]}" "$path" 2>/dev/null) || continue
+    file=${path##*/}
+    key="$file"
+    if [[ "$kind" == f ]]; then
+      ext=""
+      if [[ "$file" =~ \.[A-Za-z0-9]+$ ]]; then
+        ext="${BASH_REMATCH[0]}"
+        key=${file%"$ext"}
+      fi
+      if [[ "$key" =~ -[0-9a-f]{16,}$ ]]; then
+        key=${key%"${BASH_REMATCH[0]}"}
+      fi
+      key="$key$ext"
+    else
+      key=${key%-*}
+    fi
+    key=$(printf '%s' "$key" | od -An -v -tx1 | tr -d ' \n')
+    index=${#paths[@]}
+    paths[$index]="$path"
+    records[$index]="$metadata $index $key"
+  done < <(find "$dir" -mindepth 1 -maxdepth 1 -type "$kind" -print0 2>/dev/null)
+  [[ ${#paths[@]} -gt 0 ]] || return 0
+  while read -r index bytes; do
+    if [[ "$kind" == f ]]; then printf '%s\0' "$bytes"; fi
+    printf '%s\0' "${paths[$index]}"
+  done < <(printf '%s\n' "${records[@]}" | sort -rn | awk -v cutoff="$(cutoff_epoch "$days")" '
+    !($4 in seen) { seen[$4]=1; next }
+    $1 < cutoff { print $3, $2 }')
 }
 
 if [[ -n "$sweep_days" ]]; then
-  for profile_dir in "$target_dir"/debug "$target_dir"/release "$target_dir"/selfdev; do
+  for profile_dir in "$target_dir"/debug "$target_dir"/release "$target_dir"/release-lto "$target_dir"/selfdev; do
     [[ -d "$profile_dir" ]] || continue
+    path_is_contained "$profile_dir" || continue
     if path_has_active_process "$profile_dir"; then
       log "SKIP sweep (active process): $profile_dir"
       continue
@@ -212,14 +243,15 @@ if [[ -n "$sweep_days" ]]; then
     if [[ -d "$profile_dir/deps" ]]; then
       swept=0
       swept_count=0
-      while IFS=$'\t' read -r bytes path; do
+      while IFS= read -r -d '' bytes && IFS= read -r -d '' path; do
         [[ -n "$path" ]] || continue
+        path_is_contained "$path" || continue
         if [[ "$apply" == "true" ]]; then
-          rm -f -- "$path" 2>/dev/null || continue
+          rm -f -- "$path" || continue
         fi
         swept=$((swept + bytes))
         swept_count=$((swept_count + 1))
-      done < <(list_stale_dep_generations "$profile_dir/deps" "$sweep_days")
+      done < <(list_stale_generations "$profile_dir/deps" "$sweep_days" f)
       verb=$([ "$apply" == true ] && echo "swept" || echo "would sweep")
       log "$verb $swept_count stale dep generations (>${sweep_days}d, kept newest per crate) from $profile  [$(human "$swept")]"
       total_reclaimed=$((total_reclaimed + swept))
@@ -227,9 +259,9 @@ if [[ -n "$sweep_days" ]]; then
     # Incremental compilation session dirs are cheap to regenerate and only
     # useful while their working set is hot; drop ones idle past the threshold.
     if [[ -d "$profile_dir/incremental" ]]; then
-      while IFS= read -r d; do
+      while IFS= read -r -d '' d; do
         remove_path "$d" "stale incremental session (>${sweep_days}d)"
-      done < <(list_stale_incremental_dirs "$profile_dir/incremental" "$sweep_days")
+      done < <(list_stale_generations "$profile_dir/incremental" "$sweep_days" d)
     fi
   done
 fi
@@ -237,7 +269,7 @@ fi
 # 3) Aggressive: cargo clean on stale (not-recently-active, no active process)
 #    profiles to drop accumulated fingerprints/old artifact generations.
 if [[ "$aggressive" == "true" ]]; then
-  for profile_dir in "$target_dir"/debug "$target_dir"/release "$target_dir"/selfdev; do
+  for profile_dir in "$target_dir"/debug "$target_dir"/release "$target_dir"/release-lto "$target_dir"/selfdev; do
     [[ -d "$profile_dir" ]] || continue
     profile=$(basename "$profile_dir")
     [[ "$profile" == "debug" ]] && profile="dev"
