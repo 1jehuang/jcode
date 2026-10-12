@@ -1018,7 +1018,10 @@ fn test_side_panel_close_keeps_inline_diff_visible_and_restores_composer() {
     app.input = "/side".to_string();
     app.submit_input();
     assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
-    assert!(app.diff_pane_focus);
+    assert!(app.diff_pane_visible(), "reopening should reveal the retained page");
+    assert!(!app.diff_pane_focus, "revealing a page must not steal composer focus");
+    app.handle_key(KeyCode::Char('k'), KeyModifiers::empty()).unwrap();
+    assert_eq!(app.input, "k", "reopening must preserve normal typing");
 }
 
 #[test]
@@ -1520,6 +1523,15 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
             .0
     };
 
+    // Materialized images deliberately release their staged copy payload.
+    // Pin that state before drawing so worker/cache timing cannot change the
+    // click's copy eligibility. This test exercises expansion, not clipboard I/O.
+    crate::tui::ui::inline_image_ui::register_payload(
+        image_id, "image/png", REPRO_TINY_PNG_B64,
+    );
+    assert!(crate::tui::ui::inline_image_ui::materialize_visible(image_id));
+    assert!(crate::tui::ui::inline_image_ui::payload_for_copy(image_id).is_none());
+
     let backend = ratatui::backend::TestBackend::new(80, 40);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
 
@@ -1585,14 +1597,10 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
-    // A label click both expands the image and reports the copy outcome.
-    // Headless runners may have no clipboard, but must still report that.
-    let notice = app.status_notice().expect("image click must report its actions");
-    assert!(
-        matches!(notice.as_str(),
-            "Image size: large · Image copied" | "Image size: large · Could not copy image"),
-        "size and copy feedback must both be present: {notice}"
-    );
+    // The materialized fixture has no staged payload to copy, so only the
+    // expansion action should be reported. Copy-eligible images are separate.
+    assert!(crate::tui::ui::inline_image_ui::payload_for_copy(image_id).is_none());
+    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
 }
 
 /// The inline-image placeholder marker row must never reach the terminal as
