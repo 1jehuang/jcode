@@ -150,6 +150,45 @@ fn b_answer_body() -> String {
 }
 
 #[test]
+fn billing_metadata_402_with_http_401_does_not_offer_or_suppress_profile() {
+    with_clean_provider_test_env(|| {
+        let (a_base, a_hits) = spawn_canned_chat_server(
+            "401 Unauthorized",
+            "application/json",
+            "invalid API key".to_string(),
+        );
+        let (b_base, b_hits) =
+            spawn_canned_chat_server("200 OK", "text/event-stream", b_answer_body());
+        write_two_profile_config(&a_base, &b_base, "countdown");
+        let config_path =
+            std::path::PathBuf::from(std::env::var_os("JCODE_HOME").unwrap()).join("config.toml");
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::write(&config_path, config.replace("glm-5.3", "model-402")).unwrap();
+        crate::config::invalidate_config_cache();
+        let provider = billing_failover_test_provider();
+        provider.set_model("prof-a:model-402").unwrap();
+        let rt = enter_test_runtime();
+        for _ in 0..2 {
+            let result = rt.block_on(async {
+                let stream = provider
+                    .complete(&billing_test_messages(), &[], "", None)
+                    .await?;
+                drain_text(stream).await
+            });
+            let error = result.expect_err("invalid credentials must remain an ordinary error");
+            assert!(error.to_string().contains("401"), "{error:#}");
+            assert!(crate::provider::parse_failover_prompt_message(&error.to_string()).is_none());
+        }
+        assert_eq!(a_hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(b_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            ProviderRegistry::new(&provider).active_compatible_profile_id(),
+            Some("prof-a".to_string())
+        );
+    });
+}
+
+#[test]
 fn billing_402_in_countdown_mode_offers_sibling_without_resending() {
     with_clean_provider_test_env(|| {
         let (a_base, a_hits) = spawn_canned_chat_server(
