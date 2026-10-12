@@ -1888,6 +1888,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             app.clear_provider_messages();
             app.clear_display_messages();
             app.queued_messages.clear();
+            app.queued_message_images.clear();
             app.queued_commands.clear();
             app.pasted_contents.clear();
             app.pending_images.clear();

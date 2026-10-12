@@ -26,10 +26,20 @@ fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
     let content = super::read_clipboard_for_paste_with(
         &super::ClipboardPasteKind::Smart,
         || Some("/home/me/screenshot.png".to_string()),
-        || panic!("SSH image path must stay text"),
+        || None,
         |_| None,
     );
     assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
+    let content = super::read_clipboard_for_paste_with(
+        &super::ClipboardPasteKind::Smart,
+        || Some("/Users/me/screenshot.png".to_string()),
+        || Some(("image/png".to_string(), "aW1hZ2U=".to_string())),
+        |_| panic!("native clipboard images must not fetch a URL over SSH"),
+    );
+    assert!(matches!(
+        content,
+        super::ClipboardPasteContent::Image { .. }
+    ));
 }
 
 use super::{
@@ -42,7 +52,6 @@ use crossterm::event::{KeyCode, KeyModifiers};
 #[test]
 fn smart_paste_prefers_image_when_text_is_its_file_name() {
     for name in [
-        "Screenshot 2026-09-24 at 10.41.00.png",
         "/Users/me/Desktop/photo.JPG",
         "file:///tmp/diagram.webp",
         "'/tmp/with space.gif'",
@@ -67,6 +76,7 @@ fn smart_paste_keeps_ordinary_text_without_probing_for_images() {
         "see screenshot.png and fix the layout",
         "line one\n/tmp/a.png",
         "https://example.com/a.png",
+        "Please check figure.png",
     ] {
         let content = read_clipboard_for_paste_with(
             &ClipboardPasteKind::Smart,
@@ -78,6 +88,44 @@ fn smart_paste_keeps_ordinary_text_without_probing_for_images() {
             matches!(content, ClipboardPasteContent::Text(ref t) if t == text),
             "{text}: {content:?}"
         );
+    }
+}
+
+#[test]
+fn smart_paste_confirms_spaced_name_with_injected_file_list() {
+    let name = "Screenshot 2026-09-24 at 10.41.00.png";
+    let content = super::read_clipboard_for_paste_with_files(
+        &ClipboardPasteKind::Smart,
+        || Some(name.to_string()),
+        || Some(("image/png".to_string(), "base64".to_string())),
+        |_| panic!("native clipboard target must not download"),
+        || vec![std::path::PathBuf::from("/Users/me/Desktop").join(name)],
+    );
+    assert!(matches!(content, ClipboardPasteContent::Image { .. }));
+}
+
+#[test]
+fn image_name_existing_file_checks_home_and_cwd_without_global_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "my image.png";
+    std::fs::write(dir.path().join(name), b"image").unwrap();
+    for (path, home, cwd) in [
+        (name.to_string(), None, Some(dir.path().to_path_buf())),
+        (format!("~/{name}"), Some(dir.path().to_path_buf()), None),
+        (
+            dir.path().join(name).to_string_lossy().to_string(),
+            None,
+            None,
+        ),
+    ] {
+        assert!(super::names_existing_file(&path, home, cwd));
+    }
+}
+
+#[test]
+fn image_name_missing_base_or_file_is_not_confirmed() {
+    for path in ["missing image.png", "~/missing image.png"] {
+        assert!(!super::names_existing_file(path, None, None));
     }
 }
 

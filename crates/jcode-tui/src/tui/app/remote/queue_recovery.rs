@@ -165,6 +165,7 @@ fn recover_queued_continuation(app: &mut App, reason: &str, rejected: bool) -> b
     }
     if !pending.content.trim().is_empty() {
         app.queued_messages.insert(0, pending.content);
+        app.queued_message_images.splice(0..0, pending.images);
     }
     true
 }
@@ -174,6 +175,7 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
         return false;
     };
     if interleave.trim().is_empty() {
+        app.interleave_images.clear();
         return false;
     }
 
@@ -182,6 +184,8 @@ pub(super) fn recover_local_interleave_to_queue(app: &mut App, reason: &str) -> 
         reason
     ));
     app.queued_messages.insert(0, interleave);
+    app.queued_message_images
+        .splice(0..0, std::mem::take(&mut app.interleave_images));
     true
 }
 
