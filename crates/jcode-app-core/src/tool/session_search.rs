@@ -392,7 +392,7 @@ impl Tool for SessionSearchTool {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_MAX_SCAN_SESSIONS,
-                    "description": "Bound the number of recent sessions scanned per source."
+                    "description": "Max sessions per source. OpenCode legacy metadata is fully ranked before this cap."
                 },
                 "exhaustive": {
                     "type": "boolean",
@@ -1374,9 +1374,12 @@ fn collect_opencode_external_sessions(
         found_store = true;
         let db_ids: std::collections::HashSet<String> =
             candidates.iter().map(|(_, id, _)| id.clone()).collect();
-        // Read small session metadata before capping candidates. Filesystem mtime
-        // can change when old stores are copied, including within the legacy store.
-        // Message histories are still loaded only for the selected sessions.
+        // Exact stored-time ranking requires inspecting every legacy metadata file:
+        // an unread file can contain the newest timestamp or a duplicate ID. The
+        // scan cap bounds selected session histories, not this cold metadata pass.
+        // A bounded metadata pass would require an authoritative index or migration,
+        // not an mtime window (copied/restored files can have unrelated mtimes).
+        let mut legacy_by_id: HashMap<String, (DateTime<Utc>, PathBuf)> = HashMap::new();
         for path in jcode_import_core::collect_files_recursive(root, "json") {
             let Some(value) = std::fs::File::open(&path)
                 .ok()
@@ -1402,13 +1405,25 @@ fn collect_opencode_external_sessions(
                 .and_then(DateTime::<Utc>::from_timestamp_millis)
                 .or_else(|| jcode_import_core::file_modified_datetime(&path))
                 .unwrap_or_default();
-            candidates.push((updated, id.to_string(), OpenCodeCandidate::Legacy(path)));
+            // Copies of one session consume one slot. Keep its newest stored
+            // update, with the lexically first path breaking equal-time ties.
+            let entry = legacy_by_id
+                .entry(id.to_string())
+                .or_insert_with(|| (updated, path.clone()));
+            if updated > entry.0 || (updated == entry.0 && path < entry.1) {
+                *entry = (updated, path);
+            }
         }
+        candidates.extend(
+            legacy_by_id
+                .into_iter()
+                .map(|(id, (updated, path))| (updated, id, OpenCodeCandidate::Legacy(path))),
+        );
     }
     if found_store {
         report.external_sources.push("opencode");
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     if candidates.len() > options.max_scan_sessions {
         candidates.truncate(options.max_scan_sessions);
         report.truncated = true;
