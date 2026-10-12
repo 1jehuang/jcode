@@ -311,11 +311,13 @@ fn test_subscription_model_guard_allows_only_curated_models_when_enabled() {
     crate::subscription_catalog::clear_runtime_env();
     crate::subscription_catalog::apply_runtime_env();
 
-    assert!(ensure_model_allowed_for_subscription("claude-opus-4-8").is_ok());
-    assert!(ensure_model_allowed_for_subscription("opus 4.8").is_ok());
-    assert!(ensure_model_allowed_for_subscription("claude-sonnet-4-6").is_ok());
-    assert!(ensure_model_allowed_for_subscription("sonnet 4.6").is_ok());
-    assert!(ensure_model_allowed_for_subscription("gpt-5.5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-opus-5-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("opus 5.5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-sonnet-5-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("sonnet 5.5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-haiku-5-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-opus-4-8").is_err());
+    assert!(ensure_model_allowed_for_subscription("gpt-5.5").is_err());
     assert!(ensure_model_allowed_for_subscription("gpt-5.4").is_err());
 
     crate::subscription_catalog::clear_runtime_env();
@@ -332,13 +334,13 @@ fn test_hosted_model_guard_does_not_gate_models_by_legacy_tier() {
 
     // Every curated model is available to metered accounts. The router owns
     // spending-limit and model-policy enforcement.
-    assert!(ensure_model_allowed_for_subscription("gpt-5.6-sol").is_ok());
-    assert!(ensure_model_allowed_for_subscription("claude-fable-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-haiku-5-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("glm-5").is_ok());
 
     // Legacy cached tier metadata cannot change client-side availability.
     crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
-    assert!(ensure_model_allowed_for_subscription("claude-fable-5").is_ok());
-    assert!(ensure_model_allowed_for_subscription("sol").is_ok());
+    assert!(ensure_model_allowed_for_subscription("claude-haiku-5-5").is_ok());
+    assert!(ensure_model_allowed_for_subscription("haiku 5.5").is_ok());
 
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
     crate::env::remove_var("JCODE_HOME");
@@ -356,35 +358,30 @@ fn test_filtered_display_models_respects_curated_subscription_catalog() {
 
     let filtered = filtered_display_models(vec![
         "gpt-5.4".to_string(),
-        "claude-opus-4-8".to_string(),
-        "claude-sonnet-4-6".to_string(),
+        "claude-opus-5-5".to_string(),
+        "claude-sonnet-5-5".to_string(),
         "gpt-5.5".to_string(),
-        "gpt-5.6-sol".to_string(),
-        "claude-fable-5".to_string(),
+        "claude-opus-4-8".to_string(),
+        "claude-haiku-5-5".to_string(),
     ]);
 
-    // Every curated hosted model is shown, while unknown router models remain hidden.
+    // Every curated hosted model is shown, while unknown or retired models stay hidden.
     assert_eq!(
         filtered,
         vec![
-            "claude-opus-4-8".to_string(),
-            "claude-sonnet-4-6".to_string(),
-            "gpt-5.5".to_string(),
-            "gpt-5.6-sol".to_string(),
-            "claude-fable-5".to_string(),
+            "claude-opus-5-5".to_string(),
+            "claude-sonnet-5-5".to_string(),
+            "claude-haiku-5-5".to_string(),
         ]
     );
 
     crate::env::set_var(crate::subscription_catalog::JCODE_TIER_ENV, "ultra");
     let filtered = filtered_display_models(vec![
-        "claude-fable-5".to_string(),
+        "claude-haiku-5-5".to_string(),
         "gpt-5.6-sol".to_string(),
         "gpt-5.4".to_string(),
     ]);
-    assert_eq!(
-        filtered,
-        vec!["claude-fable-5".to_string(), "gpt-5.6-sol".to_string()]
-    );
+    assert_eq!(filtered, vec!["claude-haiku-5-5".to_string()]);
 
     crate::env::remove_var(crate::subscription_catalog::JCODE_TIER_ENV);
     crate::env::remove_var("JCODE_HOME");

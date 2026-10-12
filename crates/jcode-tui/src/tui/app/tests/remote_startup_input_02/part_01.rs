@@ -721,10 +721,10 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
         app.is_remote = true;
         app.remote_provider_name = Some("OpenAI".to_string());
         app.remote_available_entries = vec![
-            "claude-fable-5".to_string(),
-            "claude-opus-4-8".to_string(),
-            "gpt-5.5".to_string(),
-            "gpt-5.6-sol".to_string(),
+            "claude-haiku-5-5".to_string(),
+            "claude-opus-5-5".to_string(),
+            "claude-sonnet-5-5".to_string(),
+            "glm-5".to_string(),
             "deepseek/deepseek-v4-pro".to_string(),
         ];
         app.remote_model_options = app
@@ -762,10 +762,10 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
                 .map(|route| route.model.as_str())
                 .collect::<std::collections::BTreeSet<_>>(),
             std::collections::BTreeSet::from([
-                "claude-opus-4-8",
-                "claude-fable-5",
-                "gpt-5.5",
-                "gpt-5.6-sol",
+                "claude-opus-5-5",
+                "claude-haiku-5-5",
+                "claude-sonnet-5-5",
+                "glm-5",
             ])
         );
         assert!(app.remote_model_options.iter().any(|route| {
@@ -776,7 +776,7 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
             route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
                 || matches!(
                     route.model.as_str(),
-                    "claude-fable-5" | "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
+                    "claude-haiku-5-5" | "claude-opus-5-5" | "claude-sonnet-5-5" | "glm-5"
                 )
         }));
     });

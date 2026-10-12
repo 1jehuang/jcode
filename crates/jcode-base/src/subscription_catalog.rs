@@ -119,64 +119,46 @@ pub struct CuratedModel {
 }
 
 pub const CURATED_MODELS: &[CuratedModel] = &[
+    // Anthropic: only the Claude 5.5 line is offered. OpenAI models (GPT-5.5,
+    // GPT-5.6 Sol) are withdrawn while the router's OpenAI org has no billing;
+    // the router hides them via DISABLED_PROVIDERS. Keep this list in sync
+    // with the router's live /v1/models catalog.
     CuratedModel {
-        id: "claude-opus-4-8",
-        display_name: "Claude Opus 4.8",
-        aliases: &["claude-opus-4-8", "opus-4-8", "opus 4.8", "claude opus 4.8"],
+        id: "claude-opus-5-5",
+        display_name: "Claude Opus 5.5",
+        aliases: &["claude-opus-5-5", "opus-5-5", "opus 5.5", "claude opus 5.5"],
         default_enabled: true,
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
         min_tier: JcodeTier::Plus,
         note: "Frontier model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
-        id: "claude-opus-5",
-        display_name: "Claude Opus 5",
-        aliases: &["claude-opus-5", "opus-5", "opus 5", "claude opus 5"],
-        default_enabled: false,
-        routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Plus,
-        note: "Frontier model; routed server-side to Anthropic by the jcode router.",
-    },
-    CuratedModel {
-        id: "claude-sonnet-4-6",
-        display_name: "Claude Sonnet 4.6",
+        id: "claude-sonnet-5-5",
+        display_name: "Claude Sonnet 5.5",
         aliases: &[
-            "claude-sonnet-4-6",
-            "sonnet-4-6",
-            "sonnet 4.6",
-            "claude sonnet 4.6",
+            "claude-sonnet-5-5",
+            "sonnet-5-5",
+            "sonnet 5.5",
+            "claude sonnet 5.5",
         ],
         default_enabled: false,
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
         min_tier: JcodeTier::Plus,
-        note: "Frontier model; routed server-side to Amazon Bedrock by the jcode router.",
+        note: "Balanced frontier model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
-        id: "gpt-5.5",
-        display_name: "GPT-5.5",
-        aliases: &["gpt-5.5", "gpt-5-5", "gpt 5.5"],
+        id: "claude-haiku-5-5",
+        display_name: "Claude Haiku 5.5",
+        aliases: &[
+            "claude-haiku-5-5",
+            "haiku-5-5",
+            "haiku 5.5",
+            "claude haiku 5.5",
+        ],
         default_enabled: false,
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
         min_tier: JcodeTier::Plus,
-        note: "Frontier model; routed server-side to OpenAI by the jcode router.",
-    },
-    CuratedModel {
-        id: "claude-fable-5",
-        display_name: "Claude Fable 5",
-        aliases: &["claude-fable-5", "fable-5", "fable 5", "claude fable 5"],
-        default_enabled: false,
-        routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Plus,
-        note: "Frontier model; routed server-side to Anthropic by the jcode router.",
-    },
-    CuratedModel {
-        id: "gpt-5.6-sol",
-        display_name: "GPT-5.6 Sol",
-        aliases: &["gpt-5.6-sol", "gpt 5.6 sol", "sol"],
-        default_enabled: false,
-        routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Plus,
-        note: "Frontier model; routed server-side to OpenAI by the jcode router.",
+        note: "Fast, low-cost model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
         id: "qwen3-coder-next",
@@ -532,12 +514,9 @@ mod tests {
     use super::*;
 
     const EXPECTED_PLUS_MODELS: &[&str] = &[
-        "claude-opus-4-8",
-        "claude-opus-5",
-        "claude-sonnet-4-6",
-        "gpt-5.5",
-        "claude-fable-5",
-        "gpt-5.6-sol",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
         "qwen3-coder-next",
         "devstral-2-123b",
         "deepseek-v3.2",
@@ -556,22 +535,34 @@ mod tests {
 
     #[test]
     fn curated_model_aliases_resolve_to_canonical_ids() {
-        assert_eq!(canonical_model_id("opus 4.8"), Some("claude-opus-4-8"));
+        assert_eq!(canonical_model_id("opus 5.5"), Some("claude-opus-5-5"));
         assert_eq!(
-            canonical_model_id("Claude Opus 4.8"),
-            Some("claude-opus-4-8")
+            canonical_model_id("Claude Opus 5.5"),
+            Some("claude-opus-5-5")
         );
-        assert_eq!(canonical_model_id("gpt-5.5"), Some("gpt-5.5"));
-        assert_eq!(canonical_model_id("GPT 5.5"), Some("gpt-5.5"));
         assert_eq!(
-            canonical_model_id("Claude Sonnet 4.6"),
-            Some("claude-sonnet-4-6")
+            canonical_model_id("Claude Sonnet 5.5"),
+            Some("claude-sonnet-5-5")
         );
-        assert_eq!(canonical_model_id("sonnet 4.6"), Some("claude-sonnet-4-6"));
-        assert_eq!(canonical_model_id("fable-5"), Some("claude-fable-5"));
-        assert_eq!(canonical_model_id("Claude Fable 5"), Some("claude-fable-5"));
-        assert_eq!(canonical_model_id("sol"), Some("gpt-5.6-sol"));
-        assert_eq!(canonical_model_id("GPT 5.6 Sol"), Some("gpt-5.6-sol"));
+        assert_eq!(canonical_model_id("sonnet 5.5"), Some("claude-sonnet-5-5"));
+        assert_eq!(canonical_model_id("haiku-5-5"), Some("claude-haiku-5-5"));
+        assert_eq!(
+            canonical_model_id("Claude Haiku 5.5"),
+            Some("claude-haiku-5-5")
+        );
+        // Retired from the hosted catalog: older Claude lines and OpenAI
+        // models while the router's OpenAI org has no billing.
+        for retired in [
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-sonnet-4-6",
+            "claude-fable-5",
+            "gpt-5.5",
+            "gpt-5.6-sol",
+            "sol",
+        ] {
+            assert_eq!(canonical_model_id(retired), None, "{retired}");
+        }
         assert_eq!(
             canonical_model_id("Qwen 3 Coder Next"),
             Some("qwen3-coder-next")
@@ -603,21 +594,19 @@ mod tests {
     #[test]
     fn curated_model_lookup_ignores_provider_pin_suffix() {
         assert_eq!(
-            canonical_model_id("claude-opus-4-8@anthropic"),
-            Some("claude-opus-4-8")
+            canonical_model_id("claude-opus-5-5@anthropic"),
+            Some("claude-opus-5-5")
         );
-        assert_eq!(canonical_model_id("gpt-5.5@openai"), Some("gpt-5.5"));
+        assert_eq!(canonical_model_id("glm-5@bedrock"), Some("glm-5"));
     }
 
     #[test]
     fn default_model_is_newest_curated_flagship() {
-        // The curated catalog holds Opus 4.8 and Opus 5; the default must be the
-        // newest flagship, not the legacy `default_enabled` entry (Opus 4.8).
         let ids: Vec<&str> = CURATED_MODELS.iter().map(|model| model.id).collect();
         let expected = crate::auth::lifecycle::ranked_flagship_for_provider("claude", &ids)
             .expect("curated catalog has a ranked Claude flagship");
         assert_eq!(default_model().id, expected);
-        assert_ne!(default_model().id, "claude-opus-4-8");
+        assert_eq!(default_model().id, "claude-opus-5-5");
     }
 
     #[test]
@@ -643,7 +632,7 @@ mod tests {
                 .iter()
                 .all(|model| model.min_tier != JcodeTier::Flagship)
         );
-        assert_eq!(CURATED_MODELS.len(), 20);
+        assert_eq!(CURATED_MODELS.len(), 17);
         assert!(find_curated_model("magistral-small-1.2").is_none());
         assert!(find_curated_model("gemma-3-27b").is_none());
         assert!(find_curated_model("llama-4-maverick").is_none());
@@ -726,7 +715,7 @@ mod tests {
         for model in EXPECTED_PLUS_MODELS {
             assert!(is_model_allowed_for_current_tier(model));
         }
-        assert!(is_model_allowed_for_current_tier("claude-fable-5"));
+        assert!(is_model_allowed_for_current_tier("claude-opus-5-5"));
 
         crate::env::set_var(JCODE_TIER_ENV, "mystery");
         assert_eq!(cached_tier(), None);
@@ -738,7 +727,7 @@ mod tests {
             for model in EXPECTED_PLUS_MODELS {
                 assert!(is_model_allowed_for_current_tier(model));
             }
-            assert!(is_model_allowed_for_current_tier("claude-fable-5"));
+            assert!(is_model_allowed_for_current_tier("claude-haiku-5-5"));
         }
 
         crate::env::set_var(JCODE_TIER_ENV, JcodeTier::Ultra.as_str());
@@ -746,8 +735,8 @@ mod tests {
         assert!(!is_model_allowed_for_current_tier("not-a-hosted-model"));
         store_cached_tier(Some(JcodeTier::Flagship)).expect("persist tier");
         assert_eq!(cached_tier(), Some(JcodeTier::Flagship));
-        assert!(is_model_allowed_for_current_tier("claude-fable-5"));
-        assert!(is_model_allowed_for_current_tier("gpt-5.6-sol"));
+        assert!(is_model_allowed_for_current_tier("claude-sonnet-5-5"));
+        assert!(!is_model_allowed_for_current_tier("gpt-5.6-sol"));
 
         store_cached_tier(None).expect("clear tier");
         assert_eq!(cached_tier(), None);
