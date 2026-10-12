@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use jcode_message_types::StreamEvent;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -69,7 +69,8 @@ impl OpenRouterStream {
         provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     ) -> Self {
         Self {
-            inner: Box::pin(stream),
+            // Final events can require more polls after transport EOF.
+            inner: Box::pin(stream.fuse()),
             buffer: String::new(),
             utf8: jcode_core::util::Utf8StreamDecoder::new(),
             partial_json: None,
@@ -931,3 +932,7 @@ mod tests {
         assert_ne!(first_turn_id, second_turn_id);
     }
 }
+
+#[cfg(test)]
+#[path = "stream_eof_tests.rs"]
+mod stream_eof_tests;
