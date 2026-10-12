@@ -22,7 +22,10 @@ pub use anthropic_reset::{
     invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
 };
 use api_keys::enqueue_api_key_usage_tasks;
+pub(crate) use cache::note_openai_unavailability_observed;
 use cache::*;
+#[cfg(test)]
+pub(crate) use cache::{openai_usage_generation, store_openai_usage_for_generation_then};
 pub use claude_code::{
     ClaudeCodeUsageProbe, ClaudeCodeUsageWindow, register_claude_code_usage_probe,
 };
