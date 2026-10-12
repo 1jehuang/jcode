@@ -294,12 +294,19 @@ fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
 /// (`builds/stable/jcode`), and installing a new build repoints that link. From
 /// then on `current_exe()` resolves to the *new* binary, so every reload check
 /// concluded the server already ran the newest build and `jcode server reload`
-/// was skipped forever. Resolve the path once, at first use (server startup),
-/// before any later install can move the link.
+/// was skipped forever. The executable entry point pins the path before CLI
+/// startup and asynchronous provider initialization can race with an install.
 pub(crate) fn running_server_binary() -> Option<PathBuf> {
     static RUNNING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    RUNNING
-        .get_or_init(|| std::env::current_exe().ok().map(resolve_launch_path))
+    pin_launch_path(&RUNNING, || std::env::current_exe().ok())
+}
+
+fn pin_launch_path(
+    cache: &std::sync::OnceLock<Option<PathBuf>>,
+    launch_path: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    cache
+        .get_or_init(|| launch_path().map(resolve_launch_path))
         .clone()
 }
 
@@ -311,6 +318,42 @@ fn resolve_launch_path(exe: PathBuf) -> PathBuf {
 
 #[cfg(all(test, unix))]
 mod running_server_binary_tests {
+    #[tokio::test]
+    async fn launch_target_stays_pinned_while_provider_initialization_is_pending() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join("old");
+        let new = dir.path().join("new");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&new, b"new").unwrap();
+        let link = dir.path().join("channel");
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+        let cache = std::sync::OnceLock::new();
+        super::pin_launch_path(&cache, || Some(link.clone()));
+
+        // The entry-point capture must precede a provider future's first poll.
+        let provider_initialization = async {
+            tokio::task::yield_now().await;
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink(&new, &link).unwrap();
+        };
+        provider_initialization.await;
+
+        assert_eq!(
+            super::pin_launch_path(&cache, || Some(link)),
+            Some(std::fs::canonicalize(old).unwrap())
+        );
+    }
+
+    #[test]
+    fn failed_launch_identity_is_not_replaced_by_a_later_path() {
+        let cache = std::sync::OnceLock::new();
+        super::pin_launch_path(&cache, || None);
+        assert_eq!(
+            super::pin_launch_path(&cache, || Some("later".into())),
+            None
+        );
+    }
+
     /// The server is started through a channel link; installing a new build
     /// repoints the link. The pinned path must stay on the binary the server
     /// was started from, so the new build counts as newer and reload runs.
