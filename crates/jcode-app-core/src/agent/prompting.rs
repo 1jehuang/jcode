@@ -7,6 +7,19 @@ use crate::message::{Message, ToolDefinition};
 mod recovery_tests;
 
 impl Agent {
+    /// Speculatively prewarm the provider while a newly created session is idle.
+    ///
+    /// This deliberately bypasses `tool_definitions`, whose cache lock is only
+    /// appropriate once an actual turn starts. Late MCP registration or user
+    /// customization can therefore still change the foreground tool snapshot;
+    /// the provider is responsible for discarding an incompatible warmup.
+    pub(crate) async fn prewarm_provider_idle(&self) {
+        let tools = self.tool_definitions_for_debug().await;
+        let split_prompt = self.build_system_prompt_split(None);
+        self.provider
+            .prewarm(&tools, &split_prompt.static_part)
+            .await;
+    }
     /// Explicitly prepare/freeze the same tool surface used by provider turns.
     /// Unlike `debug_context`, this may update the tool cache. It never calls a provider.
     pub async fn prepare_debug_context(&mut self) -> serde_json::Value {
