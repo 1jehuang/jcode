@@ -118,6 +118,88 @@ fn test_blocked_on_a_terminal_is_detected() {
     );
 }
 
+// macOS has no /proc, so a wrapper shell that parks in `wait4` while its child
+// blocks on stdin is invisible from the shell alone: the reader is a
+// descendant. Mirrors `test_child_process_tree_detection` on Linux.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_shell_wrapped_reader_is_detected() {
+    // `cat; true` stops bash from exec-optimizing the last command away, so
+    // bash stays alive as the parent and `cat` is the process blocked in read(0).
+    let mut child = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("cat; true")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn bash");
+
+    let pid = child.id();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut state = StdinState::NotReading;
+    while std::time::Instant::now() < deadline {
+        state = check_process_tree(pid);
+        if state == StdinState::Reading {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // The wrapper shell itself is parked in `wait4`, which the parked-thread
+    // gate rejects on purpose; the descendant walk is what finds the reader.
+    let shell_only = macos::check(pid);
+
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(
+        state,
+        StdinState::Reading,
+        "cat blocked on stdin should be detected through the wrapper shell"
+    );
+    assert_eq!(
+        shell_only,
+        StdinState::NotReading,
+        "the parked wrapper shell is not itself reading stdin"
+    );
+}
+
+// The other direction: a wrapper shell whose child is parked too is still not a
+// stdin read, so the descendant walk must not resurrect the issue #1146 false
+// positive that the parked-thread gate fixed.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_shell_waiting_on_sleep_is_not_a_stdin_read() {
+    let mut child = std::process::Command::new("bash")
+        .arg("-c")
+        .arg("sleep 5; true")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn bash");
+
+    // Long enough for both the shell and the sleep to park and be swapped out.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let state = check_process_tree(child.id());
+
+    child.kill().ok();
+    child.wait().ok();
+
+    assert_eq!(
+        state,
+        StdinState::NotReading,
+        "sleep parks in nanosleep, and the shell parks in wait4"
+    );
+}
+
+// A walk over a pid that cannot be sampled must stay quiet rather than report a
+// reader, and must not panic on an empty child list.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_process_tree_nonexistent_pid() {
+    assert_eq!(macos::check_process_tree(u32::MAX), StdinState::NotReading);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_blocked_process_detected() {

@@ -19,6 +19,25 @@ pub fn is_waiting_for_stdin(pid: u32) -> StdinState {
     return StdinState::Unknown;
 }
 
+/// Descendant-aware stdin check: like [`is_waiting_for_stdin`], but also reports
+/// a reader that the tracked process merely wraps.
+///
+/// The tracked process is usually a shell that parks while a descendant blocks
+/// on the shared stdin (`bash -c 'cat; true'`), which the single-process check
+/// cannot see because the shell itself is not blocked on stdin (issue #1146
+/// follow-up, measured on macOS aarch64 2026-10-12). Platforms without a
+/// descendant walk fall back to the single-process check.
+pub fn check_process_tree(pid: u32) -> StdinState {
+    #[cfg(target_os = "linux")]
+    return linux::check_process_tree(pid);
+
+    #[cfg(target_os = "macos")]
+    return macos::check_process_tree(pid);
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return is_waiting_for_stdin(pid);
+}
+
 #[cfg(target_os = "linux")]
 pub mod linux {
     use super::*;
@@ -222,6 +241,10 @@ mod macos {
             buffer: *mut libc::c_void,
             buffersize: i32,
         ) -> i32;
+
+        /// Direct children of a process. Returns the number of PIDs written
+        /// (not a byte count), measured on macOS aarch64 2026-10-12.
+        fn proc_listchildpids(ppid: i32, buffer: *mut libc::c_void, buffersize: i32) -> i32;
     }
 
     const PROC_PIDLISTFDS: i32 = 1;
@@ -289,21 +312,99 @@ mod macos {
     }
 
     pub fn check(pid: u32) -> StdinState {
-        // Check if fd 0 (stdin) is a pipe or pty
-        if !stdin_is_interactive(pid as i32) {
-            return StdinState::NotReading;
+        if check_self(pid as i32) {
+            StdinState::Reading
+        } else {
+            StdinState::NotReading
+        }
+    }
+
+    /// Whether `pid` itself is blocked on its own stdin.
+    fn check_self(pid: i32) -> bool {
+        // fd 0 must be a pipe or pty for a read on it to mean terminal input.
+        stdin_is_interactive(pid) && is_thread_waiting(pid)
+    }
+
+    /// Descendant-aware variant used by the bash tool's stdin poll, mirroring
+    /// `linux::check_process_tree`.
+    ///
+    /// The parked-thread gate alone loses the wrapper shell: `bash -c 'cat;
+    /// true'` parks bash in `wait4`, so only its `cat` child is blocked on
+    /// stdin (issue #1146 follow-up, measured on macOS aarch64 2026-10-12).
+    /// Walking the descendant tree keeps that case detected while the gate
+    /// keeps parked threads out of the result.
+    ///
+    /// macOS exposes no `/proc/<pid>/fd/0` link to compare, so a descendant is
+    /// gated on fd 0 having the same *kind* as the tracked process (pipe or
+    /// pty) instead of the same object. That is coarser than the Linux link
+    /// comparison: a descendant blocked on an internal pipeline (`cmd | grep
+    /// x`) has the same fd kind and can still be reported as a reader.
+    pub fn check_process_tree(pid: u32) -> StdinState {
+        if check(pid) == StdinState::Reading {
+            return StdinState::Reading;
         }
 
-        // Check thread states - if any thread is in WAITING state,
-        // the process might be blocked on I/O
-        if is_thread_waiting(pid as i32) {
-            return StdinState::Reading;
+        // Bound the traversal the way the Linux walk does so a pathological
+        // tree cannot turn this few-hundred-ms poll into an expensive scan.
+        const MAX_DEPTH: usize = 32;
+        const MAX_VISITED: usize = 512;
+
+        let root = pid as i32;
+        let root_fd_type = stdin_fd_type(root);
+        let mut visited: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        visited.insert(root);
+        let mut queue: std::collections::VecDeque<(i32, usize)> = direct_children(root)
+            .into_iter()
+            .map(|child| (child, 1usize))
+            .collect();
+
+        while let Some((child, depth)) = queue.pop_front() {
+            if !visited.insert(child) || visited.len() > MAX_VISITED {
+                continue;
+            }
+
+            // Only descendants sharing the tracked process's stdin kind count.
+            if root_fd_type.is_none() || stdin_fd_type(child) != root_fd_type {
+                continue;
+            }
+
+            if check_self(child) {
+                return StdinState::Reading;
+            }
+
+            if depth < MAX_DEPTH {
+                for grandchild in direct_children(child) {
+                    queue.push_back((grandchild, depth + 1));
+                }
+            }
         }
 
         StdinState::NotReading
     }
 
-    fn stdin_is_interactive(pid: i32) -> bool {
+    /// Direct children of `pid` from libproc. An empty result is also what a
+    /// failed lookup returns, which matches the Linux walk's leaf-process case.
+    fn direct_children(pid: i32) -> Vec<i32> {
+        let mut buf = vec![0i32; 64];
+        let ret = unsafe {
+            proc_listchildpids(
+                pid,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                (buf.len() * mem::size_of::<i32>()) as i32,
+            )
+        };
+
+        if ret <= 0 {
+            return Vec::new();
+        }
+
+        buf.truncate((ret as usize).min(buf.len()));
+        buf.retain(|child| *child > 0);
+        buf
+    }
+
+    /// fd 0's `proc_fdtype`: 1 = vnode (pty), 6 = pipe.
+    fn stdin_fd_type(pid: i32) -> Option<u32> {
         // Get list of file descriptors
         let fd_size = mem::size_of::<proc_fdinfo>() as i32;
         let buf_size = fd_size * 256; // up to 256 fds
@@ -320,7 +421,7 @@ mod macos {
         };
 
         if ret <= 0 {
-            return false;
+            return None;
         }
 
         let num_fds = ret / fd_size;
@@ -328,15 +429,14 @@ mod macos {
             std::slice::from_raw_parts(buf.as_ptr() as *const proc_fdinfo, num_fds as usize)
         };
 
-        // Check if fd 0 exists and is a pipe or vnode (pty)
-        for fd in fds {
-            if fd.proc_fd == 0 {
-                // fd type 1 = vnode (could be pty), 6 = pipe
-                return fd.proc_fdtype == 1 || fd.proc_fdtype == 6;
-            }
-        }
+        fds.iter()
+            .find(|fd| fd.proc_fd == 0)
+            .map(|fd| fd.proc_fdtype)
+    }
 
-        false
+    fn stdin_is_interactive(pid: i32) -> bool {
+        // fd type 1 = vnode (could be pty), 6 = pipe
+        matches!(stdin_fd_type(pid), Some(1) | Some(6))
     }
 
     fn is_thread_waiting(pid: i32) -> bool {
