@@ -24,7 +24,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildModelPriceReport } from "./model-price-report.mjs";
 import {
-  CATALOG_URL, buildPriceIndex, observedLabelsSql, resolvePriceRows,
+  CATALOG_URL, PRICE_KIND_RANK_SQL, buildPriceIndex, observedLabelsSql, resolvePriceRows,
 } from "../src/model-pricing.js";
 const DB = "jcode-telemetry";
 
@@ -99,7 +99,7 @@ async function main() {
 
   const statements = [...rows.values()].map(
     (r) =>
-      `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at) VALUES (${sqlStr(r.model)}, ${sqlStr(r.sourceModel)}, ${sqlStr(r.sourceProvider)}, ${sqlNum(r.input)}, ${sqlNum(r.output)}, ${sqlNum(r.cacheRead)}, ${sqlNum(r.cacheWrite)}, ${r.cacheInclusive}, ${sqlStr(r.kind)}, datetime('now')) ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now') WHERE excluded.price_kind <> 'unpriced' OR model_prices.price_kind = 'unpriced';`,
+      `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at) VALUES (${sqlStr(r.model)}, ${sqlStr(r.sourceModel)}, ${sqlStr(r.sourceProvider)}, ${sqlNum(r.input)}, ${sqlNum(r.output)}, ${sqlNum(r.cacheRead)}, ${sqlNum(r.cacheWrite)}, ${r.cacheInclusive}, ${sqlStr(r.kind)}, datetime('now')) ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now') WHERE ${PRICE_KIND_RANK_SQL("excluded.price_kind")} >= ${PRICE_KIND_RANK_SQL("model_prices.price_kind")};`,
   );
 
   // A label can occur under multiple providers. Pricing is keyed by label, but
