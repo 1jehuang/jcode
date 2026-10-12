@@ -162,6 +162,7 @@ export function buildPriceIndex(catalog) {
 
 // Resolve observed {model, provider} rows to one price row per label.
 export function resolvePriceRows(observed, index) {
+  const families = buildFamilyIndex(index);
   const rows = new Map();
   for (const row of observed) {
     const label = row.model;
@@ -187,6 +188,21 @@ export function resolvePriceRows(observed, index) {
       }
     }
     if (!match) {
+      const estimate = familyEstimate(label, families);
+      if (estimate) {
+        const cost = estimate.cost;
+        rows.set(label, {
+          ...base,
+          sourceModel: estimate.modelId,
+          sourceProvider: estimate.provider,
+          input: cost.input,
+          output: cost.output ?? null,
+          cacheRead: cost.cache_read ?? cost.input * 0.1,
+          cacheWrite: cost.cache_write ?? cost.input * 1.25,
+          kind: "family_estimate",
+        });
+        continue;
+      }
       rows.set(label, {
         ...base, sourceModel: null, sourceProvider: null,
         input: null, output: null, cacheRead: null, cacheWrite: null, kind: "unpriced",
@@ -210,12 +226,68 @@ export function resolvePriceRows(observed, index) {
   return rows;
 }
 
-// Parameterized upsert. A transient catalog miss must never erase a price we
-// already had, so an `unpriced` result only overwrites an `unpriced` row.
+// A brand-new release (say `claude-opus-6`) is used by people on day one, but
+// models.dev often lists it days later. Until then, price it like the newest
+// first-party model in the same family (`claude-opus-*`) and tag the row
+// `family_estimate`, so it is counted instead of silently reading $0. The
+// nightly sync replaces it with the exact catalog price once one exists.
+const FAMILY_PROVIDERS = new Set(["anthropic", "openai", "google", "xai", "deepseek", "zai", "moonshotai", "minimax"]);
+
+function familyKey(id) {
+  const tokens = String(id).toLowerCase().split(/[-_.]/).filter((t) => t && !/^\d+[a-z]?$/.test(t) && !/^\d{8}$/.test(t));
+  // Need a vendor and a tier (`claude` + `opus`), not just a vendor.
+  return tokens.length >= 2 ? tokens.join("-") : null;
+}
+
+function versionOf(id) {
+  return (String(id).match(/\d+/g) ?? []).filter((n) => n.length < 8).map(Number);
+}
+
+function compareVersions(a, b) {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+function buildFamilyIndex(index) {
+  const families = new Map();
+  for (const [modelId, entries] of index) {
+    if (!/\d/.test(modelId)) continue;
+    const first = entries.find((e) => FAMILY_PROVIDERS.has(e.provider));
+    if (!first) continue;
+    const key = familyKey(modelId);
+    if (!key) continue;
+    const prev = families.get(key);
+    if (!prev || compareVersions(versionOf(modelId), versionOf(prev.modelId)) > 0) {
+      families.set(key, { modelId, ...first });
+    }
+  }
+  return families;
+}
+
+function familyEstimate(label, families) {
+  for (const candidate of normalizeLabel(label)) {
+    // Only versioned names: opaque aliases like `coder` or `high` stay unpriced.
+    if (!/\d/.test(candidate)) continue;
+    const fam = families.get(familyKey(candidate));
+    // Only for releases at least as new as the newest priced member. Older
+    // models (gpt-3.5 vs a gpt-4 family head) would otherwise borrow a price
+    // that can be wrong by 10x.
+    if (fam && compareVersions(versionOf(candidate), versionOf(fam.modelId)) >= 0) return fam;
+  }
+  return null;
+}
+
+// Parameterized upsert. Never downgrade: a transient catalog miss must not
+// erase a price we had, and a family estimate must not replace an exact price.
+export const PRICE_KIND_RANK_SQL = (col) =>
+  `(CASE ${col} WHEN 'unpriced' THEN 0 WHEN 'family_estimate' THEN 1 ELSE 2 END)`;
 export const UPSERT_PRICE_SQL = `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
 ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now')
-WHERE excluded.price_kind <> 'unpriced' OR model_prices.price_kind = 'unpriced'`;
+WHERE ${PRICE_KIND_RANK_SQL("excluded.price_kind")} >= ${PRICE_KIND_RANK_SQL("model_prices.price_kind")}`;
 
 export function upsertParams(r) {
   return [
@@ -231,6 +303,14 @@ WHERE event = 'session_end' AND created_at >= datetime('now', ?) AND model_end I
 GROUP BY model_end, provider_end
 ORDER BY tokens DESC`;
 
+// Per-response usage (usage_report) also covers compaction and sidecar calls,
+// whose models may never appear as a session_end model.
+const USAGE_LABELS_SQL = `SELECT model, provider, SUM(responses) AS sessions, SUM(total_tokens) AS tokens
+FROM daily_model_usage
+WHERE usage_date >= date('now', ?)
+GROUP BY model, provider
+ORDER BY tokens DESC`;
+
 export function observedLabelsSql() {
   return OBSERVED_LABELS_SQL;
 }
@@ -244,6 +324,12 @@ export async function syncModelPrices(env, { days = 2, fetchImpl = fetch, batchS
   // guard already protects existing prices, but skip the writes entirely.
   if (index.size < 100) throw new Error(`models.dev catalog too small (${index.size} ids)`);
   const observed = (await env.DB.prepare(OBSERVED_LABELS_SQL).bind(`-${days} days`).all()).results ?? [];
+  try {
+    observed.push(...((await env.DB.prepare(USAGE_LABELS_SQL).bind(`-${days} days`).all()).results ?? []));
+  } catch (err) {
+    // Table missing (migration 0027 not applied): still price session labels.
+    console.warn("daily_model_usage labels unavailable", err?.message || err);
+  }
   const rows = [...resolvePriceRows(observed, index).values()];
   const stmt = env.DB.prepare(UPSERT_PRICE_SQL);
   for (let i = 0; i < rows.length; i += batchSize) {
