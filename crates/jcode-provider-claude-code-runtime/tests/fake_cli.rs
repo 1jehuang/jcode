@@ -266,6 +266,79 @@ async fn permission_request_is_answered_by_mode() {
     provider.shutdown().await;
 }
 
+async fn native_permission_behavior(mode: &str, tool_name: &str) -> String {
+    let fake = Fake::new();
+    let provider = ClaudeCodeProvider::with_settings(ClaudeCodeSettings {
+        permission_mode: mode.into(),
+        ..fake.settings()
+    });
+    let events = run_turn(
+        &provider,
+        &[Message::user(&format!("perm {tool_name}"))],
+        None,
+    )
+    .await;
+    provider.shutdown().await;
+    text(&events)
+}
+
+#[tokio::test]
+async fn explicit_default_denies_native_permission_requests() {
+    for tool_name in ["Bash", "Write", "Edit"] {
+        assert_eq!(
+            native_permission_behavior("default", tool_name).await,
+            "permission:deny",
+            "{tool_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_permission_mode_denies_native_permission_requests() {
+    for tool_name in ["Bash", "Write", "Edit"] {
+        assert_eq!(
+            native_permission_behavior("invalid", tool_name).await,
+            "permission:deny",
+            "{tool_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn accept_edits_denies_bash_permission_request() {
+    assert_eq!(
+        native_permission_behavior("acceptEdits", "Bash").await,
+        "permission:deny"
+    );
+}
+
+#[tokio::test]
+async fn accept_edits_allows_native_edit_permission_requests() {
+    for tool_name in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+        assert_eq!(
+            native_permission_behavior("acceptEdits", tool_name).await,
+            "permission:allow",
+            "{tool_name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_bypass_allows_bash_permission_request() {
+    assert_eq!(
+        native_permission_behavior("bypassPermissions", "Bash").await,
+        "permission:allow"
+    );
+}
+
+#[tokio::test]
+async fn restrictive_mode_preserves_jcode_mcp_permission_policy() {
+    assert_eq!(
+        native_permission_behavior("default", "mcp__jcode__echo").await,
+        "permission:allow"
+    );
+}
+
 #[tokio::test]
 async fn jcode_tool_is_bridged_over_sdk_mcp() {
     let fake = Fake::new();

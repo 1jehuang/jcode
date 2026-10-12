@@ -6,7 +6,8 @@ pub use jcode_base::config::{
     ClaudeCodeConfig as ClaudeCodeSettings, ClaudeCodeInstanceConfig as ClaudeCodeInstance,
 };
 
-/// Permission modes the CLI understands. Anything else falls back to `default`.
+/// Permission modes the CLI understands. Anything else falls back to restrictive
+/// `default`, never the configured omitted-setting bypass default.
 pub const PERMISSION_MODES: &[&str] = &[
     "default",
     "acceptEdits",
@@ -122,7 +123,7 @@ pub fn build_argv(spec: &SpawnSpec) -> Vec<String> {
             || arg == "--dangerously-skip-permissions"
     });
     let mode = normalize_permission_mode(&spec.permission_mode);
-    if !user_sets_permission && mode != "default" {
+    if !user_sets_permission {
         argv.push("--permission-mode".into());
         argv.push(mode.into());
         if mode == "bypassPermissions" {
@@ -334,10 +335,31 @@ mod tests {
                 "--setting-sources=user,project,local",
                 "--model",
                 "claude-opus-5-5",
+                "--permission-mode",
+                "default",
                 "--session-id=abc",
             ]
         );
         assert!(!argv.iter().any(|a| a == "-p"));
+    }
+
+    #[test]
+    fn invalid_permission_mode_is_pinned_to_default_in_argv() {
+        let mut s = spec(SessionStart::New("x".into()));
+        s.permission_mode = "invalid".into();
+        assert!(
+            build_argv(&s)
+                .windows(2)
+                .any(|w| w == ["--permission-mode", "default"])
+        );
+    }
+
+    #[test]
+    fn omitted_permission_config_keeps_documented_bypass_default() {
+        assert_eq!(
+            ClaudeCodeSettings::default().permission_mode,
+            "bypassPermissions"
+        );
     }
 
     #[test]

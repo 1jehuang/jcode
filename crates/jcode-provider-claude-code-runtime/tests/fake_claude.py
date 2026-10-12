@@ -234,7 +234,8 @@ def turn(msg):
         assistant_text("The file says hello")
         result(user_uuid)
     elif cmd == "perm":
-        rid = control_request({"subtype": "can_use_tool", "tool_name": "Write",
+        tool_name = words[1] if len(words) > 1 else "Write"
+        rid = control_request({"subtype": "can_use_tool", "tool_name": tool_name,
                                "input": {"file_path": "/tmp/p.txt", "content": "x"}, "tool_use_id": "toolu_w"})
         resp = wait_response(rid)
         behavior = resp["response"]["behavior"]

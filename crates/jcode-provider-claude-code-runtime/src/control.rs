@@ -123,8 +123,9 @@ fn deny(message: &str, reason: &'static str) -> PermissionDecision {
 /// Decide a `can_use_tool` request.
 ///
 /// Claude Code only asks for tools its own settings did not pre-approve.
-/// jcode has no interactive approval hook here, so the configured permission
-/// mode decides: `dontAsk` and `plan` deny, every other mode allows.
+/// jcode has no interactive approval hook here. Only explicit bypass allows
+/// arbitrary native tools. `acceptEdits` allows native file-edit tools, while
+/// all other native requests fail closed. MCP tools retain jcode's own policy.
 pub fn decide_permission(
     permission_mode: &str,
     tool_name: &str,
@@ -156,9 +157,15 @@ pub fn decide_permission(
             "plan mode",
         ),
         "bypassPermissions" => allow(input, "bypassPermissions mode"),
-        "acceptEdits" => allow(input, "acceptEdits mode"),
-        "auto" => allow(input, "auto mode"),
-        _ => allow(input, "default mode (no interactive approval available)"),
+        "acceptEdits" if matches!(tool_name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit") => {
+            allow(input, "acceptEdits mode (native edit tool)")
+        }
+        _ => deny(
+            &format!(
+                "{tool_name} requires approval, but no interactive approval hook is available."
+            ),
+            "approval unavailable",
+        ),
     }
 }
 
@@ -371,7 +378,7 @@ mod tests {
         let d = decide_permission("default", "mcp__jcode__memory", &input);
         assert!(d.allow);
         assert_eq!(d.response["updatedInput"], input);
-        assert!(decide_permission("default", "Write", &input).allow);
+        assert!(!decide_permission("default", "Write", &input).allow);
         assert!(decide_permission("bypassPermissions", "Bash", &input).allow);
         assert!(decide_permission("acceptEdits", "Edit", &input).allow);
         assert!(!decide_permission("dontAsk", "Write", &input).allow);
@@ -383,6 +390,66 @@ mod tests {
         let ask = decide_permission("bypassPermissions", "AskUserQuestion", &json!({}));
         assert!(!ask.allow);
         assert_eq!(ask.response["behavior"], "deny");
+    }
+
+    #[test]
+    fn restrictive_native_permissions_fail_closed() {
+        for mode in ["default", "invalid", "", "  ", "auto", "dontAsk", "plan"] {
+            for tool_name in ["Bash", "Write", "Edit", "Read", "UnknownTool"] {
+                assert_eq!(
+                    decide_permission(mode, tool_name, &json!({})).response["behavior"],
+                    "deny",
+                    "{mode:?}: {tool_name}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accept_edits_does_not_authorize_non_edit_tools() {
+        for tool_name in ["Bash", "Read", "Task", "UnknownTool", "write"] {
+            assert!(
+                !decide_permission("acceptEdits", tool_name, &json!({})).allow,
+                "{tool_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_edits_preserves_native_edit_input() {
+        let input = json!({"file_path":"/tmp/x", "content":"y"});
+        for tool_name in ["Write", "Edit", "MultiEdit", "NotebookEdit"] {
+            assert_eq!(
+                decide_permission(" ACCEPTEDITS ", tool_name, &input).response,
+                json!({"behavior":"allow", "updatedInput":input}),
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_bypass_preserves_native_tool_input() {
+        let input = json!({"command":"echo harmless"});
+        assert_eq!(
+            decide_permission(" BYPASSPERMISSIONS ", "Bash", &input).response,
+            json!({"behavior":"allow", "updatedInput":input}),
+        );
+    }
+
+    #[test]
+    fn restrictive_modes_preserve_jcode_mcp_policy() {
+        for mode in [
+            "default",
+            "invalid",
+            "acceptEdits",
+            "dontAsk",
+            "plan",
+            "auto",
+        ] {
+            assert!(
+                decide_permission(mode, "mcp__jcode__memory", &json!({})).allow,
+                "{mode}"
+            );
+        }
     }
 
     #[test]
