@@ -12,8 +12,8 @@ All hashes are local short SHAs; full hashes available via `git log upstream/mas
 | Commits behind upstream | 2,649 |
 | Date range of ahead commits | 2026-09-11 → 2026-10-12 (31 days) |
 | Author breakdown | 131 KooshaPari, 9 Koosha Paridehpour, 1 github-actions, 1 Forge |
-| Upstream-clean PR candidates (low/medium risk) | ~30 commits in 6 themed PRs |
-| Demo-needed changes (VHS or Playwright) | 17 |
+| Upstream-clean PR candidates (low/medium risk) | ~50 commits bundled into 9 themed PRs |
+| Demo-needed changes (VHS or Playwright) | 24 |
 
 ## Intent groups
 
