@@ -11,3 +11,26 @@ pub(crate) struct PublishBuildArgs {
     #[arg(long)]
     pub termux_launcher: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::Args;
+    use clap::CommandFactory;
+
+    #[test]
+    fn publication_is_hidden_but_its_explicit_help_preserves_options() {
+        let mut command = Args::command();
+        assert!(!command.render_help().to_string().contains("publish-build"));
+        let helper = command.find_subcommand_mut("publish-build").unwrap();
+        let help = helper.render_help().to_string();
+        for option in [
+            "--source",
+            "--version",
+            "--launcher",
+            "--channel",
+            "--termux-launcher",
+        ] {
+            assert!(help.contains(option), "missing publication option {option}");
+        }
+    }
+}
