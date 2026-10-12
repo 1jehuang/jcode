@@ -161,7 +161,7 @@ pub fn is_billing_exhausted_error_message(message: &str) -> bool {
     }
     // An explicit authentication, rate-limit or server failure cannot become
     // billing exhaustion because a model, endpoint or hint mentions payment.
-    if let Some(status) = billing_http_status(&lower) {
+    if let Some(status) = parse_http_status_message(&lower) {
         return status == 402;
     }
     contains_independent_status_code(&payload, "402")
@@ -184,17 +184,30 @@ fn is_request_metadata(line: &str) -> bool {
         .any(|prefix| line.trim_start().starts_with(prefix))
 }
 
-fn billing_http_status(message: &str) -> Option<u16> {
-    for line in message.lines().filter(|line| !is_request_metadata(line)) {
+/// Parse a formatted status, a relayed HTTP status, or a leading status code.
+/// Request metadata and codes embedded in identifiers or longer numbers are ignored.
+pub fn parse_http_status_message(message: &str) -> Option<u16> {
+    let lower = message.to_ascii_lowercase();
+    for line in lower.lines().filter(|line| !is_request_metadata(line)) {
         let line = line.trim_start();
-        let tail = line
-            .split_once("status:")
-            .map(|(_, tail)| tail)
-            .or_else(|| line.split_once("http ").map(|(_, tail)| tail))
+        let tail = ["status:", "http "]
+            .iter()
+            .find_map(|marker| {
+                line.match_indices(marker).find_map(|(idx, _)| {
+                    let boundary = idx == 0
+                        || !line.as_bytes()[idx - 1].is_ascii_alphanumeric()
+                            && line.as_bytes()[idx - 1] != b'_';
+                    boundary.then_some(&line[idx + marker.len()..])
+                })
+            })
             .unwrap_or(line)
             .trim_start();
         let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
         if digits == 3
+            && !tail
+                .as_bytes()
+                .get(digits)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
             && let Ok(status) = tail[..digits].parse::<u16>()
             && (100..600).contains(&status)
         {
@@ -207,6 +220,54 @@ fn billing_http_status(message: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_http_status_accepts_formatted_and_relayed_codes() {
+        for (message, expected) in [
+            ("  STATUS:529 upstream busy", 529),
+            ("proxy relayed HTTP 529: upstream busy", 529),
+            ("HTTP 401: temporarily unavailable", 401),
+            ("429 Too Many Requests", 429),
+            ("status: 100 Continue", 100),
+            ("status: 599 upstream failed", 599),
+        ] {
+            assert_eq!(
+                parse_http_status_message(message),
+                Some(expected),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_http_status_ignores_metadata_before_real_status() {
+        let message = "endpoint: HTTP 529\n MODEL: status: 503\n auth: HTTP 402\n status: 401 temporarily unavailable";
+        assert_eq!(parse_http_status_message(message), Some(401));
+    }
+
+    #[test]
+    fn shared_http_status_rejects_metadata_and_embedded_codes() {
+        for message in [
+            "",
+            "no status here",
+            "endpoint: HTTP 529",
+            "model: status: 503",
+            "auth: HTTP 401",
+            "model529 failed",
+            "status: 5290",
+            "HTTP 529busy",
+            "status: 529_id",
+            "mystatus: 529",
+            "model_http 529",
+            "status: 099",
+            "status: 600",
+            "status: 99",
+            "status: nope",
+            "endpoint: http://localhost:529",
+        ] {
+            assert_eq!(parse_http_status_message(message), None, "{message}");
+        }
+    }
 
     #[test]
     fn billing_exhausted_detects_402_and_credit_wording() {
