@@ -76,36 +76,30 @@ if [[ -n "$git_hash" ]]; then
   if [[ "$git_dirty" == "1" ]]; then
     expected_git_identity="($git_hash, dirty)"
   fi
-  if [[ "$($bin --version)" != *"$expected_git_identity"* ]]; then
+  if [[ "$("$bin" --version)" != *"$expected_git_identity"* ]]; then
     echo "Release binary does not report expected git identity: $expected_git_identity" >&2
     exit 1
   fi
 fi
 
 # Install versioned binary into ~/.jcode/builds/versions/<hash>/
-builds_dir="$HOME/.jcode/builds"
+builds_dir="${JCODE_HOME:-$HOME/.jcode}/builds"
 version_dir="$builds_dir/versions/$hash"
-mkdir -p "$version_dir"
-install -m 755 "$bin" "$version_dir/jcode"
-
-# Update stable symlink
 stable_dir="$builds_dir/stable"
-mkdir -p "$stable_dir"
-ln -sfn "$version_dir/jcode" "$stable_dir/jcode"
-
-# Update stable-version marker
-printf '%s\n' "$hash" > "$builds_dir/stable-version"
-
-# Update current symlink + marker
 current_dir="$builds_dir/current"
-mkdir -p "$current_dir"
-ln -sfn "$version_dir/jcode" "$current_dir/jcode"
-printf '%s\n' "$hash" > "$builds_dir/current-version"
-
-# Update launcher path to current channel
 install_dir="${JCODE_INSTALL_DIR:-$HOME/.local/bin}"
-mkdir -p "$install_dir"
-ln -sfn "$current_dir/jcode" "$install_dir/jcode"
+
+# Prepare outside versions, then let the new binary copy and publish under the
+# same cross-process store lock as prune-builds. A shell child of a lock holder
+# could outlive its parent, so publication itself must run inside the helper.
+prepared_dir=$(mktemp -d)
+trap 'rm -rf -- "$prepared_dir"' EXIT
+install -m 755 "$bin" "$prepared_dir/jcode"
+if ! "$prepared_dir/jcode" --no-update publish-build --source "$prepared_dir" \
+  --version "$hash" --channel current --launcher "$install_dir/jcode"; then
+  echo "Publication failed. The new binary must support publish-build for safe, locked installation." >&2
+  exit 1
+fi
 
 echo "Installed: $version_dir/jcode"
 echo "Updated stable symlink: $stable_dir/jcode -> $version_dir/jcode"
@@ -146,7 +140,9 @@ fi
 # running process still uses are kept. Runs after the reload so the old server
 # binary is already released.
 if [ "${JCODE_KEEP_BUILDS:-}" != "0" ]; then
-  "$install_dir/jcode" prune-builds </dev/null 2>/dev/null | head -1 || true
+  if ! "$install_dir/jcode" --no-update prune-builds </dev/null; then
+    echo "Warning: build pruning failed. Installation succeeded, but old builds may remain." >&2
+  fi
 fi
 
 # Trim stale Cargo artifacts left by earlier builds in this checkout: old
@@ -155,7 +151,7 @@ fi
 # (default 2); JCODE_SKIP_TARGET_SWEEP=1 turns it off.
 if [ "${JCODE_SKIP_TARGET_SWEEP:-}" != "1" ]; then
   "$repo_root/scripts/clean_target.sh" --apply --sweep-only \
-    --sweep "${JCODE_TARGET_SWEEP_DAYS:-2}" 2>&1 | tail -1 || true
+    --sweep "${JCODE_TARGET_SWEEP_DAYS:-2}" || true
 fi
 
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$install_dir"; then

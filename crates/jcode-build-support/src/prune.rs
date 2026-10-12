@@ -106,9 +106,12 @@ pub(crate) fn prune_after_install_keeping(rollback: Option<&str>) {
     let Some(keep) = keep_versions_setting() else {
         return;
     };
-    let result = running_executable_ids()
-        .map(|running| prune_versions(keep, false, &running, rollback))
-        .transpose();
+    let result = (|| -> Result<Option<PruneReport>> {
+        let _store_lock = crate::acquire_build_store_lock()?;
+        running_executable_ids()
+            .map(|running| prune_versions(keep, false, &running, rollback))
+            .transpose()
+    })();
     match result {
         Ok(Some(report)) if !report.removed.is_empty() || !report.failed.is_empty() => {
             jcode_logging::info(report.render(false).trim_end());
@@ -121,6 +124,7 @@ pub(crate) fn prune_after_install_keeping(rollback: Option<&str>) {
 /// Delete installed versions except the `keep` newest and every version that a
 /// channel, marker, launcher, pending activation or running process uses.
 pub fn prune_old_versions(keep: usize, dry_run: bool) -> Result<PruneReport> {
+    let _store_lock = crate::acquire_build_store_lock()?;
     let Some(running) = running_executable_ids() else {
         return Ok(PruneReport {
             skipped: Some("running processes cannot be listed on this platform"),
@@ -136,6 +140,7 @@ fn prune_versions(
     running: &HashSet<FileId>,
     rollback: Option<&str>,
 ) -> Result<PruneReport> {
+    let _store_lock = crate::acquire_build_store_lock()?;
     let versions_dir = builds_dir()?.join("versions");
     let mut report = PruneReport::default();
     let Ok(entries) = std::fs::read_dir(&versions_dir) else {

@@ -283,46 +283,51 @@ impl SelfDevTool {
         };
         let hash = source.version_label.clone();
         let version_before = jcode_build_meta::version().to_string();
-        let published = if SelfDevTool::is_test_session() {
-            None
-        } else {
-            Some(build::publish_local_current_build_for_source(
-                &repo_dir, &source,
-            )?)
-        };
-        let previous_shared_server_version = if SelfDevTool::is_test_session() {
-            None
-        } else {
-            let published_build = published.as_ref().ok_or_else(|| {
+        {
+            // Serialize publication through rollback-reference persistence. The
+            // synchronous guard must leave scope before waiting for reload acks.
+            let _store_lock = jcode_build_support::acquire_build_store_lock()?;
+            let published = if SelfDevTool::is_test_session() {
+                None
+            } else {
+                Some(build::publish_local_current_build_for_source(
+                    &repo_dir, &source,
+                )?)
+            };
+            let previous_shared_server_version = if SelfDevTool::is_test_session() {
+                None
+            } else {
+                let published_build = published.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
                     "published build metadata was missing after publish_local_current_build_for_source"
                 )
             })?;
-            build::smoke_test_server_binary(&published_build.versioned_path)?;
-            build::read_shared_server_version()?
-        };
+                build::smoke_test_server_binary(&published_build.versioned_path)?;
+                build::read_shared_server_version()?
+            };
 
-        // Update manifest - track what we're testing
-        let mut manifest = build::BuildManifest::load()?;
-        manifest.canary = Some(hash.clone());
-        manifest.canary_status = Some(build::CanaryStatus::Testing);
-        manifest.set_pending_activation(build::PendingActivation {
-            session_id: session_id.to_string(),
-            new_version: hash.clone(),
-            previous_current_version: published
-                .as_ref()
-                .and_then(|published| published.previous_current_version.clone()),
-            previous_shared_server_version,
-            source_fingerprint: Some(source.fingerprint.clone()),
-            requested_at: chrono::Utc::now(),
-        })?;
-        manifest.save()?;
+            // Update manifest - track what we're testing
+            let mut manifest = build::BuildManifest::load()?;
+            manifest.canary = Some(hash.clone());
+            manifest.canary_status = Some(build::CanaryStatus::Testing);
+            manifest.set_pending_activation(build::PendingActivation {
+                session_id: session_id.to_string(),
+                new_version: hash.clone(),
+                previous_current_version: published
+                    .as_ref()
+                    .and_then(|published| published.previous_current_version.clone()),
+                previous_shared_server_version,
+                source_fingerprint: Some(source.fingerprint.clone()),
+                requested_at: chrono::Utc::now(),
+            })?;
+            manifest.save()?;
 
-        if !SelfDevTool::is_test_session()
-            && let Err(error) = build::update_shared_server_symlink(&hash)
-        {
-            let _ = build::rollback_pending_activation_for_session(session_id);
-            return Err(error);
+            if !SelfDevTool::is_test_session()
+                && let Err(error) = build::update_shared_server_symlink(&hash)
+            {
+                let _ = build::rollback_pending_activation_for_session(session_id);
+                return Err(error);
+            }
         }
 
         // Save reload context for continuation after restart
