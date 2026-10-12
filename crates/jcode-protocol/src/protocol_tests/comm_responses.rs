@@ -231,6 +231,7 @@ fn test_comm_status_response_roundtrip() -> Result<()> {
             live_attachments: Some(0),
             status_age_secs: Some(5),
             last_activity_age_secs: Some(2),
+            stalled_secs: None,
             joined_age_secs: Some(30),
             files_touched: vec!["src/main.rs".to_string()],
             activity: Some(SessionActivitySnapshot {

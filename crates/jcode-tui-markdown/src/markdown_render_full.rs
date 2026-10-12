@@ -33,6 +33,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
     // safe to keep in streaming mode: an uncached formula emits a lightweight
     // pending placeholder and upgrades once the worker finishes.
     let latex_mode = configured_latex_mode;
+    let mut latex_hint_shown = false;
 
     // Style stack for nested formatting
     let mut bold = false;
@@ -587,6 +588,7 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                     }
                 } else {
                     let block_start = lines.len();
+                    let mut toolchain_fallback = false;
                     let rendered = match latex_mode {
                         LatexRenderingMode::None => raw_math_display_lines(&math),
                         LatexRenderingMode::Unicode => math_display_lines(&math),
@@ -600,13 +602,18 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                             // whitespace is Markdown structure, not TeX source,
                             // and can make native/image renderers reject an
                             // otherwise valid expression.
-                            latex_image_lines(math.trim(), true, max_width)
-                                .unwrap_or_else(|| math_display_lines(&math))
+                            latex_image_lines(math.trim(), true, max_width).unwrap_or_else(|| {
+                                toolchain_fallback = true;
+                                math_display_lines(&math)
+                            })
                         }
                         LatexRenderingMode::Image => math_display_lines(&math),
                     };
                     for line in rendered {
                         lines.push(with_blockquote_prefix(line, blockquote_depth));
+                    }
+                    if toolchain_fallback {
+                        push_latex_install_hint_if_needed(&mut lines, &mut latex_hint_shown);
                     }
                     record_centered_independent_block(
                         &mut centered_blocks,
@@ -1063,6 +1070,10 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
         state.stats.last_tables = dbg_tables;
         state.stats.last_list_items = dbg_list_items;
         state.stats.last_blockquotes = dbg_blockquotes;
+    }
+
+    for line in &lines {
+        crate::math_copy::record_inline_math_for_line(line);
     }
 
     lines

@@ -55,8 +55,11 @@ mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
 mod commands;
+mod commit_log;
+pub(crate) use commit_log::CommitLogOverlay;
 mod commands_cloud;
 mod commands_colors;
+mod commands_desktop;
 mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
@@ -91,6 +94,7 @@ mod onboarding_sim;
 mod productivity;
 mod prompt_history;
 mod remote;
+mod remote_header_hint;
 mod remote_notifications;
 mod replay;
 pub(crate) mod run_shell;
@@ -100,6 +104,7 @@ mod slash_command_parser;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
+mod update_rehearsal;
 mod update_sim;
 mod usage_limit_notice;
 mod usage_reset;
@@ -442,6 +447,8 @@ pub(super) enum PendingReloadReconnectStatus {
 }
 
 const MEMORY_INJECTION_SUPPRESSION_SECS: u64 = 90;
+/// How long a transient status notice stays on screen.
+const STATUS_NOTICE_TTL: Duration = Duration::from_secs(3);
 
 /// Current processing status
 #[derive(Clone, Default, Debug)]
@@ -635,6 +642,7 @@ pub(super) enum MouseScrollTarget {
     HelpOverlay,
     ChangelogOverlay,
     ModelStatusOverlay,
+    CommitLogOverlay,
     /// The right-hand preview pane of the /resume session picker overlay.
     SessionPickerPreview,
 }
@@ -945,6 +953,9 @@ pub struct App {
     should_quit: bool,
     // Message queueing
     queued_messages: Vec<String>,
+    /// Slash (`/...`) and shell (`!...`) commands queued with Ctrl+Enter while
+    /// a turn was running. They run as real commands once the turn ends.
+    queued_commands: Vec<String>,
     hidden_queued_system_messages: Vec<String>,
     current_turn_system_reminder: Option<String>,
     // Upstream provider (e.g., which provider OpenRouter routed to)
@@ -1168,11 +1179,9 @@ pub struct App {
     startup_submit_deferred_reason: Option<&'static str>,
     /// One-shot/session-local preview of the first-run onboarding empty state.
     onboarding_preview_mode: bool,
-    /// Active onboarding simulator: `Some(index)` is the current simulated
-    /// screen (driven by `onboarding_sim.rs`); `None` when not simulating. The
-    /// simulator seeds synthetic phases so a developer can step through every
-    /// first-run screen via Alt+5 reset or Cmd+5 toggle without touching real auth state.
-    onboarding_sim: Option<usize>,
+    /// Whether an onboarding rehearsal is running (see `onboarding_sim.rs`):
+    /// the real first-run flow, started as if this install were new.
+    onboarding_sim: bool,
     /// Active time-based, non-destructive update experience preview.
     update_sim: Option<update_sim::UpdateSimulator>,
     /// Active guided first-run onboarding flow (model select -> continue ->
@@ -1258,6 +1267,10 @@ pub struct App {
     /// subscription vs cost-based usage display for remote sessions without
     /// re-deriving it from the provider name.
     remote_resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+    /// Remote model/provider/context/effort/credential were seeded from the
+    /// last launch's `remote_header_hint` and have not yet been confirmed by
+    /// the server. Cleared (and re-derived) when History arrives.
+    remote_session_facts_provisional: bool,
     remote_startup_phase: Option<RemoteStartupPhase>,
     remote_startup_phase_started: Option<Instant>,
     remote_reasoning_effort: Option<String>,
@@ -1379,7 +1392,7 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
-    // Diff display mode (toggle with Alt+G)
+    // Diff display mode (cycle with /diff)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     pub(crate) centered: bool,
@@ -1543,6 +1556,7 @@ pub struct App {
     model_switch_keys: ModelSwitchKeys,
     // Keybindings for effort switching
     effort_switch_keys: super::keybind::EffortSwitchKeys,
+    speed_switch_keys: super::keybind::SpeedSwitchKeys,
     // Keybindings for scrolling
     scroll_keys: ScrollKeys,
     // Keybinding for centered-mode toggle
@@ -1596,6 +1610,7 @@ pub struct App {
     input_selection_anchor: Option<input_selection::InputSelectionAnchor>,
     /// Derives double/triple clicks for word/line selection in the composer.
     input_selection_clicks: input_selection::ClickCounter,
+    input_typing_undo: Option<(Instant, usize)>,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
     // restored when Down walks back past the newest entry
     history_draft: Option<(String, usize)>,
@@ -1756,6 +1771,8 @@ pub struct App {
     help_scroll: Option<usize>,
     model_status_scroll: Option<usize>,
     model_status_content: String,
+    /// Commit log overlay (None = not visible)
+    commit_log_overlay: Option<commit_log::CommitLogOverlay>,
     /// Session picker overlay (None = not visible)
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,

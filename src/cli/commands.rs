@@ -1431,6 +1431,13 @@ pub async fn run_transcript_command(
         trimmed.to_string()
     };
 
+    // Focused-window lookup needs the user's compositor, so it happens here in
+    // the client rather than in the (possibly remote) server.
+    let session = session.or_else(|| {
+        jcode_voice::dictation::focused_jcode_session()
+            .ok()
+            .flatten()
+    });
     let mut client = crate::server::Client::connect_debug().await?;
     let request_id = client.send_transcript(&text, mode, session).await?;
 
@@ -1446,11 +1453,34 @@ pub async fn run_transcript_command(
     }
 }
 
+pub async fn run_companion_command(status: bool, no_voice: bool) -> Result<()> {
+    use crate::companion_client::{CompanionRequest, request_async};
+    if status {
+        match request_async(CompanionRequest::Status, std::time::Duration::from_secs(2)).await {
+            Ok(response) => {
+                println!(
+                    "{} at {} (capabilities: {})",
+                    response.message,
+                    crate::companion_client::socket_path().display(),
+                    response.capabilities.join(", ")
+                );
+                return Ok(());
+            }
+            Err(error) => anyhow::bail!("{error}"),
+        }
+    }
+    jcode_companion::run(jcode_companion::CompanionOptions {
+        voice: !no_voice,
+        ..Default::default()
+    })
+    .await
+}
+
 pub async fn run_dictate_command(type_output: bool) -> Result<()> {
-    let run = crate::dictation::run_configured().await?;
+    let run = jcode_voice::dictation::run_configured().await?;
 
     if type_output {
-        crate::dictation::type_text(&run.text)
+        jcode_voice::dictation::type_text(&run.text)
     } else {
         run_transcript_command(Some(run.text), run.mode, None).await
     }
@@ -1883,7 +1913,7 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
 
     eprintln!();
     eprintln!("  \x1b[1mScan with the jcode iOS app:\x1b[0m\n");
-    match crate::login_qr::render_unicode_qr(&pair_uri) {
+    match jcode_terminal_prompt::qr::render_unicode_qr(&pair_uri) {
         Ok(qr) => {
             for line in qr.lines() {
                 eprintln!("  {line}");
@@ -2529,11 +2559,9 @@ pub async fn run_single_message_command(
     emit_ndjson: bool,
     account_pins: &[(String, String)],
 ) -> Result<()> {
-    let provider = if emit_json || emit_ndjson {
-        super::provider_init::init_provider_quiet(choice, model).await?
-    } else {
-        super::provider_init::init_provider_for_validation(choice, model).await?
-    };
+    let provider =
+        super::provider_init::init_provider_for_run(choice, model, emit_json || emit_ndjson)
+            .await?;
     // `jcode run --account`: this run only; the stored default is unchanged.
     super::account_pins::apply_to_provider(&provider, account_pins)?;
     let registry = crate::tool::Registry::new(provider.clone()).await;
@@ -2565,6 +2593,29 @@ pub async fn run_single_message_command(
     run_single_message_with_agent(&mut agent, provider, message, emit_json, emit_ndjson).await
 }
 
+/// Provider id for `jcode run --json`/`--ndjson` output.
+///
+/// Every direct OpenAI-compatible profile (Ollama, LM Studio, DeepSeek, custom
+/// endpoints, ...) runs on the OpenRouter transport, whose `name()` is the
+/// fixed slot id `openrouter`. Reporting that attributed purely local runs to
+/// a paid third-party aggregator (#804). The session already records the
+/// resolved route identity, so prefer it for that slot and leave every other
+/// provider's established value unchanged.
+fn run_report_provider_name(
+    provider: &dyn crate::provider::Provider,
+    session_provider_key: Option<&str>,
+) -> String {
+    let name = provider.name();
+    if name.eq_ignore_ascii_case("openrouter")
+        && let Some(key) = session_provider_key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+    {
+        return key.to_string();
+    }
+    name.to_string()
+}
+
 async fn run_single_message_with_agent(
     agent: &mut crate::agent::Agent,
     provider: std::sync::Arc<dyn crate::provider::Provider>,
@@ -2577,7 +2628,10 @@ async fn run_single_message_with_agent(
             let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
             let report = RunCommandReport {
                 session_id: agent.session_id().to_string(),
-                provider: provider.name().to_string(),
+                provider: run_report_provider_name(
+                    provider.as_ref(),
+                    agent.session_provider_key().as_deref(),
+                ),
                 model: provider.model(),
                 text,
                 usage: agent.last_usage().clone(),
@@ -3045,6 +3099,8 @@ async fn run_single_message_command_ndjson(
 ) -> Result<()> {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let session_id = agent.session_id().to_string();
+    let provider_name =
+        run_report_provider_name(provider.as_ref(), agent.session_provider_key().as_deref());
     let mut stdout = std::io::stdout().lock();
     let mut state = NdjsonRunState {
         session_id: Some(session_id.clone()),
@@ -3055,7 +3111,7 @@ async fn run_single_message_command_ndjson(
         &serde_json::json!({
             "type": "start",
             "session_id": session_id,
-            "provider": provider.name(),
+            "provider": provider_name,
             "model": provider.model(),
         }),
     )?;
@@ -3199,7 +3255,7 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "done",
                     "session_id": session_id,
-                    "provider": provider.name(),
+                    "provider": provider_name,
                     "model": provider.model(),
                     "text": state.text,
                     "usage": state.usage,
@@ -3217,7 +3273,7 @@ async fn run_single_message_command_ndjson(
                 &serde_json::json!({
                     "type": "error",
                     "session_id": session_id,
-                    "provider": provider.name(),
+                    "provider": provider_name,
                     "model": provider.model(),
                     "message": format!("{err:#}"),
                 }),
@@ -3385,6 +3441,7 @@ fn emit_ndjson_event(
             display_role,
             point,
             tools_skipped,
+            client_ids,
         } => write_json_line(
             stdout,
             &serde_json::json!({
@@ -3393,6 +3450,7 @@ fn emit_ndjson_event(
                 "display_role": display_role,
                 "point": point,
                 "tools_skipped": tools_skipped,
+                "client_ids": client_ids,
             }),
         ),
         ServerEvent::BatchProgress { progress } => write_json_line(

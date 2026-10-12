@@ -66,6 +66,7 @@ impl App {
         }
 
         self.queued_messages = queued_messages;
+        self.queued_commands = restored.queued_commands;
         if self.has_queued_followups() {
             if self.is_remote {
                 // Do not synthesize a processing turn for restored remote follow-ups.
@@ -106,6 +107,7 @@ impl App {
         self.keybindings_config_generation = generation;
         self.model_switch_keys = keybind::load_model_switch_keys();
         self.effort_switch_keys = keybind::load_effort_switch_keys();
+        self.speed_switch_keys = keybind::load_speed_switch_keys();
         self.centered_toggle_keys = keybind::load_centered_toggle_key();
         self.toggle_keys = keybind::load_toggle_keys();
         self.workspace_navigation_keys = keybind::load_workspace_navigation_keys();
@@ -202,10 +204,17 @@ impl App {
 
     /// Hold the in-flight remote turn until the network recovers, then resume it.
     ///
-    /// Temporary connection failures can recover, but a provider-specific DNS
-    /// failure can persist while the general connectivity probe succeeds.
-    /// Count failed provider attempts when `force` is set, not offline probe
-    /// waits, so the same turn cannot resend forever.
+    /// Connectivity failures (DNS, connection reset, no route, transient TLS,
+    /// timeouts) usually recover: the request never reached the provider, so
+    /// resending is safe. When `force` is set (a real provider attempt just
+    /// failed) we wait regardless of the pending message's `auto_retry` flag
+    /// and promote it to auto-retry so the tick-based resume re-sends it.
+    ///
+    /// A provider-specific failure (for example DNS for one host) can persist
+    /// while the generic connectivity probe succeeds, so each forced wait
+    /// consumes one attempt from the per-turn retry budget and returns `false`
+    /// once it is spent. Offline probe re-waits (`force == false`) do not
+    /// consume attempts because no request was sent.
     pub(super) fn schedule_pending_remote_network_wait_with_force(
         &mut self,
         reason: &str,
@@ -218,7 +227,7 @@ impl App {
             if pending.retry_attempts >= Self::AUTO_RETRY_MAX_ATTEMPTS {
                 return false;
             }
-            pending.retry_attempts += 1;
+            pending.retry_attempts = pending.retry_attempts.saturating_add(1);
         }
         if !pending.auto_retry {
             if force {
@@ -434,6 +443,20 @@ impl App {
         self.rate_limit_reset = None;
     }
 
+    /// Stop automatically resuming a held turn whose retry budget is spent.
+    ///
+    /// Drops the held resend, disarms auto-poke (which would otherwise start
+    /// the same loop again at turn end), puts the user's prompt back in the
+    /// input box, and explains why the turn paused.
+    pub(super) fn pause_exhausted_auto_resume(&mut self, message: String, notice: &str) {
+        self.clear_pending_remote_retry();
+        super::commands::disable_auto_poke(self);
+        self.overnight_auto_poke = None;
+        self.restore_failed_input_to_box();
+        self.push_display_message(DisplayMessage::system(format!("🛑 {message}")));
+        self.set_status_notice(notice);
+    }
+
     /// Track a failed turn for the credential-failure circuit breaker.
     ///
     /// Returns `true` when the error classifies as a credential/auth failure
@@ -502,7 +525,12 @@ impl App {
         mut session: Session,
     ) -> Self {
         let skills = Arc::new(SkillRegistry::default());
-        let mcp_manager = Arc::new(RwLock::new(McpManager::new()));
+        // Remote and replay clients never connect MCP servers locally (the
+        // server owns them), so skip parsing ~/.claude.json and friends on the
+        // first-frame path.
+        let mcp_manager = Arc::new(RwLock::new(McpManager::with_config(
+            crate::mcp::McpConfig::default(),
+        )));
         if session.model.is_none() {
             session.model = Some(provider.model());
         }
@@ -578,6 +606,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
             upstream_provider: None,
@@ -659,7 +688,7 @@ impl App {
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
-            onboarding_sim: None,
+            onboarding_sim: false,
             update_sim: None,
             onboarding_flow: None,
             onboarding_auto_model_selection_active: Arc::new(AtomicBool::new(false)),
@@ -685,6 +714,7 @@ impl App {
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
+            remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
@@ -823,6 +853,7 @@ impl App {
             pending_account_requests: Default::default(),
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
+            speed_switch_keys: keybind::load_speed_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
             toggle_keys: keybind::load_toggle_keys(),
             workspace_navigation_keys: keybind::load_workspace_navigation_keys(),
@@ -847,6 +878,7 @@ impl App {
             cleared_draft_images: Vec::new(),
             input_selection_anchor: None,
             input_selection_clicks: Default::default(),
+            input_typing_undo: None,
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -917,6 +949,7 @@ impl App {
             help_scroll: None,
             model_status_scroll: None,
             model_status_content: String::new(),
+            commit_log_overlay: None,
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
             pending_session_picker_load: None,
@@ -1051,6 +1084,7 @@ impl App {
             power_inhibitor: crate::power_inhibit::PowerInhibitor::new(),
             should_quit: false,
             queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             hidden_queued_system_messages: Vec::new(),
             current_turn_system_reminder: None,
             upstream_provider: None,
@@ -1132,7 +1166,7 @@ impl App {
             submit_input_on_startup: false,
             startup_submit_deferred_reason: None,
             onboarding_preview_mode: false,
-            onboarding_sim: None,
+            onboarding_sim: false,
             update_sim: None,
             onboarding_flow: None,
             onboarding_auto_model_selection_active: Arc::new(AtomicBool::new(false)),
@@ -1158,6 +1192,7 @@ impl App {
             remote_provider_model: None,
             remote_model_catalog_generation: 0,
             remote_resolved_credential: None,
+            remote_session_facts_provisional: false,
             remote_startup_phase: None,
             remote_startup_phase_started: None,
             remote_reasoning_effort: None,
@@ -1296,6 +1331,7 @@ impl App {
             pending_account_requests: Default::default(),
             model_switch_keys: keybind::load_model_switch_keys(),
             effort_switch_keys: keybind::load_effort_switch_keys(),
+            speed_switch_keys: keybind::load_speed_switch_keys(),
             centered_toggle_keys: keybind::load_centered_toggle_key(),
             toggle_keys: keybind::load_toggle_keys(),
             workspace_navigation_keys: keybind::load_workspace_navigation_keys(),
@@ -1320,6 +1356,7 @@ impl App {
             cleared_draft_images: Vec::new(),
             input_selection_anchor: None,
             input_selection_clicks: Default::default(),
+            input_typing_undo: None,
             history_draft: None,
             status_notice: None,
             learn_hint: None,
@@ -1390,6 +1427,7 @@ impl App {
             help_scroll: None,
             model_status_scroll: None,
             model_status_content: String::new(),
+            commit_log_overlay: None,
             session_picker_overlay: None,
             session_picker_mode: SessionPickerMode::Resume,
             pending_session_picker_load: None,
@@ -1496,7 +1534,7 @@ impl App {
             .autojudge_enabled
             .unwrap_or(crate::config::config().autojudge.enabled);
         if let Some(model) = self.session.model.clone() {
-            self.update_context_limit_for_model(&model);
+            self.update_context_limit_for_model(&model, None);
         }
         self.follow_chat_bottom();
         crate::logging::info(&format!(
@@ -1520,6 +1558,10 @@ impl App {
     }
 
     pub fn new_for_remote_with_options(resume_session: Option<String>, fresh_spawn: bool) -> Self {
+        // Kick the background git probe first so its ~20ms of subprocess work
+        // overlaps with the rest of client setup. `run_remote` gives it a short
+        // bounded wait before the first paint.
+        let _ = super::helpers::gather_git_info();
         let provider: Arc<dyn Provider> =
             Arc::new(InertRuntimeProvider::new(AppRuntimeMode::RemoteClient));
         let registry = Registry::empty();
@@ -1588,6 +1630,9 @@ impl App {
         }
 
         app.resume_session_id = resume_session;
+        // After `resume_session_id`: the hint needs to know whether this is a
+        // new session (configured effort applies) or a resumed one.
+        app.apply_remote_header_hint();
         app
     }
 

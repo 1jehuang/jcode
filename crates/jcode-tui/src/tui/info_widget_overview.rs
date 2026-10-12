@@ -104,10 +104,15 @@ fn compact_memory_height(data: &InfoWidgetData) -> u16 {
 
 fn compact_background_height(data: &InfoWidgetData) -> u16 {
     if let Some(info) = &data.background_info
-        && info.running_count > 0
+        && info.has_content()
     {
-        let task_lines = info.running_tasks.len().min(3) as u16;
-        let overflow_line = u16::from(info.running_tasks.len() > 3);
+        let total = if info.rows.is_empty() {
+            info.running_tasks.len()
+        } else {
+            info.rows.len()
+        };
+        let task_lines = total.min(3) as u16;
+        let overflow_line = u16::from(total > 3);
         return 1 + task_lines + overflow_line;
     }
     0

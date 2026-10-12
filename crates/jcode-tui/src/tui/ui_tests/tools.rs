@@ -172,7 +172,9 @@ fn test_token_badges_survive_full_terminal_draw() {
                         .unwrap_or_else(|| panic!("missing tool row: {rows:#?}"))
                         as u16;
                     let row = &rows[y as usize];
-                    assert!(row.contains("(6 lines)"), "{row}");
+                    // A standalone patch's summary lives on the inline diff
+                    // header, so only batch subcall rows still carry it.
+                    assert_eq!(row.contains("(6 lines)"), batch, "{row}");
                     assert!(row.trim_end().ends_with(&label), "{row}");
                     let x = (0..width)
                         .find(|&x| {

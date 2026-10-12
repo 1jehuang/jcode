@@ -37,6 +37,52 @@
 use base64::Engine as _;
 use jcode_message_types::{ContentBlock, Message};
 
+use crate::image_normalize::{normalize_image_bytes, sniff_provider_media_type};
+
+/// Prefix of the label the agent emits after an image attached to a tool
+/// result (see `agent::tools`). Folded together with an omitted image.
+const TOOL_IMAGE_LABEL_PREFIX: &str = "[Attached image associated with the preceding tool result: ";
+
+/// Replace the image at `index` with a textual `marker`.
+///
+/// When the image belongs to a tool result (the block before it is a
+/// `ToolResult`), the marker and any trailing image label are folded into that
+/// result's text instead of becoming sibling text blocks. Anthropic requires
+/// the results of a parallel tool-call turn to be contiguous, so a stray text
+/// block between them would itself break the request.
+///
+/// Returns the index of the next block to examine.
+fn omit_image_block(content: &mut Vec<ContentBlock>, index: usize, marker: String) -> usize {
+    let folds_into_tool_result =
+        index > 0 && matches!(content[index - 1], ContentBlock::ToolResult { .. });
+    if !folds_into_tool_result {
+        content[index] = ContentBlock::Text {
+            text: marker,
+            cache_control: None,
+        };
+        return index + 1;
+    }
+    content.remove(index);
+    let mut note = marker;
+    if let Some(ContentBlock::Text { text, .. }) = content.get(index)
+        && text.starts_with(TOOL_IMAGE_LABEL_PREFIX)
+    {
+        note.push('\n');
+        note.push_str(text);
+        content.remove(index);
+    }
+    if let ContentBlock::ToolResult {
+        content: result, ..
+    } = &mut content[index - 1]
+    {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(&note);
+    }
+    index
+}
+
 /// Build a request-safe copy of `messages` when the selected provider/model
 /// cannot accept image input. Replacing each image with a small textual marker
 /// preserves message and tool-call ordering while ensuring no encoded image
@@ -57,15 +103,16 @@ pub(crate) fn filter_unsupported_outbound_images(
 
     let mut filtered = messages.to_vec();
     for message in &mut filtered {
-        for block in &mut message.content {
-            if let ContentBlock::Image { media_type, .. } = block {
-                *block = ContentBlock::Text {
-                    text: format!(
-                        "[Image omitted: this provider/model does not support image input; media_type={media_type}]"
-                    ),
-                    cache_control: None,
-                };
+        let mut index = 0;
+        while index < message.content.len() {
+            if let ContentBlock::Image { media_type, .. } = &message.content[index] {
+                let marker = format!(
+                    "[Image omitted: this provider/model does not support image input; media_type={media_type}]"
+                );
+                index = omit_image_block(&mut message.content, index, marker);
+                continue;
             }
+            index += 1;
         }
     }
     Some(filtered)
@@ -119,7 +166,7 @@ pub(crate) fn clamp_outbound_images(messages: &[Message]) -> Option<Vec<Message>
         .any(|(media_type, data)| {
             data.len() > IMAGE_BASE64_BYTE_LIMIT
                 || image_exceeds_edge(data, max_edge)
-                || media_type_mismatch(media_type, data)
+                || format_needs_fix(media_type, data)
         });
     if !needs_change {
         return None;
@@ -128,8 +175,23 @@ pub(crate) fn clamp_outbound_images(messages: &[Message]) -> Option<Vec<Message>
     let mut clamped = messages.to_vec();
     let mut changed = false;
     for message in &mut clamped {
-        for block in &mut message.content {
-            if let ContentBlock::Image { media_type, data } = block {
+        let mut index = 0;
+        while index < message.content.len() {
+            if let ContentBlock::Image { media_type, data } = &mut message.content[index] {
+                // Formats no provider accepts (BMP, ICO, TIFF, HEIC, ...) are
+                // converted to PNG when possible and otherwise replaced by a
+                // text marker. This only rewrites the request copy, so it also
+                // un-sticks sessions whose history already holds such an image
+                // (#1712).
+                match ensure_provider_format(media_type, data) {
+                    Ok(converted) => changed |= converted,
+                    Err(reason) => {
+                        let marker = format!("[Image omitted: {media_type} {reason}]");
+                        index = omit_image_block(&mut message.content, index, marker);
+                        changed = true;
+                        continue;
+                    }
+                }
                 // Correct a mismatched label first (e.g. JPEG bytes tagged as
                 // `image/png`) so downstream re-encoding decisions and the wire
                 // payload agree. Providers reject a request outright when the
@@ -141,42 +203,40 @@ pub(crate) fn clamp_outbound_images(messages: &[Message]) -> Option<Vec<Message>
                     changed = true;
                 }
             }
+            index += 1;
         }
     }
 
     changed.then_some(clamped)
 }
 
-/// Detect an image's true media type from its leading magic bytes. Returns
-/// `None` for formats we do not attempt to correct (the block is then left as
-/// declared).
-fn sniff_media_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.len() >= 8 && bytes[0..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
-        return Some("image/png");
+/// True when the block cannot go on the wire as-is: the payload is not valid
+/// base64, its bytes are not a provider-accepted format, or the declared
+/// `media_type` disagrees with the magic bytes.
+fn format_needs_fix(media_type: &str, data_b64: &str) -> bool {
+    let Some(bytes) = decode_b64(data_b64) else {
+        return true;
+    };
+    match sniff_provider_media_type(&bytes) {
+        Some(actual) => !media_type.eq_ignore_ascii_case(actual),
+        None => true,
     }
-    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
-        return Some("image/jpeg");
-    }
-    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
-        return Some("image/gif");
-    }
-    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some("image/webp");
-    }
-    None
 }
 
-/// True when `media_type` disagrees with what the base64 payload's magic bytes
-/// say the image actually is. Unknown formats and undecodable payloads are
-/// treated as "no mismatch" so we never touch data we cannot reason about.
-fn media_type_mismatch(media_type: &str, data_b64: &str) -> bool {
-    let Some(bytes) = decode_b64(data_b64) else {
-        return false;
+/// Make sure the payload is a provider-accepted format. Returns `Ok(true)` when
+/// it was converted (to PNG), `Ok(false)` when it already was, and `Err` with a
+/// reason when it cannot be sent at all.
+fn ensure_provider_format(media_type: &mut String, data: &mut String) -> Result<bool, String> {
+    let Some(bytes) = decode_b64(data) else {
+        return Err("data is not valid base64, so it cannot be sent to the model".into());
     };
-    match sniff_media_type(&bytes) {
-        Some(actual) => !media_type.eq_ignore_ascii_case(actual),
-        None => false,
+    if sniff_provider_media_type(&bytes).is_some() {
+        return Ok(false);
     }
+    let image = normalize_image_bytes(bytes)?;
+    *media_type = image.media_type.to_string();
+    *data = base64::engine::general_purpose::STANDARD.encode(&image.data);
+    Ok(true)
 }
 
 /// Rewrite `media_type` to match the payload's magic bytes when they disagree.
@@ -185,7 +245,7 @@ fn reconcile_media_type(media_type: &mut String, data_b64: &str) -> bool {
     let Some(bytes) = decode_b64(data_b64) else {
         return false;
     };
-    match sniff_media_type(&bytes) {
+    match sniff_provider_media_type(&bytes) {
         Some(actual) if !media_type.eq_ignore_ascii_case(actual) => {
             *media_type = actual.to_string();
             true
@@ -650,18 +710,120 @@ mod tests {
     #[test]
     fn sniff_detects_common_formats() {
         assert_eq!(
-            sniff_media_type(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0]),
+            sniff_provider_media_type(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0]),
             Some("image/png")
         );
         assert_eq!(
-            sniff_media_type(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            sniff_provider_media_type(&[0xFF, 0xD8, 0xFF, 0xE0]),
             Some("image/jpeg")
         );
-        assert_eq!(sniff_media_type(b"GIF89a....."), Some("image/gif"));
+        assert_eq!(sniff_provider_media_type(b"GIF89a....."), Some("image/gif"));
         assert_eq!(
-            sniff_media_type(b"RIFF\0\0\0\0WEBP...."),
+            sniff_provider_media_type(b"RIFF\0\0\0\0WEBP...."),
             Some("image/webp")
         );
-        assert_eq!(sniff_media_type(b"not an image"), None);
+        assert_eq!(sniff_provider_media_type(b"not an image"), None);
+    }
+
+    fn bmp_b64() -> String {
+        let img = RgbImage::from_pixel(4, 4, image::Rgb([200, 10, 10]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, ImageFormat::Bmp)
+            .unwrap();
+        base64::engine::general_purpose::STANDARD.encode(out.into_inner())
+    }
+
+    fn tool_result_block(id: &str, content: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: content.to_string(),
+            is_error: None,
+        }
+    }
+
+    /// #1712: a persisted `image/bmp` block must be converted before it reaches
+    /// the wire, which also recovers sessions already holding one.
+    #[test]
+    fn bmp_block_is_converted_to_png() {
+        let messages = vec![image_message_with("image/bmp", bmp_b64())];
+        let out = clamp_outbound_images(&messages).expect("bmp must be rewritten");
+        let ContentBlock::Image { media_type, data } = &out[0].content[0] else {
+            panic!("expected image block");
+        };
+        assert_eq!(media_type, "image/png");
+        let bytes = decode_b64(data).unwrap();
+        assert_eq!(sniff_provider_media_type(&bytes), Some("image/png"));
+        assert_eq!(dims(data), (4, 4));
+    }
+
+    /// TIFF bytes behind a `.png` label must not go out as `image/png`.
+    #[test]
+    fn tiff_bytes_labelled_png_are_converted() {
+        let img = RgbImage::from_pixel(3, 3, image::Rgb([1, 2, 3]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, ImageFormat::Tiff)
+            .unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+        let messages = vec![image_message_with("image/png", data)];
+        let out = clamp_outbound_images(&messages).expect("tiff must be rewritten");
+        let ContentBlock::Image { media_type, data } = &out[0].content[0] else {
+            panic!("expected image block");
+        };
+        assert_eq!(media_type, "image/png");
+        assert_eq!(
+            sniff_provider_media_type(&decode_b64(data).unwrap()),
+            Some("image/png")
+        );
+    }
+
+    /// An undecodable image inside a tool result becomes a note folded into
+    /// that result, keeping parallel tool results contiguous.
+    #[test]
+    fn undecodable_tool_image_folds_marker_into_tool_result() {
+        let mut heic = vec![0, 0, 0, 24];
+        heic.extend_from_slice(b"ftypheic");
+        heic.extend_from_slice(&[0; 16]);
+        let heic = base64::engine::general_purpose::STANDARD.encode(heic);
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                tool_result_block("toolu_1", "Image: x.heic"),
+                ContentBlock::Image {
+                    media_type: "image/heic".into(),
+                    data: heic,
+                },
+                ContentBlock::Text {
+                    text: format!("{TOOL_IMAGE_LABEL_PREFIX}x.heic]"),
+                    cache_control: None,
+                },
+                tool_result_block("toolu_2", "second"),
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+        let out = clamp_outbound_images(&messages).expect("heic must be rewritten");
+        let content = &out[0].content;
+        assert_eq!(content.len(), 2, "tool results must stay contiguous");
+        let ContentBlock::ToolResult { content: first, .. } = &content[0] else {
+            panic!("expected tool result");
+        };
+        assert!(first.starts_with("Image: x.heic\n[Image omitted: image/heic HEIC"));
+        assert!(first.contains(TOOL_IMAGE_LABEL_PREFIX));
+        assert!(matches!(
+            &content[1],
+            ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "toolu_2"
+        ));
+    }
+
+    #[test]
+    fn invalid_base64_image_is_omitted() {
+        let messages = vec![image_message_with("image/png", "@@not base64@@".into())];
+        let out = clamp_outbound_images(&messages).expect("must be rewritten");
+        assert!(matches!(
+            &out[0].content[0],
+            ContentBlock::Text { text, .. } if text.starts_with("[Image omitted: image/png")
+        ));
     }
 }

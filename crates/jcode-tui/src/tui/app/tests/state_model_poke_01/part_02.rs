@@ -124,13 +124,8 @@ fn test_tool_side_panel_uses_shared_right_pane_keyboard_focus() {
     assert!(app.handle_diagram_ctrl_key(KeyCode::Char('l'), false));
     assert!(app.diff_pane_focus);
 
-    // Cycle the diff display mode via its configured chord (Alt+G by
-    // default; BackTab was remapped to model-favorite cycling).
-    assert!(super::input::handle_navigation_shortcuts(
-        &mut app,
-        KeyCode::Char('g'),
-        KeyModifiers::ALT
-    ));
+    // Cycle the diff display mode via /diff (Alt+G now opens the commit log).
+    assert!(super::commands::handle_diff_command(&mut app, "/diff"));
     assert!(
         app.diff_pane_focus,
         "cycling diff display should not drop focus when tool side panel is still visible"

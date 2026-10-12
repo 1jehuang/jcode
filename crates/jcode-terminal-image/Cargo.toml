@@ -11,4 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 base64 = "0.22"
-crossterm = "0.29"
+crossterm = { version = "0.29", optional = true }
+
+[features]
+# Terminal rendering (Kitty/iTerm2/Sixel). Only clients enable it. The shared
+# runtime uses just the pure `metadata` helpers and stays terminal-free.
+default = []
+display = ["dep:crossterm"]

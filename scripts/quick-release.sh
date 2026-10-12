@@ -73,6 +73,20 @@ fi
 
 cd "$(git rev-parse --show-toplevel)"
 
+# Ad-hoc sign a macOS binary with a stable code-signing identifier. The linker
+# signature otherwise uses cargo's hashed output name, which macOS Tahoe treats
+# as a new program on every release (duplicate "Allow in the Menu Bar" entries,
+# #621). Must match the identifier in .github/workflows/release.yml.
+MACOS_SIGNING_IDENTIFIER="com.jcode.cli"
+sign_macos_binary() {
+    local bin="$1"
+    if command -v codesign &>/dev/null; then
+        codesign --force --sign - --identifier "$MACOS_SIGNING_IDENTIFIER" "$bin"
+    else
+        rcodesign sign --binary-identifier "$MACOS_SIGNING_IDENTIFIER" "$bin" >/dev/null
+    fi
+}
+
 required_commands=(git)
 case "$MODE" in
     remote) ;;
@@ -84,14 +98,14 @@ case "$MODE" in
         $DRY_RUN || required_commands+=(gh)
         ;;
     prepare-fast-macos)
-        required_commands+=(cargo file sha256sum)
+        required_commands+=(cargo file sha256sum rcodesign)
         ;;
     fast-macos-local)
-        required_commands+=(file tar gzip sha256sum)
+        required_commands+=(file tar gzip sha256sum rcodesign)
         $DRY_RUN || required_commands+=(gh)
         ;;
     standard)
-        required_commands+=(cargo docker file)
+        required_commands+=(cargo docker file rcodesign)
         $DRY_RUN || required_commands+=(gh)
         ;;
 esac
@@ -304,7 +318,17 @@ export JCODE_RUNTIME_RELEASE_SEMVER="$VERSION_NUM"
 export JCODE_RUNTIME_RELEASE_GIT_HASH="$(git rev-parse --short HEAD)"
 export JCODE_RUNTIME_RELEASE_GIT_DATE="$(git log -1 --format=%ci)"
 export JCODE_RUNTIME_RELEASE_GIT_TAG="$VERSION"
-self_dir=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+self=\$0
+# The launcher and channel entries are symlinks to this wrapper; resolve them
+# so the payload is found next to the real file, not next to the symlink.
+while [ -L "\$self" ]; do
+    link=\$(readlink -- "\$self")
+    case \$link in
+        /*) self=\$link ;;
+        *) self=\$(dirname -- "\$self")/\$link ;;
+    esac
+done
+self_dir=\$(CDPATH= cd -- "\$(dirname -- "\$self")" && pwd)
 exec "\$self_dir/jcode-linux-x86_64.bin" "\$@"
 WRAPPER
     chmod +x "$DIST/jcode-linux-x86_64"
@@ -367,6 +391,7 @@ if [[ "$MODE" == "fast-macos-local" ]]; then
     cp "$source_bin" "$DIST/jcode-macos-aarch64"
     chmod +x "$DIST/jcode-macos-aarch64"
     file "$DIST/jcode-macos-aarch64" | grep -q 'Mach-O 64-bit' || { echo "Error: bad macOS binary" >&2; exit 1; }
+    sign_macos_binary "$DIST/jcode-macos-aarch64"
     (cd "$DIST" && tar czf jcode-macos-aarch64.tar.gz jcode-macos-aarch64)
     (cd "$DIST" && sha256sum jcode-macos-aarch64.tar.gz > SHA256SUMS)
 
@@ -400,6 +425,7 @@ LINUX_PID=$!
         cargo build --release --target aarch64-apple-darwin --bin jcode 2>/dev/null
     cp target/aarch64-apple-darwin/release/jcode "$DIST/jcode-macos-aarch64"
     chmod +x "$DIST/jcode-macos-aarch64"
+    sign_macos_binary "$DIST/jcode-macos-aarch64"
     (cd "$DIST" && tar czf jcode-macos-aarch64.tar.gz jcode-macos-aarch64)
     echo "  ✅ macOS done ($(elapsed)s)"
 ) &

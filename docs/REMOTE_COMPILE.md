@@ -6,21 +6,22 @@ code, and server-metered usage. It never executes the supplied command locally.
 
 ## Subscription-aware tool surface
 
-The tool remains discoverable when signed out. Its description asks the agent to
-explain the Jcode subscription requirement and link to <https://jcode.sh/pricing>.
+The tool is always registered with a static description that mentions the
+Jcode subscription requirement. The description never depends on account
+state, because tool definitions are part of the provider prompt-cache prefix and
+any mid-session change would invalidate the cache for every session.
 Existing subscribers can sign in with `jcode account login`. The tool does not
 open checkout, subscribe, or purchase credits automatically.
 
-Before exposing the schema, the harness checks `/v1/me` with the configured Jcode
-account credential. Guidance distinguishes signed out, subscription required,
-available, service not enabled, and account status unknown. Account checks are
-cached for 60 seconds by a fingerprint of the key and API base, not by model
-provider. Using a non-Jcode model does not prevent use of a Jcode subscription.
-Locked tool snapshots refresh this description when account state changes,
-including sessions using deferred MCP tools.
+Account state is reported only in tool results. `action=status` and every
+compile check `/v1/me` with the configured Jcode account credential, and the
+result distinguishes signed out, subscription required, available, service not
+enabled, and account status unknown. Signed-out and subscription-required
+results tell the agent to link to <https://jcode.sh/pricing>. Using a non-Jcode
+model does not prevent use of a Jcode subscription.
 
-Every compilation checks access again **before reading or uploading source**.
-Neither a cached tier nor a local environment flag authorizes a build. The
+Every compilation checks access **before reading or uploading source**.
+No cached state or local environment flag authorizes a build. The
 server independently authenticates the request, verifies paid entitlement,
 reserves cloud credits, and admits sandbox capacity. An unavailable API fails
 closed, without representing the user as unsubscribed.

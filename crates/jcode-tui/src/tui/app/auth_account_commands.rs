@@ -114,8 +114,11 @@ pub(crate) async fn handle_account_command_remote(
 
 fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>> {
     let rest = trimmed
-        .strip_prefix("/account")
-        .or_else(|| trimmed.strip_prefix("/accounts"))?;
+        .strip_prefix("/accounts")
+        .or_else(|| trimmed.strip_prefix("/account"))?;
+    if !rest.is_empty() && !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
     let rest = rest.trim();
     if rest.is_empty() {
         return Some(Ok(AccountCommand::OpenOverlay {
@@ -955,12 +958,8 @@ fn save_openai_compat_setting(app: &mut App, setting: OpenAiCompatSetting, value
     );
     if let Some(key) = current_key
         && (old.api_key_env != new.api_key_env || old.env_file != new.env_file)
-        && crate::provider_catalog::save_env_value_to_env_file(
-            &new.api_key_env,
-            &new.env_file,
-            Some(&key),
-        )
-        .is_err()
+        && crate::provider_catalog::save_named_api_key(&new.env_file, &new.api_key_env, &key)
+            .is_err()
     {
         crate::logging::warn("Failed to migrate OpenAI-compatible API key to new source");
     }
@@ -1348,6 +1347,20 @@ mod tests {
         assert!(parsed("/account failover status").contains("Failover(Status)"));
         assert!(parsed("/account failover").contains("Failover(Status)"));
         assert!(parsed("/account failover sideways").contains("Err"));
+    }
+
+    #[test]
+    fn parse_account_command_requires_a_token_boundary() {
+        assert!(
+            parse_account_command("/accounting").is_none(),
+            "/accounting must not be parsed as /account with label `ing`"
+        );
+        assert!(matches!(
+            parse_account_command("/accounts"),
+            Some(Ok(AccountCommand::OpenOverlay {
+                provider_filter: None
+            }))
+        ));
     }
 
     #[test]

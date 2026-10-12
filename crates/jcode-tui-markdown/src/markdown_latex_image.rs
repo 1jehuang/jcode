@@ -366,6 +366,56 @@ struct Toolchain {
     pdftocairo: PathBuf,
 }
 
+const TOOLCHAIN_MISSING_ERROR: &str =
+    "no TeX toolchain found (need latex + dvipng, or pdflatex + pdftocairo)";
+
+#[cfg(test)]
+thread_local! {
+    static TOOLCHAIN_MISSING_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn with_toolchain_missing_override<T>(missing: bool, f: impl FnOnce() -> T) -> T {
+    TOOLCHAIN_MISSING_OVERRIDE.with(|cell| {
+        let previous = cell.replace(Some(missing));
+        let result = f();
+        cell.set(previous);
+        result
+    })
+}
+
+fn executable_on_path(command: &Path) -> bool {
+    if command.components().count() > 1 {
+        return command.is_file();
+    }
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        let candidate = dir.join(command);
+        candidate.is_file() || (cfg!(windows) && candidate.with_extension("exe").is_file())
+    })
+}
+
+/// True when image-mode LaTeX can never succeed because neither the DVI nor
+/// the PDF toolchain is installed. Cached for the process lifetime: this runs
+/// on the draw path and `PATH` probing is not free.
+pub(super) fn toolchain_missing() -> bool {
+    #[cfg(test)]
+    if let Some(missing) = TOOLCHAIN_MISSING_OVERRIDE.with(std::cell::Cell::get) {
+        return missing;
+    }
+    static MISSING: OnceLock<bool> = OnceLock::new();
+    *MISSING.get_or_init(|| {
+        let toolchain = Toolchain::from_environment();
+        let dvi = executable_on_path(&toolchain.latex) && executable_on_path(&toolchain.dvipng);
+        let pdf =
+            executable_on_path(&toolchain.pdflatex) && executable_on_path(&toolchain.pdftocairo);
+        !dvi && !pdf
+    })
+}
+
 impl Toolchain {
     fn from_environment() -> Self {
         Self {
@@ -409,6 +459,11 @@ pub(super) fn render_latex_image(
     let artifact = match cached_artifact(source, display, dpi) {
         Ok(artifact) => artifact,
         Err(_) => {
+            // Previously cached artifacts stay usable, but never queue work
+            // that cannot succeed without a TeX toolchain.
+            if toolchain_missing() {
+                return LatexImageOutcome::Failed(TOOLCHAIN_MISSING_ERROR.to_string());
+            }
             if enqueue_render(source, display, dpi, failure_key) {
                 return LatexImageOutcome::Pending;
             }

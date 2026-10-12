@@ -195,3 +195,42 @@ fn synthetic_interrupt_placeholder_text_is_also_treated_as_a_placeholder() {
         ))
     );
 }
+
+/// #1632: a journal replayed on top of a snapshot that already contained it
+/// repeats a whole run of `tool_use`/`tool_result` pairs. Every repeated
+/// `tool_use` must be dropped so each remaining one is answered immediately.
+#[test]
+fn duplicated_tool_history_run_formats_without_orphaned_tool_use() {
+    let run = vec![
+        tool_use("toolu_1"),
+        tool_result("toolu_1", "one", None),
+        tool_use("toolu_2"),
+        tool_result("toolu_2", "two", None),
+    ];
+    let mut messages = vec![text_msg(Role::User, "Q")];
+    messages.extend(run.clone());
+    messages.extend(run);
+    messages.push(text_msg(Role::User, "next"));
+
+    let formatted = format_messages(&messages, false);
+    assert_unique_tool_results(&formatted);
+    assert!(formatted.iter().all(|m| !m.content.is_empty()));
+
+    let mut tool_use_count = 0;
+    for (i, msg) in formatted.iter().enumerate() {
+        for block in &msg.content {
+            if let ApiContentBlock::ToolUse { id, .. } = block {
+                tool_use_count += 1;
+                let next = formatted.get(i + 1).expect("tool_use must be followed");
+                assert!(
+                    next.content.iter().any(|b| matches!(
+                        b,
+                        ApiContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == id
+                    )),
+                    "tool_use {id} not answered in the next message"
+                );
+            }
+        }
+    }
+    assert_eq!(tool_use_count, 2);
+}

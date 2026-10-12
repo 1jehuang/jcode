@@ -50,7 +50,6 @@ pub use crash::{
     CrashedSessionsInfo, detect_crashed_sessions, find_recent_crashed_sessions,
     find_session_by_name_or_id, recover_crashed_sessions, recover_crashed_sessions_by_ids,
 };
-pub use jcode_session_types::prompt_title;
 pub use jcode_session_types::{
     EnvSnapshot, GitState, SessionImproveMode, SessionStatus, StoredCompactionState,
     StoredDisplayRole, StoredMemoryInjection, StoredMessage, StoredTokenUsage,
@@ -74,9 +73,19 @@ pub use storage_paths::session_journal_path_from_snapshot;
 pub(crate) use storage_paths::session_path_in_dir;
 use storage_paths::{estimate_json_bytes, persist_vector_mode_label};
 pub use storage_paths::{session_exists, session_journal_path, session_path};
+pub use {jcode_session_types::prompt_title, persistence::drain_saves_for_shutdown};
 
 fn stored_messages_to_messages(messages: &[StoredMessage]) -> Vec<Message> {
     messages.iter().map(StoredMessage::to_message).collect()
+}
+
+fn message_has_tool_image(content: &[ContentBlock]) -> bool {
+    content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+        && content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
 }
 
 fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
@@ -1381,8 +1390,28 @@ request in this new forked session, using the inherited conversation only as con
             .message_stats
             .merge_from(&summarize_blocks(&message.content));
         self.adopt_prompt_title(&message);
+        let adds_tool_image = message_has_tool_image(&message.content);
         self.messages.push(message);
         self.mark_messages_append_dirty();
+        if adds_tool_image {
+            self.decay_old_tool_images();
+        }
+    }
+
+    /// Replace inline screenshots from older tool results with short text
+    /// markers once they exceed the tool image budget, so computer-use and
+    /// browser sessions do not grow the transcript without bound (#1680). The
+    /// newest screenshots keep their data and are still sent to the provider.
+    /// Returns the number of images replaced.
+    pub fn decay_old_tool_images(&mut self) -> usize {
+        let mut contents: Vec<&mut Vec<ContentBlock>> =
+            self.messages.iter_mut().map(|m| &mut m.content).collect();
+        let stripped = jcode_compaction_core::decay_old_tool_images_in_contents(&mut contents);
+        if stripped > 0 {
+            self.mark_memory_profile_dirty();
+            self.mark_messages_full_dirty();
+        }
+        stripped
     }
 
     /// Name an untitled session after its first real user prompt so lists show

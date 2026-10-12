@@ -114,6 +114,11 @@ static NEXT_TEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub struct BridgeState {
     /// Set only after a safe legacy ping capability probe succeeds.
     pub session_tools_supported: bool,
+    /// The daemon accepts soft interrupt ids and per-id cancellation, and
+    /// replies to `background_tool` with a result.
+    pub soft_interrupt_ids_supported: bool,
+    /// Leftover queue size reported just before the current turn's `done`.
+    pending_soft_interrupts_at_done: Option<u32>,
     /// Whether an unannounced transport loss should crash the attached session.
     pub crash_on_disconnect: bool,
     /// Session id assigned by the daemon for this connection.
@@ -304,6 +309,10 @@ enum SimpleKind {
     /// Awaiting the catalog reply that answers `list_models`.
     Models,
     RuntimeInfo,
+    /// Awaiting `background_tool_result`.
+    BackgroundTool,
+    /// Awaiting `soft_interrupts_cancelled`.
+    SoftInterruptCancel,
     Credential {
         provider: String,
         configured: bool,
@@ -649,6 +658,10 @@ impl BridgeState {
                     && !images.is_empty()
                 {
                     interrupt["images"] = json!(images);
+                }
+                if let Some(client_id) = request["client_id"].as_str() {
+                    // Older daemons ignore the field, which is harmless here.
+                    interrupt["client_id"] = json!(client_id);
                 }
                 vec![Outbound::Legacy(interrupt)]
             }
@@ -1033,6 +1046,41 @@ impl BridgeState {
                     Err((code, message)) => Self::error_reply(api_id, code, &message),
                 }
             }
+            "get_todo_state" => {
+                let session_id = request["session_id"].as_str().unwrap_or_default();
+                match Self::todo_home(session_id) {
+                    Ok(home) => vec![Outbound::Reply(ServerFrame::reply(
+                        api_id,
+                        ApiEvent::TodoState {
+                            session_id: session_id.to_string(),
+                            state: jcode_todo_policy::store::load_snapshot(&home, session_id),
+                        },
+                    ))],
+                    Err((code, message)) => Self::error_reply(api_id, code, &message),
+                }
+            }
+            "ack_todo_follow_up" => {
+                let session_id = request["session_id"].as_str().unwrap_or_default();
+                let effects: jcode_todo_policy::TodoEffects =
+                    match serde_json::from_value(request["effects"].clone()) {
+                        Ok(effects) => effects,
+                        Err(error) => {
+                            return Self::error_reply(
+                                api_id,
+                                ErrorCode::InvalidRequest,
+                                &format!("invalid effects: {error}"),
+                            );
+                        }
+                    };
+                let result = Self::todo_home(session_id).and_then(|home| {
+                    jcode_todo_policy::store::apply_effects(&home, session_id, effects)
+                        .map_err(|error| (ErrorCode::Internal, error.to_string()))
+                });
+                match result {
+                    Ok(()) => vec![Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok))],
+                    Err((code, message)) => Self::error_reply(api_id, code, &message),
+                }
+            }
             "file_status" => {
                 let session_id = request["session_id"].as_str().unwrap_or_default();
                 let relative = request["path"].as_str().unwrap_or_default();
@@ -1166,15 +1214,57 @@ impl BridgeState {
                 vec![Outbound::Legacy(json!({"type": "rewind_undo", "id": id}))]
             }
             "cancel_soft_interrupts" => {
+                let client_ids = match request.get("client_ids") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::Array(ids)) if ids.iter().all(Value::is_string) => Some(
+                        ids.iter()
+                            .filter_map(|id| id.as_str().map(str::to_string))
+                            .collect::<Vec<_>>(),
+                    ),
+                    Some(_) => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            "`client_ids` must be an array of strings",
+                        );
+                    }
+                };
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
-                vec![Outbound::Legacy(
-                    json!({"type": "cancel_soft_interrupts", "id": id}),
-                )]
+                match client_ids {
+                    Some(client_ids) => {
+                        // An older daemon ignores the filter and would clear
+                        // the whole queue: refuse instead of over-cancelling.
+                        if !self.soft_interrupt_ids_supported {
+                            return Self::error_reply(
+                                api_id,
+                                ErrorCode::UnknownRequest,
+                                "daemon does not advertise the soft_interrupt_ids capability",
+                            );
+                        }
+                        self.pending_simple
+                            .push((id, api_id, SimpleKind::SoftInterruptCancel));
+                        vec![Outbound::Legacy(json!({
+                            "type": "cancel_soft_interrupts",
+                            "id": id,
+                            "client_ids": client_ids,
+                        }))]
+                    }
+                    None => {
+                        self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                        vec![Outbound::Legacy(
+                            json!({"type": "cancel_soft_interrupts", "id": id}),
+                        )]
+                    }
+                }
             }
             "background_tool" => {
                 let id = self.legacy_id();
-                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                let kind = if self.soft_interrupt_ids_supported {
+                    SimpleKind::BackgroundTool
+                } else {
+                    SimpleKind::Ok
+                };
+                self.pending_simple.push((id, api_id, kind));
                 vec![Outbound::Legacy(
                     json!({"type": "background_tool", "id": id}),
                 )]
@@ -1453,6 +1543,7 @@ impl BridgeState {
                 vec![ServerFrame::event(ApiEvent::SessionStatus {
                     session_id,
                     status: "attached".into(),
+                    pending_soft_interrupts: None,
                 })]
             }
             "state" => {
@@ -1566,6 +1657,9 @@ impl BridgeState {
                                 "idle"
                             }
                             .into(),
+                            pending_soft_interrupts: event["pending_soft_interrupts"]
+                                .as_u64()
+                                .map(|count| count as u32),
                         }));
                     }
                     frames
@@ -1731,6 +1825,7 @@ impl BridgeState {
                     self.text_attempt.clear();
                     frames.push(ServerFrame::event(ApiEvent::TurnDone {
                         session_id: session(self),
+                        pending_soft_interrupts: self.pending_soft_interrupts_at_done.take(),
                     }));
                     frames
                 } else {
@@ -1782,6 +1877,7 @@ impl BridgeState {
                 frames.push(ServerFrame::event(ApiEvent::SessionStatus {
                     session_id: session(self),
                     status: "cancelled".into(),
+                    pending_soft_interrupts: None,
                 }));
                 frames
             }
@@ -1960,6 +2056,7 @@ impl BridgeState {
                     frames.push(ServerFrame::event(ApiEvent::SessionStatus {
                         session_id: session(self),
                         status: if active { "running" } else { "idle" }.into(),
+                        pending_soft_interrupts: None,
                     }));
                 }
                 // Correlation establishes ownership, but reject a conflicting
@@ -2289,9 +2386,78 @@ impl BridgeState {
                     self.text_attempt.clear();
                     frames.push(ServerFrame::event(ApiEvent::TurnDone {
                         session_id: session(self),
+                        pending_soft_interrupts: self.pending_soft_interrupts_at_done.take(),
                     }));
                 }
                 frames
+            }
+            "soft_interrupt_injected" => {
+                // Daemon-originated injections (background task results,
+                // system notes) are also turn boundaries an embedder may care
+                // about, so forward every injection, not only id-bearing ones.
+                let client_ids = event["client_ids"]
+                    .as_array()
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(|id| id.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Injection precedes the response that sees it: whatever text
+                // was open belongs to the previous response.
+                let mut frames = self.finish_text();
+                self.observed_turn_active = true;
+                self.activity_version += 1;
+                frames.push(ServerFrame::event(ApiEvent::SoftInterruptInjected {
+                    session_id: session(self),
+                    client_ids,
+                    point: event["point"].as_str().unwrap_or("").to_string(),
+                    tools_skipped: event["tools_skipped"].as_u64().map(|n| n as u32),
+                    display_role: event["display_role"].as_str().map(str::to_string),
+                }));
+                frames
+            }
+            "soft_interrupt_queue" => {
+                let pending = event["pending"].as_u64().unwrap_or(0) as u32;
+                self.pending_soft_interrupts_at_done = (pending > 0).then_some(pending);
+                vec![]
+            }
+            "soft_interrupts_cancelled" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::SoftInterruptCancel) else {
+                    return vec![];
+                };
+                let strings = |key: &str| -> Vec<String> {
+                    event[key]
+                        .as_array()
+                        .map(|ids| {
+                            ids.iter()
+                                .filter_map(|id| id.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::SoftInterruptsCancelled {
+                        cancelled: strings("cancelled"),
+                        not_queued: strings("not_queued"),
+                    },
+                )]
+            }
+            "background_tool_result" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::BackgroundTool) else {
+                    return vec![];
+                };
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::BackgroundToolResult {
+                        moved: event["moved"].as_bool().unwrap_or(false),
+                        tool_call_id: event["tool_call_id"].as_str().map(str::to_string),
+                        tool_name: event["tool_name"].as_str().map(str::to_string),
+                    },
+                )]
             }
             // Everything else on the legacy stream is not part of the stable
             // API surface yet; drop it.
@@ -2560,6 +2726,14 @@ impl BridgeState {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64
+    }
+
+    /// Jcode home for a todo-state request, rejecting ids unsafe for a path.
+    fn todo_home(session_id: &str) -> Result<std::path::PathBuf, (ErrorCode, String)> {
+        if !jcode_todo_policy::store::is_safe_session_id(session_id) {
+            return Err((ErrorCode::InvalidRequest, "invalid session_id".to_string()));
+        }
+        Self::jcode_home().ok_or_else(|| (ErrorCode::Internal, "no jcode home".to_string()))
     }
 
     fn jcode_home() -> Option<std::path::PathBuf> {

@@ -91,6 +91,8 @@ async fn automatic_recall_uses_jev_http_without_embeddings_or_sidecar() {
                 }
                 Err(error) => panic!("{error}"),
             };
+            // On BSD/macOS an accepted socket can inherit the listener's nonblocking flag.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();

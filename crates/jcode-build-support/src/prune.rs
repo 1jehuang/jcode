@@ -275,7 +275,7 @@ fn path_file_id(path: &Path) -> Option<FileId> {
     }
 }
 
-fn contains_running_file(dir: &Path, running: &HashSet<FileId>) -> bool {
+pub(crate) fn contains_running_file(dir: &Path, running: &HashSet<FileId>) -> bool {
     !running.is_empty()
         && std::fs::read_dir(dir)
             .into_iter()
@@ -325,7 +325,7 @@ fn file_id(_meta: &std::fs::Metadata) -> Option<FileId> {
 /// from `target/` still counts. `None` when the platform cannot tell, in which
 /// case nothing is pruned.
 #[cfg(target_os = "linux")]
-fn running_executable_ids() -> Option<HashSet<FileId>> {
+pub(crate) fn running_executable_ids() -> Option<HashSet<FileId>> {
     use std::os::unix::ffi::OsStrExt;
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return None;
@@ -342,7 +342,7 @@ fn running_executable_ids() -> Option<HashSet<FileId>> {
 }
 
 #[cfg(target_os = "macos")]
-fn running_executable_ids() -> Option<HashSet<FileId>> {
+pub(crate) fn running_executable_ids() -> Option<HashSet<FileId>> {
     use std::os::unix::ffi::OsStrExt;
     // SAFETY: a null buffer only asks libproc for the number of pids.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
@@ -378,7 +378,7 @@ fn running_executable_ids() -> Option<HashSet<FileId>> {
 /// Elsewhere (including Windows, where a release dir holds more than the
 /// locked executable and could be half deleted) nothing is pruned.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn running_executable_ids() -> Option<HashSet<FileId>> {
+pub(crate) fn running_executable_ids() -> Option<HashSet<FileId>> {
     None
 }
 

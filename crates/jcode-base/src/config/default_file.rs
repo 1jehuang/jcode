@@ -44,6 +44,11 @@ model_switch_prev = "ctrl+shift+tab"
 effort_increase = "@EFFORT_INCREASE@"
 effort_decrease = "@EFFORT_DECREASE@"
 
+# Speed tier switching: Standard -> Fast -> Ultrafast (OpenAI), Fast on/off elsewhere.
+# Ctrl/Cmd+Up/Down still recall prompt history.
+speed_increase = "alt+up"
+speed_decrease = "alt+down"
+
 # Centered mode toggle key
 centered_toggle = "alt+c"
 
@@ -81,7 +86,10 @@ copy_selection_toggle = "alt+y"
 diagram_pane_toggle = "alt+t"
 diagram_pane_visibility_toggle = "alt+shift+m"
 typing_scroll_lock_toggle = "alt+s"
-diff_mode_cycle = "alt+g"
+# Cycle the diff display mode (unbound by default; /diff does the same).
+diff_mode_cycle = ""
+# Show the git commit log of the project you are in.
+commit_log = "alt+g"
 info_widget_toggle = "alt+i"
 # Focus the inline swarm panel (list of agents this session manages). Press
 # again to cycle agents. While focused: alt+↑/↓ select, alt+o pops the agent
@@ -141,6 +149,12 @@ timeout_secs = 90
 # Empty auto-detects pw-record, parecord, arecord, rec (SoX), or ffmpeg.
 # A custom command must print raw mono 16 kHz signed 16-bit little-endian PCM.
 # recorder = "arecord -q -t raw -f S16_LE -r 16000 -c 1 -"
+
+# Copilot-key push-to-talk in `jcode companion` (Linux). List keyboard evdev
+# nodes to watch, e.g. ["/dev/input/by-id/usb-Foo-event-kbd"]. Holding the key
+# while a Jcode terminal is focused sends the transcript to that session, even
+# without Jcode Desktop. Empty disables it.
+# global_devices = []
 
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
@@ -240,6 +254,11 @@ prompt_entry_animation = true
 # Cursor) in the session picker so they can be resumed or imported
 # (default: true). Set false to list only jcode's own sessions.
 # external_sessions = true
+
+# Open /resume filtered to sessions from the current project (same directory,
+# subdirectories, and sibling git worktrees) when that project has sessions
+# (default: false). Resume is global by default. Press `s` to cycle filters.
+# resume_project_scope = false
 
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
@@ -373,6 +392,12 @@ disable_base_tools = false
 # kept only so existing configs still parse.
 mcp_tools = "auto"
 mcp_tools_token_threshold = 8000
+# Experimental, opt-in Codemode. Adds a `codemode` tool that runs
+# model-written JavaScript in an embedded QuickJS sandbox. Scripts call any
+# other tool (including MCP tools) via `await tools.<name>(args)`, chain and
+# parallelize calls, and keep intermediate results out of the conversation.
+# Env override: JCODE_CODEMODE=1.
+codemode = false
 
 [acp]
 # Agent Client Protocol adapter compatibility profile: standard, extended, or full.
@@ -520,6 +545,15 @@ swarm_spawn_mode = "inline"
 # per-swarm hard cap of 1000. Light mode uses a smaller fixed fan-out.
 # Env override: JCODE_SWARM_MAX_CONCURRENT_AGENTS
 swarm_max_concurrent_agents = 32
+#
+# Stalled-worker watchdog. A running worker with no streamed tokens, tool
+# events, or task heartbeats for this many seconds (and no tool currently
+# executing) is flagged as stalled in swarm status and its coordinator is
+# notified once. 0 disables it. Set swarm_stall_nudge = true to also send the
+# worker a short nudge message.
+# Env overrides: JCODE_SWARM_STALL_AFTER_SECS, JCODE_SWARM_STALL_NUDGE
+swarm_stall_after_secs = 600
+# swarm_stall_nudge = false
 #
 # Max percentage (1-90) of the chat height the inline swarm gallery band may use.
 # Unset = built-in default (40%). Lower values keep more transcript visible; set
@@ -669,9 +703,17 @@ swarm_max_concurrent_agents = 32
 # pre_tool_timeout_ms = 5000
 #
 # Runs after each tool call. Extra fields: JCODE_HOOK_TOOL_NAME,
+# JCODE_HOOK_TOOL_CALL_ID, JCODE_HOOK_TOOL_INPUT (tool input JSON, 16 KB cap),
+# JCODE_HOOK_TOUCHED_PATHS (newline-separated absolute paths),
 # JCODE_HOOK_STATUS, JCODE_HOOK_DURATION_MS, JCODE_HOOK_OUTPUT_BYTES,
 # JCODE_HOOK_ERROR.
 # post_tool = ""
+#
+# Synchronous hook after each successful tool call. Same fields as post_tool,
+# full tool input JSON on stdin. Anything it prints to stdout is appended to
+# the tool result the model sees, so linters can report findings inline.
+# post_tool_feedback = "~/bin/jcode-vale"
+# post_tool_feedback_timeout_ms = 10000
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
@@ -719,6 +761,12 @@ prevent_sleep_while_streaming = true
 # sudoers rule for /usr/bin/pmset (skipped otherwise). Original settings are
 # saved to ~/.jcode/lid_override.json and restored afterwards, even after a crash.
 block_lid_close = true
+
+[menubar]
+# macOS only: show the jcode session count in the menu bar. Set to false to
+# stop the menu bar helper (a running helper exits within a second).
+# JCODE_NO_MENUBAR=1 also disables it.
+enabled = true
 
 [safety]
 # Notification settings for ambient mode events

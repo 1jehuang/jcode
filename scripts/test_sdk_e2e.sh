@@ -78,6 +78,9 @@ node "$sdk_dir/test/live-isolation.mjs" "$jcode_bin"
 echo "== checking every documented launch option =="
 node "$sdk_dir/test/live-options.mjs" "$jcode_bin"
 
+echo "== checking mid-turn message ids, cancellation, and background results =="
+node "$sdk_dir/test/live-soft-interrupt-ids.mjs" "$jcode_bin"
+
 echo "== bridge log =="
 cat "$log"
 echo "SDK e2e passed."

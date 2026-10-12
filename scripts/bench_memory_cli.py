@@ -24,6 +24,7 @@ DEFAULT_TOOLS = [
     "jcode_memory_off",
     "jcode_memory_on",
     "pi",
+    "prime_agent",
     "codex",
     "opencode",
     "copilot_cli",
@@ -40,6 +41,9 @@ class ToolSpec:
     version_argv: list[str]
     env: dict[str, str] | None = None
     jcode: bool = False
+    # Command-line substrings for detached daemons/workers that escape the
+    # launched process tree (e.g. Prime Agent's daemon and Python kernels).
+    extra_proc_patterns: tuple[str, ...] = ()
 
 
 @dataclass
@@ -79,7 +83,7 @@ def detect_pi_bin() -> str:
     candidate = Path(prefix) / "bin" / "pi"
     if candidate.exists():
         return str(candidate)
-    raise FileNotFoundError("could not find pi binary")
+    return "pi"
 
 
 def build_specs() -> dict[str, ToolSpec]:
@@ -90,6 +94,7 @@ def build_specs() -> dict[str, ToolSpec]:
     cursor_agent = shutil.which("cursor-agent") or str(Path.home() / ".local/bin/cursor-agent")
     claude = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
     agy = shutil.which("agy") or str(Path.home() / ".local/bin/agy")
+    prime_agent = shutil.which("prime-agent") or str(Path.home() / ".local/bin/prime-agent")
     specs = {
         "jcode_memory_off": ToolSpec(
             name="jcode_memory_off",
@@ -109,6 +114,15 @@ def build_specs() -> dict[str, ToolSpec]:
             name="pi",
             argv=[detect_pi_bin()],
             version_argv=[detect_pi_bin(), "--version"],
+        ),
+        "prime_agent": ToolSpec(
+            name="prime_agent",
+            argv=[prime_agent],
+            version_argv=[prime_agent, "--version"],
+            extra_proc_patterns=(
+                "/share/prime-agent/prime-agent",
+                "/.prime/agent/kernel-venv/bin/python",
+            ),
         ),
         "codex": ToolSpec(
             name="codex",
@@ -317,8 +331,39 @@ def read_pss_mb(pid: int) -> float | None:
     return None
 
 
-def sum_tree_pss(root_pids: list[int], pgids: list[int]) -> tuple[float, int]:
-    all_pids = collect_descendants(root_pids) | collect_process_group_pids(pgids)
+def collect_pattern_pids(patterns: tuple[str, ...]) -> set[int]:
+    if not patterns:
+        return set()
+    found: set[int] = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if any(pattern in cmdline for pattern in patterns):
+            found.add(int(entry.name))
+    return found
+
+
+def read_rss_mb(pid: int) -> float | None:
+    try:
+        for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
+            if line.startswith("Rss:"):
+                return int(line.split()[1]) / 1024.0
+    except Exception:
+        return None
+    return None
+
+
+def sum_tree_rss(root_pids: list[int], pgids: list[int], patterns: tuple[str, ...] = ()) -> float:
+    all_pids = collect_descendants(root_pids) | collect_process_group_pids(pgids) | collect_pattern_pids(patterns)
+    return round(sum(read_rss_mb(pid) or 0.0 for pid in all_pids), 1)
+
+
+def sum_tree_pss(root_pids: list[int], pgids: list[int], patterns: tuple[str, ...] = ()) -> tuple[float, int]:
+    all_pids = collect_descendants(root_pids) | collect_process_group_pids(pgids) | collect_pattern_pids(patterns)
     total = 0.0
     counted = 0
     for pid in sorted(all_pids):
@@ -347,6 +392,11 @@ def version_for(spec: ToolSpec) -> str:
 
 def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_s: float) -> ToolRunResult:
     notes: list[str] = []
+    for stale_pid in collect_pattern_pids(spec.extra_proc_patterns):
+        try:
+            os.kill(stale_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     version = version_for(spec)
     launches: list[SessionLaunch] = []
     cleanup_pgids: list[int] = []
@@ -423,7 +473,9 @@ def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_
                 notes.append(f"session {idx}: no meaningful screen content before timeout")
             elif launch.excerpt:
                 notes.append(f"session {idx}: {launch.excerpt}")
-        pss_mb, process_count = sum_tree_pss(root_pids, sample_pgids)
+        pss_mb, process_count = sum_tree_pss(root_pids, sample_pgids, spec.extra_proc_patterns)
+        rss_mb = sum_tree_rss(root_pids, sample_pgids, spec.extra_proc_patterns)
+        notes.append(f"rss_mb={rss_mb}")
         return ToolRunResult(
             tool=spec.name,
             sessions=sessions,
@@ -440,6 +492,11 @@ def run_tool(spec: ToolSpec, sessions: int, cwd: Path, timeout_s: float, settle_
                 pass
         for pgid in reversed(cleanup_pgids):
             terminate_pgroup(pgid)
+        for pid in collect_pattern_pids(spec.extra_proc_patterns):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         if temp_root:
             shutil.rmtree(temp_root, ignore_errors=True)
 

@@ -1,0 +1,22 @@
+{
+  "version": "0.92.0",
+  "date": "2026-10-06",
+  "title": "Codemode and smarter model defaults",
+  "highlights": [
+    "Opt-in codemode tool runs JavaScript in an embedded sandbox that can chain, loop over, and parallelize other tool calls in one step",
+    "Every provider, including OpenRouter, Bedrock, Grok Build, Copilot, and the Jcode subscription, now defaults to its newest flagship model instead of a stale or merely newest release",
+    "The browser bridge checks for updates and installs them automatically"
+  ],
+  "improvements": [
+    "Gmail drafts and sends support Cc and Bcc recipients",
+    "Rendered math copies as LaTeX source, with a hint when TeX is not installed",
+    "Ctrl+wheel and trackpad pinch over inline images resize them",
+    "Background tasks moved into the background widget, which ranks above stat widgets while tasks need attention",
+    "SDK turns that fail transiently are retried automatically"
+  ],
+  "fixes": [
+    "OpenAI OAuth and API-key logins keep separate model catalogs, so ChatGPT accounts no longer see API-only models",
+    "Browser hosts already running a new bridge binary are kept after an update",
+    "Compact background rows fit the overview width"
+  ]
+}

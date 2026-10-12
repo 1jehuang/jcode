@@ -25,6 +25,11 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::io::Write;
 
 const STATUS_SPINNER_FPS: f32 = 12.5;
+/// How long the first remote frame waits for the git probe. The probe takes
+/// ~20ms on a typical repo and has already been running since app
+/// construction, so this mostly costs nothing; it is capped so a pathological
+/// repo never delays first paint noticeably.
+const FIRST_FRAME_GIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
@@ -802,6 +807,13 @@ impl App {
                 }
             }
             if needs_redraw {
+                if !first_frame_reported {
+                    // The git probe was kicked off when the app was built. Let
+                    // it land (bounded) so the first frame already has the
+                    // branch, dirty counts, and commits rather than growing
+                    // them a frame later.
+                    super::helpers::prime_git_info(FIRST_FRAME_GIT_BUDGET);
+                }
                 status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
                 if !first_frame_reported {
                     first_frame_reported = true;

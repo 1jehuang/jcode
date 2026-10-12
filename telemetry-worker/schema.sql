@@ -116,16 +116,13 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_telemetry_id ON events(telemetry_id);
-CREATE INDEX IF NOT EXISTS idx_events_event ON events(event);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_event_created_telemetry ON events(event, created_at, telemetry_id);
 CREATE INDEX IF NOT EXISTS idx_events_event_telemetry_created ON events(event, telemetry_id, created_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
-CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
-CREATE INDEX IF NOT EXISTS idx_events_step ON events(step);
-CREATE INDEX IF NOT EXISTS idx_events_feedback_rating ON events(feedback_rating);
-CREATE INDEX IF NOT EXISTS idx_events_account_id ON events(account_id);
-CREATE INDEX IF NOT EXISTS idx_events_event_tier_created ON events(event, tier, created_at);
+-- Every index costs one billed D1 row write per insert/delete. Single-column
+-- indexes on event, session_id, step, feedback_rating, account_id, and
+-- (event, tier, created_at) were dropped in migration 0028: no query used them.
 
 -- Metadata for separately consented transcript uploads. Transcript bodies live
 -- in the private R2 TRANSCRIPTS bucket, never in the ordinary events table.
@@ -558,3 +555,16 @@ CREATE VIEW IF NOT EXISTS trusted_concurrency_events AS
 SELECT * FROM concurrency_event_quality
 WHERE event = 'session_concurrency' AND quality = 'trusted'
   AND is_ci = 0 AND runtime_is_ci = 0;
+
+-- Jcode Desktop self-update outcomes (desktop_update events). Added in
+-- migration 0029. Separate table because events is at D1's column cap.
+CREATE TABLE IF NOT EXISTS desktop_update_details (
+    event_id TEXT PRIMARY KEY,
+    install_kind TEXT,
+    update_outcome TEXT,
+    update_failure_stage TEXT,
+    FOREIGN KEY (event_id) REFERENCES events(event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_desktop_update_details_kind_outcome
+    ON desktop_update_details(install_kind, update_outcome);

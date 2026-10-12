@@ -82,6 +82,7 @@ impl Agent {
         let mut sequential_single_tool_rounds = 0u32;
         let mut batch_nudge_pending = false;
         let mut consecutive_malformed_tool_rounds = 0u32;
+        let mut unparsed_tool_markup_nudges = 0u32;
 
         loop {
             // Do not start another provider request once a cancel has been
@@ -890,7 +891,8 @@ impl Agent {
                 cache_creation_input_tokens: usage_cache_creation,
             };
 
-            self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
+            let text_tool_recovery =
+                self.recover_text_wrapped_tool_call(&mut text_content, &mut tool_calls);
 
             let visible_text_is_empty = text_content.trim().is_empty();
 
@@ -970,6 +972,18 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
+                // Unparseable tool-call markup in the text (issue #1702):
+                // surface it and ask the model to re-issue the call natively.
+                if let Some(notice) = self.maybe_nudge_unparsed_tool_markup(
+                    &text_tool_recovery,
+                    stop_reason.as_deref(),
+                    &mut unparsed_tool_markup_nudges,
+                )? {
+                    if print_output {
+                        println!("\n{}", notice);
+                    }
+                    continue;
+                }
                 if self.maybe_reconsider_fable_guardrail(
                     stop_reason.as_deref(),
                     &mut fable_guardrail_reconsiderations,
@@ -1329,7 +1343,19 @@ impl Agent {
                 return true;
             }
             message.content.iter().any(|block| match block {
-                ContentBlock::Text { text, .. } => text.trim().starts_with("<system-reminder>"),
+                ContentBlock::Text { text, .. } => {
+                    let trimmed = text.trim();
+                    trimmed.starts_with("<system-reminder>")
+                        // The empty-post-tool continuation is itself a
+                        // User-role `<system-reminder>`. Counting it would let the
+                        // injected instruction keep this predicate true on its own,
+                        // so every later whitespace-only response appends another
+                        // continuation and spends another call, with no tool result
+                        // anywhere near.
+                        && !trimmed.starts_with(
+                            Self::EMPTY_POST_TOOL_CONTINUATION_PREFIX
+                        )
+                }
                 _ => false,
             })
         })
@@ -1337,102 +1363,5 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn user_text(text: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: text.to_string(),
-                cache_control: None,
-            }],
-            timestamp: None,
-            tool_duration_ms: None,
-        }
-    }
-
-    fn tool_result(id: &str, content: &str) -> Message {
-        Message {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: id.to_string(),
-                content: content.to_string(),
-                is_error: None,
-            }],
-            timestamp: None,
-            tool_duration_ms: Some(1),
-        }
-    }
-
-    #[test]
-    fn messages_end_with_tool_result_detects_tool_continuation_context() {
-        let messages = vec![
-            user_text("tell me about the desktop application"),
-            tool_result("functions.read:0", "desktop architecture docs"),
-            tool_result("functions.agentgrep:4", "desktop source summary"),
-        ];
-
-        assert!(Agent::messages_end_with_tool_result(&messages));
-    }
-
-    #[test]
-    fn messages_end_with_tool_result_allows_memory_after_tool_results() {
-        let messages = vec![
-            user_text("tell me about the desktop application"),
-            tool_result("functions.read:0", "desktop architecture docs"),
-            user_text("<system-reminder>Relevant memory</system-reminder>"),
-        ];
-
-        assert!(Agent::messages_end_with_tool_result(&messages));
-    }
-
-    #[test]
-    fn messages_end_with_tool_result_ignores_plain_user_prompt() {
-        let messages = vec![user_text("hello")];
-
-        assert!(!Agent::messages_end_with_tool_result(&messages));
-    }
-
-    #[test]
-    fn sequential_tool_rounds_trigger_after_three_single_calls() {
-        let mut rounds = 0;
-        for _ in 0..3 {
-            rounds = Agent::update_sequential_tool_rounds(rounds, 1, false);
-        }
-
-        assert_eq!(rounds, Agent::SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE);
-    }
-
-    #[test]
-    fn parallel_or_batch_calls_reset_sequential_tool_rounds() {
-        assert_eq!(Agent::update_sequential_tool_rounds(2, 2, false), 0);
-        assert_eq!(Agent::update_sequential_tool_rounds(2, 1, true), 0);
-        assert_eq!(Agent::update_sequential_tool_rounds(2, 0, false), 0);
-    }
-
-    #[test]
-    fn pending_nudge_is_injected_only_when_batch_is_available() {
-        assert!(Agent::should_inject_batch_nudge(true, true));
-        assert!(!Agent::should_inject_batch_nudge(false, true));
-        assert!(!Agent::should_inject_batch_nudge(true, false));
-        assert!(Agent::BATCH_NUDGE.contains("use the batch tool"));
-        assert!(Agent::BATCH_NUDGE.contains("result is required"));
-    }
-
-    #[test]
-    fn plan_limit_reminder_relays_upgrade_link_without_purchasing() {
-        let reminder = Agent::plan_limit_reminder(&crate::subscription_notice::QuotaExceeded {
-            feature: "memory".into(),
-            tier: Some("plus".into()),
-            upgrade_tier: Some("pro".into()),
-            upgrade_url: Some("https://jcode.sh/pricing".into()),
-            resets_at: None,
-        });
-        assert!(reminder.starts_with("<system-reminder>"));
-        assert!(reminder.contains("Daily memory recall limit reached on your Plus plan"));
-        assert!(reminder.contains("Upgrade to Pro"));
-        assert!(reminder.contains("https://jcode.sh/pricing"));
-        assert!(reminder.contains("Do not open checkout"));
-    }
-}
+#[path = "turn_loops_tests.rs"]
+mod tests;

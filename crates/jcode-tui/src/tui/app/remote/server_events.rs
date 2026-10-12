@@ -1374,7 +1374,7 @@ pub(in crate::tui::app) fn handle_server_event(
             let reset_duration = (!invalid_tool_calls_exhausted)
                 .then(|| {
                     retry_after_secs
-                        .map(|secs| Duration::from_secs(secs.min(24 * 60 * 60)))
+                        .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)))
                         .or_else(|| parse_rate_limit_error(&message))
                 })
                 .flatten();
@@ -1398,7 +1398,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     if previous_account_limit {
                         pending.retry_attempts = 0;
                     }
-                    pending.retry_attempts += 1;
+                    pending.retry_attempts = pending.retry_attempts.saturating_add(1);
                     let is_system = pending.is_system;
                     app.rate_limit_reset = Some(Instant::now() + reset_duration);
                     if previous_account_limit {
@@ -1510,7 +1510,7 @@ pub(in crate::tui::app) fn handle_server_event(
             {
                 return false;
             }
-            if is_connectivity_error {
+            if is_connectivity_error && app.rate_limit_pending_message.is_some() {
                 // Generic connectivity can be healthy while this provider's
                 // DNS remains broken. Do not let auto-poke reset the budget.
                 crate::tui::app::commands::disable_auto_poke(app);
@@ -1892,6 +1892,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.follow_chat_bottom();
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
+                    app.queued_commands.clear();
                     app.interleave_message = None;
                     app.interleave_images.clear();
                     app.clear_pending_soft_interrupt_tracking();
@@ -1906,6 +1907,20 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.swarm_plan_swarm_id = None;
                 remote.reset_call_output_tokens_seen();
             }
+            // Facts seeded from the last launch are only a first-frame guess.
+            // When History reports a different model, drop them so the snapshot
+            // below is applied exactly as on a cold start (including the
+            // context-window lookup that only runs on a model change). When it
+            // is the same model, keep the remembered server-resolved window:
+            // re-deriving it from the static catalog could briefly show a
+            // different value until the resume ModelChanged lands.
+            if app.remote_session_facts_provisional
+                && provider_model.as_deref() != app.remote_provider_model.as_deref()
+            {
+                app.remote_session_facts_provisional = false;
+                app.remote_provider_model = None;
+                app.remote_provider_name = None;
+            }
             let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
                 provider_name,
                 provider_model,
@@ -1913,6 +1928,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 available_model_routes,
             );
             let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            // History is authoritative from here on: a later ModelChanged is a
+            // real switch and must announce itself.
+            app.remote_session_facts_provisional = false;
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
             app.session.agent_model_overrides = agent_model_overrides;
@@ -1939,6 +1957,7 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.remote_service_tier = service_tier;
             app.remote_compaction_mode = Some(compaction_mode);
+            app.persist_remote_header_hint();
             app.set_side_panel_snapshot(side_panel);
             if history_images_match_retained(&images, &app.remote_side_pane_images) {
                 // The already-retained image set is identical (count + per-image
@@ -1962,15 +1981,29 @@ pub(in crate::tui::app) fn handle_server_event(
             // was still loading. Replace that loading row as soon as history
             // supplies the authoritative snapshot.
             app.refresh_open_model_picker_after_catalog_update();
-            app.remote_skills = skills;
-            app.invalidate_command_candidates_cache();
-            app.remote_sessions = all_sessions;
-            app.remote_client_count = client_count;
-            app.remote_is_canary = is_canary;
-            app.remote_server_version = server_version;
-            app.remote_server_short_name = server_name.clone();
-            app.remote_server_icon = server_icon.clone();
-            app.remote_server_has_update = server_has_update;
+            // The model-catalog response reuses the History event shape with
+            // every server-identity and session-list field left empty. Applying
+            // those empties wiped the server name/icon/version/canary flag,
+            // skills, and session list for a frame right after startup, so the
+            // header and the Overview session row flickered (`peak hare` ->
+            // `hare`). Only overwrite what the event actually carries; a real
+            // session switch still resets everything.
+            let carries_server_identity =
+                server_name.is_some() || server_version.is_some() || is_canary.is_some();
+            let authoritative = session_changed || carries_server_identity;
+            if authoritative || !skills.is_empty() {
+                app.remote_skills = skills;
+                app.invalidate_command_candidates_cache();
+            }
+            if authoritative {
+                app.remote_sessions = all_sessions;
+                app.remote_client_count = client_count;
+                app.remote_is_canary = is_canary;
+                app.remote_server_version = server_version;
+                app.remote_server_short_name = server_name.clone();
+                app.remote_server_icon = server_icon.clone();
+                app.remote_server_has_update = server_has_update;
+            }
             let history_total_tokens = total_tokens.or_else(|| {
                 token_usage_totals.map(|totals| (totals.input_tokens, totals.output_tokens))
             });
@@ -2022,7 +2055,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.pending_server_reload = true;
                 app.set_status_notice("Server update available");
             }
-            app.remote_server_short_name = server_name;
+            if authoritative {
+                app.remote_server_short_name = server_name;
+            }
             if let Some(icon) = server_icon {
                 app.remote_server_icon = Some(icon);
             }
@@ -2030,6 +2065,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.update_terminal_title();
 
             if !mcp_servers.is_empty() {
+                let previous = std::mem::take(&mut app.mcp_server_names);
                 app.mcp_server_names = mcp_servers
                     .iter()
                     .filter_map(|s| {
@@ -2038,6 +2074,9 @@ pub(in crate::tui::app) fn handle_server_event(
                         Some((name.to_string(), count))
                     })
                     .collect();
+                if previous != app.mcp_server_names {
+                    app.persist_remote_header_hint();
+                }
             }
 
             let should_apply_history_payload = session_changed || !remote.has_loaded_history();
@@ -2486,6 +2525,7 @@ pub(in crate::tui::app) fn handle_server_event(
             error,
             resolved_credential,
             reasoning_effort,
+            context_window,
             ..
         } => {
             app.remote_model_switch_in_flight = false;
@@ -2508,7 +2548,15 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
-                app.update_context_limit_for_model(&model);
+                // The server also re-sends ModelChanged on resume so the client
+                // learns the server-resolved context window. That is not a
+                // user-visible switch, so only announce an actual model change.
+                // A first-frame hint is not a model the user switched away from.
+                let had_provisional_facts =
+                    std::mem::take(&mut app.remote_session_facts_provisional);
+                let model_actually_changed = !had_provisional_facts
+                    && app.remote_provider_model.as_deref() != Some(model.as_str());
+                app.update_context_limit_for_model(&model, context_window);
                 app.remote_provider_model = Some(model.clone());
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
@@ -2522,13 +2570,16 @@ pub(in crate::tui::app) fn handle_server_event(
                 // previous model's level.
                 app.remote_reasoning_effort = reasoning_effort;
                 app.invalidate_model_picker_cache();
-                if !app.auth_catalog_refresh_pending {
+                app.persist_remote_header_hint();
+                if model_actually_changed && !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(
                         "✓ Switched to model: {}",
                         model
                     )));
                 }
-                app.set_status_notice(format!("Model → {}", model));
+                if model_actually_changed {
+                    app.set_status_notice(format!("Model → {}", model));
+                }
             }
             false
         }
@@ -2661,7 +2712,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 )));
             } else {
                 app.remote_service_tier = service_tier.clone();
-                let enabled = service_tier.as_deref() == Some("priority");
+                let enabled = app_mod::service_tier_is_fast(service_tier.as_deref());
                 let label = service_tier
                     .as_deref()
                     .map(app_mod::service_tier_display_label)
@@ -2671,7 +2722,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     app_mod::fast_mode_success_message(enabled, label, applies_next_request),
                 ));
                 app.set_status_notice(app_mod::fast_mode_status_notice(
-                    enabled,
+                    service_tier.as_deref(),
                     applies_next_request,
                 ));
             }
@@ -2718,6 +2769,7 @@ pub(in crate::tui::app) fn handle_server_event(
             display_role,
             point,
             tools_skipped,
+            ..
         } => {
             crate::logging::info(&format!(
                 "REMOTE_INTERRUPT_EVENT_RECEIVED kind=soft_interrupt_injected session={:?} point={} display_role={:?} tools_skipped={:?} content_bytes={} content_chars={} pending_soft_interrupts={}",

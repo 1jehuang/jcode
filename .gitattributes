@@ -1,0 +1,10 @@
+# Normalise text files in the repository and convert on checkout.
+#
+# Without this, line-ending behaviour depends on each contributor's global
+# core.autocrlf, so the same file is CRLF for one person and LF for the next.
+# Edits made by tooling that writes LF then land inside a CRLF working tree,
+# and every subsequent commit warns "LF will be replaced by CRLF".
+#
+# `text=auto` keeps binary files untouched and lets git detect them, so this is
+# safe to apply repository-wide.
+* text=auto

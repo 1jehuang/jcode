@@ -1,5 +1,6 @@
-//! Subscription-backed remote compilation. Account state only changes guidance:
-//! every build verifies access again before reading or uploading source, and the
+//! Subscription-backed remote compilation. The tool description is static so it
+//! never invalidates the prompt cache. Account state is reported in results:
+//! every build verifies access before reading or uploading source, and the
 //! server remains authoritative for entitlement and cloud-compute credit admission.
 mod source;
 
@@ -10,11 +11,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-const ACCESS_TTL: Duration = Duration::from_secs(60);
+const DESCRIPTION: &str = "Compile in an isolated Linux sandbox using Jcode subscription cloud-compute credits (shared with cloud agents). Uploads eligible source files and returns compiler output and metered usage. Requires a Jcode subscription; use action=status to check access and credits. Use only when the user has requested remote builds or authorized source sharing. Failed builds also consume credits. No automatic top-ups.";
 const SUBSCRIBE: &str = "Remote compilation requires a Jcode subscription. Tell the user to subscribe at https://jcode.sh/pricing, then sign in with `jcode account login`. Do not open checkout or purchase automatically.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,20 +27,20 @@ enum Access {
 }
 
 impl Access {
-    fn description(self) -> &'static str {
+    fn guidance(self) -> &'static str {
         match self {
             Self::SignedOut => {
                 "Not signed in. Subscribe at https://jcode.sh/pricing, then `jcode account login`."
             }
             Self::SubscriptionRequired => SUBSCRIBE,
             Self::Ready => {
-                "Compile in an isolated Linux sandbox using the signed-in Jcode subscription's cloud-compute credits, shared with cloud agents. Uploads eligible source files and returns compiler output and metered usage. Use only when the user has requested remote builds or authorized source sharing. Failed builds also consume compute credits. No automatic top-ups."
+                "Remote compilation is available. Builds spend the signed-in Jcode subscription's cloud-compute credits, shared with cloud agents. Failed builds also consume credits. No automatic top-ups."
             }
             Self::NotEnabled => {
                 "Remote compilation is not enabled for this account or the build service is not configured. Do not promise subscribing will fix service availability. Use action=status to recheck or compile locally."
             }
             Self::Unknown => {
-                "Compile remotely using Jcode subscription cloud-compute credits. Account access could not yet be verified. Use action=status to recheck. Do not claim the user is unsubscribed. Builds fail closed before source upload when access cannot be verified."
+                "Account access could not be verified (the account service may be unreachable). Builds fail closed before source upload. Retry action=status later. Do not claim the user is unsubscribed."
             }
         }
     }
@@ -56,41 +56,10 @@ impl Access {
     }
 }
 
-struct CachedAccess {
-    identity: [u8; 32],
-    checked_at: Instant,
-    access: Access,
-}
-static ACCESS: LazyLock<Mutex<Option<CachedAccess>>> = LazyLock::new(|| Mutex::new(None));
-static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-// Credentials are never retained in the cache or sent to the model.
-fn identity(base: &str, key: &str) -> [u8; 32] {
-    Sha256::digest(format!("{base}\0{key}").as_bytes()).into()
-}
-
 fn credentials() -> Option<(String, String)> {
     crate::subscription_catalog::configured_api_key()
         .filter(|key| !key.trim().is_empty())
         .map(|key| (crate::subscription_api::configured_api_base(), key))
-}
-
-fn cached_access(base: &str, key: &str) -> Option<Access> {
-    ACCESS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .filter(|entry| {
-            entry.identity == identity(base, key) && entry.checked_at.elapsed() < ACCESS_TTL
-        })
-        .map(|entry| entry.access)
-}
-
-fn current_access() -> Access {
-    match credentials() {
-        None => Access::SignedOut,
-        Some((base, key)) => cached_access(&base, &key).unwrap_or(Access::Unknown),
-    }
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -185,29 +154,10 @@ async fn check_access(client: &reqwest::Client, base: &str, key: &str) -> Access
     }
 }
 
-async fn access_with(base: &str, key: &str, force: bool) -> Access {
-    let _guard = REFRESH.lock().await;
-    if !force && let Some(access) = cached_access(base, key) {
-        return access;
-    }
-    let access = match client() {
+async fn access(base: &str, key: &str) -> Access {
+    match client() {
         Ok(client) => check_access(&client, base, key).await,
         Err(_) => Access::Unknown,
-    };
-    *ACCESS.lock().unwrap_or_else(|e| e.into_inner()) = Some(CachedAccess {
-        identity: identity(base, key),
-        checked_at: Instant::now(),
-        access,
-    });
-    access
-}
-
-/// Called before publishing definitions, including locked agent snapshots.
-/// State is cached briefly, keyed by both credential and API base. Execution
-/// bypasses the cache, so stale schemas never authorize an upload.
-pub(super) async fn refresh_access() {
-    if let Some((base, key)) = credentials() {
-        access_with(&base, &key, false).await;
     }
 }
 
@@ -382,8 +332,11 @@ impl Tool for CompileRemoteTool {
     fn name(&self) -> &str {
         "compile_remote"
     }
+    // Static by design: tool definitions sit in the provider prompt-cache
+    // prefix, so account state is reported in results (action=status or a
+    // denied compile), never in the description.
     fn description(&self) -> &str {
-        current_access().description()
+        DESCRIPTION
     }
     fn parameters_schema(&self) -> Value {
         json!({
@@ -402,12 +355,12 @@ impl Tool for CompileRemoteTool {
         validate_input(&input)?;
         let credentials = credentials();
         let access = match &credentials {
-            Some((base, key)) => access_with(base, key, true).await,
+            Some((base, key)) => access(base, key).await,
             None => Access::SignedOut,
         };
         if input.action.as_deref() == Some("status") {
             let mut status = json!({
-                "access": access.label(), "guidance": access.description(),
+                "access": access.label(), "guidance": access.guidance(),
                 "credits": "Builds and cloud agents spend the same cloud-compute balance. The server reserves credits before starting a sandbox."
             });
             if !matches!(access, Access::SignedOut | Access::Unknown)
@@ -421,7 +374,7 @@ impl Tool for CompileRemoteTool {
             return Ok(ToolOutput::new(serde_json::to_string_pretty(&status)?));
         }
         if access != Access::Ready {
-            bail!("{}", access.description());
+            bail!("{}", access.guidance());
         }
         let (base, key) = credentials.expect("verified access requires credentials");
         let root = ctx.resolve_path(Path::new(input.path.as_deref().unwrap_or(".")));

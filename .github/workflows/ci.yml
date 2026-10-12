@@ -12,6 +12,9 @@ concurrency:
 
 env:
   JCODE_CI: "1"
+  # CI builds without the local parallel-frontend rustc wrapper from
+  # .cargo/config.toml (a POSIX shell script; see scripts/rustc-parallel-frontend).
+  CARGO_BUILD_RUSTC_WRAPPER: ""
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
 
@@ -57,6 +60,10 @@ jobs:
         # binary", skipping all of its validation steps. This catches it in
         # seconds, on the job that already owns dependency hygiene.
         run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Warning budget gate contract tests
+        shell: bash
+        run: scripts/test_check_warning_budget.sh
 
       - name: Enforce warning budget
         shell: bash
@@ -224,6 +231,12 @@ jobs:
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-base --lib secret_input -- --nocapture
+
+      - name: Run browser session liveness and reuse regressions
+        shell: bash
+        run: |
+          cargo test --target ${{ matrix.target }} -p jcode-base --lib browser_session -- --nocapture
+          cargo test --target ${{ matrix.target }} -p jcode-app-core --lib browser_session -- --nocapture
 
       - name: Run embedding numeric-stability cohort (Linux only)
         if: runner.os == 'Linux'
