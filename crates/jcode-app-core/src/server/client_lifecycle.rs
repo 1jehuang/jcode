@@ -3459,17 +3459,11 @@ async fn start_processing_message(
         return;
     }
 
-    if !agent
-        .lock()
-        .await
-        .set_remote_active_skill(active_skill.clone())
-    {
-        let skill_name = active_skill.as_deref().unwrap_or_default();
-        let _ = client_event_tx.send(ServerEvent::Error {
-            id,
-            message: format!("Skill '{skill_name}' is not installed on the server"),
-            retry_after_secs: None,
-        });
+    // A stopped session's Agent stays reachable through this connection's own
+    // handle after the stop removed the worker from routing, so admission is
+    // checked here, under the lock, before this message is recorded or run.
+    if let Some(rejection) = super::live_turn::admit_client_turn(agent, active_skill, id).await {
+        let _ = client_event_tx.send(rejection);
         return;
     }
 
@@ -4011,3 +4005,7 @@ mod tests;
 #[cfg(test)]
 #[path = "client_target_attach_tests.rs"]
 mod target_attach_tests;
+
+#[cfg(test)]
+#[path = "client_lifecycle_stop_tests.rs"]
+mod stop_tests;

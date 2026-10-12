@@ -668,3 +668,86 @@ async fn stopped_but_unquiesced_worker_rejects_debug_queued_interrupts() {
     ));
     assert!(worker.lock().await.is_closed());
 }
+
+/// A tracked turn that outlives the stop which cancelled it must not publish its
+/// own end status over the `stopping` marker.
+///
+/// `stopped_but_unquiesced_worker_rejects_debug_queued_interrupts` covers the
+/// timeout itself: the stop leaves the member in `stopping` and tells the caller
+/// not to schedule replacement work. This turn is exactly the work that outlived
+/// that timeout, so when it finally finishes it must not flip the member back to
+/// `ready` (with a coordinator completion report) as if the worker were
+/// reusable.
+#[tokio::test]
+async fn tracked_turn_that_outlived_the_stop_timeout_keeps_the_stopping_status() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let (_temp_home, _home) = setup_test_home();
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let worker = blocking_agent("stop-late-turn-worker", &provider_calls).await;
+    let fixture = StopFixture::new("stop-late-turn-worker", Arc::clone(&worker)).await;
+
+    let reserved = idle_live_agent(
+        &fixture.worker_id,
+        &fixture.sessions,
+        &fixture.swarm_members,
+    )
+    .await
+    .expect("reserve idle live worker");
+    spawn_tracked_live_turn(
+        &fixture.worker_id,
+        reserved,
+        "work that outlives its stop".to_string(),
+        None,
+        None,
+        None,
+        fixture.live_turn_context(),
+    )
+    .await;
+    // The turn registers its cancel signal before it reaches the provider, so
+    // observing the provider call means the cancellation below cannot be missed.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while provider_calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the tracked turn must reach the provider");
+
+    // The state a timed-out stop leaves behind: `stopping`, while the turn it
+    // could not quiesce still holds the Agent.
+    crate::server::swarm::update_member_status(
+        &fixture.worker_id,
+        "stopping",
+        Some("Cancellation requested by stop-late-turn-worker-coord".to_string()),
+        &fixture.swarm_members,
+        &fixture.swarms_by_id,
+        Some(&fixture.event_history),
+        Some(&fixture.event_counter),
+        Some(&fixture.swarm_event_tx),
+    )
+    .await;
+
+    // Cancel the way the stop does. The turn ends and publishes its terminal
+    // status before it releases the Agent.
+    let control = SessionControlHandle::cancel_only(
+        &fixture.worker_id,
+        fixture.queue.clone(),
+        InterruptSignal::new(),
+    );
+    control.request_cancel();
+    let released = tokio::time::timeout(Duration::from_secs(5), Arc::clone(&worker).lock_owned())
+        .await
+        .expect("the cancelled turn must release the Agent");
+    drop(released);
+
+    assert_eq!(
+        fixture
+            .swarm_members
+            .read()
+            .await
+            .get(&fixture.worker_id)
+            .map(|member| member.status.as_str()),
+        Some("stopping"),
+        "a turn that outlived the stop timeout must not resurrect the worker as ready"
+    );
+}
