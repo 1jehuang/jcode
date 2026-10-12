@@ -82,8 +82,13 @@ impl Collections {
         default_dir: Option<String>,
         instructions: Option<String>,
     ) -> Result<String> {
-        let name = validate_name(name)?;
-        self.ensure_unique(&name, None)?;
+        let id = self.new_id();
+        self.create_with_id(&id, name, default_dir, instructions)?;
+        Ok(id)
+    }
+
+    /// A fresh, unused collection id.
+    pub fn new_id(&self) -> String {
         let created_at_ms = now_ms();
         let mut id = format!("collection_{created_at_ms}");
         let mut suffix = 1;
@@ -91,14 +96,33 @@ impl Collections {
             suffix += 1;
             id = format!("collection_{created_at_ms}_{suffix}");
         }
+        id
+    }
+
+    /// Create a collection with a caller-chosen id. Clients that apply a
+    /// change optimistically and then replay it against the file under
+    /// [`update`] use this so both copies agree on the id.
+    pub fn create_with_id(
+        &mut self,
+        id: &str,
+        name: &str,
+        default_dir: Option<String>,
+        instructions: Option<String>,
+    ) -> Result<()> {
+        let name = validate_name(name)?;
+        self.ensure_unique(&name, None)?;
+        let id = id.trim();
+        if id.is_empty() || self.get(id).is_some() {
+            bail!("That collection id is already in use.");
+        }
         self.collections.push(Collection {
-            id: id.clone(),
+            id: id.to_owned(),
             name,
             default_dir: clean_dir(default_dir),
             instructions: clean_instructions(instructions)?,
-            created_at_ms,
+            created_at_ms: now_ms(),
         });
-        Ok(id)
+        Ok(())
     }
 
     /// Replace a collection's name, default directory, and instructions.
@@ -335,6 +359,12 @@ mod tests {
         assert!(store.delete(&client));
         assert_eq!(store.collection_of("s1"), None);
         assert!(!store.delete(&client));
+
+        let chosen = store.new_id();
+        store.create_with_id(&chosen, "Chosen", None, None).unwrap();
+        assert_eq!(store.get(&chosen).unwrap().name, "Chosen");
+        assert!(store.create_with_id(&chosen, "Other", None, None).is_err());
+        assert!(store.create_with_id(" ", "Blank", None, None).is_err());
     }
 
     #[test]
