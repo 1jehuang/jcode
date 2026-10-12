@@ -206,7 +206,7 @@ pub async fn export_swarm_video(
         let frames = app
             .run_headless_replay(&pane.timeline, speed, pane_width, pane_height, fps)
             .await?;
-        rendered_panes.push(crate::replay::SwarmPaneFrames {
+        rendered_panes.push(crate::swarm_compose::SwarmPaneFrames {
             session_id: pane.session.id.clone(),
             title: pane
                 .session
@@ -217,7 +217,7 @@ pub async fn export_swarm_video(
         });
     }
 
-    let frames = crate::replay::compose_swarm_buffers(&rendered_panes, width, height, fps, cols);
+    let frames = crate::swarm_compose::compose_swarm_buffers(&rendered_panes, width, height, fps, cols);
     crate::tui::mermaid::set_video_export_mode(false);
 
     let font_px = font_size * 96.0 / 72.0;

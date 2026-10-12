@@ -139,26 +139,26 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
 pub fn hot_update(session_id: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
-    update::print_centered("Checking for updates...");
+    super::output::print_centered("Checking for updates...");
 
     match update::check_for_update_blocking() {
         Ok(Some(release)) => {
             let current = jcode_build_meta::version();
-            update::print_centered(&format!(
+            super::output::print_centered(&format!(
                 "Update available: {} -> {}",
                 current, release.tag_name
             ));
-            update::print_centered(&format!("Downloading {}...", release.tag_name));
+            super::output::print_centered(&format!("Downloading {}...", release.tag_name));
 
             match update::download_and_install_blocking_with_progress(&release, |progress| {
-                update::print_centered(&format!(
+                super::output::print_centered(&format!(
                     "{} {}",
                     release.tag_name,
                     update::format_download_progress_bar(progress)
                 ));
             }) {
                 Ok(path) => {
-                    update::print_centered(&format!("✓ Installed {}", release.tag_name));
+                    super::output::print_centered(&format!("✓ Installed {}", release.tag_name));
                     reload_server_after_update("installed update");
 
                     let is_selfdev = crate::cli::selfdev::client_selfdev_requested();
@@ -166,7 +166,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                         .map(|(p, _)| p)
                         .unwrap_or(path);
 
-                    update::print_centered(&format!("Restarting with session {}...", session_id));
+                    super::output::print_centered(&format!("Restarting with session {}...", session_id));
 
                     crate::env::set_var("JCODE_RESUMING", "1");
 
@@ -182,7 +182,7 @@ pub fn hot_update(session_id: &str) -> Result<()> {
                     return Err(anyhow::anyhow!("Failed to exec {:?}: {}", exe, err));
                 }
                 Err(e) => {
-                    update::print_centered(&format!(
+                    super::output::print_centered(&format!(
                         "✗ Download failed: {}",
                         update::summarize_update_error(&format!("{:#}", e))
                     ));
@@ -193,13 +193,13 @@ pub fn hot_update(session_id: &str) -> Result<()> {
             if repair_stale_shared_server_after_update_check() {
                 reload_server_after_update("repaired stale server target");
             }
-            update::print_centered(&format!(
+            super::output::print_centered(&format!(
                 "Already up to date ({})",
                 jcode_build_meta::version()
             ));
         }
         Err(e) => {
-            update::print_centered(&format!(
+            super::output::print_centered(&format!(
                 "✗ Update check failed: {}",
                 update::summarize_update_error(&format!("{:#}", e))
             ));
@@ -400,31 +400,31 @@ pub fn run_auto_update() -> Result<()> {
 /// Explicit updates follow the configured channel for release and dev builds alike.
 /// Source rebuilds belong to self-dev and /rebuild, not the stable update path.
 pub fn run_update() -> Result<()> {
-    update::print_centered("Checking GitHub for latest release...");
+    super::output::print_centered("Checking GitHub for latest release...");
     match update::check_for_update_blocking() {
         Ok(Some(release)) => {
-            update::print_centered(&format!(
+            super::output::print_centered(&format!(
                 "Downloading {} \u{2192} {}...",
                 jcode_build_meta::version(),
                 release.tag_name
             ));
             let _path =
                 update::download_and_install_blocking_with_progress(&release, |progress| {
-                    update::print_centered(&format!(
+                    super::output::print_centered(&format!(
                         "{} {}",
                         release.tag_name,
                         update::format_download_progress_bar(progress)
                     ));
                 })?;
-            update::print_centered(&format!("✅ Updated to {}", release.tag_name));
+            super::output::print_centered(&format!("✅ Updated to {}", release.tag_name));
             reload_server_after_update("installed update");
-            update::print_centered("Restart jcode to use the new version.");
+            super::output::print_centered("Restart jcode to use the new version.");
         }
         Ok(None) => {
             if repair_stale_shared_server_after_update_check() {
                 reload_server_after_update("repaired stale server target");
             }
-            update::print_centered(&format!(
+            super::output::print_centered(&format!(
                 "Already up to date ({})",
                 jcode_build_meta::version()
             ));
@@ -449,7 +449,7 @@ fn repair_stale_shared_server_after_update_check() -> bool {
                 "update: repaired stale shared-server channel {:?} -> {}",
                 previous, repaired_to
             ));
-            update::print_centered(&format!(
+            super::output::print_centered(&format!(
                 "Repaired stale server reload target: {}",
                 repaired_to
             ));
