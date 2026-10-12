@@ -362,22 +362,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;
         }
-        Some(Command::PruneBuilds { keep, dry_run }) => {
-            build::run_prune_builds_command(keep, dry_run)?;
-        }
-        Some(Command::PublishBuild {
-            source,
-            version,
-            launcher,
-            channel,
-            termux_launcher,
-        }) => {
-            let channel = match channel.as_str() {
-                "current" => build::PreparedBuildChannel::Current,
-                "stable" => build::PreparedBuildChannel::Stable,
-                _ => anyhow::bail!("invalid build publication channel"),
-            };
-            build::publish_prepared_build(&source, &version, channel, &launcher, termux_launcher)?;
+        Some(command @ (Command::PruneBuilds { .. } | Command::PublishBuild(_))) => {
+            commands::build_store::run(command)?;
         }
         Some(Command::Usage { json }) => {
             commands::run_usage_command(json).await?;

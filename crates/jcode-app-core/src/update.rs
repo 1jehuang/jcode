@@ -341,11 +341,8 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
         "Main channel: built successfully at {}",
         path.display()
     ));
-
     let mut metadata = UpdateMetadata::load().unwrap_or_default();
     let channel_version = format!("main-{}", latest_sha);
-    // Hold across version creation and every reference publication, not just
-    // individual helper calls. This function is synchronous after the build.
     let _store_lock = jcode_build_support::acquire_build_store_lock()?;
     build::install_binary_at_version(&path, &channel_version)
         .context("Failed to install built binary")?;
@@ -1008,9 +1005,6 @@ pub fn download_and_install_blocking_with_progress(
         download_asset_with_resume(&client, &download_url, total_hint, &mut on_progress)?;
 
     verify_asset_checksum_if_available(&client, release, asset, &bytes)?;
-
-    // Download/checksum work is finished. Serialize the complete synchronous
-    // install transaction, including archive copies before channel publication.
     let _store_lock = jcode_build_support::acquire_build_store_lock()?;
     let mut installed_version_dir: Option<PathBuf> = None;
     if asset.name.ends_with(".tar.gz") {

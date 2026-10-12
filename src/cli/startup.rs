@@ -25,7 +25,7 @@ pub async fn run() -> Result<()> {
         && matches!(
             args.command,
             Some(Command::Auth(super::args::AuthCommand::Import { .. }))
-                | Some(Command::PublishBuild { .. })
+                | Some(Command::PublishBuild(_))
         )
     {
         if let Some(cwd) = &args.cwd {
@@ -494,7 +494,7 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
             args.command,
             Some(Command::Update)
                 | Some(Command::PruneBuilds { .. })
-                | Some(Command::PublishBuild { .. })
+                | Some(Command::PublishBuild(_))
                 | Some(Command::Serve { .. })
                 | Some(Command::Server { .. })
                 | Some(Command::Acp)
