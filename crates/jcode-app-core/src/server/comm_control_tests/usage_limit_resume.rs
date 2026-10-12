@@ -16,9 +16,7 @@ impl Provider for LimitedOnceProvider {
         _system: &str,
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let call = self
-            .calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if call == 0 {
             let error = jcode_provider_core::usage_limit_resume::with_usage_limit_reset(
                 anyhow::anyhow!(
@@ -29,7 +27,9 @@ impl Provider for LimitedOnceProvider {
             return Ok(Box::pin(stream::iter(vec![Err(error)])));
         }
         Ok(Box::pin(stream::iter(vec![
-            Ok(StreamEvent::TextDelta("task finished after the reset".to_string())),
+            Ok(StreamEvent::TextDelta(
+                "task finished after the reset".to_string(),
+            )),
             Ok(StreamEvent::MessageEnd { stop_reason: None }),
         ])))
     }
@@ -66,7 +66,10 @@ async fn swarm_task_hitting_a_usage_limit_stays_in_progress_and_resumes() {
             m.role = "coordinator".to_string();
             m
         }),
-        (worker.to_string(), owned_member(worker, swarm_id, "queued", coord)),
+        (
+            worker.to_string(),
+            owned_member(worker, swarm_id, "queued", coord),
+        ),
     ])));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
         swarm_id.to_string(),
@@ -148,8 +151,7 @@ async fn swarm_task_hitting_a_usage_limit_stays_in_progress_and_resumes() {
     }
 }
 
-#[tokio::test(start_paused = true)]
-async fn swarm_task_hitting_a_usage_limit_is_requeued_when_the_resume_is_superseded() {
+async fn superseded_usage_limit_worker_status(successor_status: Option<&str>) -> String {
     let (_env, _runtime) = RuntimeEnvGuard::new();
     let home = tempfile::TempDir::new().expect("jcode home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -171,7 +173,10 @@ async fn swarm_task_hitting_a_usage_limit_is_requeued_when_the_resume_is_superse
             m.role = "coordinator".to_string();
             m
         }),
-        (worker.to_string(), owned_member(worker, swarm_id, "queued", coord)),
+        (
+            worker.to_string(),
+            owned_member(worker, swarm_id, "queued", coord),
+        ),
     ])));
     let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
         swarm_id.to_string(),
@@ -185,7 +190,7 @@ async fn swarm_task_hitting_a_usage_limit_is_requeued_when_the_resume_is_superse
         coord.to_string(),
     )])));
 
-    super::spawn_assigned_task_run(
+    let task_run = super::spawn_assigned_task_run(
         Arc::clone(&agent),
         worker.to_string(),
         swarm_id.to_string(),
@@ -214,7 +219,23 @@ async fn swarm_task_hitting_a_usage_limit_is_requeued_when_the_resume_is_superse
 
     // A user message takes the worker over; the takeover turn does not
     // finish the task.
-    assert!(crate::server::usage_limit_resume::cancel_pending_resume(worker));
+    if let Some(status) = successor_status {
+        crate::server::update_member_status(
+            worker,
+            status,
+            None,
+            &swarm_members,
+            &swarms_by_id,
+            None,
+            None,
+            None,
+        )
+        .await;
+    }
+    assert!(crate::server::usage_limit_resume::cancel_pending_resume(
+        worker
+    ));
+    task_run.await.expect("assigned task runner finished");
 
     let item = |plans: &HashMap<String, VersionedPlan>| {
         plans[swarm_id]
@@ -226,7 +247,9 @@ async fn swarm_task_hitting_a_usage_limit_is_requeued_when_the_resume_is_superse
     };
     let mut released = false;
     for _ in 0..20_000 {
-        if item(&*swarm_plans.read().await).status == "queued" {
+        if item(&*swarm_plans.read().await).status == "queued"
+            && swarm_members.read().await[worker].status != "rate_limited"
+        {
             released = true;
             break;
         }
@@ -240,9 +263,31 @@ async fn swarm_task_hitting_a_usage_limit_is_requeued_when_the_resume_is_superse
     );
     assert_eq!(item.assigned_to, None);
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-
+    let worker_status = swarm_members.read().await[worker].status.clone();
     match prev_home {
         Some(prev) => crate::env::set_var("JCODE_HOME", prev),
         None => crate::env::remove_var("JCODE_HOME"),
     }
+    worker_status
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_usage_limit_resume_restores_idle_worker_to_ready() {
+    assert_eq!(superseded_usage_limit_worker_status(None).await, "ready");
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_usage_limit_resume_preserves_running_successor() {
+    assert_eq!(
+        superseded_usage_limit_worker_status(Some("running")).await,
+        "running"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn superseded_usage_limit_resume_preserves_stopped_successor() {
+    assert_eq!(
+        superseded_usage_limit_worker_status(Some("stopped")).await,
+        "stopped"
+    );
 }

@@ -1561,6 +1561,71 @@ pub(super) async fn update_member_status_with_report_tldr(
     event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
     swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
 ) {
+    update_member_status_inner(
+        session_id,
+        None,
+        status,
+        detail,
+        completion_report,
+        report_tldr,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+    )
+    .await;
+}
+
+/// Compare and update under the member write lock, preserving newer turns.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "status update needs shared swarm and event sinks"
+)]
+pub(super) async fn update_member_status_if(
+    session_id: &str,
+    expected: &str,
+    status: &str,
+    detail: Option<String>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
+    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
+    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+) {
+    update_member_status_inner(
+        session_id,
+        Some(expected),
+        status,
+        detail,
+        None,
+        None,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
+    )
+    .await;
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "status update needs shared swarm, report and event sinks"
+)]
+async fn update_member_status_inner(
+    session_id: &str,
+    expected: Option<&str>,
+    status: &str,
+    detail: Option<String>,
+    completion_report: Option<String>,
+    report_tldr: Option<String>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: Option<&Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>>,
+    event_counter: Option<&Arc<std::sync::atomic::AtomicU64>>,
+    swarm_event_tx: Option<&broadcast::Sender<SwarmEvent>>,
+) {
     let completion_report = normalize_completion_report(completion_report);
     let detail_present = detail.is_some();
     let (
@@ -1573,7 +1638,10 @@ pub(super) async fn update_member_status_with_report_tldr(
         report_back_to_session_id,
     ) = {
         let mut members = swarm_members.write().await;
-        if let Some(member) = members.get_mut(session_id) {
+        if let Some(member) = members
+            .get_mut(session_id)
+            .filter(|member| expected.is_none_or(|expected| member.status == expected))
+        {
             let previous_status = member.status.clone();
             let status_changed = member.status != status;
             let detail_changed = member.detail != detail;

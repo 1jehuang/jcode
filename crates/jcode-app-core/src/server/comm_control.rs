@@ -770,7 +770,7 @@ fn spawn_assigned_task_run(
     event_history: Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: broadcast::Sender<SwarmEvent>,
-) {
+) -> tokio::task::JoinHandle<()> {
     let assignment_text = append_swarm_completion_report_instructions(&assignment_text);
     tokio::spawn(async move {
         {
@@ -899,7 +899,9 @@ fn spawn_assigned_task_run(
         // A usage limit that resets later keeps the task in progress: wait
         // for the reset (the heartbeat keeps the task from going stale) and
         // continue the same turn. Other errors fail the task as before.
-        let (result, completion_report) = match result {
+        // A resumed turn reserves the agent through terminal bookkeeping so
+        // a successor cannot start before this task publishes its outcome.
+        let (result, completion_report, _resume_guard) = match result {
             Err(error) => {
                 let on_wait = {
                     let swarm_id = swarm_id.clone();
@@ -961,17 +963,14 @@ fn spawn_assigned_task_run(
                 )
                 .await
                 {
-                    super::usage_limit_resume::ResumeOutcome::NotUsageLimit { error, .. }
-                    | super::usage_limit_resume::ResumeOutcome::Failed { error, .. } => {
-                        (Err(error), None)
+                    super::usage_limit_resume::ResumeOutcome::NotUsageLimit { error, guard }
+                    | super::usage_limit_resume::ResumeOutcome::Failed { error, guard, .. } => {
+                        (Err(error), None, guard)
                     }
                     super::usage_limit_resume::ResumeOutcome::Completed {
                         guard,
                         completion_report,
-                    } => {
-                        drop(guard);
-                        (Ok(()), completion_report)
-                    }
+                    } => (Ok(()), completion_report, Some(guard)),
                     super::usage_limit_resume::ResumeOutcome::Superseded => {
                         // The user (or another turn) took the worker over.
                         // Release the task back to the queue, like the
@@ -1026,6 +1025,21 @@ fn spawn_assigned_task_run(
                             &swarms_by_id,
                         )
                         .await;
+                        // Requeue alone leaves an idle worker ineligible for
+                        // assignment. Do not overwrite a successor turn that
+                        // has already claimed the member's lifecycle state.
+                        super::swarm::update_member_status_if(
+                            &target_session,
+                            "rate_limited",
+                            "ready",
+                            None,
+                            &swarm_members,
+                            &swarms_by_id,
+                            Some(&event_history),
+                            Some(&event_counter),
+                            Some(&swarm_event_tx),
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -1035,6 +1049,7 @@ fn spawn_assigned_task_run(
                 (
                     Ok(()),
                     agent.latest_assistant_text_after(start_message_index),
+                    None,
                 )
             }
         };
@@ -1226,7 +1241,7 @@ fn spawn_assigned_task_run(
                 .await;
             }
         }
-    });
+    })
 }
 
 fn format_salvage_message(
