@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.90.0"
+version = "0.95.0"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -73,7 +73,9 @@ members = [
     "crates/jcode-tui-core",
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
+    "crates/jcode-todo-policy",
     "crates/jcode-transport",
+    "crates/jcode-codemode",
     "crates/jcode-tool-core",
     "crates/jcode-tool-types",
     "crates/jcode-tui-account-picker",
@@ -88,6 +90,10 @@ members = [
     "crates/jcode-update-core",
     "crates/jcode-terminal-launch",
     "crates/jcode-terminal-image",
+    "crates/jcode-terminal-prompt",
+    "crates/jcode-voice",
+    "crates/jcode-desktop-open",
+    "crates/jcode-companion",
     "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
     "crates/jcode-render-core",
@@ -174,6 +180,7 @@ tokio-stream = "0.1"
 # TUI
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
+unicode-width = "0.2"
 
 # Markdown & syntax highlighting
 
@@ -187,6 +194,9 @@ jcode-build-meta = { path = "crates/jcode-build-meta" }
 # so the root feature set fully controls the downstream features (see
 # [features]).
 jcode-tui = { path = "crates/jcode-tui", default-features = false }
+jcode-terminal-prompt = { path = "crates/jcode-terminal-prompt" }
+jcode-voice = { path = "crates/jcode-voice" }
+jcode-companion = { path = "crates/jcode-companion" }
 # `jcode provider-doctor` / provider diagnostics; sits downstream of jcode-base
 # so doctor edits do not rebuild the base -> app-core -> tui spine.
 jcode-provider-doctor = { path = "crates/jcode-provider-doctor" }

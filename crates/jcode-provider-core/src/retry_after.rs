@@ -32,12 +32,20 @@ pub fn retry_after(headers: &HeaderMap) -> Option<RetryAfter> {
 /// cannot stall a turn. Returns the raw delay, not a deadline, so callers
 /// that must report the exact server-requested value keep full precision.
 pub fn retry_after_body_delay(body: &str) -> Option<Duration> {
-    let value = serde_json::Deserializer::from_str(body)
+    retry_after_body_seconds(body).map(|seconds| Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
+}
+
+/// Raw (saturating, uncapped) `retry_after_seconds` from a JSON error body.
+///
+/// In-request retry loops should use [`retry_after_body_delay`], which caps at
+/// [`MAX_RETRY_AFTER`]. Callers that hold a whole turn until the limit clears
+/// (the TUI) apply their own, longer clamp.
+pub fn retry_after_body_seconds(body: &str) -> Option<u64> {
+    let value = serde_json::Deserializer::from_str(body.trim_start())
         .into_iter::<serde_json::Value>()
         .next()?
         .ok()?;
     find_retry_after_seconds(&value)
-        .map(|seconds| Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
 }
 
 /// Body counterpart of [`retry_after`]: parse a JSON error body for a
@@ -335,6 +343,19 @@ mod tests {
             retry_after_body_delay("{\"retry_after_seconds\":1.2}"),
             Some(Duration::from_secs(2))
         );
+    }
+
+    #[test]
+    fn body_retry_after_seconds_keeps_long_waits_for_turn_holds() {
+        assert_eq!(
+            retry_after_body_seconds(r#"{"error":{"retry_after_seconds":3600},"max_rpm":25}"#),
+            Some(3600)
+        );
+        assert_eq!(
+            retry_after_body_seconds(r#"{"retry_after_seconds":1e300}"#),
+            Some(u64::MAX)
+        );
+        assert_eq!(retry_after_body_seconds(r#"{"max_rpm":25}"#), None);
     }
 
     #[test]

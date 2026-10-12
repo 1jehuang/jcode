@@ -87,6 +87,41 @@ pub struct BedrockProvider {
 }
 
 impl BedrockProvider {
+    /// The built-in placeholder model used when nothing was configured. Callers
+    /// that know the live catalog replace it via
+    /// [`Self::replace_placeholder_default_model`].
+    pub const PLACEHOLDER_DEFAULT_MODEL: &'static str = DEFAULT_MODEL;
+
+    /// Swap the stale placeholder default for `model` (chosen by the caller from
+    /// this provider's usable routes). No-op when `JCODE_BEDROCK_MODEL` is set or
+    /// the current model is anything other than the placeholder, so explicit
+    /// user, env and session choices always win. Returns whether it switched.
+    pub fn replace_placeholder_default_model(&self, model: &str) -> bool {
+        if std::env::var_os("JCODE_BEDROCK_MODEL").is_some() || model.trim().is_empty() {
+            return false;
+        }
+        match self.model.write() {
+            Ok(mut current) if current.as_str() == DEFAULT_MODEL && current.as_str() != model => {
+                jcode_logging::info(&format!(
+                    "Bedrock default model {DEFAULT_MODEL} -> {model} (newest flagship in catalog)"
+                ));
+                *current = model.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a live or cached `ListFoundationModels` catalog is loaded. Without
+    /// one, only the hardcoded known list is available and its availability
+    /// flags (inference-profile requirements) are unverified.
+    pub fn has_catalog(&self) -> bool {
+        self.fetched_models
+            .read()
+            .map(|models| !models.is_empty())
+            .unwrap_or(false)
+    }
+
     pub fn new() -> Self {
         let model =
             std::env::var("JCODE_BEDROCK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());

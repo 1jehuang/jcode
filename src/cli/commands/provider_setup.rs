@@ -9,7 +9,7 @@ use crate::config::{
 };
 use crate::provider_catalog::{
     api_base_uses_localhost, is_safe_env_file_name, is_safe_env_key_name, normalize_api_base,
-    resolve_login_provider, save_env_value_to_env_file,
+    resolve_login_provider, save_named_api_key,
 };
 
 #[derive(Debug)]
@@ -149,7 +149,7 @@ pub(crate) fn configure_provider_profile(
         api_key_env.as_deref(),
         env_file.as_deref(),
     ) {
-        save_env_value_to_env_file(env_key, file_name, Some(key))?;
+        save_named_api_key(file_name, env_key, key)?;
     }
     let api_key_stored = api_key.is_some() && env_file.is_some();
 

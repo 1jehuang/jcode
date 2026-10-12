@@ -736,3 +736,5 @@ async fn openai_refresh_writes_back_to_pinned_label_not_default() {
     assert_eq!(find(&fox).access_token, "fox-refreshed");
     assert_eq!(find(&fox).email.as_deref(), Some("fox@example.com"));
 }
+
+include!("openai_tests/persistent_cancellation.rs");

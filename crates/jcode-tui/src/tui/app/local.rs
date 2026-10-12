@@ -63,6 +63,18 @@ pub(super) async fn process_turn_with_input(
         finish_turn(app);
         return;
     }
+    // Commands queued with Ctrl+Enter run before queued prompts, matching the
+    // remote dispatcher. If one starts its own turn, the prompts wait for it.
+    if !app.queued_commands.is_empty() {
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        super::input::run_queued_commands_local(app);
+        if app.pending_turn || app.is_processing {
+            finish_turn(app);
+            return;
+        }
+    }
+
     app.process_queued_messages(terminal, event_stream).await;
     finish_turn(app);
 }
@@ -80,6 +92,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // no paint at all, which drops the animation to whatever unrelated events
     // happen to trigger (~4fps in practice).
     let mut needs_redraw = reset_redraw | crate::tui::periodic_redraw_required(app);
+    needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();
@@ -99,6 +112,10 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     if app.submit_input_on_startup && !app.is_processing {
         app.submit_input_on_startup = false;
         app.submit_input();
+        needs_redraw = true;
+    }
+    if !app.is_processing && !app.pending_queued_dispatch && !app.queued_commands.is_empty() {
+        super::input::run_queued_commands_local(app);
         needs_redraw = true;
     }
     let ops = app.stream_buffer.flush();
@@ -206,6 +223,7 @@ pub(super) fn handle_bus_event(
             true
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
+        Ok(BusEvent::GitInfoRefreshed) => true,
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
             true
@@ -253,7 +271,7 @@ pub(super) fn handle_bus_event(
             app.session.provider_session_id = None;
             app.upstream_provider = None;
             app.invalidate_model_picker_cache();
-            app.update_context_limit_for_model(&model);
+            app.update_context_limit_for_model(&model, None);
             app.session.provider_key = provider_key.or_else(|| {
                 crate::provider::MultiProvider::session_provider_key_after_model_switch(
                     &model,
@@ -429,6 +447,7 @@ fn apply_terminal_event(
             Ok(false)
         }
         Some(Ok(Event::Key(key))) => {
+            let key = jcode_tui_core::korean_input::normalize_key_event(key);
             crate::tui::ui::note_key_event_read();
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);

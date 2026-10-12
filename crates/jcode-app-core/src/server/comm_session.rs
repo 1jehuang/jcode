@@ -650,7 +650,7 @@ pub(super) async fn spawn_swarm_agent(
     // startup env (#405).
     let client_terminal_env =
         client_terminal_env_for_session(req_session_id, client_connections).await;
-    let agents_config = &crate::config::Config::load().agents;
+    let agents_config = &crate::config::config().agents;
     let configured_swarm_model =
         session_swarm_model(req_session_id, sessions, agents_config.swarm_model.clone()).await;
     let resolved_spawn_mode = resolve_swarm_spawn_mode(spawn_mode, agents_config.swarm_spawn_mode);

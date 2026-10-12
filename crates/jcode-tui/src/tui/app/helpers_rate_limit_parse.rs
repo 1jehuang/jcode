@@ -3,6 +3,20 @@ use std::time::Duration;
 
 use super::parse_clock_time_to_duration;
 
+/// Longest wait a held turn will be parked for before its automatic resume.
+/// Server and body hints beyond this are clamped so a bogus or hostile value
+/// cannot park a turn for days.
+pub(crate) const MAX_TURN_HOLD_SECS: u64 = 24 * 60 * 60;
+
+/// Find a JSON object embedded in a formatted provider error (for example
+/// after `response:` or `OpenAI API error 429:`) and read its numeric
+/// `retry_after_seconds`. Sibling limit fields such as `max_rpm` are ignored.
+fn structured_retry_after_seconds(error: &str) -> Option<u64> {
+    error.match_indices('{').take(8).find_map(|(idx, _)| {
+        jcode_provider_core::retry_after::retry_after_body_seconds(&error[idx..])
+    })
+}
+
 /// Parse rate limit reset time from error message
 /// Returns the Duration until rate limit resets, if this is a rate limit error
 pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
@@ -23,16 +37,11 @@ pub(crate) fn parse_rate_limit_error(error: &str) -> Option<Duration> {
 
     // A compact JSON object is one whitespace token. Scanning its digits can
     // miss retry_after_seconds entirely or accidentally pick max_rpm instead.
-    let body = error
-        .split_once("response:")
-        .map_or(error, |(_, body)| body)
-        .trim();
-    let body = body.split("\nHint:").next().unwrap_or(body);
-    let structured_delay = jcode_provider_core::retry_after::retry_after_body_delay(body);
-    if structured_delay.is_some() || body.contains("\"retry_after_seconds\"") {
+    if error.contains("\"retry_after_seconds\"") {
         // Invalid structured delays stay invalid rather than falling through
         // to a loose numeric scan, which could mistake -1 for one second.
-        return structured_delay;
+        return structured_retry_after_seconds(error)
+            .map(|secs| Duration::from_secs(secs.min(MAX_TURN_HOLD_SECS)));
     }
 
     if let Some(idx) = error_lower.find("retry") {

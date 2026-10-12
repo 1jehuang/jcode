@@ -14,6 +14,7 @@ pub mod pricing;
 pub mod reasoning;
 pub mod retry_after;
 pub mod selection;
+pub mod service_tier;
 pub mod transport;
 pub mod usage_limit;
 
@@ -1315,12 +1316,14 @@ pub fn model_route_metadata_is_recommended(
         return false;
     }
     let api_method = ModelRouteApiMethod::parse(api_method);
+    // Recommendations track the curated quality-first defaults so the picker
+    // highlights the newest flagship automatically when the defaults move.
     match model {
-        "gpt-5.5" => {
+        DEFAULT_OPENAI_MODEL => {
             matches!(&api_method, ModelRouteApiMethod::OpenAIOAuth)
                 && model_route_provider_labels_match(provider, "openai")
         }
-        "claude-opus-4-8" => {
+        DEFAULT_CLAUDE_MODEL => {
             matches!(
                 &api_method,
                 ModelRouteApiMethod::ClaudeOAuth | ModelRouteApiMethod::AnthropicApiKey
@@ -1737,52 +1740,55 @@ mod tests {
     #[test]
     fn model_route_recommendation_policy_is_provider_aware() {
         assert!(model_route_metadata_is_recommended(
-            "gpt-5.5",
+            DEFAULT_OPENAI_MODEL,
             "OpenAI",
             "openai-oauth",
             true
         ));
         assert!(!model_route_metadata_is_recommended(
-            "gpt-5.5",
+            DEFAULT_OPENAI_MODEL,
             "OpenAI",
             "openai-api-key",
             true
         ));
         assert!(!model_route_metadata_is_recommended(
-            "gpt-5.5", "Copilot", "copilot", true
+            DEFAULT_OPENAI_MODEL,
+            "Copilot",
+            "copilot",
+            true
         ));
         assert!(!model_route_metadata_is_recommended(
-            "gpt-5.5",
+            DEFAULT_OPENAI_MODEL,
             "OpenAI",
             "openai-oauth",
             false
         ));
         assert!(model_route_metadata_is_recommended(
-            "claude-opus-4-8",
+            DEFAULT_CLAUDE_MODEL,
             "Anthropic",
             "claude-oauth",
             true
         ));
         assert!(model_route_metadata_is_recommended(
-            "claude-opus-4-8",
+            DEFAULT_CLAUDE_MODEL,
             "Anthropic",
             "claude-api",
             true
         ));
         assert!(model_route_metadata_is_recommended(
-            "claude-opus-4-8",
+            DEFAULT_CLAUDE_MODEL,
             "Anthropic",
             "claude-oauth",
             true
         ));
         assert!(model_route_metadata_is_recommended(
-            "claude-opus-4-8",
+            DEFAULT_CLAUDE_MODEL,
             "Anthropic",
             "claude-api",
             true
         ));
         assert!(!model_route_metadata_is_recommended(
-            "claude-opus-4-8",
+            DEFAULT_CLAUDE_MODEL,
             "Anthropic",
             "openrouter",
             true

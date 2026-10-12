@@ -106,6 +106,44 @@ impl Drop for ReloadTestEnv {
     }
 }
 
+/// The shared daemon must keep its plain `serve` argv; an owned server must
+/// ask for the temporary lifecycle and name its owner, or the ephemeral server
+/// a headless `run` starts would outlive the run (#1748).
+#[test]
+fn owned_server_argv_requests_the_temporary_lifecycle() {
+    assert_eq!(
+        serve_subcommand_args(ServerLifetime::Shared, 4321),
+        vec!["serve".to_string()]
+    );
+    assert_eq!(
+        serve_subcommand_args(ServerLifetime::OwnedByThisProcess, 4321),
+        vec![
+            "serve".to_string(),
+            "--temporary-server".to_string(),
+            "--owner-pid".to_string(),
+            "4321".to_string(),
+        ]
+    );
+
+    // The argv must parse back into the flags `serve` actually reads.
+    let argv = std::iter::once("jcode".to_string())
+        .chain(serve_subcommand_args(
+            ServerLifetime::OwnedByThisProcess,
+            4321,
+        ))
+        .collect::<Vec<_>>();
+    let parsed = <crate::cli::args::Args as clap::Parser>::try_parse_from(argv)
+        .expect("parse owned serve argv");
+    assert!(matches!(
+        parsed.command,
+        Some(Command::Serve {
+            temporary_server: true,
+            owner_pid: Some(4321),
+            ..
+        })
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn spawn_lock_serializes_shared_server_bootstrap() {
@@ -313,4 +351,54 @@ async fn server_is_running_at_treats_live_listener_as_running_without_pong() {
         server_is_running_at(&socket_path).await,
         "a live listener should prevent duplicate server spawns even if ping is slow or absent"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn spawn_lock_creates_missing_runtime_directory() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("missing/nested/jcode.sock.spawning");
+    assert!(!path.parent().unwrap().exists());
+
+    let guard = try_acquire_spawn_lock(&path)
+        .expect("create runtime directory and acquire lock")
+        .expect("first lock should succeed");
+    assert!(path.is_file());
+    assert!(try_acquire_spawn_lock(&path).unwrap().is_none());
+
+    drop(guard);
+    assert!(!path.exists());
+    assert!(path.parent().unwrap().is_dir());
+}
+
+#[test]
+fn provider_profile_transport_follows_profile_type() {
+    // Issue #1560: --provider-profile forced OpenAI-compatible for every profile.
+    let config: crate::config::Config = toml::from_str(
+        r#"
+[providers.fcc-anthropic]
+type = "anthropic-compatible"
+base_url = "http://127.0.0.1:8082/v1"
+auth = "none"
+
+[providers.local-openai]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8000/v1"
+auth = "none"
+"#,
+    )
+    .expect("valid config");
+
+    assert!(matches!(
+        provider_choice_for_named_profile_in("fcc-anthropic", &config),
+        ProviderChoice::Auto
+    ));
+    assert!(matches!(
+        provider_choice_for_named_profile_in("local-openai", &config),
+        ProviderChoice::OpenaiCompatible
+    ));
+    assert!(matches!(
+        provider_choice_for_named_profile_in("missing", &config),
+        ProviderChoice::OpenaiCompatible
+    ));
 }

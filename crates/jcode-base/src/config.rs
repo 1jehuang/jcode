@@ -9,7 +9,7 @@ pub use jcode_config_types::{
     ClaudeCodeInstanceConfig, CompactionConfig, CompactionMode, CrossProviderFailoverMode,
     DiagramDisplayMode, DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig,
     GatewayConfig, HookCommands, HooksConfig, InfoWidgetLayout, KeybindingsConfig,
-    LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode,
+    LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig, MarkdownSpacingMode, MenubarConfig,
     NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig, NamedProviderType,
     NativeScrollbarConfig, NotificationsConfig, PowerConfig, ProviderConfig, ReasoningDisplayMode,
     SafetyConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
@@ -30,6 +30,10 @@ const CONFIG_CACHE_CHECK_INTERVAL: Duration = if cfg!(test) {
 
 const CONFIG_ENV_KEYS: &[&str] = &[
     "HOME",
+    "JCODE_COMMIT_LOG_KEY",
+    "JCODE_RESUME_PROJECT_SCOPE",
+    "JCODE_SWARM_STALL_AFTER_SECS",
+    "JCODE_SWARM_STALL_NUDGE",
     "JCODE_ACP_PROFILE",
     "JCODE_ACP_TOOL_PROFILE",
     "JCODE_ACTIVE_SESSIONS_MANAGER",
@@ -88,6 +92,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_DISPLAY_CENTERED",
     "JCODE_EFFORT_DECREASE_KEY",
     "JCODE_EFFORT_INCREASE_KEY",
+    "JCODE_SPEED_DECREASE_KEY",
+    "JCODE_SPEED_INCREASE_KEY",
     "JCODE_EMAIL_REPLY_ENABLED",
     "JCODE_EMAIL_TO",
     "JCODE_FOCUS_HOOK",
@@ -100,6 +106,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS",
     "JCODE_HOOK_PRE_TOOL_TIMEOUT_MS",
     "JCODE_HOOK_POST_TOOL",
+    "JCODE_HOOK_POST_TOOL_FEEDBACK",
+    "JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS",
     "JCODE_HOOK_SESSION_END",
     "JCODE_HOOK_SESSION_START",
     "JCODE_HOOK_TURN_END",
@@ -179,6 +187,7 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_MAX_RETRIES",
     "JCODE_MCP_TOOLS",
     "JCODE_MCP_TOOLS_TOKEN_THRESHOLD",
+    "JCODE_CODEMODE",
     "JCODE_RETRY_BACKOFF_CAP_SECS",
     "JCODE_SWARM_ENABLED",
     "JCODE_SWARM_EFFORT",
@@ -555,6 +564,9 @@ pub struct Config {
     /// Power-management configuration (prevent sleep while streaming)
     pub power: PowerConfig,
 
+    /// macOS menu bar session indicator
+    pub menubar: MenubarConfig,
+
     /// Auto-review configuration
     pub autoreview: AutoReviewConfig,
 
@@ -684,6 +696,10 @@ pub struct ToolConfig {
         alias = "mcp_tools_auto_threshold_tokens"
     )]
     pub mcp_tools_token_threshold: usize,
+    /// Opt-in Codemode: expose a `codemode` tool that runs model-written
+    /// JavaScript in an embedded QuickJS sandbox able to call every other
+    /// tool (including MCP tools). Off by default.
+    pub codemode: bool,
 }
 
 impl Default for ToolConfig {
@@ -695,6 +711,7 @@ impl Default for ToolConfig {
             disable_base_tools: false,
             mcp_tools: McpToolsMode::Auto,
             mcp_tools_token_threshold: 8_000,
+            codemode: false,
         }
     }
 }
@@ -836,6 +853,10 @@ pub struct DictationConfig {
     /// microphone and prints raw mono 16 kHz s16le PCM to stdout. Empty means
     /// auto-detect (pw-record, parecord, arecord, rec, ffmpeg).
     pub recorder: String,
+    /// Keyboards `jcode companion` watches for Copilot-key push-to-talk
+    /// (Linux evdev nodes, preferably stable `/dev/input/by-id/...` paths).
+    /// Empty disables the companion's global voice listener.
+    pub global_devices: Vec<std::path::PathBuf>,
 }
 
 impl Default for DictationConfig {
@@ -847,6 +868,7 @@ impl Default for DictationConfig {
             timeout_secs: 90,
             vocabulary: Vec::new(),
             recorder: String::new(),
+            global_devices: Vec::new(),
         }
     }
 }

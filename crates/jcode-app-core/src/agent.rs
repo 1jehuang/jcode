@@ -12,6 +12,7 @@ mod provider;
 mod response_recovery;
 mod status;
 mod streaming;
+mod tool_markup_recovery;
 mod tools;
 mod turn_execution;
 mod turn_loops;
@@ -621,27 +622,7 @@ impl Agent {
         if agent.session.provider_key.is_none() {
             agent.session.provider_key = agent.provider_key_for_new_session();
         }
-        if let Some(model) = agent.session.model.clone() {
-            let model_request =
-                crate::provider::MultiProvider::model_switch_request_for_session_route(
-                    &model,
-                    agent.session.provider_key.as_deref(),
-                    agent.session.route_api_method.as_deref(),
-                );
-            if let Err(e) = crate::provider::set_model_with_auth_refresh(
-                agent.provider.as_ref(),
-                &model_request,
-            ) {
-                logging::error(&format!(
-                    "Failed to restore session model '{}' via '{}': {}",
-                    model, model_request, e
-                ));
-            } else {
-                agent.reconcile_explicit_provider_pin_route();
-            }
-        } else {
-            agent.session.model = Some(agent.provider_model());
-        }
+        agent.restore_session_model_from_session();
         agent.restore_reasoning_effort_from_session();
         agent.restore_account_pins_from_session();
         agent.session.ensure_initial_session_context_message();
@@ -1196,6 +1177,15 @@ impl Agent {
         if let Some(mut guard) = self.concurrency_session.take() {
             guard.finish();
         }
+    }
+
+    /// Detach the concurrency telemetry guard so the caller can finish it off
+    /// a latency-sensitive path. `finish` performs a blocking delivery (up to
+    /// ~800ms) that must not run under server-wide locks.
+    pub(crate) fn take_concurrency_session(
+        &mut self,
+    ) -> Option<crate::telemetry::ConcurrencySession> {
+        self.concurrency_session.take()
     }
 
     #[cfg(test)]

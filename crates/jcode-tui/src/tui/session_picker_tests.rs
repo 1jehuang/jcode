@@ -1349,88 +1349,100 @@ fn onboarding_banner_offers_review_then_new_session() {
     assert!(picker.onboarding_review_recent_project_highlighted());
 }
 
-#[test]
-fn onboarding_banner_renders_prompt_and_both_action_rows() {
-    let mut picker = SessionPicker::new(Vec::new());
-    picker.activate_onboarding_banner(vec![
-        Line::from("Welcome to jcode"),
-        Line::from("Choose how to begin."),
-    ]);
-
-    let backend = ratatui::backend::TestBackend::new(120, 40);
+fn render_onboarding_picker_lines(
+    picker: &mut SessionPicker,
+    width: u16,
+    height: u16,
+) -> Vec<String> {
+    let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
     terminal
         .draw(|frame| picker.render(frame))
         .expect("render onboarding picker");
-
     let buffer = terminal.backend().buffer().clone();
-    let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
-    let lines = (0..buffer.area.height)
+    (0..buffer.area.height)
         .map(|y| {
             (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
 
+fn onboarding_test_picker() -> SessionPicker {
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some("/srv/projects/demo".to_string()));
+    picker.activate_onboarding_banner(vec![
+        Line::from("Welcome to jcode"),
+        Line::from("Choose how to begin."),
+    ]);
+    picker
+}
+
+#[test]
+fn onboarding_banner_renders_actions_side_by_side_with_or() {
+    let mut picker = onboarding_test_picker();
+    let lines = render_onboarding_picker_lines(&mut picker, 120, 40);
+    let text = lines.join("\n");
+
+    assert!(text.contains("Welcome to jcode"), "{lines:#?}");
     assert!(
-        text.contains("Welcome to jcode"),
-        "onboarding prompt should render in the banner: {text:?}"
-    );
-    assert!(
-        text.contains("Start in the current directory"),
-        "start-new row should render in the banner: {text:?}"
-    );
-    assert!(
-        text.contains("Find bugs in my most active repo"),
-        "suggested-review row should render in the banner: {text:?}"
+        !text.contains("Start in the current directory"),
+        "old start label must be gone: {lines:#?}"
     );
     assert!(
         !text.contains("Sessions"),
-        "resume chrome must be absent: {text:?}"
+        "resume chrome must be absent: {lines:#?}"
     );
     assert!(
         !text.contains('╭') && !text.contains('╰') && !text.contains('│'),
         "onboarding choice should not render an outer boundary: {lines:#?}"
     );
 
+    let row = lines
+        .iter()
+        .position(|line| line.contains("Find bugs in my most active repo"))
+        .expect("review action");
+    let line = &lines[row];
+    let review_x = line.find("Find bugs in my most active repo").unwrap();
+    let or_x = line
+        .find(" or ")
+        .expect("'or' between the actions on the same row");
+    let start_x = line
+        .find("New session in /srv/projects/demo")
+        .expect("start action names the directory, on the same row");
+    assert!(review_x < or_x && or_x < start_x, "{lines:#?}");
+
     let welcome_y = lines
         .iter()
         .position(|line| line.contains("Welcome to jcode"))
-        .expect("welcome row");
+        .unwrap();
+    assert!(welcome_y < row, "{lines:#?}");
+    assert!(
+        row.abs_diff(lines.len() / 2) <= 1,
+        "actions vertically centered: {lines:#?}"
+    );
+}
+
+#[test]
+fn onboarding_banner_stacks_actions_when_narrow() {
+    let mut picker = onboarding_test_picker();
+    let lines = render_onboarding_picker_lines(&mut picker, 50, 30);
+
     let review_y = lines
         .iter()
         .position(|line| line.contains("Find bugs in my most active repo"))
-        .expect("review row");
+        .expect("review action");
+    let or_y = lines
+        .iter()
+        .position(|line| line.trim() == "or")
+        .expect("'or' on its own line");
     let start_y = lines
         .iter()
-        .position(|line| line.contains("Start in the current directory"))
-        .expect("start-new row");
-    let review_x = lines[review_y]
-        .find("Find bugs in my most active repo")
-        .expect("review column");
-    let start_x = lines[start_y]
-        .find("Start in the current directory")
-        .expect("start-new column");
-
-    assert!(
-        welcome_y < review_y,
-        "welcome copy should introduce the centered suggested prompt: {lines:#?}"
-    );
-    assert!(
-        review_y.abs_diff(buffer.area.height as usize / 2) <= 1,
-        "suggested prompt should be vertically centered: {lines:#?}"
-    );
-    assert!(
-        review_x < 50,
-        "suggested prompt should span the visual center: {lines:#?}"
-    );
-    let width = buffer.area.width as usize;
-    let start_end = lines[start_y].trim_end().chars().count();
-    assert!(
-        start_y >= buffer.area.height as usize - 3 && start_x > width / 2 && start_end + 4 >= width,
-        "blank-session action should stay secondary in the bottom-right: {lines:#?}"
-    );
+        .position(|line| line.contains("New session in /srv/projects/demo"))
+        .expect("start action");
+    assert_eq!(or_y, review_y + 1, "{lines:#?}");
+    assert_eq!(start_y, review_y + 2, "{lines:#?}");
 }
 
 #[test]
@@ -1849,7 +1861,11 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
                         assert!(row.starts_with(text), "preview must be flush left: {row:?}");
                     }
-                    for text in ["list item", "code sample", "tool:"] {
+                    assert!(
+                        rows.iter().all(|row| !row.contains("tool:")),
+                        "preview must not show a tool-name summary line: {rows:?}"
+                    );
+                    for text in ["list item", "code sample"] {
                         let row = rows.iter().find(|row| row.contains(text)).expect(text);
                         assert!(
                             row.chars().take_while(|c| *c == ' ').count() <= 2,
@@ -1910,8 +1926,14 @@ fn test_preview_structured_messages_stay_left_aligned() {
                 "preview must restore chat context"
             );
             let cache = picker.preview_cache.as_ref().unwrap();
+            assert!(
+                cache
+                    .wrapped_lines
+                    .iter()
+                    .all(|line| !line_text(line).contains("tool:")),
+                "preview must not show a tool-name summary line"
+            );
             for needle in [
-                "tool:",
                 "Verify structured preview alignment",
                 "Reviewing the weak points",
                 "Check structured preview alignment",
@@ -2604,3 +2626,126 @@ fn preview_without_search_has_no_highlight_and_scrolls_to_bottom() {
 
 #[path = "session_picker_search_tests.rs"]
 mod search;
+
+#[test]
+fn onboarding_start_label_marks_home_directory() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let mut picker = SessionPicker::new(Vec::new());
+    picker.set_current_dir(Some(home.display().to_string()));
+    picker.activate_onboarding_banner(vec![Line::from("Welcome to jcode")]);
+    let lines = render_onboarding_picker_lines(&mut picker, 120, 40);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("New session in ~ (home)")),
+        "home directory should read '~ (home)': {lines:#?}"
+    );
+}
+
+#[test]
+fn test_resume_prefers_current_project_filter_when_it_has_sessions() {
+    let mut here = make_session("here", "here", false, SessionStatus::Closed);
+    here.working_dir = Some("/work/project".to_string());
+    let mut sub = make_session("sub", "sub", false, SessionStatus::Closed);
+    sub.working_dir = Some("/work/project/crates/a".to_string());
+    let mut other = make_session("other", "other", false, SessionStatus::Closed);
+    other.working_dir = Some("/work/other".to_string());
+
+    let mut picker = SessionPicker::new(vec![here, sub, other]);
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker.prefer_current_dir_filter();
+
+    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
+    let ids: Vec<_> = picker
+        .visible_session_iter()
+        .map(|session| session.id.clone())
+        .collect();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert!(!ids.contains(&"other".to_string()));
+
+    // Once the user picks a filter, reloads must not snap it back.
+    while picker.filter_mode != SessionFilterMode::All {
+        picker.cycle_filter_mode();
+    }
+    picker.prefer_current_dir_filter();
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+}
+
+#[test]
+fn test_resume_keeps_all_filter_when_current_project_has_no_sessions() {
+    let mut other = make_session("other", "other", false, SessionStatus::Closed);
+    other.working_dir = Some("/work/other".to_string());
+
+    let mut picker = SessionPicker::new(vec![other]);
+    picker.set_current_dir(Some("/work/project".to_string()));
+    picker.prefer_current_dir_filter();
+
+    assert_eq!(picker.filter_mode, SessionFilterMode::All);
+    assert_eq!(picker.visible_sessions.len(), 1);
+}
+
+#[test]
+fn test_current_dir_matches_sibling_git_worktree() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let main = root.path().join("repo");
+    let wt_git = main.join(".git/worktrees/feature");
+    std::fs::create_dir_all(&wt_git).expect("worktree gitdir");
+    std::fs::write(wt_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = root.path().join("repo-feature");
+    std::fs::create_dir_all(worktree.join("src")).expect("worktree dir");
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", wt_git.display()),
+    )
+    .expect(".git file");
+    let unrelated = root.path().join("unrelated");
+    std::fs::create_dir_all(&unrelated).expect("unrelated dir");
+
+    let mut in_worktree = make_session("wt", "wt", false, SessionStatus::Closed);
+    in_worktree.working_dir = Some(worktree.join("src").display().to_string());
+    let mut elsewhere = make_session("elsewhere", "elsewhere", false, SessionStatus::Closed);
+    elsewhere.working_dir = Some(unrelated.display().to_string());
+
+    let mut picker = SessionPicker::new(vec![in_worktree.clone(), elsewhere.clone()]);
+    picker.set_current_dir(Some(main.display().to_string()));
+
+    assert!(picker.session_in_current_dir(&in_worktree));
+    assert!(!picker.session_in_current_dir(&elsewhere));
+}
+
+#[test]
+fn test_compact_dir_keeps_whole_trailing_components() {
+    use super::render::compact_dir;
+    assert_eq!(compact_dir("/srv/app"), "/srv/app");
+    assert_eq!(
+        compact_dir("/srv/relatorios/sherlocker-formula-20261010/worktrees/base"),
+        "…/worktrees/base"
+    );
+    assert_eq!(
+        compact_dir("/srv/a/an-extremely-long-single-directory-name-here"),
+        "…/an-extremely-long-single-…"
+    );
+}
+
+#[test]
+fn test_resume_project_scope_is_off_by_default() {
+    assert!(
+        !crate::config::Config::default()
+            .display
+            .resume_project_scope
+    );
+    let mut here = make_session("here", "here", false, SessionStatus::Closed);
+    here.working_dir = Some("/work/project".to_string());
+    let mut other = make_session("other", "other", false, SessionStatus::Closed);
+    other.working_dir = Some("/work/other".to_string());
+
+    let mut picker = SessionPicker::new(vec![here, other]);
+    picker.set_current_dir(Some("/work/project".to_string()));
+    if !crate::config::config().display.resume_project_scope {
+        picker.apply_resume_project_scope_default();
+        assert_eq!(picker.filter_mode, SessionFilterMode::All);
+        assert_eq!(picker.visible_sessions.len(), 2);
+    }
+}

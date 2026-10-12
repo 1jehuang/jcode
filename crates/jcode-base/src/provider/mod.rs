@@ -91,6 +91,40 @@ pub(crate) use routing::{
 /// provider here at startup.
 static ACTIVE_PROVIDER: RwLock<Option<Arc<dyn Provider>>> = RwLock::new(None);
 
+/// Pick the newest usable Bedrock flagship from `routes`, if it should replace
+/// the placeholder default. Pure so it can be tested without AWS.
+fn bedrock_promoted_default(current: &str, routes: &[ModelRoute]) -> Option<String> {
+    if current != bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL {
+        return None;
+    }
+    let usable: Vec<&str> = routes
+        .iter()
+        .filter(|route| route.available)
+        .map(|route| route.model.as_str())
+        .collect();
+    crate::auth::lifecycle::preferred_model_for_provider("bedrock", &usable)
+        .filter(|best| best != current)
+}
+
+fn promote_bedrock_placeholder_default(bedrock: &bedrock::BedrockProvider) {
+    // The hardcoded known list has unverified availability (newer Claude ids
+    // often need an inference profile), so only promote from a real catalog.
+    if !bedrock.has_catalog() {
+        return;
+    }
+    if let Some(best) = bedrock_promoted_default(&bedrock.model(), &bedrock.model_routes()) {
+        bedrock.replace_placeholder_default_model(&best);
+    }
+}
+
+/// Build a Bedrock provider whose default is already the newest flagship in its
+/// cached catalog, instead of the stale placeholder.
+pub(crate) fn new_bedrock_provider() -> bedrock::BedrockProvider {
+    let provider = bedrock::BedrockProvider::new();
+    promote_bedrock_placeholder_default(&provider);
+    provider
+}
+
 /// Register the live agent provider so background helpers (memory sidecar) can
 /// reach whatever provider the user is actually running on. Safe to call more
 /// than once; the most recent registration wins.
@@ -269,6 +303,133 @@ fn configured_standard_openrouter_profile_routes() -> Vec<ModelRoute> {
         .collect()
 }
 
+/// Strip an explicit Jcode subscription prefix (`jcode:` or
+/// `jcode-subscription:`) from a model spec.
+pub(crate) fn jcode_subscription_model_prefix(model: &str) -> Option<&str> {
+    let (prefix, rest) = model.split_once(':')?;
+    let prefix = prefix.trim();
+    if !(prefix.eq_ignore_ascii_case("jcode") || prefix.eq_ignore_ascii_case("jcode-subscription"))
+    {
+        return None;
+    }
+    let rest = rest.trim();
+    (!rest.is_empty()).then_some(rest)
+}
+
+/// The outcome of re-applying a persisted session's model on resume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionModelRestore {
+    /// The model-switch request that was actually applied.
+    pub request: String,
+    /// Set when the persisted credential route could not be honored and the
+    /// session was moved onto the credential the process can actually use.
+    /// Callers must write these back to the session so every later reader
+    /// (swarm spawn inheritance, headed clients, the next resume) sees the
+    /// route the session really runs on instead of the stale one.
+    pub healed_route: Option<HealedSessionRoute>,
+}
+
+/// Route metadata to persist after a stale credential pin was recovered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HealedSessionRoute {
+    pub stale_request: String,
+    pub provider_key: Option<String>,
+    pub route_api_method: Option<String>,
+}
+
+/// When a persisted request pins a dual-auth credential (`claude-api:`,
+/// `claude-oauth:`, `openai-api:`, `openai-oauth:`) that the process cannot
+/// use, compute the request that keeps the same provider and model on the
+/// credential the process *can* use:
+///
+/// - `JCODE_RUNTIME_PROVIDER` pins the same provider with the other credential
+///   (the operator moved the deployment from an API key to OAuth or back):
+///   follow the runtime pin.
+/// - No runtime pin for that provider: drop to the bare provider prefix
+///   (`claude:` / `openai:`) so the runtime's automatic mode picks whichever
+///   credential exists.
+///
+/// Returns `None` when the request pins nothing, or when the runtime pins the
+/// very credential that failed (a genuine auth failure, not a stale session).
+pub fn stale_credential_route_fallback(request: &str) -> Option<(String, HealedSessionRoute)> {
+    let (_, prefix, bare) = explicit_model_provider_prefix(request.trim())?;
+    let bare = bare.trim();
+    if bare.is_empty() {
+        return None;
+    }
+    let stale = jcode_provider_core::AuthRoute::parse_explicit_credential_prefix(prefix)?;
+    match jcode_provider_core::runtime_env_auth_route()
+        .filter(|runtime| runtime.provider == stale.provider)
+    {
+        Some(runtime) if runtime.mode == stale.mode => None,
+        Some(runtime) => Some((
+            format!("{}:{bare}", runtime.model_prefix()),
+            HealedSessionRoute {
+                stale_request: request.to_string(),
+                provider_key: Some(runtime.session_provider_key().to_string()),
+                route_api_method: Some(runtime.route_api_method().to_string()),
+            },
+        )),
+        None => {
+            let bare_prefix = stale.provider.bare_model_prefix();
+            Some((
+                format!("{bare_prefix}:{bare}"),
+                HealedSessionRoute {
+                    stale_request: request.to_string(),
+                    provider_key: Some(bare_prefix.to_string()),
+                    route_api_method: None,
+                },
+            ))
+        }
+    }
+}
+
+/// Re-apply a persisted session's model on resume, recovering from a stale
+/// credential pin.
+///
+/// A session records the credential route it was created on. When the
+/// deployment's credential later changes type (an Anthropic API key replaced
+/// by a Claude subscription, or the reverse), the persisted pin names a
+/// credential that no longer exists. Restoring through it fails, and before
+/// this the failure was only logged: the session kept running on the provider
+/// default while its metadata still claimed the dead route, so every swarm
+/// worker that inherited it failed with "No Anthropic API key found".
+pub fn restore_session_model(
+    provider: &dyn Provider,
+    model: &str,
+    provider_key: Option<&str>,
+    route_api_method: Option<&str>,
+) -> Result<SessionModelRestore> {
+    let request = MultiProvider::model_switch_request_for_session_route(
+        model,
+        provider_key,
+        route_api_method,
+    );
+    let first_err = match set_model_with_auth_refresh(provider, &request) {
+        Ok(()) => {
+            return Ok(SessionModelRestore {
+                request,
+                healed_route: None,
+            });
+        }
+        Err(err) => err,
+    };
+    let Some((fallback, healed)) = stale_credential_route_fallback(&request) else {
+        return Err(first_err);
+    };
+    set_model_with_auth_refresh(provider, &fallback).map_err(|fallback_err| {
+        anyhow!("{first_err} (fallback to '{fallback}' also failed: {fallback_err})")
+    })?;
+    crate::logging::warn(&format!(
+        "Session credential route '{request}' is no longer usable ({first_err}); \
+         restored on '{fallback}' and updated the session route"
+    ));
+    Ok(SessionModelRestore {
+        request: fallback,
+        healed_route: Some(healed),
+    })
+}
+
 pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Result<()> {
     match provider.set_model(model) {
         Ok(()) => Ok(()),
@@ -326,6 +487,15 @@ pub use self::models::{
     record_provider_unavailable_for_label, refresh_openai_model_catalog_in_background,
     resolve_model_capabilities, should_refresh_anthropic_model_catalog,
     should_refresh_anthropic_model_catalog_for_scope, should_refresh_openai_model_catalog,
+};
+pub use self::models::{
+    begin_openai_model_catalog_refresh_for_scope, cached_openai_model_ids_for_scope,
+    cached_openai_reasoning_efforts_for_scope, clear_model_unavailable_for_scope,
+    finish_openai_model_catalog_refresh_for_scope, get_best_available_openai_model_for_scope,
+    known_openai_model_ids_for_scope, model_availability_for_scope,
+    openai_catalog_scope_for_credential, persist_openai_model_catalog_for_scope,
+    populate_account_models_for_scope, record_model_unavailable_for_scope,
+    should_refresh_openai_model_catalog_for_scope,
 };
 pub use self::selection::DefaultModelSelection;
 use self::selection::{ActiveProvider, ProviderAvailability};
@@ -1624,7 +1794,7 @@ impl MultiProvider {
                 .bedrock
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                Some(Arc::new(bedrock::BedrockProvider::new()));
+                Some(Arc::new(new_bedrock_provider()));
         }
 
         let registry = ProviderRegistry::new(self);
@@ -2200,6 +2370,13 @@ impl Provider for MultiProvider {
             return Ok(());
         }
 
+        // `jcode:<model>` is the explicit spec for the Jcode subscription
+        // runtime. Without this it fell through to the active provider and
+        // `--model jcode:gpt-5.5` silently stayed on the previous model.
+        if let Some(target_model) = jcode_subscription_model_prefix(requested_model) {
+            return self.set_model_on_jcode_subscription(target_model);
+        }
+
         if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)
         {
             return self.set_model_on_openai_compatible_profile(profile, target_model);
@@ -2548,6 +2725,12 @@ impl Provider for MultiProvider {
                 "Optional model catalog refresh failed: {}",
                 optional_errors.join("; ")
             ));
+        }
+
+        // Bedrock's built-in default is a 2024 model; once its catalog (live
+        // or cached) is known, land on the newest usable Claude flagship.
+        if let Some(bedrock) = self.bedrock_provider() {
+            promote_bedrock_placeholder_default(&bedrock);
         }
 
         if !errors.is_empty() {
@@ -3066,7 +3249,7 @@ impl Provider for MultiProvider {
         // process and session), carrying the instance and model over.
         let claude_code_provider = self.claude_code_provider().map(|provider| provider.fork());
         let bedrock_provider = if self.bedrock_provider().is_some() {
-            Some(Arc::new(bedrock::BedrockProvider::new()))
+            Some(Arc::new(new_bedrock_provider()))
         } else {
             None
         };
@@ -3239,3 +3422,123 @@ pub fn cache_ttl_for_provider_model(provider: &str, model: Option<&str>) -> Opti
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod bedrock_placeholder_default_tests {
+    use super::*;
+
+    fn route(model: &str, available: bool) -> ModelRoute {
+        ModelRoute {
+            model: model.to_string(),
+            provider: "AWS Bedrock".to_string(),
+            api_method: "bedrock".to_string(),
+            available,
+            detail: String::new(),
+            usage: None,
+            cheapness: None,
+        }
+    }
+
+    #[test]
+    fn bedrock_placeholder_promotes_to_newest_usable_claude() {
+        let routes = vec![
+            route(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, true),
+            route("anthropic.claude-sonnet-4-20250514-v1:0", true),
+            route("us.anthropic.claude-opus-4-6-v1", true),
+            route("amazon.nova-pro-v1:0", true),
+        ];
+        assert_eq!(
+            bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
+                .as_deref(),
+            Some("us.anthropic.claude-opus-4-6-v1")
+        );
+    }
+
+    #[test]
+    fn bedrock_placeholder_skips_unusable_routes() {
+        // A newer Opus that needs a missing inference profile is unavailable
+        // and must not become the default.
+        let routes = vec![
+            route("anthropic.claude-opus-5-20260101-v1:0", false),
+            route("anthropic.claude-sonnet-4-20250514-v1:0", true),
+        ];
+        assert_eq!(
+            bedrock_promoted_default(bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL, &routes)
+                .as_deref(),
+            Some("anthropic.claude-sonnet-4-20250514-v1:0")
+        );
+    }
+
+    /// End to end through the real construction path: a cached Bedrock catalog
+    /// on disk must make a freshly built provider start on the newest Claude
+    /// flagship instead of the 2024 placeholder; with no catalog it stays put.
+    #[test]
+    fn new_bedrock_provider_starts_on_newest_cached_flagship() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let keys = [
+            "JCODE_HOME",
+            "JCODE_BEDROCK_MODEL",
+            "JCODE_BEDROCK_REGION",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+        ];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        for key in &keys[1..] {
+            crate::env::remove_var(key);
+        }
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let fresh = new_bedrock_provider();
+        assert_eq!(
+            fresh.model(),
+            bedrock::BedrockProvider::PLACEHOLDER_DEFAULT_MODEL,
+            "no catalog: keep placeholder rather than guess from the known list"
+        );
+
+        let cache = crate::storage::app_config_dir()
+            .expect("config dir")
+            .join("bedrock_models_cache.json");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cache,
+            serde_json::json!({
+                "models": [
+                    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+                    "anthropic.claude-sonnet-4-20250514-v1:0",
+                    "anthropic.claude-opus-4-20250514-v1:0",
+                ],
+                "inference_profiles": [],
+                "region": null,
+                "fetched_at_rfc3339": "2026-10-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let promoted = new_bedrock_provider().model();
+
+        crate::env::set_var(
+            "JCODE_BEDROCK_MODEL",
+            "anthropic.claude-3-5-haiku-20241022-v1:0",
+        );
+        let pinned = new_bedrock_provider().model();
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => crate::env::set_var(key, value),
+                None => crate::env::remove_var(key),
+            }
+        }
+        assert_eq!(promoted, "anthropic.claude-opus-4-20250514-v1:0");
+        assert_eq!(pinned, "anthropic.claude-3-5-haiku-20241022-v1:0");
+    }
+
+    #[test]
+    fn bedrock_explicit_model_is_never_replaced() {
+        let routes = vec![route("us.anthropic.claude-opus-4-6-v1", true)];
+        assert_eq!(
+            bedrock_promoted_default("anthropic.claude-sonnet-4-20250514-v1:0", &routes),
+            None
+        );
+    }
+}

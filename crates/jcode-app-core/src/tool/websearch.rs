@@ -70,7 +70,7 @@ impl Tool for WebSearchTool {
                 "engine": {
                     "type": "string",
                     "enum": ["duckduckgo", "bing", "searxng"],
-                    "description": "Engine. Defaults to duckduckgo; bing uses JCODE_BING_API_KEY, searxng uses JCODE_SEARXNG_URL."
+                    "description": "Engine. Defaults to duckduckgo; searxng uses JCODE_SEARXNG_URL."
                 },
                 "bing_market": {
                     "type": "string",
@@ -133,10 +133,9 @@ impl Tool for WebSearchTool {
                 "No results found for: {}\n\n\
                  If results are consistently empty on this machine, the default \
                  DuckDuckGo/Bing engines may be blocked here by TLS fingerprinting \
-                 or IP reputation (common on Linux/servers). Workarounds:\n\
+                 or IP reputation (common on Linux/servers). Workaround:\n\
                  - Point at a SearXNG instance: set `websearch.searxng_url` (or \
-                 JCODE_SEARXNG_URL) and use engine \"searxng\".\n\
-                 - Or provide a Bing Search API key via JCODE_BING_API_KEY.",
+                 JCODE_SEARXNG_URL) and use engine \"searxng\".",
                 params.query
             )));
         }

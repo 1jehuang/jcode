@@ -66,6 +66,7 @@ fn fallback_models_skip_current_model() {
     assert_eq!(
         gemini_fallback_models("gemini-2.5-flash"),
         vec![
+            "gemini-pro-latest",
             "gemini-3.1-pro-preview",
             "gemini-3-pro-preview",
             "gemini-2.5-pro",

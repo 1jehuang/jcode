@@ -27,8 +27,11 @@ impl crate::tool::Tool for AccountAwareTool {
     }
 }
 
+/// Tool definitions are part of the provider prompt-cache prefix. Once a
+/// snapshot is locked, a tool whose description depends on runtime state (such
+/// as account status) must not rewrite it mid-session.
 #[tokio::test]
-async fn compile_remote_account_guidance_refreshes_locked_and_deferred_snapshots() {
+async fn locked_snapshots_ignore_runtime_description_changes() {
     let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
     for mode in [
         crate::config::McpToolsMode::Eager,
@@ -48,23 +51,10 @@ async fn compile_remote_account_guidance_refreshes_locked_and_deferred_snapshots
         agent.allowed_tools = Some(HashSet::from(["compile_remote".into()]));
         let before = agent.tool_definitions().await;
         assert_eq!(before.len(), 1);
-        assert!(before[0].description.contains("Subscribe"));
         agent.mcp_late_register_resolved = true;
         paid.store(true, Ordering::SeqCst);
         let after = agent.tool_definitions().await;
-        assert_eq!(after.len(), 1);
-        assert!(after[0].description.contains("Subscription verified"));
+        assert_eq!(after[0].description, before[0].description);
         assert_eq!(after[0].input_schema, before[0].input_schema);
-        assert_eq!(
-            agent.tool_definitions().await[0].description,
-            after[0].description,
-            "unchanged state keeps a stable schema"
-        );
-        paid.store(false, Ordering::SeqCst);
-        assert!(
-            agent.tool_definitions().await[0]
-                .description
-                .contains("Subscribe")
-        );
     }
 }

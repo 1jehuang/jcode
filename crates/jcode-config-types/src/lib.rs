@@ -6,7 +6,13 @@ pub use claude_code::{
     ClaudeCodeConfig, ClaudeCodeInstanceConfig, is_valid_claude_code_instance_id,
 };
 mod display;
-pub use display::{DisplayConfig, InfoWidgetLayout};
+mod menubar;
+mod power;
+pub use {
+    display::{DisplayConfig, InfoWidgetLayout},
+    menubar::MenubarConfig,
+    power::PowerConfig,
+};
 pub mod keybindings;
 mod serde_lenient;
 pub use keybindings::{
@@ -666,6 +672,22 @@ pub struct AgentsConfig {
     /// Env override: `JCODE_SWARM_MAX_CONCURRENT_AGENTS`.
     #[serde(default = "default_swarm_max_concurrent_agents")]
     pub swarm_max_concurrent_agents: usize,
+    /// Stalled-worker watchdog window in seconds. A running swarm worker with
+    /// no streamed tokens, tool events, or task heartbeats for this long, and
+    /// no tool currently executing, is flagged as stalled in swarm status and
+    /// its coordinator is notified once. `0` disables the watchdog.
+    /// Env override: `JCODE_SWARM_STALL_AFTER_SECS`.
+    #[serde(default = "default_swarm_stall_after_secs")]
+    pub swarm_stall_after_secs: u64,
+    /// When the watchdog flags a worker as stalled, also queue a short nudge
+    /// message into the worker's own session. Off by default.
+    /// Env override: `JCODE_SWARM_STALL_NUDGE`.
+    #[serde(default)]
+    pub swarm_stall_nudge: bool,
+}
+
+fn default_swarm_stall_after_secs() -> u64 {
+    600
 }
 
 fn default_swarm_max_concurrent_agents() -> usize {
@@ -722,6 +744,8 @@ impl Default for AgentsConfig {
             memory_embedding_base_url: None,
             memory_embedding_dim: None,
             swarm_max_concurrent_agents: default_swarm_max_concurrent_agents(),
+            swarm_stall_after_secs: default_swarm_stall_after_secs(),
+            swarm_stall_nudge: false,
         }
     }
 }
@@ -955,9 +979,18 @@ pub struct HooksConfig {
     /// Env override: JCODE_HOOK_PRE_TOOL.
     pub pre_tool: Option<HookCommands>,
     /// Runs after each tool call completes.
-    /// Fields: TOOL_NAME, STATUS ("ok"/"error"), DURATION_MS, OUTPUT_BYTES.
+    /// Fields: TOOL_NAME, TOOL_CALL_ID, TOOL_INPUT, TOUCHED_PATHS, STATUS
+    /// ("ok"/"error"), DURATION_MS, OUTPUT_BYTES, ERROR.
     /// Env override: JCODE_HOOK_POST_TOOL.
     pub post_tool: Option<HookCommands>,
+    /// Synchronous hook after each successful tool call. Same fields as
+    /// post_tool, tool input JSON on stdin. Its stdout is appended to the tool
+    /// result the model sees (e.g. linter output for edited files).
+    /// Env override: JCODE_HOOK_POST_TOOL_FEEDBACK.
+    pub post_tool_feedback: Option<HookCommands>,
+    /// Max milliseconds to wait for each post_tool_feedback hook (default:
+    /// 10000). Env override: JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS.
+    pub post_tool_feedback_timeout_ms: u64,
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
@@ -974,6 +1007,8 @@ impl Default for HooksConfig {
             session_end: None,
             pre_tool: None,
             post_tool: None,
+            post_tool_feedback: None,
+            post_tool_feedback_timeout_ms: 10_000,
             pre_tool_timeout_ms: 5000,
         }
     }
@@ -1050,6 +1085,10 @@ pub struct KeybindingsConfig {
     pub effort_increase: String,
     /// Effort decrease key (default: "cmd+left" on macOS, "alt+left" elsewhere)
     pub effort_decrease: String,
+    /// Speed tier increase key, Standard -> Fast -> Ultrafast (default: "alt+up")
+    pub speed_increase: String,
+    /// Speed tier decrease key, Ultrafast -> Fast -> Standard (default: "alt+down")
+    pub speed_decrease: String,
     /// Centered mode toggle key (default: "alt+c")
     pub centered_toggle: String,
     /// Scroll to previous prompt key (default: "ctrl+[")
@@ -1085,8 +1124,10 @@ pub struct KeybindingsConfig {
     pub diagram_pane_visibility_toggle: String,
     /// Toggle typing scroll lock (default: "alt+s")
     pub typing_scroll_lock_toggle: String,
-    /// Cycle inline diff display mode (default: "alt+g")
+    /// Cycle inline diff display mode (default: unbound; use /diff)
     pub diff_mode_cycle: String,
+    /// Show the git commit log of the current project (default: "alt+g")
+    pub commit_log: String,
     /// Toggle the info widget (default: "alt+i")
     pub info_widget_toggle: String,
     /// Show/dismiss the session todo list as an inline card in the chat
@@ -1130,6 +1171,8 @@ impl Default for KeybindingsConfig {
             fallback_switch: get("fallback_switch", "ctrl+y"),
             effort_increase: get("effort_increase", "alt+right"),
             effort_decrease: get("effort_decrease", "alt+left"),
+            speed_increase: get("speed_increase", "alt+up"),
+            speed_decrease: get("speed_decrease", "alt+down"),
             centered_toggle: get("centered_toggle", "alt+c"),
             scroll_prompt_up: get("scroll_prompt_up", "ctrl+["),
             scroll_prompt_down: get("scroll_prompt_down", "ctrl+]"),
@@ -1147,7 +1190,8 @@ impl Default for KeybindingsConfig {
             diagram_pane_toggle: get("diagram_pane_toggle", "alt+t"),
             diagram_pane_visibility_toggle: get("diagram_pane_visibility_toggle", "alt+shift+m"),
             typing_scroll_lock_toggle: get("typing_scroll_lock_toggle", "alt+s"),
-            diff_mode_cycle: get("diff_mode_cycle", "alt+g"),
+            diff_mode_cycle: get("diff_mode_cycle", ""),
+            commit_log: get("commit_log", "alt+g"),
             info_widget_toggle: get("info_widget_toggle", "alt+i"),
             todo_card_toggle: get("todo_card_toggle", "alt+x"),
             swarm_panel_focus: get("swarm_panel_focus", "alt+n"),
@@ -1655,39 +1699,6 @@ impl Default for GatewayConfig {
             enabled: false,
             port: 7643,
             bind_addr: "0.0.0.0".to_string(),
-        }
-    }
-}
-
-/// Power-management configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PowerConfig {
-    /// Prevent automatic system sleep while any jcode session is actively
-    /// streaming/processing. Linux also asks logind to block lid-switch suspend.
-    /// Windows cannot override a user-initiated lid close or power-button action;
-    /// those remain controlled by the active Windows power plan. The display is
-    /// still allowed to sleep. Default: true.
-    ///
-    /// Honored by the shared `jcode serve` daemon. The `JCODE_DISABLE_POWER_INHIBIT`
-    /// environment variable forces this off regardless of the config value.
-    pub prevent_sleep_while_streaming: bool,
-
-    /// Also keep working when the lid closes on macOS and Windows while a
-    /// session is streaming. Linux always blocks lid-close suspend as part of
-    /// `prevent_sleep_while_streaming`. On Windows jcode temporarily sets the
-    /// active power plan's lid close action to "Do nothing". On macOS it runs
-    /// `sudo -n pmset -a disablesleep 1`, which requires a passwordless sudoers
-    /// rule and is skipped otherwise. Original settings are journaled and
-    /// restored when work finishes, including after a crash. Default: true.
-    pub block_lid_close: bool,
-}
-
-impl Default for PowerConfig {
-    fn default() -> Self {
-        Self {
-            prevent_sleep_while_streaming: true,
-            block_lid_close: true,
         }
     }
 }

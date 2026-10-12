@@ -246,6 +246,47 @@ fn update_launcher_symlink_stays_inside_sandbox_home() {
     });
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn idle_prune_keeps_a_running_binary_installed_under_an_old_label() {
+    with_temp_jcode_home(|| {
+        let versions = builds_dir().unwrap().join("versions");
+        let running_version = versions.join("old-running-link");
+        std::fs::create_dir_all(&running_version).unwrap();
+        std::fs::hard_link(
+            std::env::current_exe().unwrap(),
+            running_version.join(binary_name()),
+        )
+        .unwrap();
+        let day = std::time::Duration::from_secs(24 * 60 * 60);
+        std::fs::File::open(&running_version)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - day * 100)
+            .unwrap();
+        for i in 1..8u32 {
+            let unused = versions.join(format!("unused-{i}"));
+            std::fs::create_dir_all(&unused).unwrap();
+            std::fs::write(unused.join(binary_name()), b"unused binary").unwrap();
+            std::fs::File::open(&unused)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - day * (i + 1))
+                .unwrap();
+        }
+        let previous_keep = std::env::var_os(KEEP_VERSIONS_ENV);
+        jcode_core::env::set_var(KEEP_VERSIONS_ENV, "1");
+        prune_old_versions_on_idle();
+        if let Some(previous_keep) = previous_keep {
+            jcode_core::env::set_var(KEEP_VERSIONS_ENV, previous_keep);
+        } else {
+            jcode_core::env::remove_var(KEEP_VERSIONS_ENV);
+        }
+        assert!(
+            running_version.exists(),
+            "idle pruning must retain live binaries"
+        );
+    });
+}
+
 #[test]
 fn test_canary_status_serialization() {
     assert_eq!(

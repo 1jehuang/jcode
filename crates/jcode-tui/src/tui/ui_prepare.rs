@@ -1066,6 +1066,11 @@ fn header_prep_signature(app: &dyn TuiState, width: u16) -> u64 {
     app.connected_clients().hash(&mut hasher);
     app.server_sessions().len().hash(&mut hasher);
     app.working_dir().hash(&mut hasher);
+    // The directory row renders `(branch)`. The branch arrives from the async
+    // git probe, so without this the header kept the branch-less row until an
+    // unrelated field changed (or the 30s TTL lapsed), and a `git switch` did
+    // not show in the header at all.
+    app.git_branch().hash(&mut hasher);
     // Credential changes alter the auth inventory lines. Hashing the auth
     // generation (cheap atomic load) means `/login` and account edits repaint
     // the header on the very next frame instead of waiting out the TTL, which
@@ -1567,8 +1572,13 @@ fn render_message_into(
                                 })
                         })
                         .unwrap_or_else(|| "unknown".to_string());
-                    let expandable =
-                        messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width);
+                    // Outside the inline modes the diff body is hidden entirely,
+                    // so any edit with a diff can be expanded into full inline.
+                    let expandable = if app.diff_mode().is_inline() {
+                        messages::edit_tool_inline_diff_is_expandable(tc, &msg.content, width)
+                    } else {
+                        messages::edit_tool_has_inline_diff(tc, &msg.content)
+                    };
                     acc.edit_tool_line_ranges.push((
                         msg_global_idx,
                         file_path,

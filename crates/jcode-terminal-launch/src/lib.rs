@@ -666,7 +666,12 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
             // than requiring every user to configure an equivalent spawn hook.
             let herdr = terminal_env_value(&command.client_terminal_env, "HERDR_BIN_PATH")
                 .unwrap_or_else(|| "herdr".to_string());
-            let shell = shell_command(&command_parts(command));
+            // Unlike tmux/zellij, herdr runs the command inside an interactive
+            // shell, which would outlive jcode and leave an empty pane behind
+            // (e.g. after `swarm stop`). Exit that shell when jcode exits
+            // cleanly so the pane closes, but keep it open after a failure so
+            // the error stays readable.
+            let shell = format!("{} && exit", shell_command(&command_parts(command)));
             let script = concat!(
                 "set -eu; ",
                 "response=\"$(\"$1\" pane split --current --direction right --cwd \"$2\" --focus)\"; ",
@@ -1345,7 +1350,10 @@ mod tests {
         assert_eq!(args[2], "jcode-herdr-spawn");
         assert_eq!(args[3], "/opt/herdr/bin/herdr");
         assert_eq!(args[4], "/work/a b");
-        assert_eq!(args[5], "'/usr/local/bin/jcode' '--resume' 'ses herdr'");
+        assert_eq!(
+            args[5],
+            "'/usr/local/bin/jcode' '--resume' 'ses herdr' && exit"
+        );
     }
 
     #[test]
@@ -1403,7 +1411,7 @@ mod tests {
         );
         assert_eq!(
             lines[1],
-            "pane run w9:p12 '/opt/Jcode App/jcode' '--resume' 'session with spaces'"
+            "pane run w9:p12 '/opt/Jcode App/jcode' '--resume' 'session with spaces' && exit"
         );
         let _ = std::fs::remove_dir_all(dir);
     }

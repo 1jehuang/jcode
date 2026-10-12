@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 8;
+export const API_VERSION_MINOR = 9;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -76,6 +76,22 @@ export interface TextMatch {
   line: number;
   column: number;
   preview: string;
+}
+
+/** A session's persisted todo state, as read by the follow-up policy.
+ * Todos, plan, goals, and observations use the runtime's todo schema. */
+export interface TodoSnapshot {
+  todos: Array<Record<string, unknown>>;
+  plan: Record<string, unknown>;
+  goals: Array<Record<string, unknown>>;
+  gate_observations: Array<Record<string, unknown>>;
+  long_session_review_due: boolean;
+}
+
+/** Persistent effects of a follow-up decision. */
+export interface TodoEffects {
+  clear_gate_observations?: boolean;
+  mark_long_session_review_delivered?: boolean;
 }
 
 /** Durable raw provider counts summed over all assistant rounds in one user turn.
@@ -161,6 +177,8 @@ export type ApiRequest =
       content: string;
       images?: ImageAttachment[];
       urgent?: boolean;
+      /** Opaque id echoed in `soft_interrupt_injected` and accepted by a filtered cancel. */
+      client_id?: string;
     }
   | { req: "get_history"; session_id: string }
   | { req: "peek_session"; session_id: string; limit?: number }
@@ -182,6 +200,8 @@ export type ApiRequest =
   | { req: "find_files"; session_id: string; query: string; limit?: number }
   | { req: "search_text"; session_id: string; query: string; path?: string; limit?: number }
   | { req: "file_status"; session_id: string; path: string }
+  | { req: "get_todo_state"; session_id: string }
+  | { req: "ack_todo_follow_up"; session_id: string; effects: TodoEffects }
   | { req: "set_model"; session_id: string; model: string }
   | { req: "set_reasoning_effort"; session_id: string; effort: string }
   | { req: "compact"; session_id: string }
@@ -197,7 +217,9 @@ export type ApiRequest =
     }
   | { req: "close_applet"; session_id: string; instance: string }
   | { req: "rewind_undo"; session_id: string }
-  | { req: "cancel_soft_interrupts"; session_id: string }
+  /** Without `client_ids`, clears the queue (replies `ok`). With them, replies `soft_interrupts_cancelled`. */
+  | { req: "cancel_soft_interrupts"; session_id: string; client_ids?: string[] }
+  /** Replies `background_tool_result` when the `background_tool_result` capability is advertised, else `ok`. */
   | { req: "background_tool"; session_id: string }
   | { req: "ping" };
 
@@ -300,7 +322,26 @@ export type ApiEvent =
       message: string;
     }
   | { ev: "turn_stopped"; session_id: string; reason: TurnStopReason; message: string; provider_stop_reason?: string }
-  | { ev: "turn_done"; session_id: string }
+  /** `pending_soft_interrupts`: queued messages this turn never saw (only when nonzero). */
+  | { ev: "turn_done"; session_id: string; pending_soft_interrupts?: number }
+  /**
+   * Queued soft interrupts reached the model. Output after this event was written
+   * having seen them. Several queued messages arrive as one user message, so
+   * `client_ids` lists every id delivered, in queue order. `point` is B, C, D, or
+   * `turn_start` (sent while idle, so it started a turn).
+   */
+  | {
+      ev: "soft_interrupt_injected";
+      session_id: string;
+      client_ids: string[];
+      point: string;
+      tools_skipped?: number;
+      display_role?: string;
+    }
+  /** Reply to a filtered `cancel_soft_interrupts`. Decided atomically against delivery. */
+  | { ev: "soft_interrupts_cancelled"; cancelled: string[]; not_queued: string[] }
+  /** Reply to `background_tool`. */
+  | { ev: "background_tool_result"; moved: boolean; tool_call_id?: string; tool_name?: string }
   | {
       ev: "wake_requested";
       session_id: string;
@@ -326,7 +367,7 @@ export type ApiEvent =
     }
   /** Attachment recovery intent. Can precede attached. Never auto-sent by the bridge. */
   | { ev: "session_recovery"; session_id: string; continuation_message: string; reconnect_notice?: string }
-  | { ev: "session_status"; session_id: string; status: string }
+  | { ev: "session_status"; session_id: string; status: string; pending_soft_interrupts?: number }
   | { ev: "connection_phase"; session_id: string; phase: string }
   | {
       ev: "model_info";
@@ -366,6 +407,7 @@ export type ApiEvent =
       size?: number;
       modified_ms?: number;
     }
+  | { ev: "todo_state"; session_id: string; state: TodoSnapshot }
   | { ev: "compacted"; session_id: string; message: string }
   | {
       ev: "session_renamed";
@@ -431,6 +473,9 @@ export const KNOWN_EVENT_KINDS = [
   "token_usage",
   "kv_cache_miss",
   "turn_done",
+  "soft_interrupt_injected",
+  "soft_interrupts_cancelled",
+  "background_tool_result",
   "turn_stopped",
   "wake_requested",
   "background_progress",
@@ -447,6 +492,7 @@ export const KNOWN_EVENT_KINDS = [
   "files",
   "text_matches",
   "file_status",
+  "todo_state",
   "compacted",
   "session_renamed",
 ] as const;
@@ -483,6 +529,8 @@ export const KNOWN_REQUEST_KINDS = [
   "find_files",
   "search_text",
   "file_status",
+  "get_todo_state",
+  "ack_todo_follow_up",
   "set_model",
   "set_reasoning_effort",
   "compact",

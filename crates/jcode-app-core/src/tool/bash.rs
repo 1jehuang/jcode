@@ -904,12 +904,11 @@ impl Tool for BashTool {
         if crate::browser::is_browser_command(&params.command) {
             params.command = crate::browser::rewrite_command_with_full_path(&params.command);
 
-            // Start/attach a browser session for this jcode session.
-            // This gives each agent its own browser tab, preventing
-            // multi-agent conflicts when using the browser bridge.
+            // Give each agent its own browser session without blocking async workers.
             if !cfg!(windows)
                 && std::env::var("BROWSER_SESSION").is_err()
-                && let Some(session_name) = crate::browser::ensure_browser_session(&ctx.session_id)
+                && let Some(session_name) =
+                    crate::browser::ensure_browser_session_for_async(&ctx.session_id, None).await
             {
                 params.command = format!("BROWSER_SESSION={} {}", session_name, params.command);
             }
