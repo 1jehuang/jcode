@@ -34,10 +34,18 @@ Unknown capabilities are ignored for forward compatibility.
 - Enforce the negotiated maximum frame size. The reference adapter defaults to
   16 MiB and bounds reads before allocating an unbounded line.
 - Use a handshake deadline and a per-request deadline. The adapter defaults to
-  10 seconds for the handshake and 120 seconds for a request.
+  10 seconds for the handshake and 120 seconds for a request. The request
+  deadline covers writing the request as well as reading its response. A write
+  that hits the deadline closes the transport, because a partial JSONL frame
+  may already be in the pipe.
 - Treat a missing newline, malformed JSON, unsupported version, mismatched ID,
-  process exit, and timeout as a failed request. Do not silently reuse a
-  partially read stream.
+  process exit, and timeout as a failed request. A timed-out read keeps any
+  bytes already taken from the current line and resumes that same frame on the
+  next read. Do not decode the leftover suffix as a new frame.
+- Run one request collection at a time on a provider process. Frames are tagged
+  with a request ID, but the reference adapter does not interleave two readers
+  on the same stdout. Cancellation may still be written while a collection is
+  waiting.
 - Kill the child when the adapter is dropped or a session is cancelled by the
   application.
 - Never put secrets in frame payloads or logs unless the provider contract

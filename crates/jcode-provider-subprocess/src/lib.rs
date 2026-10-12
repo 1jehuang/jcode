@@ -7,7 +7,8 @@ use std::ffi::OsStr;
 #[cfg(test)]
 use std::ffi::OsString;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
@@ -48,8 +49,20 @@ pub enum AdapterError {
     ProcessExited(Option<i32>),
     #[error("provider request timed out")]
     Timeout,
+    #[error("provider transport failed and cannot be reused")]
+    TransportFailed,
     #[error("unexpected protocol frame: {0}")]
     UnexpectedFrame(String),
+}
+
+struct StdoutState {
+    reader: BufReader<ChildStdout>,
+    /// Bytes of the current JSONL frame already pulled from stdout.
+    ///
+    /// A read deadline drops the in-flight read future. Keeping this buffer in
+    /// the mutex (instead of on that future's stack) lets the next read resume
+    /// the same frame instead of decoding the leftover suffix as a new one.
+    partial: Vec<u8>,
 }
 
 /// A bounded JSONL subprocess transport for external provider implementations.
@@ -58,7 +71,12 @@ pub enum AdapterError {
 pub struct SubprocessProvider {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
-    stdout: Mutex<BufReader<ChildStdout>>,
+    stdout: Mutex<StdoutState>,
+    /// Serializes a full request exchange so two collectors cannot consume one
+    /// stdout stream. Cancellation writes only need the stdin mutex, so they
+    /// can still be sent while a collection is in progress.
+    exchange: Mutex<()>,
+    broken: AtomicBool,
     config: SubprocessConfig,
     requested_capabilities: Vec<String>,
 }
@@ -117,26 +135,69 @@ impl SubprocessProvider {
         let adapter = Self {
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
-            stdout: Mutex::new(BufReader::new(stdout)),
+            stdout: Mutex::new(StdoutState {
+                reader: BufReader::new(stdout),
+                partial: Vec::with_capacity(1024),
+            }),
+            exchange: Mutex::new(()),
+            broken: AtomicBool::new(false),
             config: config.clone(),
             requested_capabilities: capabilities.clone(),
         };
+        let hello_deadline = Instant::now() + config.handshake_timeout;
         adapter
-            .send(Frame::Hello {
-                protocol_version: PROTOCOL_VERSION.into(),
-                client: client.into(),
-                capabilities,
-                max_frame_size: Some(config.max_frame_size),
-            })
+            .send_until(
+                Frame::Hello {
+                    protocol_version: PROTOCOL_VERSION.into(),
+                    client: client.into(),
+                    capabilities,
+                    max_frame_size: Some(config.max_frame_size),
+                },
+                Some(hello_deadline),
+            )
             .await?;
         Ok(adapter)
     }
 
     pub async fn send(&self, frame: Frame) -> Result<(), AdapterError> {
+        self.send_until(frame, None).await
+    }
+
+    async fn send_until(
+        &self,
+        frame: Frame,
+        deadline: Option<Instant>,
+    ) -> Result<(), AdapterError> {
+        if self.broken.load(Ordering::Acquire) {
+            return Err(AdapterError::TransportFailed);
+        }
+        let bytes = encode(&frame)?;
         let mut stdin = self.stdin.lock().await;
-        stdin.write_all(&encode(&frame)?).await?;
-        stdin.flush().await?;
-        Ok(())
+        let write = async {
+            stdin.write_all(&bytes).await?;
+            stdin.flush().await?;
+            Ok::<(), std::io::Error>(())
+        };
+        let write_result = if let Some(deadline) = deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(AdapterError::Timeout);
+            }
+            match tokio::time::timeout(remaining, write).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    // A cancelled write may already have pushed a prefix into the
+                    // pipe. The child cannot resynchronize, so close the transport.
+                    self.broken.store(true, Ordering::Release);
+                    drop(stdin);
+                    let _ = self.child.lock().await.start_kill();
+                    return Err(AdapterError::Timeout);
+                }
+            }
+        } else {
+            write.await
+        };
+        write_result.map_err(AdapterError::Io)
     }
 
     pub async fn next(&self) -> Result<Frame, AdapterError> {
@@ -147,6 +208,17 @@ impl SubprocessProvider {
         &self,
         timeout: Option<Duration>,
     ) -> Result<Frame, AdapterError> {
+        let _exchange = self.exchange.lock().await;
+        self.read_frame_with_timeout(timeout).await
+    }
+
+    async fn read_frame_with_timeout(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<Frame, AdapterError> {
+        if self.broken.load(Ordering::Acquire) {
+            return Err(AdapterError::TransportFailed);
+        }
         let read = self.next_inner();
         match timeout {
             Some(timeout) => tokio::time::timeout(timeout, read)
@@ -158,30 +230,32 @@ impl SubprocessProvider {
 
     async fn next_inner(&self) -> Result<Frame, AdapterError> {
         let mut stdout = self.stdout.lock().await;
-        let mut line = Vec::with_capacity(1024);
         loop {
-            let byte = match stdout.read_u8().await {
+            let byte = match stdout.reader.read_u8().await {
                 Ok(byte) => byte,
                 Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                     let mut child = self.child.lock().await;
-                    let status = child.try_wait()?.map(|status| status.code()).flatten();
+                    let status = child.try_wait()?.and_then(|status| status.code());
                     return Err(AdapterError::ProcessExited(status));
                 }
                 Err(error) => return Err(AdapterError::Io(error)),
             };
             if byte == b'\n' {
+                let line = std::mem::take(&mut stdout.partial);
                 return Ok(decode(&line, self.config.max_frame_size)?);
             }
-            line.push(byte);
-            if line.len() > self.config.max_frame_size {
+            stdout.partial.push(byte);
+            if stdout.partial.len() > self.config.max_frame_size {
+                stdout.partial.clear();
                 return Err(AdapterError::Protocol(ProtocolError::TooLarge));
             }
         }
     }
 
     pub async fn handshake(&self) -> Result<Handshake, AdapterError> {
+        let _exchange = self.exchange.lock().await;
         let frame = self
-            .next_with_timeout(Some(self.config.handshake_timeout))
+            .read_frame_with_timeout(Some(self.config.handshake_timeout))
             .await?;
         match frame {
             Frame::HelloOk {
@@ -226,15 +300,25 @@ impl SubprocessProvider {
         params: Value,
     ) -> Result<Vec<Frame>, AdapterError> {
         let id = id.into();
-        self.request(id.clone(), method, params).await?;
-        let deadline = tokio::time::Instant::now() + self.config.request_timeout;
+        let _exchange = self.exchange.lock().await;
+        let deadline = Instant::now() + self.config.request_timeout;
+        self.send_until(
+            Frame::Request {
+                protocol_version: PROTOCOL_VERSION.into(),
+                id: id.clone(),
+                method: method.into(),
+                params,
+            },
+            Some(deadline),
+        )
+        .await?;
         let mut frames = Vec::new();
         loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(AdapterError::Timeout);
             }
-            let frame = self.next_with_timeout(Some(remaining)).await?;
+            let frame = self.read_frame_with_timeout(Some(remaining)).await?;
             match &frame {
                 Frame::Event { request_id, .. } if request_id == &id => frames.push(frame),
                 Frame::Response {
@@ -381,6 +465,122 @@ mod tests {
         assert!(matches!(
             provider.next().await,
             Err(AdapterError::Protocol(ProtocolError::TooLarge))
+        ));
+    }
+
+    #[tokio::test]
+    async fn timed_out_partial_frame_resumes_instead_of_desynchronizing() {
+        let script = "import sys,time\n\
+            sys.stdout.write('{\"kind\":\"hello_ok\",\"protocol_version\":\"0.1\",\"provider\":{\"id\":\"p\",\"name\":\"P\",\"version\":\"1\"},\"capabilities\":[]}\\n')\n\
+            sys.stdout.flush()\n\
+            sys.stdin.readline()\n\
+            sys.stdout.write('{\"kind\":\"response\",\"protocol_version\":\"0.1\",\"id\":\"r1\",\"ok\":true,\"result\":{}}')\n\
+            sys.stdout.flush()\n\
+            time.sleep(1.0)\n\
+            sys.stdout.write('\\n')\n\
+            sys.stdout.flush()\n";
+        let provider = SubprocessProvider::spawn_with_config(
+            "python3",
+            &["-c", script],
+            "test",
+            vec![],
+            SubprocessConfig {
+                request_timeout: Duration::from_millis(200),
+                ..SubprocessConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        provider.handshake().await.unwrap();
+        assert!(matches!(
+            provider
+                .request_and_collect("r1", "complete", serde_json::json!({}))
+                .await,
+            Err(AdapterError::Timeout)
+        ));
+        let frame = provider.next().await.unwrap();
+        assert!(matches!(frame, Frame::Response { ok: true, .. }));
+    }
+
+    #[tokio::test]
+    async fn concurrent_collections_do_not_steal_frames() {
+        let script = "import sys,json\n\
+            for line in sys.stdin:\n\
+            \tf=json.loads(line)\n\
+            \tif f['kind']=='hello':\n\
+            \t\tprint(json.dumps({'kind':'hello_ok','protocol_version':'0.1','provider':{'id':'p','name':'P','version':'1'},'capabilities':[]}),flush=True)\n\
+            \telif f['kind']=='request':\n\
+            \t\tprint(json.dumps({'kind':'response','protocol_version':'0.1','id':f['id'],'ok':True,'result':{'id':f['id']}}),flush=True)\n";
+        let provider = std::sync::Arc::new(
+            SubprocessProvider::spawn_with_config(
+                "python3",
+                &["-c", script],
+                "test",
+                vec![],
+                SubprocessConfig {
+                    request_timeout: Duration::from_secs(2),
+                    ..SubprocessConfig::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        provider.handshake().await.unwrap();
+        let first = {
+            let provider = std::sync::Arc::clone(&provider);
+            tokio::spawn(async move {
+                provider
+                    .request_and_collect("a", "complete", serde_json::json!({}))
+                    .await
+            })
+        };
+        let second = {
+            let provider = std::sync::Arc::clone(&provider);
+            tokio::spawn(async move {
+                provider
+                    .request_and_collect("b", "complete", serde_json::json!({}))
+                    .await
+            })
+        };
+        let first = first.await.unwrap().unwrap();
+        let second = second.await.unwrap().unwrap();
+        assert!(matches!(first.last(), Some(Frame::Response { id, .. }) if id == "a"));
+        assert!(matches!(second.last(), Some(Frame::Response { id, .. }) if id == "b"));
+    }
+
+    #[tokio::test]
+    async fn request_write_respects_deadline_when_provider_stops_reading() {
+        let provider = SubprocessProvider::spawn_with_config(
+            "python3",
+            &["-c", "import time; time.sleep(30)"],
+            "test",
+            vec![],
+            SubprocessConfig {
+                handshake_timeout: Duration::from_secs(2),
+                request_timeout: Duration::from_millis(200),
+                ..SubprocessConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            provider.request_and_collect(
+                "r1",
+                "complete",
+                serde_json::json!({ "blob": "x".repeat(2 * 1024 * 1024) }),
+            ),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "request write blocked for {elapsed:?}"
+        );
+        assert!(matches!(
+            result,
+            Ok(Err(AdapterError::Timeout | AdapterError::TransportFailed))
         ));
     }
 }
