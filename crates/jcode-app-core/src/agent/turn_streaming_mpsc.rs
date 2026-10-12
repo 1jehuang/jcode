@@ -1055,6 +1055,11 @@ impl Agent {
                         provider_native_items.clear();
                         provider_native_tracker.clear();
                         openai_native_compaction = None;
+                        // Usage belongs to the discarded attempt, not its replacement.
+                        usage_input = None;
+                        usage_output = None;
+                        usage_cache_read = None;
+                        usage_cache_creation = None;
                         saw_message_end = false;
                         stop_reason = None;
                         let _ = event_tx.send(ServerEvent::RetryRollback { attempt, max });
