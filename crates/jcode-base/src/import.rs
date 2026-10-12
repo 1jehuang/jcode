@@ -4,7 +4,7 @@
 //! so they can be resumed within jcode.
 
 use crate::message::{ContentBlock, Role};
-use crate::session::{Session, SessionStatus, StoredMessage};
+use crate::session::{Session, StoredMessage};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 pub use jcode_import_core::repo_ranking;
@@ -1010,58 +1010,8 @@ fn append_text_message(
     });
 }
 
-fn finalize_imported_session(
-    session: Session,
-    created_at: DateTime<Utc>,
-    updated_at: Option<DateTime<Utc>>,
-) -> Result<Session> {
-    finalize_imported_session_with_omissions(session, created_at, updated_at, 0)
-}
-
-fn finalize_imported_session_with_omissions(
-    mut session: Session,
-    created_at: DateTime<Utc>,
-    updated_at: Option<DateTime<Utc>>,
-    omitted: usize,
-) -> Result<Session> {
-    // Never overwrite a jcode-side continuation with a shorter external
-    // transcript. This protection applies to every importer, not only Claude.
-    if crate::session::session_exists(&session.id)
-        && let Ok(mut existing) = Session::load(&session.id)
-        && existing.messages.len() > session.messages.len()
-    {
-        if normalize_imported_history(&mut existing, false) {
-            existing.save()?;
-        }
-        return Ok(existing);
-    }
-
-    let original_messages = session.messages.len().saturating_add(omitted);
-    session.created_at = created_at;
-    session.updated_at = updated_at.unwrap_or(created_at);
-    session.last_active_at = updated_at.or(Some(created_at));
-    session.status = SessionStatus::Closed;
-    normalize_imported_history(&mut session, true);
-    if omitted > 0 {
-        let mut messages = std::mem::take(&mut session.messages);
-        messages.insert(0, StoredMessage {
-            id: crate::id::new_id("message"),
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: format!("[Imported session: {omitted} older messages were omitted for a fast, provider-safe resume. Use session_search to inspect earlier external history.]"),
-                cache_control: None,
-            }],
-            display_role: None, timestamp: None, tool_duration_ms: None, token_usage: None,
-        });
-        session.replace_messages(messages);
-    }
-    session.save()?;
-    crate::logging::info(&format!(
-        "Imported session prepared: source_messages={original_messages} kept_messages={}",
-        session.messages.len()
-    ));
-    Ok(session)
-}
+mod finalize;
+use finalize::{finalize_imported_session, finalize_imported_session_with_omissions};
 
 fn find_codex_session_file(session_id: &str) -> Result<PathBuf> {
     let root = crate::storage::user_home_path(".codex/sessions")?;
