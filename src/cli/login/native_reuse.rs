@@ -30,9 +30,10 @@ pub(super) fn reuse_claude_code_native_snapshot(
 
     if credentials.refresh_token.trim().is_empty() {
         anyhow::ensure!(
-            std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-                .ok()
-                .is_some_and(|token| !token.trim().is_empty()),
+            matches!(
+                std::env::var("CLAUDE_CODE_OAUTH_TOKEN"),
+                Ok(token) if !token.trim().is_empty()
+            ),
             "Claude Code's Keychain credential has no refresh token and cannot be imported."
         );
         eprintln!(
