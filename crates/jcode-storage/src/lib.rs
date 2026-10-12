@@ -185,8 +185,19 @@ fn test_harness_home() -> Result<Option<&'static Path>> {
     if let Some(cached) = HOME.get() {
         return Ok(cached.as_deref());
     }
+    // Test threads reach this concurrently on first use. Serialize creation,
+    // cleanup registration, and caching: two racing calls could otherwise
+    // create two homes, and the one that lost `HOME` was never removed.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _serialized = HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = HOME.get() {
+        return Ok(cached.as_deref());
+    }
     // Resolve before caching, so a test binary that cannot create a private home
-    // reports that instead of quietly using the real `~/.jcode`.
+    // reports that instead of quietly using the real `~/.jcode`. A failed
+    // resolve caches nothing, so the next call retries it.
     let resolved = resolve_test_harness_home()?;
     Ok(HOME.get_or_init(|| resolved).as_deref())
 }
@@ -932,6 +943,29 @@ mod test_harness_home_tests {
         if let Some(home) = dirs::home_dir() {
             assert_ne!(sandbox, home.join(".jcode"));
         }
+    }
+
+    #[test]
+    fn concurrent_first_calls_agree_on_the_registered_home() {
+        // Test threads race the first call. A home created by a loser of that
+        // race was neither cached nor removed, so every caller must observe the
+        // one home that exit cleanup owns.
+        let homes: Vec<PathBuf> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| harness_home().to_path_buf()))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("caller thread"))
+                .collect()
+        });
+        let shared = harness_home();
+        assert!(homes.iter().all(|home| home.as_path() == shared));
+        assert_eq!(
+            TEST_HOME_CLEANUP.get().map(PathBuf::as_path),
+            Some(shared),
+            "the cached home must be the one exit cleanup removes"
+        );
     }
 
     #[test]
