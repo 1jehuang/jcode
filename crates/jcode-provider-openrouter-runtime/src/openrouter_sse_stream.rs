@@ -685,6 +685,7 @@ mod tests {
                 tx,
                 Arc::new(Mutex::new(None)),
                 "glm-5.3".to_string(),
+                false, // Exercise chat-completions, not the Responses API.
             )
             .await
             .expect_err("429 must surface as an error");
@@ -757,6 +758,7 @@ mod tests {
                 tx,
                 Arc::new(Mutex::new(None)),
                 "glm-5.3".to_string(),
+                false, // Exercise chat-completions, not the Responses API.
             )
             .await
             .expect_err("402 must surface as an error");
@@ -837,6 +839,7 @@ mod tests {
                 tx,
                 Arc::new(Mutex::new(None)),
                 "glm-5.3".to_string(),
+                false, // Exercise chat-completions, not the Responses API.
             )
             .await;
 
@@ -947,6 +950,7 @@ mod tests {
                     tx,
                     Arc::new(Mutex::new(None)),
                     "ntl/claude".to_string(),
+                    false, // Exercise chat-completions, not the Responses API.
                 )
                 .await;
             });

@@ -1477,21 +1477,19 @@ pub(in crate::tui::app) fn handle_server_event(
             if rate_limit_retry_exhausted || invalid_tool_calls_exhausted {
                 // Do not fall through to generic retry or turn-end auto-poke:
                 // either would immediately restart the exhausted hold loop.
-                crate::tui::app::commands::disable_auto_poke(app);
-                app.overnight_auto_poke = None;
-                app.clear_pending_remote_retry();
-                app.restore_failed_input_to_box();
                 if invalid_tool_calls_exhausted {
-                    app.push_display_message(DisplayMessage::system(
+                    app.pause_exhausted_auto_resume(
                         "Paused because the model kept sending invalid tool arguments. Your progress is saved. Re-send the message or switch with /model.".to_string(),
-                    ));
-                    app.set_status_notice("Paused: invalid tool arguments");
+                        "Paused: invalid tool arguments",
+                    );
                 } else {
-                    app.push_display_message(DisplayMessage::system(format!(
-                        "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your progress is saved. Wait for a valid reset, check the provider account, or switch with /model.",
-                        App::AUTO_RETRY_MAX_ATTEMPTS
-                    )));
-                    app.set_status_notice("Paused: provider limit did not clear");
+                    app.pause_exhausted_auto_resume(
+                        format!(
+                            "Rate-limit retry limit reached after {} automatic resumes. The provider still reports a limit. Your progress is saved. Wait for a valid reset, check the provider account, or switch with /model.",
+                            App::AUTO_RETRY_MAX_ATTEMPTS
+                        ),
+                        "Paused: provider limit did not clear",
+                    );
                 }
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
@@ -1513,15 +1511,13 @@ pub(in crate::tui::app) fn handle_server_event(
             if is_connectivity_error && app.rate_limit_pending_message.is_some() {
                 // Generic connectivity can be healthy while this provider's
                 // DNS remains broken. Do not let auto-poke reset the budget.
-                crate::tui::app::commands::disable_auto_poke(app);
-                app.overnight_auto_poke = None;
-                app.clear_pending_remote_retry();
-                app.restore_failed_input_to_box();
-                app.push_display_message(DisplayMessage::system(format!(
-                    "Connection retry limit reached after {} automatic resumes. Your progress is saved. Check the provider endpoint or DNS, then re-send the message or switch with /model.",
-                    App::AUTO_RETRY_MAX_ATTEMPTS
-                )));
-                app.set_status_notice("Paused: provider connection did not recover");
+                app.pause_exhausted_auto_resume(
+                    format!(
+                        "Connection retry limit reached after {} automatic resumes. Your progress is saved. Check the provider endpoint or DNS, then re-send the message or switch with /model.",
+                        App::AUTO_RETRY_MAX_ATTEMPTS
+                    ),
+                    "Paused: provider connection did not recover",
+                );
                 app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
                 return false;
             }
@@ -1534,9 +1530,30 @@ pub(in crate::tui::app) fn handle_server_event(
             // from the server's saved history instead of resent in full.
             if !is_connectivity_error
                 && crate::tui::app::commands::is_provider_overload_error(&message)
-                && app.schedule_pending_remote_overload_retry(&message)
             {
-                return false;
+                if app.schedule_pending_remote_overload_retry(&message) {
+                    return false;
+                }
+                // An exhausted overload budget must not fall through to the
+                // generic retry path, which would grant the same turn a new
+                // budget and let turn-end auto-poke restart it again.
+                if app
+                    .rate_limit_pending_message
+                    .as_ref()
+                    .is_some_and(|pending| {
+                        pending.overload_attempts >= App::OVERLOAD_RETRY_MAX_ATTEMPTS
+                    })
+                {
+                    app.pause_exhausted_auto_resume(
+                        format!(
+                            "Provider overload retry limit reached after {} automatic resumes. Your progress is saved. Re-send the message later or switch with /model.",
+                            App::OVERLOAD_RETRY_MAX_ATTEMPTS
+                        ),
+                        "Paused: provider overload did not recover",
+                    );
+                    app.offer_fallback_after_error_with_payload(&message, failed_fallback_payload);
+                    return false;
+                }
             }
             // Credential-failure circuit breaker: repeated auth failures mean
             // the login/API key is dead. Resending the identical request can
