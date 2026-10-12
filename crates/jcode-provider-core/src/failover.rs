@@ -147,25 +147,24 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
 /// contain those words does not hide a real out-of-credit error.
 pub fn is_billing_exhausted_error_message(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    let body = lower
-        .find("response:")
-        .map(|idx| &lower[idx + "response:".len()..])
-        .unwrap_or_else(|| {
-            // No response section: drop `endpoint:` lines and search the rest.
-            lower.as_str()
-        });
-    let has_reset = if lower.contains("response:") {
-        body.contains("resets_at") || body.contains("reset_at")
+    let payload = if let Some(idx) = lower.find("response:") {
+        lower[idx + "response:".len()..].to_string()
     } else {
         lower
             .lines()
-            .filter(|line| !line.trim_start().starts_with("endpoint:"))
-            .any(|line| line.contains("resets_at") || line.contains("reset_at"))
+            .filter(|line| !is_request_metadata(line))
+            .collect::<Vec<_>>()
+            .join("\n")
     };
-    if has_reset {
+    if payload.contains("resets_at") || payload.contains("reset_at") {
         return false;
     }
-    contains_independent_status_code(&lower, "402")
+    // An explicit authentication, rate-limit or server failure cannot become
+    // billing exhaustion because a model, endpoint or hint mentions payment.
+    if let Some(status) = billing_http_status(&lower) {
+        return status == 402;
+    }
+    contains_independent_status_code(&payload, "402")
         || [
             "payment required",
             "insufficient credit",
@@ -176,7 +175,33 @@ pub fn is_billing_exhausted_error_message(message: &str) -> bool {
             "out of credit",
         ]
         .iter()
-        .any(|needle| lower.contains(needle))
+        .any(|needle| payload.contains(needle))
+}
+
+fn is_request_metadata(line: &str) -> bool {
+    ["endpoint:", "model:", "auth:"]
+        .iter()
+        .any(|prefix| line.trim_start().starts_with(prefix))
+}
+
+fn billing_http_status(message: &str) -> Option<u16> {
+    for line in message.lines().filter(|line| !is_request_metadata(line)) {
+        let line = line.trim_start();
+        let tail = line
+            .split_once("status:")
+            .map(|(_, tail)| tail)
+            .or_else(|| line.split_once("http ").map(|(_, tail)| tail))
+            .unwrap_or(line)
+            .trim_start();
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 3
+            && let Ok(status) = tail[..digits].parse::<u16>()
+            && (100..600).contains(&status)
+        {
+            return Some(status);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -208,6 +233,35 @@ mod tests {
     fn billing_exhausted_ignores_rate_limits_and_embedded_digits() {
         assert!(!is_billing_exhausted_error_message("429 Too Many Requests"));
         assert!(!is_billing_exhausted_error_message("model 4021 failed"));
+    }
+
+    #[test]
+    fn billing_exhausted_metadata_does_not_override_explicit_http_failure() {
+        for message in [
+            "request failed\n  model: model-402\n  status: 401 Unauthorized\n  response: invalid API key",
+            "request failed\n  endpoint: https://example.test/402\n  status: 500 Internal Server Error\n  response: upstream unavailable",
+            "request failed\n  auth: payment required\n  status: 403 Forbidden\n  response: denied",
+            "HTTP 401: payment required by an unrelated service",
+        ] {
+            assert!(!is_billing_exhausted_error_message(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn billing_exhausted_ignores_metadata_without_a_response_section() {
+        for message in [
+            "request failed\n  model: model-402",
+            "request failed\n  endpoint: https://example.test/402",
+            "request failed\n  auth: insufficient credit",
+        ] {
+            assert!(!is_billing_exhausted_error_message(message), "{message}");
+        }
+        assert!(is_billing_exhausted_error_message(
+            "HTTP 402: payment required"
+        ));
+        assert!(is_billing_exhausted_error_message(
+            "response: insufficient_balance"
+        ));
     }
 
     #[test]
