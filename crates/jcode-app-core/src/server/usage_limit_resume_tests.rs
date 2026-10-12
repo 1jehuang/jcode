@@ -25,7 +25,7 @@ struct UsageLimitedProvider {
     limited_calls: usize,
     reset_in: Option<Duration>,
     calls: Arc<AtomicUsize>,
-    call_times: Arc<StdMutex<Vec<tokio::time::Instant>>>,
+    call_times: Arc<StdMutex<Vec<(tokio::time::Instant, Instant)>>>,
 }
 
 impl UsageLimitedProvider {
@@ -44,7 +44,17 @@ impl UsageLimitedProvider {
 
     fn gaps(&self) -> Vec<Duration> {
         let times = self.call_times.lock().unwrap();
-        times.windows(2).map(|pair| pair[1] - pair[0]).collect()
+        // Every fixture consumer pauses Tokio time, but typed reset deadlines
+        // use SystemTime. Real processing between provider calls consumes part
+        // of the reset countdown without advancing the paused Tokio clock.
+        // Thus elapsed = virtual advancement + real elapsed. In particular,
+        // (reset - real processing before planning) + jitter + real elapsed
+        // must still be at least reset + jitter. Keep the original lower bound,
+        // rather than adding tolerance or changing production resume timing.
+        times
+            .windows(2)
+            .map(|pair| (pair[1].0 - pair[0].0) + (pair[1].1 - pair[0].1))
+            .collect()
     }
 }
 
@@ -66,6 +76,36 @@ fn usage_limit_error(reset_in: Option<Duration>) -> anyhow::Error {
     )
 }
 
+#[tokio::test(start_paused = true)]
+async fn fixture_gap_includes_real_time_consumed_by_reset_countdown() {
+    let provider = UsageLimitedProvider::new(0, None);
+    let virtual_start = tokio::time::Instant::now();
+    let wall_start = Instant::now();
+    provider.call_times.lock().unwrap().extend([
+        (virtual_start, wall_start),
+        (
+            virtual_start + Duration::from_millis(124_997),
+            wall_start + Duration::from_millis(3),
+        ),
+    ]);
+    assert_eq!(provider.gaps(), vec![Duration::from_secs(125)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fixture_gap_compensation_still_rejects_early_resume() {
+    let provider = UsageLimitedProvider::new(0, None);
+    let virtual_start = tokio::time::Instant::now();
+    let wall_start = Instant::now();
+    provider.call_times.lock().unwrap().extend([
+        (virtual_start, wall_start),
+        (
+            virtual_start + Duration::from_millis(124_996),
+            wall_start + Duration::from_millis(3),
+        ),
+    ]);
+    assert!(provider.gaps()[0] < Duration::from_secs(125));
+}
+
 #[async_trait]
 impl Provider for UsageLimitedProvider {
     async fn complete(
@@ -79,7 +119,7 @@ impl Provider for UsageLimitedProvider {
         self.call_times
             .lock()
             .unwrap()
-            .push(tokio::time::Instant::now());
+            .push((tokio::time::Instant::now(), Instant::now()));
         if call < self.limited_calls {
             // Like the Anthropic runtime: the stream ends with the error.
             let error = usage_limit_error(self.reset_in);
