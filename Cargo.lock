@@ -3171,6 +3171,7 @@ dependencies = [
  "jcode-provider-openai-runtime",
  "jcode-provider-openrouter-runtime",
  "jcode-selfdev-types",
+ "jcode-terminal-prompt",
  "jcode-tui",
  "jcode-tui-session-picker",
  "jcode-tui-style",
@@ -3252,7 +3253,6 @@ dependencies = [
  "jcode-setup-hints",
  "jcode-swarm-core",
  "jcode-task-types",
- "jcode-terminal-image",
  "jcode-tool-core",
  "jcode-tool-types",
  "jcode-update-core",
@@ -3316,7 +3316,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "cpal",
- "crossterm",
  "dirs",
  "flate2",
  "futures",
@@ -3360,6 +3359,7 @@ dependencies = [
  "jcode-telemetry-core",
  "jcode-terminal-image",
  "jcode-terminal-launch",
+ "jcode-terminal-prompt",
  "jcode-todo-policy",
  "jcode-tool-core",
  "jcode-tool-types",
@@ -3368,7 +3368,6 @@ dependencies = [
  "libc",
  "open",
  "proctitle",
- "qrcode",
  "rand 0.9.3",
  "regex",
  "reqwest 0.12.28",
@@ -4127,6 +4126,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-terminal-prompt"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "libc",
+ "qrcode",
+]
+
+[[package]]
 name = "jcode-todo-policy"
 version = "0.1.0"
 dependencies = [
@@ -4194,6 +4203,7 @@ dependencies = [
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-terminal-image",
+ "jcode-terminal-prompt",
  "jcode-tui-account-picker",
  "jcode-tui-anim",
  "jcode-tui-core",

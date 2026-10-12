@@ -1883,7 +1883,7 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
 
     eprintln!();
     eprintln!("  \x1b[1mScan with the jcode iOS app:\x1b[0m\n");
-    match crate::login_qr::render_unicode_qr(&pair_uri) {
+    match jcode_terminal_prompt::qr::render_unicode_qr(&pair_uri) {
         Ok(qr) => {
             for line in qr.lines() {
                 eprintln!("  {line}");

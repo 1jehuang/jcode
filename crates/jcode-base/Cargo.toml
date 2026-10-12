@@ -93,10 +93,9 @@ cpal = { version = "0.15", optional = true }
 
 # Streaming
 
-# Terminal I/O (event stream for interactive auth/secret prompts). NOTE: the
-# heavier presentation deps (ratatui widgets, arboard clipboard) were dropped
-# from this foundation layer; they are unused here and live only in `jcode-tui`.
-crossterm = { version = "0.29", features = ["event-stream"] }
+# NOTE: no terminal crates (crossterm, ratatui, qrcode). Interactive login
+# prompts and QR rendering are client concerns: the CLI installs a presenter
+# from `jcode-terminal-prompt` into `auth::login_ui`.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "ico", "tiff"] }  # PNG/JPEG plus BMP/ICO/TIFF decoding so they can be re-encoded to PNG for providers (#1712). Skip avif/rav1e, exr, etc.
 
 # NOTE: PDF text extraction (jcode-pdf) lives in the upper jcode-app-core crate
@@ -124,7 +123,6 @@ jcode-applet-types = { path = "../jcode-applet-types" }
 # Gzip/deflate decoding (provider import helpers, browser extension unzip)
 flate2 = "1"
 tempfile = "3"
-qrcode = { version = "0.14.1", default-features = false }
 
 [features]
 default = ["bedrock"]
@@ -157,6 +155,8 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 global-hotkey = "0.7"
 
 [dev-dependencies]
+# The browserless login integration test installs the real terminal presenter.
+jcode-terminal-prompt = { path = "../jcode-terminal-prompt" }
 # Dev-only cycle (cargo permits dev-dependencies on dependents): base's
 # MultiProvider routing tests exercise the real OpenRouter/OpenAI-compatible
 # runtime through the composition-root registry, exactly like the binary.

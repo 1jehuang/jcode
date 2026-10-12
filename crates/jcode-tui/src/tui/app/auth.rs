@@ -895,7 +895,7 @@ impl App {
                 (auth_url, redirect_uri)
             }
         };
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
             &auth_url,
             "Scan this on another device if this machine has no browser:",
         )
@@ -1166,7 +1166,7 @@ impl App {
             &state,
             Some("login"),
         );
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the full callback URL here:",
         )
@@ -1351,7 +1351,7 @@ impl App {
             }
         };
 
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the callback URL or authorization code here:",
         )
@@ -1700,7 +1700,7 @@ impl App {
                 provider: "copilot_code".to_string(),
                 success: true,
                 message: {
-                    let qr_section = crate::login_qr::markdown_section_for_tui(
+                    let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
                         &verification_uri,
                         "Scan this on another device to open the GitHub verification page:",
                     )
@@ -1859,7 +1859,7 @@ impl App {
             }
         };
 
-        let qr_section = crate::login_qr::markdown_section_for_tui(
+        let qr_section = jcode_terminal_prompt::qr::markdown_section_for_tui(
             &auth_url,
             "Scan this on another device if this machine has no browser, then paste the full callback URL or query string here:",
         )
