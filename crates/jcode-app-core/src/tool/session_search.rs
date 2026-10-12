@@ -392,7 +392,7 @@ impl Tool for SessionSearchTool {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_MAX_SCAN_SESSIONS,
-                    "description": "Bound the number of recent sessions scanned per source."
+                    "description": "Max sessions per source. OpenCode legacy metadata is fully ranked before this cap."
                 },
                 "exhaustive": {
                     "type": "boolean",
@@ -1481,18 +1481,8 @@ struct LegacyOpenCodeSessionTime {
     updated: Option<i64>,
 }
 
-/// How many legacy session files to read metadata from, given the scan limit.
-///
-/// Files are preselected by filesystem mtime so a large store does not cost
-/// one open and parse per session. The headroom lets stored update times
-/// reorder sessions whose mtime drifted (for example after a copy) without
-/// making the work proportional to the whole store.
-fn legacy_opencode_metadata_window(max_scan_sessions: usize) -> usize {
-    max_scan_sessions
-        .saturating_mul(2)
-        .max(max_scan_sessions.saturating_add(16))
-}
-
+/// Exact stored-time ranking requires reading all legacy metadata files.
+/// The scan cap bounds selected histories, not this cold metadata pass.
 /// Pick legacy OpenCode JSON sessions to scan, one entry per session id.
 ///
 /// Sessions already present in the database are skipped. When several files
@@ -1502,12 +1492,11 @@ fn legacy_opencode_metadata_window(max_scan_sessions: usize) -> usize {
 fn select_legacy_opencode_candidates(
     root: &Path,
     db_ids: &std::collections::HashSet<String>,
-    max_scan_sessions: usize,
+    _max_scan_sessions: usize,
 ) -> (Vec<(DateTime<Utc>, String, PathBuf)>, usize) {
     let mut parse_errors = 0;
     let mut by_id: HashMap<String, (DateTime<Utc>, PathBuf)> = HashMap::new();
-    let window = legacy_opencode_metadata_window(max_scan_sessions);
-    for path in collect_recent_files_recursive(root, "json", window) {
+    for path in jcode_import_core::collect_files_recursive(root, "json") {
         #[cfg(test)]
         OPENCODE_LEGACY_META_READS.with(|reads| reads.set(reads.get() + 1));
         let meta = match std::fs::File::open(&path).map(std::io::BufReader::new) {
@@ -1531,7 +1520,8 @@ fn select_legacy_opencode_candidates(
             .or_else(|| jcode_import_core::file_modified_datetime(&path))
             .unwrap_or_default();
         match by_id.get(&meta.id) {
-            Some((existing, existing_path)) if (*existing, existing_path) >= (updated, &path) => {}
+            Some((existing, existing_path))
+                if *existing > updated || (*existing == updated && existing_path <= &path) => {}
             _ => {
                 by_id.insert(meta.id, (updated, path));
             }
