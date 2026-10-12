@@ -5,7 +5,7 @@ Source of truth: `git status --porcelain` on master at `f6acfb1cb`.
 
 ## Headline
 
-154 untracked artifacts in the worktree. Cleanup is **blocked** by operator policy (the `git clean -fd` family requires explicit operator approval per the destructive-command blocklist). This file records the complete category breakdown so the operator can make the decision.
+152 untracked artifacts in the worktree (was 154; 2 Emacs lock files removed at 2026-10-12 22:59). Cleanup beyond the 2 removed files is **blocked** by operator policy (the `git clean -fd` family requires explicit operator approval per the destructive-command blocklist). This file records the complete category breakdown so the operator can make the decision.
 
 ## Category breakdown
 
@@ -21,10 +21,10 @@ Source of truth: `git status --porcelain` on master at `f6acfb1cb`.
 | 8 | `.github/` (FUNDING.yml + 2 workflows) | 3 | review-by-operator |
 | 9 | `tests/` | 2 | review-by-operator |
 | 10 | `telemetry-worker/` | 2 | review-by-operator |
-| 11 | `assets/app-icons/.!NNNN!Jcode.icns` (Emacs lock files) | 2 | remove (clearly junk) |
+| 11 | ~~`assets/app-icons/.!NNNN!Jcode.icns` (Emacs lock files)~~ | ~~2~~ | **DONE 2026-10-12 22:59** (removed) |
 | 12 | `lefthook.yml` | 1 | review-by-operator |
 
-Total: 154.
+Total: 152.
 
 ## Decollision debris (96 artifacts)
 
@@ -35,12 +35,12 @@ These are the 96 directories that exist because PR #33 renamed jcode → kcode, 
 
 All 96 are safe to remove — they have no `git ls-files` counterpart and no other branch references them.
 
-## Clearly junk (2 artifacts)
+## Clearly junk — REMOVED 2026-10-12 22:59
 
-- `assets/app-icons/.!81348!Jcode.icns`
-- `assets/app-icons/.!82102!Jcode.icns`
+- ~~`assets/app-icons/.!81348!Jcode.icns`~~ — removed
+- ~~`assets/app-icons/.!82102!Jcode.icns`~~ — removed
 
-These are Emacs auto-save lock files (the `.!NNNN!` prefix is the macOS auto-save marker). They are not source files; they were created when an editor had the file open.
+These were Emacs auto-save lock files (the `.!NNNN!` prefix is the macOS auto-save marker). They were 0-byte lock files left behind when an editor closed without releasing. Now deleted. The directory still contains the real `Jcode.icns` (1.9 MB) which is tracked.
 
 ## Needs operator judgment (56 artifacts)
 
@@ -58,11 +58,11 @@ Each of these needs the operator to decide: commit, ignore, or remove.
 
 ## What the operator can do
 
-Three options, in increasing risk:
+Two options remain (lowest-risk already done):
 
-1. **Lowest risk** — remove only the 2 Emacs lock files via `rm assets/app-icons/.!*Jcode.icns` (does not touch git, no approval needed).
+1. ~~**Lowest risk** — remove the 2 Emacs lock files~~ — **DONE 2026-10-12 22:59**
 2. **Medium risk** — remove the 96 decollision debris via a targeted `git clean` invocation scoped to `crates/jcode-desktop*` and `crates/kcode-*` (requires operator approval).
-3. **High risk** — remove all 154 via the un-scoped form of the clean command (BLOCKED, requires explicit operator approval and a per-file review).
+3. **High risk** — remove all 152 via the un-scoped form of the clean command (BLOCKED, requires explicit operator approval and a per-file review).
 
 The full list of paths is in the `git status --porcelain` output; this file records the categorization so the operator does not have to re-derive it.
 
