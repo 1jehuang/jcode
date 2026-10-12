@@ -1,6 +1,7 @@
 import {
   CONCURRENCY_EVENTS, concurrencyEntries, rawConcurrencyScalar,
 } from "./concurrency.js";
+import { syncModelPrices } from "./model-pricing.js";
 
 let cachedEventColumns = null;
 let cachedSessionDetailColumns = null;
@@ -626,6 +627,13 @@ export default {
     ctx.waitUntil(
       (async () => {
         await repairDailyActivityYesterday(env);
+        // Price any model label first seen recently, so new models (e.g.
+        // claude-opus-5-5) are not silently valued at $0 in spend dashboards.
+        try {
+          await syncModelPrices(env);
+        } catch (err) {
+          console.warn("model price sync failed", err?.message || err);
+        }
         await pruneOldEvents(env);
         // If the normal prune did not free enough headroom, escalate with the
         // emergency (halved) retention windows instead of waiting for inserts
