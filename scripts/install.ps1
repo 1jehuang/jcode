@@ -957,7 +957,11 @@ if (-not $Version) { Write-Err "Failed to determine latest version" }
 $VersionNum = $Version.TrimStart('v')
 $DownloadBases = Get-JcodeReleaseDownloadBases $Version
 
-$BuildsDir = Join-Path (Get-JcodeLocalAppDataDir) "jcode\builds"
+$BuildsDir = if ($env:JCODE_HOME) {
+    Join-Path $env:JCODE_HOME "builds"
+} else {
+    Join-Path (Get-JcodeLocalAppDataDir) "jcode\builds"
+}
 $StableDir = Join-Path $BuildsDir "stable"
 $VersionDir = Join-Path $BuildsDir "versions\$VersionNum"
 $LauncherPath = Join-Path $InstallDir "jcode.exe"
@@ -977,10 +981,6 @@ if ($Existing) {
     Write-Info "Installing jcode $Version"
 }
 Write-Info "  launcher: $LauncherPath"
-
-foreach ($d in @($InstallDir, $StableDir, $VersionDir)) {
-    if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
-}
 
 $TempDir = Join-Path $env:TEMP "jcode-install-$(Get-Random)"
 New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
@@ -1022,7 +1022,9 @@ if (-not $ResolvedArtifactExePath -and -not $ResolvedArtifactTgzPath -and $Downl
     Assert-JcodeFileChecksum -FilePath $DownloadPath -ExpectedSha256 $expectedSha256 -AssetName $downloadedAssetName | Out-Null
 }
 
-$DestBin = Join-Path $VersionDir "jcode.exe"
+$PreparedDir = Join-Path $TempDir "prepared"
+New-Item -ItemType Directory -Path $PreparedDir -Force | Out-Null
+$DestBin = Join-Path $PreparedDir "jcode.exe"
 
 if ($DownloadMode -eq "tar") {
     Write-Info "Extracting..."
@@ -1086,10 +1088,14 @@ if ($DownloadMode -eq "tar") {
 
 Assert-JcodeBinaryCandidate -BinaryPath $DestBin -ExpectedVersion $Version | Out-Null
 
-$StableBin = Join-Path $StableDir "jcode.exe"
-Copy-Item -Path $DestBin -Destination $StableBin -Force
-Set-Content -Path (Join-Path $BuildsDir "stable-version") -Value $VersionNum
-Install-JcodeLauncher -SourcePath $StableBin -LauncherPath $LauncherPath | Out-Null
+# Copy, channels, marker and launcher are published by the new binary under
+# the same process-owned store lock as pruning. Never fall back to unguarded
+# shell publication when a legacy binary lacks this helper.
+& $DestBin --no-update publish-build --source $PreparedDir --version $VersionNum `
+    --channel stable --launcher $LauncherPath
+if ($LASTEXITCODE -ne 0) {
+    Write-Err "Publication failed. This installer requires a binary with publish-build support for safe, locked installation."
+}
 } finally {
     Get-Item -LiteralPath $TempDir -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue

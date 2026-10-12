@@ -19,12 +19,13 @@ pub async fn run() -> Result<()> {
     // Parse once, before startup side effects. Invalid arguments and --help
     // must not harden credential files or create configuration/telemetry state.
     let args = Args::parse();
-    // Credential import must refuse existing stores without normal startup
-    // hardening, migrations, telemetry, or provider discovery touching them.
+    // Credential import and installer publication must run without normal
+    // startup hardening, migrations, telemetry, or provider discovery.
     if args.ssh.is_none()
         && matches!(
             args.command,
             Some(Command::Auth(super::args::AuthCommand::Import { .. }))
+                | Some(Command::PublishBuild { .. })
         )
     {
         if let Some(cwd) = &args.cwd {
@@ -492,6 +493,8 @@ fn should_spawn_background_update_check_with_config(args: &Args, check_updates: 
         && !matches!(
             args.command,
             Some(Command::Update)
+                | Some(Command::PruneBuilds { .. })
+                | Some(Command::PublishBuild { .. })
                 | Some(Command::Serve { .. })
                 | Some(Command::Server { .. })
                 | Some(Command::Acp)
@@ -523,6 +526,36 @@ mod tests {
 
     fn parse_args(argv: &[&str]) -> Args {
         Args::parse_from(argv)
+    }
+
+    #[test]
+    fn build_store_maintenance_never_starts_background_update_check() {
+        for argv in [
+            vec!["jcode", "prune-builds"],
+            vec!["jcode", "prune-builds", "--keep", "0"],
+            vec!["jcode", "prune-builds", "--dry-run"],
+            vec![
+                "jcode",
+                "publish-build",
+                "--source",
+                "prepared",
+                "--version",
+                "test",
+                "--launcher",
+                "launcher",
+                "--channel",
+                "stable",
+            ],
+        ] {
+            let args = parse_args(&argv);
+            assert!(!should_spawn_background_update_check_with_config(
+                &args, true
+            ));
+        }
+        let args = parse_args(&["jcode"]);
+        assert!(should_spawn_background_update_check_with_config(
+            &args, true
+        ));
     }
 
     #[test]

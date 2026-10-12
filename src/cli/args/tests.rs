@@ -1064,3 +1064,52 @@ fn prune_builds_parses_keep_and_dry_run() {
         })
     ));
 }
+#[test]
+fn publish_build_parses_paths_and_validates_channels() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "publish-build",
+        "--source",
+        "/prepared payload",
+        "--version",
+        "v-test",
+        "--launcher",
+        "/bin path/jcode",
+        "--channel",
+        "current",
+        "--termux-launcher",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::PublishBuild {
+            source,
+            version,
+            launcher,
+            channel,
+            termux_launcher,
+        }) => {
+            assert_eq!(source, std::path::PathBuf::from("/prepared payload"));
+            assert_eq!(version, "v-test");
+            assert_eq!(launcher, std::path::PathBuf::from("/bin path/jcode"));
+            assert_eq!(channel, "current");
+            assert!(termux_launcher);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+    assert!(
+        Args::try_parse_from([
+            "jcode",
+            "publish-build",
+            "--source",
+            "/prepared",
+            "--version",
+            "v-test",
+            "--launcher",
+            "/bin/jcode",
+            "--channel",
+            "unknown",
+        ])
+        .is_err()
+    );
+    assert!(Args::try_parse_from(["jcode", "publish-build"]).is_err());
+}
