@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use super::provider_init::ProviderChoice;
 
+mod build_store;
 mod google;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
@@ -306,7 +307,6 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
-
     /// Delete old installed builds, keeping recent, referenced and running ones
     PruneBuilds {
         /// Unreferenced builds to keep, newest first (default: JCODE_KEEP_BUILDS or 3)
@@ -316,22 +316,9 @@ pub(crate) enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-
     /// Publish a prepared build without exposing a partially installed version
     #[command(hide = true)]
-    PublishBuild {
-        #[arg(long)]
-        source: std::path::PathBuf,
-        #[arg(long)]
-        version: String,
-        #[arg(long)]
-        launcher: std::path::PathBuf,
-        #[arg(long, default_value = "stable", value_parser = ["stable", "current"])]
-        channel: String,
-        #[arg(long)]
-        termux_launcher: bool,
-    },
-
+    PublishBuild(build_store::PublishBuildArgs),
     /// Show usage limits for connected providers
     Usage {
         /// Emit JSON instead of plain text

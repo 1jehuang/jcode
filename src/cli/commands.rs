@@ -12,11 +12,11 @@ use crate::{browser, gateway, memory, session, storage, tui};
 
 use super::{output::terminal_title, terminal::init_tui_runtime};
 
+pub(crate) mod build_store;
 mod menubar;
 mod provider_setup;
 mod report_info;
 mod restart;
-
 pub(crate) use super::auth_test::run_post_login_validation;
 #[cfg(test)]
 pub(crate) use super::auth_test::{
