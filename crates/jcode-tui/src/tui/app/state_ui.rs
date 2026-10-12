@@ -124,7 +124,7 @@ impl App {
             return;
         }
 
-        if crate::dictation::remember_last_focused_session(&session_id).is_ok() {
+        if crate::client_focus::remember_last_focused_session(&session_id).is_ok() {
             self.last_client_focus_recorded_at = Some(Instant::now());
             self.last_client_focus_session_id = Some(session_id);
         }

@@ -88,8 +88,8 @@ jcode-terminal-image = { path = "../jcode-terminal-image" }
 jcode-telemetry-core = { path = "../jcode-telemetry-core" }
 jcode-usage-types = { path = "../jcode-usage-types" }
 
-# Native microphone input is opt-in so CLI builds need no audio development libraries.
-cpal = { version = "0.15", optional = true }
+# NOTE: microphone capture and transcription live in `jcode-voice`, a
+# client-only crate. The shared runtime never opens a microphone.
 
 # Streaming
 
@@ -132,7 +132,6 @@ default = ["bedrock"]
 # dev-dependency feature by jcode-app-core / jcode / etc.; never in normal
 # (non-test) builds.
 test-support = []
-voice-capture = ["dep:cpal"]
 jemalloc = [
     "dep:tikv-jemalloc-ctl",
     "dep:tikv-jemalloc-sys",
@@ -164,6 +163,3 @@ jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runti
 # Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
 tokio = { version = "1", features = ["test-util"] }
 
-[[example]]
-name = "voice_startup_profile"
-required-features = ["voice-capture"]

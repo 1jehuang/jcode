@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::{HashMap, VecDeque};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+
 use tokio::time::{Duration, timeout};
 
 const CLIENT_TITLE_PREFIXES: &[&str] = &["jcode:d:", "jcode:c:"];
@@ -10,11 +10,11 @@ const CLIENT_TITLE_PREFIXES: &[&str] = &["jcode:d:", "jcode:c:"];
 #[derive(Debug, Clone)]
 pub struct DictationRun {
     pub text: String,
-    pub mode: crate::protocol::TranscriptMode,
+    pub mode: jcode_base::protocol::TranscriptMode,
 }
 
 pub async fn run_configured() -> Result<DictationRun> {
-    let cfg = crate::config::config().dictation.clone();
+    let cfg = jcode_base::config::config().dictation.clone();
     let command = cfg.command.trim();
     if command.is_empty() {
         anyhow::bail!(
@@ -66,62 +66,6 @@ pub async fn run_command(command: &str, timeout_secs: u64) -> Result<String> {
     }
 
     Ok(transcript)
-}
-
-fn last_focused_session_write_cache() -> &'static Mutex<Option<String>> {
-    static CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
-}
-
-pub fn remember_last_focused_session(session_id: &str) -> Result<()> {
-    let session_id = session_id.trim();
-    if session_id.is_empty() {
-        return Ok(());
-    }
-
-    // Always rewrite the shared file (callers debounce): another client may
-    // have taken it since this process last wrote the same session.
-    let path = last_focused_session_path()?;
-    if let Some(parent) = path.parent() {
-        crate::storage::ensure_dir(parent)?;
-    }
-    std::fs::write(&path, session_id).context("failed to persist last focused jcode session")?;
-
-    if let Ok(cache) = last_focused_session_write_cache().lock()
-        && cache.as_deref() == Some(session_id)
-    {
-        return Ok(());
-    }
-    // Best effort: lets a global voice hold map a focused terminal window to
-    // exactly this client's session, even with several CLIs open.
-    let _ = remember_client_session(std::process::id(), session_id);
-
-    if let Ok(mut cache) = last_focused_session_write_cache().lock() {
-        *cache = Some(session_id.to_string());
-    }
-
-    Ok(())
-}
-
-pub fn last_focused_session() -> Result<Option<String>> {
-    let path = last_focused_session_path()?;
-    let session_id = match std::fs::read_to_string(path) {
-        Ok(text) => text.trim().to_string(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err).context("failed to read last focused jcode session"),
-    };
-    if session_id.is_empty() {
-        return Ok(None);
-    }
-
-    if crate::storage::active_session_ids()
-        .iter()
-        .any(|id| id == &session_id)
-    {
-        Ok(Some(session_id))
-    } else {
-        Ok(None)
-    }
 }
 
 pub fn type_text(text: &str) -> Result<()> {
@@ -176,7 +120,7 @@ fn process_exe_name(pid: u32) -> Option<String> {
 #[cfg(unix)]
 pub fn send_transcript_blocking(
     text: &str,
-    mode: crate::protocol::TranscriptMode,
+    mode: jcode_base::protocol::TranscriptMode,
     session_id: Option<String>,
     timeout: std::time::Duration,
 ) -> Result<()> {
@@ -186,7 +130,7 @@ pub fn send_transcript_blocking(
         .with_context(|| format!("failed to connect to {}", path.display()))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    let request = crate::protocol::Request::Transcript {
+    let request = jcode_base::protocol::Request::Transcript {
         id: 1,
         text: text.to_string(),
         mode,
@@ -201,9 +145,9 @@ pub fn send_transcript_blocking(
         if reader.read_line(&mut line)? == 0 {
             anyhow::bail!("jcode server closed the connection");
         }
-        match serde_json::from_str::<crate::protocol::ServerEvent>(line.trim()) {
-            Ok(crate::protocol::ServerEvent::Done { id: 1 }) => return Ok(()),
-            Ok(crate::protocol::ServerEvent::Error { id: 1, message, .. }) => {
+        match serde_json::from_str::<jcode_base::protocol::ServerEvent>(line.trim()) {
+            Ok(jcode_base::protocol::ServerEvent::Done { id: 1 }) => return Ok(()),
+            Ok(jcode_base::protocol::ServerEvent::Error { id: 1, message, .. }) => {
                 anyhow::bail!(message)
             }
             _ => {}
@@ -217,44 +161,13 @@ pub fn send_transcript_blocking(
 fn debug_socket_path() -> std::path::PathBuf {
     let main = std::env::var_os("JCODE_SOCKET")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| crate::storage::runtime_dir().join("jcode.sock"));
+        .unwrap_or_else(|| jcode_base::storage::runtime_dir().join("jcode.sock"));
     let name = main
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("jcode.sock")
         .replace(".sock", "-debug.sock");
     main.with_file_name(name)
-}
-
-fn client_sessions_dir() -> Result<std::path::PathBuf> {
-    Ok(crate::storage::jcode_dir()?.join("client_sessions"))
-}
-
-/// Record which session a TUI client process is showing. Keyed by client PID.
-fn remember_client_session(pid: u32, session_id: &str) -> Result<()> {
-    let dir = client_sessions_dir()?;
-    crate::storage::ensure_dir(&dir)?;
-    // Opportunistically drop markers of exited clients.
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let alive = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<u32>().ok())
-                .is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists());
-            if !alive && cfg!(target_os = "linux") {
-                let _ = std::fs::remove_file(entry.path());
-            }
-        }
-    }
-    std::fs::write(dir.join(pid.to_string()), session_id)?;
-    Ok(())
-}
-
-fn registered_client_session(pid: u32) -> Option<String> {
-    let path = client_sessions_dir().ok()?.join(pid.to_string());
-    let session_id = std::fs::read_to_string(path).ok()?.trim().to_string();
-    (!session_id.is_empty()).then_some(session_id)
 }
 
 /// A running `jcode` TUI client, not a server or one-shot subcommand.
@@ -336,7 +249,7 @@ fn resolve_session_for_window(window: &NiriFocusedWindow) -> Option<String> {
     // Exact: a client in this window registered the session it shows.
     let registered: Vec<String> = tree
         .iter()
-        .filter_map(|&pid| registered_client_session(pid))
+        .filter_map(|&pid| jcode_base::client_focus::registered_client_session(pid))
         .collect();
     if registered.len() == 1 {
         return registered.into_iter().next();
@@ -361,17 +274,19 @@ fn resolve_session_for_window(window: &NiriFocusedWindow) -> Option<String> {
     // this window. The TUI records its session on focus, so the last-focused
     // session belongs to it.
     if tree.iter().any(|&pid| is_jcode_client_process(pid)) {
-        return last_focused_session().ok().flatten();
+        return jcode_base::client_focus::last_focused_session()
+            .ok()
+            .flatten();
     }
     None
 }
 
 fn resolve_session_from_window_title(title: &str) -> Option<String> {
     let short_name = extract_session_short_name_from_window_title(title)?;
-    let mut matching: Vec<String> = crate::storage::active_session_ids()
+    let mut matching: Vec<String> = jcode_base::storage::active_session_ids()
         .into_iter()
         .filter(|session_id| {
-            crate::id::extract_session_name(session_id)
+            jcode_base::id::extract_session_name(session_id)
                 .map(|name| name.eq_ignore_ascii_case(&short_name))
                 .unwrap_or(false)
         })
@@ -412,7 +327,7 @@ struct ClientCandidate {
 
 fn inspect_client_process(pid: u32) -> Option<ClientCandidate> {
     if let Some(session_id) = read_resumed_session_id(pid) {
-        let short_name = crate::id::extract_session_name(&session_id)
+        let short_name = jcode_base::id::extract_session_name(&session_id)
             .unwrap_or(session_id.as_str())
             .to_string();
         return Some(ClientCandidate {
@@ -476,10 +391,10 @@ fn resolve_candidate_session_id(candidate: &ClientCandidate) -> Option<String> {
         return Some(session_id.clone());
     }
 
-    let mut matching: Vec<String> = crate::storage::active_session_ids()
+    let mut matching: Vec<String> = jcode_base::storage::active_session_ids()
         .into_iter()
         .filter(|session_id| {
-            crate::id::extract_session_name(session_id)
+            jcode_base::id::extract_session_name(session_id)
                 .map(|name| name.eq_ignore_ascii_case(&candidate.short_name))
                 .unwrap_or(false)
         })
@@ -534,10 +449,6 @@ fn shell_command(command: &str) -> tokio::process::Command {
         cmd.arg("-lc").arg(command);
         cmd
     }
-}
-
-fn last_focused_session_path() -> Result<std::path::PathBuf> {
-    Ok(crate::storage::jcode_dir()?.join("last_focused_client_session"))
 }
 
 #[cfg(test)]

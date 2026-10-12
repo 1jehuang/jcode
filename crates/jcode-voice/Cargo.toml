@@ -1,0 +1,44 @@
+[package]
+name = "jcode-voice"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Client-side voice for jcode: microphone capture, Nari streaming transcription, and configured dictation"
+
+# Client-only. The shared runtime (jcode-base, jcode-app-core) and the harness
+# server must not depend on this crate: voice needs a microphone and the user's
+# desktop session, which a headless or remote server does not have. The TUI,
+# CLI, Jcode Desktop, and the companion process depend on it directly.
+
+[lib]
+name = "jcode_voice"
+path = "src/lib.rs"
+
+[dependencies]
+jcode-base = { path = "../jcode-base", default-features = false }
+anyhow = "1"
+base64 = "0.22"
+futures = "0.3"
+libc = "0.2"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls", "rustls-tls-native-roots"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
+
+# Native microphone input is opt-in so CLI builds need no audio development libraries.
+cpal = { version = "0.15", optional = true }
+
+[features]
+voice-capture = ["dep:cpal"]
+
+[dev-dependencies]
+jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
+
+[[example]]
+name = "voice_startup_profile"
+required-features = ["voice-capture"]
