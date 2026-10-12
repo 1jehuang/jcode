@@ -219,15 +219,10 @@ fn sync_plugin_provider(
         &store.root().join(&installed.metadata.name),
         trusted,
     )?;
-    if installed.previous_provider_id() != Some(new_provider_id.as_str()) {
-        if let Some(previous_id) = installed.previous_provider_id() {
-            remove_owned_plugin_provider(
-                &mut registry,
-                previous_id,
-                store,
-                &installed.metadata.name,
-            )?;
-        }
+    if installed.previous_provider_id() != Some(new_provider_id.as_str())
+        && let Some(previous_id) = installed.previous_provider_id()
+    {
+        remove_owned_plugin_provider(&mut registry, previous_id, store, &installed.metadata.name)?;
     }
     registry.save()?;
     Ok(true)
@@ -334,7 +329,7 @@ pub(crate) fn run_plugin_remove_command(name: &str, json: bool) -> Result<()> {
         let owned = registry
             .get(provider_id)
             .and_then(|record| record.source.as_deref())
-            .is_some_and(|source| source.starts_with(&store.root().join(name)));
+            .is_some_and(|source| source.starts_with(store.root().join(name)));
         if registry.get(provider_id).is_some() && !owned {
             anyhow::bail!(
                 "provider '{}' is not owned by plugin '{}'; refusing to remove it",

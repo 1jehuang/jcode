@@ -230,6 +230,7 @@ pub(crate) fn run_provider_extension_inspect_command(path: &str, json: bool) -> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_provider_extension_run_command(
     id: &str,
     message: &str,
