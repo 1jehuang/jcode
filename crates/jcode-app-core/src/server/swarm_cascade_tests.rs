@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
 
-fn member(
+pub(super) fn member(
     session_id: &str,
     parent: Option<&str>,
 ) -> (SwarmMember, mpsc::UnboundedReceiver<ServerEvent>) {
