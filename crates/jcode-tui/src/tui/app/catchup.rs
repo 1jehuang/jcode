@@ -75,6 +75,8 @@ impl App {
                 .then_with(|| a.id.cmp(&b.id))
         });
         snapshot.focused_page_id = Some(CATCHUP_PAGE_ID.to_string());
+        self.side_panel_user_hidden = false;
+        self.side_panel_explicit_hidden = false;
         self.apply_side_panel_snapshot(snapshot);
         let _ = crate::catchup::mark_seen(&session.id, session.updated_at);
     }

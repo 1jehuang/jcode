@@ -48,7 +48,10 @@ fn voice_transcript_remote_send_wraps_tags_and_keeps_typed_draft() {
         "<transcription>\nrename the rows\n</transcription>"
     );
     assert!(app.is_processing, "remote send enters processing");
-    assert!(!app.pending_turn, "remote send never uses local pending_turn");
+    assert!(
+        !app.pending_turn,
+        "remote send never uses local pending_turn"
+    );
     assert_eq!(app.input(), "draft stays");
 }
 
@@ -78,7 +81,10 @@ fn voice_key_is_consumed_and_never_types_or_opens_other_actions() {
     assert!(app.handle_voice_key_event(&key));
     assert!(app.input().is_empty());
     let plain = crossterm::event::KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
-    assert!(!app.handle_voice_key_event(&plain), "plain space still types");
+    assert!(
+        !app.handle_voice_key_event(&plain),
+        "plain space still types"
+    );
 }
 
 #[test]
@@ -106,7 +112,9 @@ fn voice_esc_passes_through_when_not_recording() {
 
 #[test]
 fn voice_input_help_and_command_are_registered() {
-    assert!(super::commands_dispatch::contains_registered_slash_command("/voice"));
+    assert!(super::commands_dispatch::contains_registered_slash_command(
+        "/voice"
+    ));
     let mut app = create_test_app();
     app.set_input_for_test("/voice extra");
     app.submit_input();
@@ -130,5 +138,41 @@ fn korean_jamo_voice_chord_is_normalized_before_voice_interception() {
         KeyCode::Char('ㅠ'),
         KeyModifiers::NONE,
     ));
-    assert_eq!(plain.code, KeyCode::Char('ㅠ'), "plain Korean typing is untouched");
+    assert_eq!(
+        plain.code,
+        KeyCode::Char('ㅠ'),
+        "plain Korean typing is untouched"
+    );
+}
+#[test]
+fn voice_transcript_keeps_image_undo_history_with_text_undo_history() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.handle_paste_image_for_test("image/png", "QQ==");
+    assert_eq!(app.input(), "[image 1]");
+    super::remote::submit_voice_transcript(&mut app, "look at this");
+    assert_eq!(app.input(), "[image 1]");
+    assert_eq!(app.pending_images.len(), 1);
+    app.undo_input_change();
+    assert_eq!(app.input(), "");
+    assert!(app.pending_images.is_empty());
+}
+
+#[test]
+fn voice_transcript_keeps_ctrl_c_cleared_images_for_undo() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    app.handle_paste_image_for_test("image/png", "QQ==");
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(app.pending_images.is_empty());
+    super::remote::submit_voice_transcript(&mut app, "never mind");
+    app.undo_input_change();
+    assert_eq!(app.input(), "[image 1]");
+    assert_eq!(
+        app.pending_images,
+        vec![("image/png".to_string(), "QQ==".to_string())]
+    );
 }
