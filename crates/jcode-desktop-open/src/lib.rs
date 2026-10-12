@@ -5,6 +5,7 @@
 //! headless or remote server never pops windows on the wrong machine.
 
 use anyhow::{Context, Result};
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
 use serde::Deserialize;
 use std::collections::HashSet;
 #[cfg(all(unix, not(target_os = "macos")))]
