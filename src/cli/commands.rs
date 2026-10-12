@@ -1431,6 +1431,13 @@ pub async fn run_transcript_command(
         trimmed.to_string()
     };
 
+    // Focused-window lookup needs the user's compositor, so it happens here in
+    // the client rather than in the (possibly remote) server.
+    let session = session.or_else(|| {
+        jcode_voice::dictation::focused_jcode_session()
+            .ok()
+            .flatten()
+    });
     let mut client = crate::server::Client::connect_debug().await?;
     let request_id = client.send_transcript(&text, mode, session).await?;
 
@@ -1447,10 +1454,10 @@ pub async fn run_transcript_command(
 }
 
 pub async fn run_dictate_command(type_output: bool) -> Result<()> {
-    let run = crate::dictation::run_configured().await?;
+    let run = jcode_voice::dictation::run_configured().await?;
 
     if type_output {
-        crate::dictation::type_text(&run.text)
+        jcode_voice::dictation::type_text(&run.text)
     } else {
         run_transcript_command(Some(run.text), run.mode, None).await
     }

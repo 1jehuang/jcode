@@ -10,7 +10,7 @@
 //!   ... -- 4 "ffmpeg -loglevel error -re -i /tmp/s.wav -ac 1 -ar 16000 -f s16le -"
 //!
 //! Prints stage timings and the final transcript.
-use jcode_base::voice::{NariEvent, NariRecording, nari_api_key, timing};
+use jcode_voice::{NariEvent, NariRecording, nari_api_key, timing};
 use std::{
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},

@@ -174,13 +174,10 @@ async fn resolve_transcript_target_session(
         return Ok(session_id);
     }
 
-    if let Ok(Some(session_id)) = crate::dictation::focused_jcode_session()
-        && live_sessions.contains(&session_id)
-    {
-        return Ok(session_id);
-    }
-
-    if let Ok(Some(session_id)) = crate::dictation::last_focused_session()
+    // Focused-window lookup (compositor IPC) happens client-side: `jcode
+    // transcript` resolves it in the user's session and sends `session_id`.
+    // The server only knows which session a client last reported focus for.
+    if let Ok(Some(session_id)) = crate::client_focus::last_focused_session()
         && live_sessions.contains(&session_id)
     {
         return Ok(session_id);

@@ -3175,6 +3175,7 @@ dependencies = [
  "jcode-tui",
  "jcode-tui-session-picker",
  "jcode-tui-style",
+ "jcode-voice",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -3315,7 +3316,6 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "cpal",
  "dirs",
  "flate2",
  "futures",
@@ -4192,7 +4192,6 @@ dependencies = [
  "hex",
  "image",
  "jcode-app-core",
- "jcode-base",
  "jcode-build-meta",
  "jcode-config-types",
  "jcode-core",
@@ -4218,6 +4217,7 @@ dependencies = [
  "jcode-tui-usage-overlay",
  "jcode-tui-visual-debug",
  "jcode-tui-workspace",
+ "jcode-voice",
  "libc",
  "open",
  "rand 0.9.3",
@@ -4408,6 +4408,26 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "jcode-voice"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "cpal",
+ "futures",
+ "jcode-base",
+ "libc",
+ "regex",
+ "reqwest 0.12.28",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

@@ -90,6 +90,7 @@ members = [
     "crates/jcode-terminal-launch",
     "crates/jcode-terminal-image",
     "crates/jcode-terminal-prompt",
+    "crates/jcode-voice",
     "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
     "crates/jcode-render-core",
@@ -191,6 +192,7 @@ jcode-build-meta = { path = "crates/jcode-build-meta" }
 # [features]).
 jcode-tui = { path = "crates/jcode-tui", default-features = false }
 jcode-terminal-prompt = { path = "crates/jcode-terminal-prompt" }
+jcode-voice = { path = "crates/jcode-voice" }
 # `jcode provider-doctor` / provider diagnostics; sits downstream of jcode-base
 # so doctor edits do not rebuild the base -> app-core -> tui spine.
 jcode-provider-doctor = { path = "crates/jcode-provider-doctor" }

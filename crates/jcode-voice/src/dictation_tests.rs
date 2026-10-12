@@ -1,10 +1,10 @@
 #[cfg(target_os = "linux")]
 use super::focused_jcode_session;
 use super::{
-    ClientCandidate, extract_session_short_name_from_window_title, last_focused_session,
-    normalize_session_short_name, parse_ppid, read_resumed_session_id,
-    remember_last_focused_session, run_command, select_candidate,
+    ClientCandidate, extract_session_short_name_from_window_title, normalize_session_short_name,
+    parse_ppid, read_resumed_session_id, run_command, select_candidate,
 };
+use jcode_base::client_focus::{last_focused_session, remember_last_focused_session};
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;
 
@@ -18,7 +18,7 @@ struct EnvVarGuard {
 impl EnvVarGuard {
     fn set<K: AsRef<std::ffi::OsStr>>(key: &'static str, value: K) -> Self {
         let previous = std::env::var_os(key);
-        crate::env::set_var(key, value);
+        jcode_base::env::set_var(key, value);
         Self { key, previous }
     }
 }
@@ -27,9 +27,9 @@ impl EnvVarGuard {
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {
-            crate::env::set_var(self.key, previous);
+            jcode_base::env::set_var(self.key, previous);
         } else {
-            crate::env::remove_var(self.key);
+            jcode_base::env::remove_var(self.key);
         }
     }
 }
@@ -157,10 +157,10 @@ fn normalize_session_short_name_strips_wrapping_punctuation() {
 
 #[test]
 fn remember_and_read_last_focused_session() {
-    let _guard = crate::storage::lock_test_env();
+    let _guard = jcode_base::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_HOME");
     let temp = tempfile::TempDir::new().expect("tempdir");
-    crate::env::set_var("JCODE_HOME", temp.path());
+    jcode_base::env::set_var("JCODE_HOME", temp.path());
 
     let active_dir = temp.path().join("active_pids");
     std::fs::create_dir_all(&active_dir).expect("create active_pids");
@@ -173,16 +173,16 @@ fn remember_and_read_last_focused_session() {
     );
 
     if let Some(prev) = prev {
-        crate::env::set_var("JCODE_HOME", prev);
+        jcode_base::env::set_var("JCODE_HOME", prev);
     } else {
-        crate::env::remove_var("JCODE_HOME");
+        jcode_base::env::remove_var("JCODE_HOME");
     }
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn focused_jcode_session_uses_niri_window_title_when_process_name_is_generic() {
-    let _guard = crate::storage::lock_test_env();
+    let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("tempdir");
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
@@ -213,7 +213,7 @@ fn focused_jcode_session_uses_niri_window_title_when_process_name_is_generic() {
 #[cfg(target_os = "linux")]
 #[test]
 fn focused_cli_session_uses_client_registry_for_task_titled_windows() {
-    let _guard = crate::storage::lock_test_env();
+    let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("tempdir");
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
@@ -247,7 +247,7 @@ fn focused_cli_session_uses_client_registry_for_task_titled_windows() {
 #[cfg(target_os = "linux")]
 #[test]
 fn focused_cli_session_ignores_unrelated_windows() {
-    let _guard = crate::storage::lock_test_env();
+    let _guard = jcode_base::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("tempdir");
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
     std::fs::create_dir_all(temp.path().join("active_pids")).expect("active_pids");

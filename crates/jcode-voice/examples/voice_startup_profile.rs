@@ -5,7 +5,7 @@
 //!
 //! Records for N seconds (default 4) after the simulated press. Prints only
 //! stage timings and transcript length, never audio or transcript text.
-use jcode_base::voice::{NariEvent, NariRecording, nari_api_key, timing};
+use jcode_voice::{NariEvent, NariRecording, nari_api_key, timing};
 use std::{
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},

@@ -8,7 +8,7 @@
 //! sent to the agent wrapped in `<transcription>` tags. Whatever is already
 //! typed in the composer stays there, untouched.
 use super::*;
-use crate::voice::{self, NariEvent, NariRecording, VoiceError};
+use jcode_voice::{self as voice, NariEvent, NariRecording, VoiceError};
 use crossterm::event::KeyEvent;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;

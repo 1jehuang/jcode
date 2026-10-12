@@ -238,7 +238,7 @@ const MAX_PROMPT_CHARS: usize = 1000;
 /// Recognition context: built-in names plus `[dictation] vocabulary`,
 /// deduplicated case-insensitively and bounded without splitting a term.
 pub fn recognition_prompt() -> String {
-    build_prompt(&crate::config::config().dictation.vocabulary)
+    build_prompt(&jcode_base::config::config().dictation.vocabulary)
 }
 
 fn build_prompt(extra: &[String]) -> String {
@@ -272,7 +272,7 @@ fn build_prompt(extra: &[String]) -> String {
 }
 
 pub fn nari_api_key() -> Option<String> {
-    crate::provider_catalog::load_api_key_from_env_or_config("NARI_API_KEY", "nari.env")
+    jcode_base::provider_catalog::load_api_key_from_env_or_config("NARI_API_KEY", "nari.env")
         .filter(|key| !key.trim().is_empty())
 }
 

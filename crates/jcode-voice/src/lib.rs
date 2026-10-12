@@ -6,10 +6,11 @@
 //! clients. `NariSession` and `nari_pcm_channel` accept bounded mono 16 kHz PCM16
 //! from any source without the capture feature. Nari requires a caller-supplied
 //! provider key. The existing subscription APIs still need no provider key.
-use crate::{subscription_api, subscription_catalog};
+use jcode_base::{subscription_api, subscription_catalog};
 use serde::Deserialize;
 use std::{fmt, time::Duration};
 
+pub mod dictation;
 mod nari;
 pub mod timing;
 pub use nari::{
@@ -707,14 +708,14 @@ mod tests {
 
     #[tokio::test]
     async fn configured_public_api_requires_key_and_uses_configured_base() {
-        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        let _sandbox = jcode_base::auth::test_sandbox::AuthTestSandbox::new().unwrap();
         struct Restore(Vec<(&'static str, Option<String>)>);
         impl Drop for Restore {
             fn drop(&mut self) {
                 for (key, value) in &self.0 {
                     match value {
-                        Some(value) => crate::env::set_var(key, value),
-                        None => crate::env::remove_var(key),
+                        Some(value) => jcode_base::env::set_var(key, value),
+                        None => jcode_base::env::remove_var(key),
                     }
                 }
             }
@@ -725,21 +726,21 @@ mod tests {
                 .map(|key| (key, std::env::var(key).ok()))
                 .collect(),
         );
-        crate::env::remove_var("JCODE_API_KEY");
-        crate::env::set_var("JCODE_API_BASE", "http://127.0.0.1:1");
+        jcode_base::env::remove_var("JCODE_API_KEY");
+        jcode_base::env::set_var("JCODE_API_BASE", "http://127.0.0.1:1");
         assert!(!subscription_voice_available().await);
         assert_eq!(
             transcribe_wav(wav(), None).await,
             Err(VoiceError::NotConfigured)
         );
-        crate::env::set_var("JCODE_API_KEY", "public-api-test-key");
+        jcode_base::env::set_var("JCODE_API_KEY", "public-api-test-key");
         let (base, worker) = mock(
             200,
             "",
             br#"{"capabilities":{"voice_transcription":true}}"#.to_vec(),
             Duration::ZERO,
         );
-        crate::env::set_var("JCODE_API_BASE", &base);
+        jcode_base::env::set_var("JCODE_API_BASE", &base);
         assert!(subscription_voice_available().await);
         assert!(
             String::from_utf8(worker.join().unwrap())
@@ -752,7 +753,7 @@ mod tests {
             br#"{"text":"configured upload"}"#.to_vec(),
             Duration::ZERO,
         );
-        crate::env::set_var("JCODE_API_BASE", &base);
+        jcode_base::env::set_var("JCODE_API_BASE", &base);
         assert_eq!(
             transcribe_wav(wav(), None).await.unwrap(),
             "configured upload"

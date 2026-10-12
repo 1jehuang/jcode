@@ -30,11 +30,11 @@ pub mod cache_tracker;
 pub mod claude_live;
 pub mod client_input;
 pub mod compaction;
+pub mod client_focus;
 pub mod config;
 pub mod console;
 pub mod copilot_usage;
 pub mod detected_emails;
-pub mod dictation;
 #[cfg(feature = "embeddings")]
 pub mod embedding;
 pub mod embedding_backend;
@@ -108,7 +108,6 @@ pub mod transcript_sample;
 pub mod transport;
 pub mod usage;
 pub mod util;
-pub mod voice;
 pub mod voice_intent;
 #[cfg(not(feature = "embeddings"))]
 pub use embedding_stub as embedding;
