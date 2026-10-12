@@ -1065,6 +1065,42 @@ fn test_remote_provider_overload_after_hidden_reasoning_still_resends() {
     });
 }
 
+#[test]
+fn test_remote_exhausted_overload_budget_pauses_without_generic_retry() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let prompt = "finish this work";
+    let mut pending = held_user_turn(prompt, true, 0);
+    pending.overload_attempts = App::OVERLOAD_RETRY_MAX_ATTEMPTS;
+    app.rate_limit_pending_message = Some(pending);
+    app.last_submitted_input = Some(prompt.to_string());
+    app.auto_poke_incomplete_todos = true;
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
+    app.current_message_id = Some(44);
+
+    app.handle_server_event(
+        crate::protocol::ServerEvent::Error {
+            id: 44,
+            message: OPENFERENCE_529.to_string(),
+            retry_after_secs: None,
+            server_resumes: false,
+        },
+        &mut remote,
+    );
+
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.rate_limit_reset.is_none());
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(!app.is_processing);
+    assert_eq!(app.input, prompt);
+    assert!(app.display_messages().iter().any(|message| {
+        message.content.contains("Provider overload retry limit reached")
+    }));
+}
+
 /// A permanent 4xx (or model-not-found) whose body happens to contain an
 /// overload phrase must not be classified as an overload: the provider
 /// runtime refuses to retry these statuses, so the TUI must not resend them.
