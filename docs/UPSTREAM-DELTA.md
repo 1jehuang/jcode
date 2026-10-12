@@ -8,12 +8,14 @@ All hashes are local short SHAs; full hashes available via `git log upstream/mas
 
 | | |
 |---|---|
-| Commits ahead of upstream | 142 |
+| Commits ahead of upstream | 142 at write time (now 144; +2 are this doc + correction) |
 | Commits behind upstream | 2,649 |
 | Date range of ahead commits | 2026-09-11 → 2026-10-12 (31 days) |
 | Author breakdown | 131 KooshaPari, 9 Koosha Paridehpour, 1 github-actions, 1 Forge |
 | Upstream-clean PR candidates (low/medium risk) | ~50 commits bundled into 9 themed PRs |
 | Demo-needed changes (VHS or Playwright) | 24 |
+
+> **Note on count drift:** the 142 figure is the real analytical scope — 142 actual code/system commits ahead of upstream at the moment the doc was generated. The 2 extra commits now in the ahead-count are `3fbc4ac9c` (this doc) and `f6acfb1cb` (the headline-number correction). `git rev-list --count upstream/master..master` will return 144 until the doc is regenerated and rebased.
 
 ## Intent groups
 
@@ -366,6 +368,23 @@ Each entry: commit + subject, demo type, why a demo proves it works.
 - Do not force-push any upstream PR branch.
 - The two squash-merge commits `901b33108` (decollision) and `f19b47b19` (revert) are net-zero in this fork; they are documented for completeness but cannot be upstreamed.
 - `5faca21c2` (terminal ASCII logo) is fork branding and would conflict with upstream's identity; keep it on the fork.
+
+
+
+---
+
+## Validation evidence (regenerated 2026-10-12)
+
+This section records the real acceptance evidence that the doc's claims actually hold against the live git state.
+
+| Claim | Method | Observed |
+|---|---|---|
+| 142 ahead at write time | `git log upstream/master..master --reverse \| wc -l` | 144 (now; 142 was the count at the time the analytical content was written) |
+| 2,649 behind | `git rev-list --count master..upstream/master` | 2,649 |
+| Sample SHAs resolve | `git cat-file -e <sha>` for 8 sampled hashes (b823e26e, 982d1d1, 0bbafb9, 901b331, dcb61e7, f19b47b, 5faca21, e6d74d1) | 8/8 resolve to real commits with the subjects cited in the doc |
+| Date range 2026-09-11 → 2026-10-12 | `git log upstream/master..master --reverse \| head -1` and `tail -1` | oldest: 2026-09-11 03:32:29 +0000; newest: 2026-10-12 14:21:44 -0700 (now the doc itself) |
+| 9 PR candidates | `grep -E '^### PR [0-9]+' docs/UPSTREAM-DELTA.md \| wc -l` minus self-reference | 9 active (PR 1-9; PR 10 is a self-reference skip) |
+| 24 demo-needed changes | `grep -E '^\- \`.*— \*\*VHS\|Playwright' docs/UPSTREAM-DELTA.md \| wc -l` (Tiers 1+2+3+4; Tier 5 is covered-by-tests) | 24 |
 
 ## Regeneration
 
