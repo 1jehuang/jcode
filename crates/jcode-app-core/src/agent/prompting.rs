@@ -2,6 +2,10 @@ use super::Agent;
 use crate::logging;
 use crate::message::{Message, ToolDefinition};
 
+#[cfg(test)]
+#[path = "prompting_recovery_tests.rs"]
+mod recovery_tests;
+
 impl Agent {
     /// Explicitly prepare/freeze the same tool surface used by provider turns.
     /// Unlike `debug_context`, this may update the tool cache. It never calls a provider.
@@ -121,10 +125,12 @@ impl Agent {
         memory_prompt: Option<&str>,
     ) -> crate::prompt::SplitSystemPrompt {
         if let Some(ref override_prompt) = self.session.system_prompt {
-            return crate::prompt::SplitSystemPrompt {
+            let mut split = crate::prompt::SplitSystemPrompt {
                 static_part: override_prompt.clone(),
                 dynamic_part: String::new(),
             };
+            self.append_current_turn_system_reminder(&mut split);
+            return split;
         }
 
         let skills = self.current_skills_snapshot();
