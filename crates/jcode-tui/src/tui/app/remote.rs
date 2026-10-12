@@ -1478,7 +1478,13 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
             .clone()
             .unwrap_or_else(|| "Split".to_string());
         begin_remote_split_launch(app, &flow_label);
-        if let Err(error) = remote.split().await {
+        let feedback_role = match flow_label.to_ascii_lowercase().as_str() {
+            "review" | "autoreview" | "judge" | "autojudge" => {
+                Some(flow_label.to_ascii_lowercase())
+            }
+            _ => None,
+        };
+        if let Err(error) = remote.split_feedback(feedback_role).await {
             finish_remote_split_launch(app);
             let had_startup = app.pending_split_startup_message.take().is_some();
             app.pending_split_parent_session_id = None;

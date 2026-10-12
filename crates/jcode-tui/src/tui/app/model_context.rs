@@ -650,23 +650,10 @@ impl App {
         } else {
             self.provider.reasoning_effort()
         };
-        let current_index = current
-            .as_ref()
-            .and_then(|c| efforts.iter().position(|e| *e == c.as_str()))
-            .unwrap_or(efforts.len() - 1); // default to last (highest)
-
+        let next_index =
+            super::helpers::cycled_effort_index(&efforts, current.as_deref(), direction)
+                .expect("nonempty effort ladder");
         let len = efforts.len();
-        let next_index = if direction > 0 {
-            if current_index + 1 >= len {
-                current_index // already at max
-            } else {
-                current_index + 1
-            }
-        } else if current_index == 0 {
-            0 // already at min
-        } else {
-            current_index - 1
-        };
 
         let next_effort = efforts[next_index];
         if Some(next_effort.to_string()) == current {

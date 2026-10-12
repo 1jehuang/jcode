@@ -449,7 +449,12 @@ pub enum Request {
 
     /// Split the current session — clone conversation into a new session
     #[serde(rename = "split")]
-    Split { id: u64 },
+    Split {
+        id: u64,
+        /// Feedback splits resolve their role on the server, never the client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback_role: Option<String>,
+    },
 
     /// Transfer the current session into a compacted handoff session
     #[serde(rename = "transfer")]

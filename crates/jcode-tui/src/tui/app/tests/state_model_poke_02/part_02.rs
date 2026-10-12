@@ -121,7 +121,12 @@ fn test_agents_ctrl_g_toggles_scope_and_saves_to_the_chosen_scope() {
         assert!(!app.agent_models_global_scope);
         let roles = app.inline_interactive_state.as_ref().expect("role list");
         assert!(roles.is_agent_target_picker());
-        assert!(roles.entries.iter().all(|entry| entry.name.ends_with("[session]")));
+        assert!(
+            roles
+                .entries
+                .iter()
+                .all(|entry| entry.name.ends_with("[session]"))
+        );
         configure_test_remote_models(&mut app);
         app.open_agent_model_picker(crate::tui::AgentModelTarget::Review);
         app.is_remote = false;
@@ -230,7 +235,7 @@ fn test_agents_global_scope_and_distinct_session_clear_and_inherit() {
 }
 
 #[test]
-fn test_agents_remote_feedback_honors_session_global_and_inherit() {
+fn test_agents_remote_feedback_defers_session_global_and_inherit_to_server() {
     with_temp_jcode_home(|| {
         let auth_path = crate::storage::jcode_dir()
             .unwrap()
@@ -254,20 +259,13 @@ fn test_agents_remote_feedback_honors_session_global_and_inherit() {
         config.save().unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
-        for (command, role, global) in [
-            ("/review", "review", "claude-api:global-review"),
-            ("/judge", "judge", "claude-api:global-judge"),
-            ("/autoreview now", "review", "claude-api:global-review"),
-            ("/autojudge now", "judge", "claude-api:global-judge"),
+        for (command, role) in [
+            ("/review", "review"),
+            ("/judge", "judge"),
+            ("/autoreview now", "review"),
+            ("/autojudge now", "judge"),
         ] {
-            for (override_model, expected) in [
-                (
-                    Some("openai-api:session-worker"),
-                    Some("openai-api:session-worker"),
-                ),
-                (Some("inherit"), None),
-                (None, Some(global)),
-            ] {
+            for override_model in [Some("openai-api:session-worker"), Some("inherit"), None] {
                 let mut app = create_test_app();
                 app.session
                     .set_agent_model_override(role, override_model.map(str::to_string))
@@ -285,8 +283,8 @@ fn test_agents_remote_feedback_honors_session_global_and_inherit() {
                 .unwrap();
                 assert_eq!(
                     app.pending_split_model_override.as_deref(),
-                    expected,
-                    "{command} with {override_model:?}"
+                    None,
+                    "{command} with {override_model:?} must resolve on the server"
                 );
                 assert!(
                     app.pending_split_provider_key_override.is_none(),

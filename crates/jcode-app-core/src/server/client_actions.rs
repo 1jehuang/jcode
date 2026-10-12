@@ -824,9 +824,18 @@ pub(super) async fn handle_trigger_memory_extraction(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+#[cfg(test)]
 fn clone_split_session(
     parent_session_id: &str,
     live_parent: Option<&Session>,
+) -> anyhow::Result<(String, String)> {
+    clone_split_session_with_feedback(parent_session_id, live_parent, None)
+}
+
+fn clone_split_session_with_feedback(
+    parent_session_id: &str,
+    live_parent: Option<&Session>,
+    feedback_role: Option<&str>,
 ) -> anyhow::Result<(String, String)> {
     // Keep the persisted snapshot authoritative, including while the parent is
     // busy. A brand-new Agent may not have saved anything yet, however. Only a
@@ -849,6 +858,35 @@ fn clone_split_session(
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     crate::session_accounts::AccountInheritance::from_session(&parent).apply_to_session(&mut child);
+    if let Some(role) = feedback_role {
+        let (target, one_shot) = match role {
+            "review" => ("review", true),
+            "autoreview" => ("review", false),
+            "judge" => ("judge", true),
+            "autojudge" => ("judge", false),
+            _ => anyhow::bail!("Unknown feedback role: {role}"),
+        };
+        let config = crate::config::Config::load_strict()?;
+        let global = if target == "review" {
+            config.autoreview.model
+        } else {
+            config.autojudge.model
+        };
+        match parent.effective_agent_model(target, global) {
+            Some(model) if model != "inherit" => child.model = Some(model),
+            Some(_) => {}
+            None if one_shot => {
+                if let Ok(credentials) = crate::auth::codex::load_credentials()
+                    && (!credentials.refresh_token.trim().is_empty()
+                        || credentials.id_token.is_some())
+                {
+                    child.model = Some("gpt-5.5".to_string());
+                    child.provider_key = Some("openai".to_string());
+                }
+            }
+            None => {}
+        }
+    }
     child.status = crate::session::SessionStatus::Closed;
     // The parent agent keeps ownership of any in-flight request; tell the
     // forked agent so it treats the next prompt as fresh work instead of
@@ -905,6 +943,7 @@ pub(super) async fn handle_split(
     client_session_id: &str,
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+    feedback_role: Option<&str>,
 ) {
     let started = Instant::now();
     crate::logging::event_info(
@@ -919,9 +958,10 @@ pub(super) async fn handle_split(
     // Agent lock: busy sessions can still fork their last persisted snapshot.
     let result = {
         let idle_agent = agent.try_lock().ok();
-        clone_split_session(
+        clone_split_session_with_feedback(
             client_session_id,
             idle_agent.as_ref().map(|agent| agent.session_for_split()),
+            feedback_role,
         )
     };
     let (new_session_id, new_session_name) = match result {
