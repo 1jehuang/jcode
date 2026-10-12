@@ -63,10 +63,9 @@ pub fn is_db_path(path: &Path) -> bool {
     path.file_name().and_then(|name| name.to_str()) == Some(DB_FILE_NAME)
 }
 
-/// Open read-only. A WAL database whose `-shm` file is missing (OpenCode not
-/// running) cannot be opened by a plain read-only connection because it would
-/// have to create the `-shm`. In that case fall back to `immutable=1`, which is
-/// safe exactly because no writer is live.
+/// Open read-only without creating sidecars in the owner's directory. When a
+/// WAL database lacks `-shm`, immutable reading is allowed only without a
+/// nonempty WAL: immutable SQLite connections ignore committed WAL frames.
 pub fn open(path: &Path) -> Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     if is_wal_without_shm(path) {
@@ -88,14 +87,30 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(db)
 }
 
-fn open_immutable(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connection> {
+fn open_immutable(path: &Path, flags: OpenFlags) -> Result<Connection> {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    match std::fs::metadata(Path::new(&wal)) {
+        Ok(metadata) if metadata.len() > 0 => anyhow::bail!(
+            "Cannot safely read OpenCode database {}: nonempty WAL prevents immutable reading; \
+             checkpoint the database with OpenCode before retrying",
+            path.display()
+        ),
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
     let uri = format!("file:{}?mode=ro&immutable=1", uri_escape(path));
-    Connection::open_with_flags(uri, flags | OpenFlags::SQLITE_OPEN_URI)
+    Ok(Connection::open_with_flags(
+        uri,
+        flags | OpenFlags::SQLITE_OPEN_URI,
+    )?)
 }
 
-/// A WAL-mode database (header bytes 18/19 == 2) whose `-shm` is absent has no
-/// live writer. A plain read-only open would create the `-shm` in OpenCode's
-/// directory (or fail if it cannot), so read it as immutable instead.
+/// A WAL-mode database (header bytes 18/19 == 2) without `-shm` must not be
+/// opened normally: even a read-only connection can create the missing sidecar.
+/// Missing SHM does not imply that WAL data has been checkpointed or no writer
+/// is live. The immutable path separately rejects nonempty WAL files.
 fn is_wal_without_shm(path: &Path) -> bool {
     use std::io::Read;
     let mut shm = path.as_os_str().to_owned();
