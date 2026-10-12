@@ -30,3 +30,6 @@ include!("resume/attach_without_local_history.rs");
 include!("resume/different_client_attach.rs");
 include!("resume/live_events_before_history.rs");
 include!("resume/same_client_takeover.rs");
+
+#[path = "resume/stopped_session.rs"]
+mod stopped_session;

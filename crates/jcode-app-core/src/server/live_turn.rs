@@ -117,27 +117,28 @@ pub(super) async fn idle_live_agent(
 /// run, and it owns the skill validation so both rejections are decided in one
 /// lock acquisition.
 ///
-/// Returns the rejection to send back when the turn is refused, or `None` when
-/// it is admitted. The caller sends the event; admission itself never touches
-/// the client channel.
+/// Returns the Agent reservation through execution, or the rejection to send
+/// back. The caller sends the event; admission never touches the client channel.
 pub(super) async fn admit_client_turn(
     agent: &Arc<Mutex<Agent>>,
     active_skill: Option<String>,
     id: u64,
-) -> Option<ServerEvent> {
-    let mut agent = agent.lock().await;
-    if agent.is_closed() {
-        return Some(ServerEvent::Error {
+) -> Result<OwnedMutexGuard<Agent>, ServerEvent> {
+    let mut agent = Arc::clone(agent).lock_owned().await;
+    // Check the existing stop gate only after locking Agent. This short-lived
+    // permit must not delay stop while waiting for Agent or executing the turn.
+    if agent.is_closed() || begin_session_interrupt_delivery(agent.session_id()).is_none() {
+        return Err(ServerEvent::Error {
             id,
             message: "This session was stopped and no longer accepts new turns".to_string(),
             retry_after_secs: None,
         });
     }
     if agent.set_remote_active_skill(active_skill.clone()) {
-        return None;
+        return Ok(agent);
     }
     let skill_name = active_skill.as_deref().unwrap_or("");
-    Some(ServerEvent::Error {
+    Err(ServerEvent::Error {
         id,
         message: format!("Skill '{skill_name}' is not installed on the server"),
         retry_after_secs: None,
@@ -220,29 +221,20 @@ pub(super) async fn spawn_tracked_live_turn(
         if pending > 0 {
             let _ = event_tx.send(ServerEvent::SoftInterruptQueue { pending });
         }
-        // A stop that could not quiesce this turn within its timeout left the
-        // member in `stopping` and told the caller not to schedule replacement
-        // work. This turn is the work that outlived that timeout, so its own end
-        // status must not overwrite the marker: publishing `ready` (with a
-        // coordinator completion report) or `failed` here would advertise a
-        // worker that is still stopping as reusable.
-        let quiescing = member_is_stopping(&session_id, &swarm.members).await;
         match result {
             Ok(()) => {
-                if !quiescing {
-                    update_member_status_with_report(
-                        &session_id,
-                        "ready",
-                        None,
-                        completion_report,
-                        &swarm.members,
-                        &swarm.swarms_by_id,
-                        Some(&swarm.event_history),
-                        Some(&swarm.event_counter),
-                        Some(&swarm.event_tx),
-                    )
-                    .await;
-                }
+                update_member_status_with_report(
+                    &session_id,
+                    "ready",
+                    None,
+                    completion_report,
+                    &swarm.members,
+                    &swarm.swarms_by_id,
+                    Some(&swarm.event_history),
+                    Some(&swarm.event_counter),
+                    Some(&swarm.event_tx),
+                )
+                .await;
                 let _ = event_tx.send(ServerEvent::Done { id: 0 });
             }
             Err(error) => {
@@ -250,19 +242,17 @@ pub(super) async fn spawn_tracked_live_turn(
                     "Server-initiated turn failed for live session {}: {}",
                     session_id, error
                 ));
-                if !quiescing {
-                    update_member_status(
-                        &session_id,
-                        "failed",
-                        Some(truncate_detail(&error.to_string(), 120)),
-                        &swarm.members,
-                        &swarm.swarms_by_id,
-                        Some(&swarm.event_history),
-                        Some(&swarm.event_counter),
-                        Some(&swarm.event_tx),
-                    )
-                    .await;
-                }
+                update_member_status(
+                    &session_id,
+                    "failed",
+                    Some(truncate_detail(&error.to_string(), 120)),
+                    &swarm.members,
+                    &swarm.swarms_by_id,
+                    Some(&swarm.event_history),
+                    Some(&swarm.event_counter),
+                    Some(&swarm.event_tx),
+                )
+                .await;
                 let _ = event_tx.send(ServerEvent::TurnStopped {
                     reason: stop_reason,
                     message: crate::util::format_error_chain(&error),
@@ -562,22 +552,6 @@ fn clear_live_stop_queue(queue: &jcode_agent_runtime::SoftInterruptQueue) -> any
         "live soft-interrupt queue remains nonempty"
     );
     Ok(())
-}
-
-/// Whether a stop has begun for `session_id` and has not quiesced it yet.
-///
-/// A stop publishes `stopping` before it cancels anything and only clears it
-/// (by removing the member) once the turn released the Agent. A turn that
-/// finishes while the marker is still set therefore ended after a stop timed
-/// out, and must leave the marker alone.
-async fn member_is_stopping(
-    session_id: &str,
-    members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> bool {
-    let members = members.read().await;
-    members
-        .get(session_id)
-        .is_some_and(|member| member.status == "stopping")
 }
 
 /// Acquire the terminal Agent guard for a session being stopped.

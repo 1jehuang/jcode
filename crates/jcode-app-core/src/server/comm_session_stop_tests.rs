@@ -50,6 +50,88 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+#[tokio::test]
+async fn residual_pr1362_stopping_rejects_queued_running_status() {
+    assert_stopping_rejects_queued_status("running").await;
+}
+
+#[tokio::test]
+async fn residual_pr1362_stopping_rejects_queued_ready_status() {
+    assert_stopping_rejects_queued_status("ready").await;
+}
+
+#[tokio::test]
+async fn residual_pr1362_stopping_rejects_queued_failed_status() {
+    assert_stopping_rejects_queued_status("failed").await;
+}
+
+async fn assert_stopping_rejects_queued_status(status: &str) {
+    let (mut worker, mut worker_events) = member("status-worker", Some("status-swarm"), "agent");
+    let (coordinator, mut coordinator_events) =
+        member("status-owner", Some("status-swarm"), "coordinator");
+    worker.status = "running".into();
+    worker.report_back_to_session_id = Some("status-owner".into());
+    worker.detail = Some("stop detail".into());
+    worker.latest_completion_report = Some("prior report".into());
+    worker.output_tail = Some("prior output".into());
+    let last_status_change = worker.last_status_change;
+    let members = Arc::new(RwLock::new(HashMap::from([
+        ("status-worker".into(), worker),
+        ("status-owner".into(), coordinator),
+    ])));
+    let swarms = Arc::new(RwLock::new(HashMap::from([(
+        "status-swarm".into(),
+        HashSet::from(["status-worker".into(), "status-owner".into()]),
+    )])));
+    let history = Arc::new(RwLock::new(VecDeque::new()));
+    let counter = Arc::new(AtomicU64::new(0));
+    let (event_tx, mut event_rx) = broadcast::channel(8);
+
+    let mut held_members = members.write().await;
+    let mut update = Box::pin(crate::server::swarm::update_member_status_with_report_tldr(
+        "status-worker",
+        status,
+        Some("late detail".into()),
+        Some("late report".into()),
+        Some("late tldr".into()),
+        &members,
+        &swarms,
+        Some(&history),
+        Some(&counter),
+        Some(&event_tx),
+    ));
+    assert!(futures::poll!(update.as_mut()).is_pending());
+    // Stop wins while the already-polled status update waits for the lock.
+    held_members.get_mut("status-worker").unwrap().status = "stopping".into();
+    drop(held_members);
+    update.await;
+
+    let members = members.read().await;
+    let worker = &members["status-worker"];
+    assert_eq!(worker.status, "stopping", "late {status} must be rejected");
+    assert_eq!(worker.detail.as_deref(), Some("stop detail"));
+    assert_eq!(
+        worker.latest_completion_report.as_deref(),
+        Some("prior report")
+    );
+    assert_eq!(worker.output_tail.as_deref(), Some("prior output"));
+    assert_eq!(worker.last_status_change, last_status_change);
+    assert!(history.read().await.is_empty());
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        event_rx.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        worker_events.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(matches!(
+        coordinator_events.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+
 #[derive(Clone)]
 struct BlockingStreamProvider {
     calls: Arc<AtomicUsize>,

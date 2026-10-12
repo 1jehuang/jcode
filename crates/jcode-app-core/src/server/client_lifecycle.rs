@@ -3462,10 +3462,13 @@ async fn start_processing_message(
     // A stopped session's Agent stays reachable through this connection's own
     // handle after the stop removed the worker from routing, so admission is
     // checked here, under the lock, before this message is recorded or run.
-    if let Some(rejection) = super::live_turn::admit_client_turn(agent, active_skill, id).await {
-        let _ = client_event_tx.send(rejection);
-        return;
-    }
+    let mut agent = match super::live_turn::admit_client_turn(agent, active_skill, id).await {
+        Ok(agent) => agent,
+        Err(rejection) => {
+            let _ = client_event_tx.send(rejection);
+            return;
+        }
+    };
 
     *state.client_is_processing = true;
     *state.message_id = Some(id);
@@ -3496,15 +3499,8 @@ async fn start_processing_message(
     )
     .await;
 
-    let (start_message_index, pending_queue) = {
-        let agent_guard = agent.lock().await;
-        (
-            agent_guard.message_count(),
-            agent_guard.soft_interrupt_queue(),
-        )
-    };
-    let agent = Arc::clone(agent);
-    let report_agent = Arc::clone(&agent);
+    let start_message_index = agent.message_count();
+    let pending_queue = agent.soft_interrupt_queue();
     let tx = super::state::session_event_fanout_sender_with_fallback(
         client_session_id.to_string(),
         Arc::clone(swarm.members),
@@ -3517,7 +3513,13 @@ async fn start_processing_message(
         let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
-            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
+            process_locked_message_streaming_mpsc(
+                &mut agent,
+                &content,
+                images,
+                system_reminder,
+                event_tx,
+            ),
         ))
         .catch_unwind()
         .await
@@ -3549,12 +3551,10 @@ async fn start_processing_message(
                 id, error
             )),
         }
-        let completion_report = if result.is_ok() {
-            let agent = report_agent.lock().await;
-            agent.latest_assistant_text_after(start_message_index)
-        } else {
-            None
-        };
+        let completion_report = result
+            .is_ok()
+            .then(|| agent.latest_assistant_text_after(start_message_index))
+            .flatten();
         // Keep the terminal event on the same ordered fanout channel as the
         // stream. Sending it later from the owning client's event loop could
         // race ahead of the final MessageEnd for newly attached clients.

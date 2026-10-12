@@ -1713,23 +1713,17 @@ pub(super) async fn handle_resume_session(
         }
     }
 
-    let (result, is_canary) = {
+    let (result, is_canary, was_interrupted) = {
         let mut agent_guard = agent.lock().await;
         let result =
             agent_guard.restore_session_with_working_dir(&session_id, working_dir_override);
         if *client_selfdev {
             agent_guard.set_canary("self-dev");
         }
-        let is_canary = agent_guard.is_canary();
-        (result, is_canary)
-    };
-
-    let was_interrupted = match &result {
-        Ok(status) => {
-            let agent_guard = agent.lock().await;
+        let was_interrupted = result.as_ref().is_ok_and(|status| {
             restored_session_was_interrupted(&session_id, status, &agent_guard)
-        }
-        Err(_) => false,
+        });
+        (result, agent_guard.is_canary(), was_interrupted)
     };
 
     if result.is_ok() && is_canary {
@@ -1758,6 +1752,12 @@ pub(super) async fn handle_resume_session(
             rename_shutdown_signal(shutdown_signals, &old_session_id, &session_id).await;
             rename_session_interrupt_queue(soft_interrupt_queues, &old_session_id, &session_id)
                 .await;
+            let agent_guard = agent.lock().await;
+            if !agent_guard.is_closed() {
+                let queue = agent_guard.soft_interrupt_queue();
+                register_session_interrupt_queue(soft_interrupt_queues, &session_id, queue).await;
+            }
+            drop(agent_guard);
             {
                 let mut connections = client_connections.write().await;
                 if let Some(info) = connections.get_mut(client_connection_id) {
