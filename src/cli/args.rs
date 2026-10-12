@@ -1170,6 +1170,26 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Import managed Cursor and Antigravity accounts from ~/.opencodex/auth.json
+    ImportOpencodex {
+        /// Emit a secret-free JSON acknowledgement
+        #[arg(long)]
+        json: bool,
+    },
+    /// List, select, or remove pooled provider accounts
+    Accounts {
+        #[arg(id = "pool_provider", default_value = "all", value_name = "PROVIDER")]
+        pool_provider: String,
+        /// Persistently select an account by its displayed label
+        #[arg(long, value_name = "LABEL")]
+        switch: Option<String>,
+        /// Remove one Cursor or Antigravity account by its displayed label
+        #[arg(long, value_name = "LABEL", conflicts_with = "switch")]
+        remove: Option<String>,
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
     /// Show configured authentication status for model/tool providers
     Status {
         /// Emit JSON instead of plain text

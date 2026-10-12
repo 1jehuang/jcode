@@ -7,6 +7,7 @@ mod accessors;
 mod anthropic_reset;
 mod api_keys;
 mod cache;
+mod cursor;
 mod disk_cache;
 mod display;
 mod model;
@@ -21,7 +22,9 @@ pub use anthropic_reset::{
 };
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
-pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
+pub use jcode_usage_types::{
+    CursorUsageSemantics, OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit,
+};
 pub use model::*;
 pub use openai_reset::{
     OpenAiUsageResetOutcome, PendingOpenAiUsageReset, consume_openai_usage_reset,
@@ -382,7 +385,21 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
-    if auth::cursor::has_cursor_native_auth() {
+    // Managed Cursor accounts are fetched independently. The account-bound
+    // adapter never switches the active override, and its semaphore keeps a
+    // large imported pool from stampeding Cursor's endpoints.
+    let cursor_accounts = auth::provider_pool::list_accounts("cursor").unwrap_or_default();
+    if !cursor_accounts.is_empty() {
+        let cursor_account_count = cursor_accounts.len();
+        for account in cursor_accounts {
+            tasks.spawn(async move {
+                let mut report = fetch_cursor_usage_report_for_account(account).await;
+                attach_activity(&mut report, "cursor");
+                Some(report)
+            });
+        }
+        total += cursor_account_count;
+    } else if auth::cursor::has_cursor_native_auth() {
         tasks.spawn(async {
             fetch_cursor_usage_report().await.map(|mut report| {
                 attach_activity(&mut report, "cursor");

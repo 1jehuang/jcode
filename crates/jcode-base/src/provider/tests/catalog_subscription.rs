@@ -237,7 +237,7 @@ fn test_anthropic_model_catalog_hydrates_from_disk_cache() {
 fn test_same_provider_account_candidates_include_other_openai_accounts() {
     with_clean_provider_test_env(|| {
         let now_ms = chrono::Utc::now().timestamp_millis() + 60_000;
-        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        let first_label = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
             label: "seed-a".to_string(),
             access_token: "acc-a".to_string(),
             refresh_token: "ref-a".to_string(),
@@ -247,7 +247,7 @@ fn test_same_provider_account_candidates_include_other_openai_accounts() {
             email: Some("a@example.com".to_string()),
         })
         .unwrap();
-        crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+        let second_label = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
             label: "seed-b".to_string(),
             access_token: "acc-b".to_string(),
             refresh_token: "ref-b".to_string(),
@@ -258,9 +258,9 @@ fn test_same_provider_account_candidates_include_other_openai_accounts() {
         })
         .unwrap();
 
-        crate::auth::codex::set_active_account("openai-otter").unwrap();
+        crate::auth::codex::set_active_account(&first_label).unwrap();
         let candidates = MultiProvider::same_provider_account_candidates(ActiveProvider::OpenAI);
-        assert_eq!(candidates, vec!["openai-fox".to_string()]);
+        assert_eq!(candidates, vec![second_label]);
     });
 }
 

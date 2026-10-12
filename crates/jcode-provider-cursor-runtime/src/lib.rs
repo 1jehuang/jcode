@@ -591,7 +591,71 @@ impl Provider for CursorCliProvider {
             }
         });
 
-        Ok(Box::pin(ReceiverStream::new(rx)))
+        open_cursor_stream(rx).await
+    }
+
+    async fn complete_for_account(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        account_label: &str,
+    ) -> Result<EventStream> {
+        let prompt = build_cli_prompt(system, messages);
+        let model = self
+            .model
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let client = self.client.clone();
+        let resume_session_id = resume_session_id.map(str::to_string);
+        let (tx, rx) = mpsc::channel::<Result<jcode_message_types::StreamEvent>>(100);
+        let stream_uuid = uuid::Uuid::new_v4().to_string();
+        let (tool_result_tx, tool_result_rx) = mpsc::channel::<NativeToolResult>(16);
+        let stream_guard = self.multiplexer.register(&stream_uuid, tool_result_tx);
+        let tools = tools.to_vec();
+        let system = system.to_string();
+        self.ensure_forwarder_loop();
+        let fast_override = *self
+            .fast
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let model_catalog = self
+            .fetched_models
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let account_label = account_label.to_string();
+
+        tokio::spawn(async move {
+            let _stream_guard = stream_guard;
+            let result = run_native_text_command(
+                client,
+                tx.clone(),
+                &prompt,
+                &model,
+                fast_override,
+                &model_catalog,
+                Some(&account_label),
+                resume_session_id.as_deref(),
+                &stream_uuid,
+                &tools,
+                &system,
+                tool_result_rx,
+            )
+            .await;
+
+            if let Err(err) = result {
+                let _ = tx.send(Err(err)).await;
+            }
+        });
+
+        open_cursor_stream(rx).await
+    }
+
+    fn supports_request_scoped_accounts(&self) -> bool {
+        true
     }
 
     fn name(&self) -> &'static str {
@@ -775,6 +839,30 @@ impl Provider for CursorCliProvider {
     }
 }
 
+/// Return the stream only after Cursor emits its first event. Startup
+/// transport, auth, and quota errors arrive as `Err` before that event, so
+/// `MultiProvider` can fail over to another pooled account.
+async fn open_cursor_stream(mut rx: mpsc::Receiver<Result<StreamEvent>>) -> Result<EventStream> {
+    match rx.recv().await {
+        Some(Ok(first)) => {
+            let (tx, out_rx) = mpsc::channel(100);
+            tokio::spawn(async move {
+                if tx.send(Ok(first)).await.is_err() {
+                    return;
+                }
+                while let Some(event) = rx.recv().await {
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok(Box::pin(ReceiverStream::new(out_rx)))
+        }
+        Some(Err(error)) => Err(error),
+        None => anyhow::bail!("Cursor stream ended before it started"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_native_text_command(
     client: reqwest::Client,
@@ -783,14 +871,21 @@ async fn run_native_text_command(
     model: &str,
     fast_override: Option<bool>,
     model_catalog: &[String],
-    _account_label: Option<&str>,
+    account_label: Option<&str>,
     resume_session_id: Option<&str>,
     stream_uuid: &str,
     tools: &[ToolDefinition],
     system: &str,
     mut tool_result_rx: mpsc::Receiver<NativeToolResult>,
 ) -> Result<()> {
-    let tokens = cursor_auth::resolve_direct_tokens(&client).await?;
+    let tokens = match account_label {
+        Some(label) => {
+            let account = jcode_base::auth::provider_pool::account("cursor", label)?
+                .with_context(|| format!("No Cursor account with label '{label}'"))?;
+            cursor_auth::resolve_direct_tokens_for_account(&client, &account).await?
+        }
+        None => cursor_auth::resolve_direct_tokens(&client).await?,
+    };
 
     // Cursor rejects some bare base ids (`grok-4.6`, `claude-opus-5-5`) and only
     // serves the exact ids in its catalog, so model resolution needs it. The

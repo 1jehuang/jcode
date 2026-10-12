@@ -368,6 +368,10 @@ pub fn active_account_label() -> Option<String> {
 
 /// Persist the active account choice to disk (and set the runtime override).
 pub fn set_active_account(label: &str) -> Result<()> {
+    let _request_lease = crate::auth::provider_pool::try_acquire_account_request_lease("claude")
+        .ok_or_else(|| {
+            anyhow::anyhow!("Cannot switch Claude accounts while a request is active")
+        })?;
     let mut auth = load_auth_file()?;
     crate::auth::account_store::set_active_account(
         label,
@@ -383,6 +387,10 @@ pub fn set_active_account(label: &str) -> Result<()> {
 
 /// Add or update an account. Returns the label used.
 pub fn upsert_account(account: AnthropicAccount) -> Result<String> {
+    let _request_lease = crate::auth::provider_pool::try_acquire_account_request_lease("claude")
+        .ok_or_else(|| {
+            anyhow::anyhow!("Cannot update Claude accounts while a request is active")
+        })?;
     let mut auth = load_auth_file()?;
     let label = crate::auth::account_store::upsert_account(
         ACCOUNT_LABEL_PREFIX,
@@ -398,6 +406,10 @@ pub fn upsert_account(account: AnthropicAccount) -> Result<String> {
 
 /// Remove an account by label.
 pub fn remove_account(label: &str) -> Result<()> {
+    let _request_lease = crate::auth::provider_pool::try_acquire_account_request_lease("claude")
+        .ok_or_else(|| {
+            anyhow::anyhow!("Cannot remove Claude accounts while a request is active")
+        })?;
     let mut auth = load_auth_file()?;
     let before = auth.anthropic_accounts.len();
     auth.anthropic_accounts.retain(|a| a.label != label);
@@ -420,6 +432,8 @@ pub fn remove_account(label: &str) -> Result<()> {
 
 /// Remove every stored Anthropic account in one write.
 pub fn clear_accounts() -> Result<usize> {
+    let _request_lease = crate::auth::provider_pool::try_acquire_account_request_lease("claude")
+        .ok_or_else(|| anyhow::anyhow!("Cannot clear Claude accounts while a request is active"))?;
     let mut auth = load_auth_file()?;
     let removed = auth.anthropic_accounts.len();
     auth.anthropic_accounts.clear();

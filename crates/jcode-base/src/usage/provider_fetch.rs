@@ -1,3 +1,4 @@
+use super::cursor::fetch_cursor_usage_for_account;
 use super::*;
 
 pub(super) fn usage_percent_from_used_limit(used: f64, limit: f64) -> f32 {
@@ -453,6 +454,10 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
     }
 
     let client = crate::provider::shared_http_client();
+    // Refresh alternate managed accounts as well as the active account. Their
+    // secret-free snapshots let the request path prefer accounts with recent
+    // remaining quota without changing the account used for this report.
+    crate::provider::antigravity::refresh_managed_account_quotas(&client).await;
     let snapshot = match crate::provider::antigravity::fetch_catalog_snapshot(&client).await {
         Ok(snapshot) if !snapshot.models.is_empty() => {
             crate::provider::antigravity::persist_catalog(&snapshot);
@@ -473,6 +478,24 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
             });
         }
     };
+
+    if let Some(account) = crate::auth::provider_pool::active_account("antigravity")
+        .ok()
+        .flatten()
+    {
+        let quotas = snapshot
+            .models
+            .iter()
+            .map(|model| {
+                (
+                    model.id.clone(),
+                    model.remaining_fraction_milli,
+                    model.reset_time.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        crate::auth::provider_pool::record_account_quotas("antigravity", &account.label, &quotas);
+    }
 
     let mut limits = Vec::new();
     let mut extra_info = Vec::new();
@@ -734,6 +757,12 @@ async fn cursor_key_status_report() -> ProviderUsage {
         error: None,
         last_used_unix_secs: None,
     }
+}
+
+pub(super) async fn fetch_cursor_usage_report_for_account(
+    account: auth::provider_pool::ManagedProviderAccount,
+) -> ProviderUsage {
+    fetch_cursor_usage_for_account(account).await
 }
 
 pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {

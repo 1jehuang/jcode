@@ -345,6 +345,7 @@ impl OpenAIUsageData {
 pub enum MultiAccountProviderKind {
     Anthropic,
     OpenAI,
+    Cursor,
 }
 
 impl MultiAccountProviderKind {
@@ -352,6 +353,7 @@ impl MultiAccountProviderKind {
         match self {
             Self::Anthropic => "Anthropic",
             Self::OpenAI => "OpenAI",
+            Self::Cursor => "Cursor",
         }
     }
 
@@ -359,6 +361,7 @@ impl MultiAccountProviderKind {
         match self {
             Self::Anthropic => format!("/account switch {}", label),
             Self::OpenAI => format!("/account openai switch {}", label),
+            Self::Cursor => format!("/account switch {}", label),
         }
     }
 }

@@ -80,18 +80,33 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
     // Import is a narrow stdin-only credential operation. Do not trigger config
     // migrations, provider discovery, or unrelated credential imports first.
-    if let Some(Command::Auth(AuthCommand::Import { json, .. })) = &args.command {
-        return super::auth_import::run(&args.provider, *json);
+    if let Some(command) = &args.command {
+        match command {
+            Command::Auth(AuthCommand::Import { json, .. }) => {
+                return super::auth_import::run(&args.provider, *json);
+            }
+            Command::Auth(AuthCommand::ImportOpencodex { json }) => {
+                return super::auth_import::run_opencodex(*json);
+            }
+            Command::Auth(AuthCommand::Accounts {
+                pool_provider,
+                switch,
+                remove,
+                json,
+            }) => {
+                return super::auth_import::run_accounts(
+                    pool_provider,
+                    switch.as_deref(),
+                    remove.as_deref(),
+                    *json,
+                );
+            }
+            _ => {}
+        }
     }
     resolve_resume_arg(&mut args)?;
 
-    // One-time config migration: users whose config.toml still carries the old
-    // baked-in `swarm_spawn_mode = "visible"` default get flipped to the
-    // current `inline` default. Cheap (single file read, marker-gated), and it
-    // must run before the config cache is first populated.
     crate::config::Config::migrate_legacy_swarm_spawn_mode_once();
-    // One-time config migration: force idle_animation off for all existing
-    // users; anyone re-enabling it afterwards keeps their choice.
     crate::config::Config::migrate_idle_animation_off_once();
 
     if let Some(profile_name) = args
@@ -379,7 +394,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             debug::run_debug_command(&command, &arg, session, socket, wait).await?;
         }
         Some(Command::Auth(subcmd)) => match subcmd {
-            AuthCommand::Import { .. } => unreachable!("auth import handled before bootstrap"),
+            AuthCommand::Import { .. }
+            | AuthCommand::ImportOpencodex { .. }
+            | AuthCommand::Accounts { .. } => {
+                unreachable!("auth import handled before bootstrap")
+            }
             AuthCommand::Status { json } => commands::run_auth_status_command(json)?,
             AuthCommand::Doctor {
                 provider,

@@ -1,4 +1,9 @@
 use super::*;
+use futures::{
+    Stream,
+    task::{Context, Poll},
+};
+use std::pin::Pin;
 
 #[derive(Clone, Copy)]
 pub(super) enum CompletionMode<'a> {
@@ -25,6 +30,36 @@ impl CompletionMode<'_> {
             CompletionMode::Split { .. } => "Auto-fallback (split)",
         }
     }
+}
+
+pub(super) struct AccountScopedEventStream {
+    inner: EventStream,
+    account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
+}
+
+impl Stream for AccountScopedEventStream {
+    type Item = anyhow::Result<jcode_message_types::StreamEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let item = self.inner.as_mut().poll_next(context);
+        // A startup failure is returned from `complete` before this wrapper
+        // exists. Once a stream is live, release the account lease on its
+        // first error so another pooled account can be acquired.
+        if matches!(item, Poll::Ready(Some(Err(_))) | Poll::Ready(None)) {
+            self.account_lease = None;
+        }
+        item
+    }
+}
+
+pub(super) fn scope_event_stream(
+    stream: EventStream,
+    account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
+) -> EventStream {
+    Box::pin(AccountScopedEventStream {
+        inner: stream,
+        account_lease,
+    })
 }
 
 impl MultiProvider {
@@ -54,16 +89,19 @@ impl MultiProvider {
         (chars, tokens)
     }
 
-    pub(super) async fn complete_on_provider(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn complete_on_provider_with_guard(
         &self,
         provider: ActiveProvider,
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
+        account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
+        account_label: Option<&str>,
     ) -> Result<EventStream> {
         self.reconcile_auth_if_provider_missing(provider);
-        match provider {
+        let attempt = match provider {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
                     anthropic
@@ -105,9 +143,24 @@ impl MultiProvider {
             ActiveProvider::Antigravity => {
                 let antigravity = self.antigravity_provider();
                 if let Some(antigravity) = antigravity {
-                    antigravity
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
+                    match account_label {
+                        Some(label) => {
+                            antigravity
+                                .complete_for_account(
+                                    messages,
+                                    tools,
+                                    system,
+                                    resume_session_id,
+                                    label,
+                                )
+                                .await
+                        }
+                        None => {
+                            antigravity
+                                .complete(messages, tools, system, resume_session_id)
+                                .await
+                        }
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Antigravity is not available. Run `jcode login --provider antigravity`."
@@ -137,9 +190,24 @@ impl MultiProvider {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone();
                 if let Some(cursor) = cursor {
-                    cursor
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
+                    match account_label {
+                        Some(label) => {
+                            cursor
+                                .complete_for_account(
+                                    messages,
+                                    tools,
+                                    system,
+                                    resume_session_id,
+                                    label,
+                                )
+                                .await
+                        }
+                        None => {
+                            cursor
+                                .complete(messages, tools, system, resume_session_id)
+                                .await
+                        }
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Cursor is not available. Run `jcode login --provider cursor`."
@@ -169,10 +237,12 @@ impl MultiProvider {
                     ))
                 }
             }
-        }
+        };
+        attempt.map(|stream| scope_event_stream(stream, account_lease))
     }
 
-    pub(super) async fn complete_split_on_provider(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn complete_split_on_provider_with_guard(
         &self,
         provider: ActiveProvider,
         messages: &[Message],
@@ -180,9 +250,11 @@ impl MultiProvider {
         system_static: &str,
         system_dynamic: &str,
         resume_session_id: Option<&str>,
+        account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
+        account_label: Option<&str>,
     ) -> Result<EventStream> {
         self.reconcile_auth_if_provider_missing(provider);
-        match provider {
+        let attempt = match provider {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
                     anthropic
@@ -242,15 +314,31 @@ impl MultiProvider {
             ActiveProvider::Antigravity => {
                 let antigravity = self.antigravity_provider();
                 if let Some(antigravity) = antigravity {
-                    antigravity
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
+                    match account_label {
+                        Some(label) => {
+                            antigravity
+                                .complete_split_for_account(
+                                    messages,
+                                    tools,
+                                    system_static,
+                                    system_dynamic,
+                                    resume_session_id,
+                                    label,
+                                )
+                                .await
+                        }
+                        None => {
+                            antigravity
+                                .complete_split(
+                                    messages,
+                                    tools,
+                                    system_static,
+                                    system_dynamic,
+                                    resume_session_id,
+                                )
+                                .await
+                        }
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Antigravity is not available. Run `jcode login --provider antigravity`."
@@ -286,15 +374,31 @@ impl MultiProvider {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone();
                 if let Some(cursor) = cursor {
-                    cursor
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
+                    match account_label {
+                        Some(label) => {
+                            cursor
+                                .complete_split_for_account(
+                                    messages,
+                                    tools,
+                                    system_static,
+                                    system_dynamic,
+                                    resume_session_id,
+                                    label,
+                                )
+                                .await
+                        }
+                        None => {
+                            cursor
+                                .complete_split(
+                                    messages,
+                                    tools,
+                                    system_static,
+                                    system_dynamic,
+                                    resume_session_id,
+                                )
+                                .await
+                        }
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Cursor is not available. Run `jcode login --provider cursor`."
@@ -336,6 +440,7 @@ impl MultiProvider {
                     ))
                 }
             }
-        }
+        };
+        attempt.map(|stream| scope_event_stream(stream, account_lease))
     }
 }

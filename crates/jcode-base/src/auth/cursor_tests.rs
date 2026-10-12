@@ -107,6 +107,36 @@ fn has_cursor_api_key_from_env() {
 }
 
 #[test]
+fn save_api_key_prefers_native_storage_without_plaintext_copy() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = TempDir::new().unwrap();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_key = std::env::var_os("CURSOR_API_KEY");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::remove_var("CURSOR_API_KEY");
+
+    clear_api_key().unwrap();
+    save_api_key("cursor-native-test-key").unwrap();
+
+    let path = config_file_path().unwrap();
+    let file_contents = std::fs::read_to_string(path).unwrap_or_default();
+    assert!(!file_contents.contains("cursor-native-test-key"));
+    assert_eq!(load_api_key().unwrap(), "cursor-native-test-key");
+
+    clear_api_key().unwrap();
+    assert!(load_api_key().is_err());
+
+    match previous_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    match previous_key {
+        Some(value) => crate::env::set_var("CURSOR_API_KEY", value),
+        None => crate::env::remove_var("CURSOR_API_KEY"),
+    }
+}
+
+#[test]
 fn cursor_auth_file_path_respects_jcode_home() {
     // Regression: on Linux the auth.json path previously used
     // `dirs::config_dir()` directly, ignoring JCODE_HOME. That leaked the real
