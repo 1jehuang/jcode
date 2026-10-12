@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(windows)]
 use std::collections::HashSet;
 #[cfg(windows)]
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 #[cfg(windows)]
 use std::time::{Duration, Instant};
 
