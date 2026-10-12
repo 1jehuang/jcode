@@ -591,7 +591,7 @@ impl Provider for CursorCliProvider {
             }
         });
 
-        Ok(Box::pin(ReceiverStream::new(rx)))
+        open_cursor_stream(rx).await
     }
 
     async fn complete_for_account(
@@ -651,7 +651,7 @@ impl Provider for CursorCliProvider {
             }
         });
 
-        Ok(Box::pin(ReceiverStream::new(rx)))
+        open_cursor_stream(rx).await
     }
 
     fn supports_request_scoped_accounts(&self) -> bool {
@@ -836,6 +836,30 @@ impl Provider for CursorCliProvider {
 
     fn available_service_tiers(&self) -> Vec<&'static str> {
         vec!["priority", "off"]
+    }
+}
+
+/// Return the stream only after Cursor emits its first event. Startup
+/// transport, auth, and quota errors arrive as `Err` before that event, so
+/// `MultiProvider` can fail over to another pooled account.
+async fn open_cursor_stream(mut rx: mpsc::Receiver<Result<StreamEvent>>) -> Result<EventStream> {
+    match rx.recv().await {
+        Some(Ok(first)) => {
+            let (tx, out_rx) = mpsc::channel(100);
+            tokio::spawn(async move {
+                if tx.send(Ok(first)).await.is_err() {
+                    return;
+                }
+                while let Some(event) = rx.recv().await {
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok(Box::pin(ReceiverStream::new(out_rx)))
+        }
+        Some(Err(error)) => Err(error),
+        None => anyhow::bail!("Cursor stream ended before it started"),
     }
 }
 

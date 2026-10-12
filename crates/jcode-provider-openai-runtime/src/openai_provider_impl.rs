@@ -33,9 +33,47 @@ fn is_account_rotation_error(error: &anyhow::Error) -> bool {
 
 const MAX_ACCOUNT_ROTATIONS: usize = 2;
 
+struct StreamAccountRestore {
+    credentials: Arc<RwLock<CodexCredentials>>,
+    original: CodexCredentials,
+    original_label: Option<String>,
+    rotated: bool,
+}
+
+impl StreamAccountRestore {
+    async fn capture(credentials: &Arc<RwLock<CodexCredentials>>) -> Self {
+        Self {
+            original: credentials.read().await.clone(),
+            original_label: jcode_base::auth::codex::get_active_account_override(),
+            credentials: Arc::clone(credentials),
+            rotated: false,
+        }
+    }
+
+    fn note(&mut self, label: &str) {
+        self.rotated = true;
+        jcode_base::auth::codex::set_active_account_override(Some(label.to_string()));
+    }
+}
+
+impl Drop for StreamAccountRestore {
+    fn drop(&mut self) {
+        if !self.rotated {
+            return;
+        }
+        // Keep the label on the rotated account when the credential lock is
+        // busy, so the UI does not name a different account than the tokens.
+        if let Ok(mut guard) = self.credentials.try_write() {
+            *guard = self.original.clone();
+            jcode_base::auth::codex::set_active_account_override(self.original_label.clone());
+        }
+    }
+}
+
 async fn try_rotate_openai_account(
     credentials: &Arc<RwLock<CodexCredentials>>,
     attempted_accounts: &mut HashSet<String>,
+    restore: &mut StreamAccountRestore,
 ) -> Option<String> {
     let current = jcode_base::auth::codex::active_account_label()?;
     let candidate = jcode_base::provider::MultiProvider::preferred_openai_account_label()?;
@@ -58,6 +96,7 @@ async fn try_rotate_openai_account(
         }
     };
     *credentials.write().await = next;
+    restore.note(&candidate);
     jcode_base::provider::clear_all_model_unavailability_for_account();
     jcode_base::logging::info(&format!(
         "OpenAI stream account rotation switched account {} -> {}",
@@ -331,6 +370,7 @@ impl Provider for OpenAIProvider {
 
         tokio::spawn(async move {
             let stream_task = async move {
+                let mut account_restore = StreamAccountRestore::capture(&credentials).await;
                 // Attempt persistent WebSocket continuation first
                 if use_websocket_transport {
                     // Track output: a continuation that streams partial output
@@ -683,6 +723,7 @@ impl Provider for OpenAIProvider {
                                     && let Some(account) = try_rotate_openai_account(
                                         &credentials,
                                         &mut attempted_accounts,
+                                        &mut account_restore,
                                     )
                                     .await
                                 {
@@ -783,9 +824,12 @@ impl Provider for OpenAIProvider {
                     // All retries exhausted for this account.
                     if let Some(e) = last_error.take() {
                         if is_account_rotation_error(&e)
-                            && let Some(account) =
-                                try_rotate_openai_account(&credentials, &mut attempted_accounts)
-                                    .await
+                            && let Some(account) = try_rotate_openai_account(
+                                &credentials,
+                                &mut attempted_accounts,
+                                &mut account_restore,
+                            )
+                            .await
                         {
                             {
                                 let mut guard = persistent_ws.lock().await;

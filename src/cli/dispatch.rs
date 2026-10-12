@@ -91,22 +91,22 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             Command::Auth(AuthCommand::Accounts {
                 pool_provider,
                 switch,
+                remove,
                 json,
             }) => {
-                return super::auth_import::run_accounts(pool_provider, switch.as_deref(), *json);
+                return super::auth_import::run_accounts(
+                    pool_provider,
+                    switch.as_deref(),
+                    remove.as_deref(),
+                    *json,
+                );
             }
             _ => {}
         }
     }
     resolve_resume_arg(&mut args)?;
 
-    // One-time config migration: users whose config.toml still carries the old
-    // baked-in `swarm_spawn_mode = "visible"` default get flipped to the
-    // current `inline` default. Cheap (single file read, marker-gated), and it
-    // must run before the config cache is first populated.
     crate::config::Config::migrate_legacy_swarm_spawn_mode_once();
-    // One-time config migration: force idle_animation off for all existing
-    // users; anyone re-enabling it afterwards keeps their choice.
     crate::config::Config::migrate_idle_animation_off_once();
 
     if let Some(profile_name) = args

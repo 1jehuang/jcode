@@ -323,10 +323,10 @@ pub fn save_api_key(key: &str) -> Result<()> {
     }
 
     let file_path = config_file_path()?;
-    if crate::storage::set_native_credential(CURSOR_API_KEY_NATIVE_KEY, &key).is_ok() {
+    if crate::storage::set_native_credential(CURSOR_API_KEY_NATIVE_KEY, key).is_ok() {
         crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", None)?;
     } else {
-        crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(&key))?;
+        crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(key))?;
     }
     // File or native store only (#1386): a process env copy would shadow later
     // edits and leak into child processes.

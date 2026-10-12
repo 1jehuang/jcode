@@ -778,13 +778,9 @@ pub async fn run_agent_turn(
         .and_then(|p| p.to_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "/".to_string());
 
-    let _ = tx
-        .send(Ok(StreamEvent::ConnectionType {
-            connection: "native http2 (agent)".to_string(),
-        }))
-        .await;
-
-    // Establish TLS + HTTP/2.
+    // Establish TLS + HTTP/2. Do not emit stream events until the response
+    // status is known, so a connect/auth/quota failure can still fail the
+    // `complete` call and reach same-provider failover.
     let tcp = tokio::time::timeout(
         CONNECT_TIMEOUT,
         tokio::net::TcpStream::connect((host.as_str(), 443)),
@@ -850,8 +846,6 @@ pub async fn run_agent_turn(
     let (response, mut send_stream) = h2
         .send_request(request, false)
         .context("Failed to send Cursor agent request headers")?;
-
-    let _ = tx.send(Ok(StreamEvent::SessionId(session_id))).await;
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(32);
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -930,6 +924,18 @@ pub async fn run_agent_turn(
     };
     let status = response.status();
     stream_debug(format_args!("response status={status}"));
+    if !status.is_success() {
+        let _ = stop_tx.send(());
+        sender.abort();
+        conn_task.abort();
+        anyhow::bail!("Cursor agent request failed with {status} before the stream started");
+    }
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionType {
+            connection: "native http2 (agent)".to_string(),
+        }))
+        .await;
+    let _ = tx.send(Ok(StreamEvent::SessionId(session_id))).await;
     let mut body = response.into_body();
     let mut pending: Vec<u8> = Vec::new();
     let mut error_message: Option<String> = None;
@@ -941,18 +947,12 @@ pub async fn run_agent_turn(
     let mut idle_finished = false;
     let mut stream_error: Option<anyhow::Error> = None;
 
-    // Idle timeouts guard against the server holding the stream open after
-    // the assistant message. The first-byte budget is longer because reasoning
-    // models can think for a while before streaming. The post-text budget has
-    // to tolerate mid-answer pauses (reasoning models such as Grok routinely
-    // go quiet for several seconds while planning a tool call); a 4s budget
-    // cut those turns off with a "timed out" error after partial output.
+    // First-byte budget covers reasoning before text. Later pauses stay open
+    // long enough for a tool call; a short budget used to cut those turns off.
     let first_byte_timeout = Duration::from_secs(120);
     let idle_timeout = Duration::from_secs(30);
     let tool_exec_timeout = Duration::from_secs(300);
-    // Heartbeat, KV, and acknowledgement frames are transport activity, not
-    // model progress. Keep a phase deadline so a server that only emits those
-    // frames cannot keep a user-facing turn alive forever.
+    // Heartbeats are not model progress, so the phase deadline still ends the turn.
     let mut phase_started = Instant::now();
     let mut last_meaningful = phase_started;
 

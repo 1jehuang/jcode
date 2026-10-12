@@ -174,16 +174,17 @@ pub async fn refresh_managed_account_quotas(client: &reqwest::Client) {
             project_id: account.project_id,
         };
         if tokens.is_expired() {
-            tokens = match antigravity_auth::refresh_tokens(&tokens).await {
-                Ok(tokens) => tokens,
-                Err(error) => {
-                    crate::logging::info(&format!(
-                        "Skipping Antigravity quota refresh for account '{}': {}",
-                        account.label, error
-                    ));
-                    continue;
-                }
-            };
+            tokens =
+                match antigravity_auth::refresh_tokens_for_account(&account.label, &tokens).await {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        crate::logging::info(&format!(
+                            "Skipping Antigravity quota refresh for account '{}': {}",
+                            account.label, error
+                        ));
+                        continue;
+                    }
+                };
         }
 
         match fetch_catalog_snapshot_for_credentials(

@@ -42,7 +42,10 @@ impl Stream for AccountScopedEventStream {
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let item = self.inner.as_mut().poll_next(context);
-        if matches!(item, Poll::Ready(None)) {
+        // A startup failure is returned from `complete` before this wrapper
+        // exists. Once a stream is live, release the account lease on its
+        // first error so another pooled account can be acquired.
+        if matches!(item, Poll::Ready(Some(Err(_))) | Poll::Ready(None)) {
             self.account_lease = None;
         }
         item
@@ -86,6 +89,7 @@ impl MultiProvider {
         (chars, tokens)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn complete_on_provider_with_guard(
         &self,
         provider: ActiveProvider,
@@ -237,6 +241,7 @@ impl MultiProvider {
         attempt.map(|stream| scope_event_stream(stream, account_lease))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn complete_split_on_provider_with_guard(
         &self,
         provider: ActiveProvider,

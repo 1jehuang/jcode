@@ -24,6 +24,7 @@ impl Stream for LeasedEventStream {
 }
 
 impl MultiProvider {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn try_same_provider_account_failover(
         &self,
         provider: ActiveProvider,

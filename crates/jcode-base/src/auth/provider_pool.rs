@@ -9,8 +9,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -26,7 +24,8 @@ const MAX_QUOTA_HISTORY: usize = 8;
 /// are intentionally ephemeral and cannot strand an account after a restart.
 static ACCOUNT_COOLDOWNS: LazyLock<Mutex<HashMap<(String, String), Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static ACCOUNT_LEASES: LazyLock<Mutex<HashMap<(String, String), (Instant, u64)>>> =
+type AccountLeaseTable = HashMap<(String, String), (Instant, u64)>;
+static ACCOUNT_LEASES: LazyLock<Mutex<AccountLeaseTable>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ACCOUNT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
 static ACCOUNT_REQUEST_GATES: LazyLock<Mutex<HashMap<String, Arc<AccountRequestGate>>>> =
@@ -112,36 +111,23 @@ impl AccountLeaseFileLock {
         ));
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)
             .ok()?;
-
-        #[cfg(unix)]
-        {
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                return None;
-            }
-        }
-
+        file.try_lock().ok()?;
         Some(Self { file })
     }
 }
 
 impl Drop for AccountLeaseFileLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        let _ = self.file.unlock();
     }
 }
 
-/// Providers whose credentials are selected through the process-local account
-/// override need an exclusive request scope. The downstream runtimes read that
-/// override while constructing a request and some of them may rotate it while
-/// a stream is still alive. Keeping this gate for the complete stream lifetime
-/// prevents two requests from observing each other's account.
+/// Exclusive scope for providers that read the process-local account override.
 fn uses_runtime_account_override(provider: &str) -> bool {
     matches!(provider, "claude" | "openai" | "antigravity" | "cursor")
 }
@@ -444,29 +430,24 @@ impl AccountFileLock {
         }
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)
             .ok()?;
-
-        #[cfg(unix)]
-        {
-            let operation = if shared { libc::LOCK_SH } else { libc::LOCK_EX };
-            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-                return None;
-            }
-        }
-
+        let locked = if shared {
+            file.lock_shared()
+        } else {
+            file.lock()
+        };
+        locked.ok()?;
         Some(Self { file })
     }
 }
 
 impl Drop for AccountFileLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        let _ = self.file.unlock();
     }
 }
 
@@ -496,15 +477,12 @@ fn read_unlocked(provider: &str) -> Result<AccountFile> {
     }
     if legacy {
         // Migrate opportunistically while the caller owns the exclusive file
-        // lock. If the native store is unavailable, keep the legacy file intact
-        // and continue reading it for compatibility. Any later write is still
-        // strict and will never publish another plaintext snapshot.
-        if let Ok(migrated) = PersistedAccountFile::from_managed(provider, &file) {
-            if let Err(error) = write_persisted_unlocked(provider, &migrated) {
-                crate::logging::warn(&format!(
-                    "Could not migrate managed {provider} credentials to the native store: {error}"
-                ));
-            }
+        // lock. A failed publish restores the previous native values and leaves
+        // the legacy file intact.
+        if let Err(error) = write_unlocked(provider, &file) {
+            crate::logging::warn(&format!(
+                "Could not migrate managed {provider} credentials to the native store: {error}"
+            ));
         }
     }
     Ok(file)
@@ -517,9 +495,62 @@ fn write(provider: &str, file: &AccountFile) -> Result<()> {
     write_unlocked(provider, file)
 }
 
+struct NativeCredentialSnapshot {
+    access_key: String,
+    refresh_key: String,
+    access: Option<String>,
+    refresh: Option<String>,
+}
+
+fn snapshot_native_credentials(provider: &str, account_id: &str) -> NativeCredentialSnapshot {
+    let access_key = native_account_key(provider, account_id, "access");
+    let refresh_key = native_account_key(provider, account_id, "refresh");
+    NativeCredentialSnapshot {
+        access: crate::storage::get_native_credential(&access_key).ok(),
+        refresh: crate::storage::get_native_credential(&refresh_key).ok(),
+        access_key,
+        refresh_key,
+    }
+}
+
+fn restore_native_value(key: &str, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            let _ = crate::storage::set_native_credential(key, value);
+        }
+        None => {
+            let _ = crate::storage::delete_native_credential(key);
+        }
+    }
+}
+
+fn restore_native_credentials(snapshot: &NativeCredentialSnapshot) {
+    restore_native_value(&snapshot.access_key, snapshot.access.as_deref());
+    restore_native_value(&snapshot.refresh_key, snapshot.refresh.as_deref());
+}
+
 fn write_unlocked(provider: &str, file: &AccountFile) -> Result<()> {
-    let persisted = PersistedAccountFile::from_managed(provider, file)?;
-    write_persisted_unlocked(provider, &persisted)
+    let snapshots: Vec<_> = file
+        .accounts
+        .iter()
+        .map(|account| snapshot_native_credentials(provider, &account.id))
+        .collect();
+    let persisted = match PersistedAccountFile::from_managed(provider, file) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            for snapshot in &snapshots {
+                restore_native_credentials(snapshot);
+            }
+            return Err(error);
+        }
+    };
+    if let Err(error) = write_persisted_unlocked(provider, &persisted) {
+        for snapshot in &snapshots {
+            restore_native_credentials(snapshot);
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn write_persisted_unlocked(provider: &str, file: &PersistedAccountFile) -> Result<()> {
@@ -619,29 +650,24 @@ impl HealthFileLock {
         }
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)
             .ok()?;
-
-        #[cfg(unix)]
-        {
-            let operation = if shared { libc::LOCK_SH } else { libc::LOCK_EX };
-            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-                return None;
-            }
-        }
-
+        let locked = if shared {
+            file.lock_shared()
+        } else {
+            file.lock()
+        };
+        locked.ok()?;
         Some(Self { file })
     }
 }
 
 impl Drop for HealthFileLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
-        }
+        let _ = self.file.unlock();
     }
 }
 
@@ -760,14 +786,14 @@ pub fn record_account_quotas(
             if model.is_empty() {
                 continue;
             }
-            if models.len() >= MAX_QUOTA_MODELS_PER_ACCOUNT && !models.contains_key(model) {
-                if let Some(oldest) = models
+            if models.len() >= MAX_QUOTA_MODELS_PER_ACCOUNT
+                && !models.contains_key(model)
+                && let Some(oldest) = models
                     .iter()
                     .min_by_key(|(_, snapshot)| snapshot.observed_at_unix_secs)
                     .map(|(model, _)| model.clone())
-                {
-                    models.remove(&oldest);
-                }
+            {
+                models.remove(&oldest);
             }
             let observation = QuotaObservation {
                 remaining_fraction_milli: *remaining_fraction_milli,
@@ -984,6 +1010,44 @@ pub fn update_tokens_for_refresh(
     Ok(true)
 }
 
+/// Remove one managed Cursor or Antigravity account, its native credentials,
+/// and any cooldown recorded for that label.
+pub fn remove_account(provider: &str, label: &str) -> Result<()> {
+    let _guard = ACCOUNT_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _file_lock = AccountFileLock::acquire(provider, false)
+        .ok_or_else(|| anyhow::anyhow!("could not lock managed {provider} account store"))?;
+    let mut file = read_unlocked(provider)?;
+    let index = file
+        .accounts
+        .iter()
+        .position(|account| account.label == label)
+        .with_context(|| format!("No managed {provider} account named '{label}'"))?;
+    let removed = file.accounts.remove(index);
+    if file.active_account.as_deref() == Some(removed.label.as_str()) {
+        file.active_account = file.accounts.first().map(|account| account.label.clone());
+    }
+    write_unlocked(provider, &file)?;
+    let _ = crate::storage::delete_native_credential(&native_account_key(
+        provider,
+        &removed.id,
+        "access",
+    ));
+    let _ = crate::storage::delete_native_credential(&native_account_key(
+        provider,
+        &removed.id,
+        "refresh",
+    ));
+    clear_account_cooldown(provider, &removed.label);
+    if crate::auth::account_store::runtime_active_override(provider).as_deref()
+        == Some(removed.label.as_str())
+    {
+        set_runtime_active_override_for_provider(provider, file.active_account);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImportSummary {
     pub cursor_imported: usize,
@@ -1090,13 +1154,12 @@ pub fn import_opencodex() -> Result<ImportSummary> {
             upsert_account("cursor", account)?;
             summary.cursor_imported += 1;
         }
-        if let Some(active) = provider.active_account_id {
-            if let Some(account) = list_accounts("cursor")?
+        if let Some(active) = provider.active_account_id
+            && let Some(account) = list_accounts("cursor")?
                 .into_iter()
-                .find(|a| a.id == active)
-            {
-                set_active_account("cursor", &account.label)?;
-            }
+                .find(|account| account.id == active)
+        {
+            set_active_account("cursor", &account.label)?;
         }
     }
 
@@ -1120,13 +1183,12 @@ pub fn import_opencodex() -> Result<ImportSummary> {
             upsert_account("antigravity", account)?;
             summary.antigravity_imported += 1;
         }
-        if let Some(active) = provider.active_account_id {
-            if let Some(account) = list_accounts("antigravity")?
+        if let Some(active) = provider.active_account_id
+            && let Some(account) = list_accounts("antigravity")?
                 .into_iter()
-                .find(|a| a.id == active)
-            {
-                set_active_account("antigravity", &account.label)?;
-            }
+                .find(|account| account.id == active)
+        {
+            set_active_account("antigravity", &account.label)?;
         }
     }
 
@@ -1134,453 +1196,5 @@ pub fn import_opencodex() -> Result<ImportSummary> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn account_lease_cross_process_helper() {
-        let Ok(status_path) = std::env::var("JCODE_ACCOUNT_LEASE_STATUS") else {
-            return;
-        };
-        let acquired =
-            try_acquire_account_lease("cursor", "cross-process-test", Duration::from_secs(30))
-                .is_some();
-        std::fs::write(status_path, if acquired { "acquired" } else { "blocked" })
-            .expect("write child lease status");
-        if acquired {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn account_lease_is_exclusive_across_processes() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-
-        let lease =
-            try_acquire_account_lease("cursor", "cross-process-test", Duration::from_secs(30))
-                .expect("parent should acquire account lease");
-        let run_child = |expected: &str| {
-            let status_path = home.path().join(format!("status-{expected}"));
-            let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-                .args([
-                    "--exact",
-                    "auth::provider_pool::tests::account_lease_cross_process_helper",
-                    "--nocapture",
-                ])
-                .env("JCODE_HOME", home.path())
-                .env("JCODE_ACCOUNT_LEASE_STATUS", &status_path)
-                .status()
-                .expect("run child lease test");
-            assert!(status.success(), "child lease test failed: {status}");
-            assert_eq!(
-                std::fs::read_to_string(status_path).expect("read child lease status"),
-                expected
-            );
-        };
-
-        run_child("blocked");
-        drop(lease);
-        run_child("acquired");
-
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn labels_are_stable_and_safe() {
-        assert_eq!(
-            label("cursor", 0, Some("Work Email"), "id"),
-            "cursor-Work-Email"
-        );
-        assert_eq!(label("cursor", 0, None, "id/unsafe"), "cursor-id-unsafe");
-    }
-
-    #[test]
-    fn persisted_managed_switch_updates_runtime_override() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-        set_runtime_active_override("cursor", Some("cursor-one".to_string()));
-
-        let account = |label: &str| ManagedProviderAccount {
-            id: label.to_string(),
-            label: label.to_string(),
-            access_token: "access".to_string(),
-            refresh_token: "refresh".to_string(),
-            expires_at: 0,
-            email: None,
-            project_id: None,
-        };
-        write(
-            "cursor",
-            &AccountFile {
-                active_account: Some("cursor-one".to_string()),
-                accounts: vec![account("cursor-one"), account("cursor-two")],
-            },
-        )
-        .expect("write managed accounts");
-
-        set_active_account("cursor", "cursor-two").expect("switch managed account");
-        assert_eq!(
-            crate::auth::account_store::runtime_active_override("cursor").as_deref(),
-            Some("cursor-two")
-        );
-        assert_eq!(
-            active_account("cursor")
-                .expect("read active managed account")
-                .expect("active account")
-                .label,
-            "cursor-two"
-        );
-
-        set_runtime_active_override("cursor", None);
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn managed_account_file_contains_metadata_only() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-
-        write(
-            "cursor",
-            &AccountFile {
-                active_account: Some("cursor-secret-free".to_string()),
-                accounts: vec![ManagedProviderAccount {
-                    id: "cursor-secret-free".to_string(),
-                    label: "cursor-secret-free".to_string(),
-                    access_token: "access-token-must-not-be-on-disk".to_string(),
-                    refresh_token: "refresh-token-must-not-be-on-disk".to_string(),
-                    expires_at: 0,
-                    email: None,
-                    project_id: None,
-                }],
-            },
-        )
-        .expect("write managed account");
-
-        let contents = std::fs::read_to_string(accounts_path("cursor").expect("account path"))
-            .expect("read account metadata");
-        assert!(!contents.contains("access-token-must-not-be-on-disk"));
-        assert!(!contents.contains("refresh-token-must-not-be-on-disk"));
-        assert!(contents.contains("credential_key"));
-
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn cooldown_state_survives_process_local_cache_reset_without_secrets() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-        let provider = "cursor";
-        let account = "cursor-persistence-test";
-
-        clear_account_cooldown(provider, account);
-        mark_account_cooldown(provider, account, Duration::from_secs(60));
-        assert!(account_on_cooldown(provider, account));
-
-        let state_path = health_path().expect("resolve health path");
-        let state = std::fs::read_to_string(&state_path).expect("read persisted health state");
-        assert!(state.contains(account));
-        assert!(!state.contains("access_token"));
-        assert!(!state.contains("refresh_token"));
-
-        ACCOUNT_COOLDOWNS
-            .lock()
-            .expect("lock cooldown cache")
-            .clear();
-        assert!(account_on_cooldown(provider, account));
-
-        clear_account_cooldown(provider, account);
-        assert!(!account_on_cooldown(provider, account));
-
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn quota_score_prefers_recent_high_remaining_account() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-
-        record_account_quotas(
-            "antigravity",
-            "antigravity-low",
-            &[("gemini-3-flash".to_string(), Some(100), None)],
-        );
-        record_account_quotas(
-            "antigravity",
-            "antigravity-high",
-            &[(
-                "gemini-3-flash".to_string(),
-                Some(900),
-                Some("reset".to_string()),
-            )],
-        );
-
-        assert_eq!(
-            account_quota_score("antigravity", "antigravity-low"),
-            Some(100)
-        );
-        assert_eq!(
-            account_quota_score("antigravity", "antigravity-high"),
-            Some(900)
-        );
-        let state = std::fs::read_to_string(health_path().expect("resolve health path"))
-            .expect("read quota state");
-        assert!(state.contains("gemini-3-flash"));
-        assert!(state.contains("reset"));
-        assert!(!state.contains("access_token"));
-        assert!(!state.contains("refresh_token"));
-
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn model_quota_score_does_not_use_another_model_as_a_proxy() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-
-        record_account_quotas(
-            "antigravity",
-            "antigravity-model-scoped",
-            &[
-                ("gemini-3-pro".to_string(), Some(900), None),
-                ("gemini-3-flash".to_string(), Some(100), None),
-            ],
-        );
-
-        assert_eq!(
-            account_quota_score_for_model(
-                "antigravity",
-                "antigravity-model-scoped",
-                "gemini-3-pro",
-            ),
-            Some(900)
-        );
-        assert_eq!(
-            account_quota_score_for_model(
-                "antigravity",
-                "antigravity-model-scoped",
-                "gemini-3-flash",
-            ),
-            Some(100)
-        );
-        assert_eq!(
-            account_quota_score_for_model(
-                "antigravity",
-                "antigravity-model-scoped",
-                "unknown-model",
-            ),
-            None
-        );
-
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn quota_history_is_bounded_and_legacy_snapshots_still_deserialize() {
-        let legacy: AccountQuotaSnapshot = serde_json::from_str(
-            r#"{"remaining_fraction_milli":321,"reset_time":"reset","observed_at_unix_secs":1}"#,
-        )
-        .expect("legacy quota snapshot should deserialize");
-        assert!(legacy.history.is_empty());
-
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-        for remaining in 0..(MAX_QUOTA_HISTORY as u16 + 3) {
-            record_account_quota(
-                "antigravity",
-                "history-test",
-                "gemini-3-flash",
-                Some(remaining),
-                None,
-            );
-        }
-        let health = read_health();
-        let snapshot = &health.quotas["antigravity"]["history-test"]["gemini-3-flash"];
-        assert_eq!(snapshot.history.len(), MAX_QUOTA_HISTORY - 1);
-        assert_eq!(
-            account_quota_score_for_model("antigravity", "history-test", "gemini-3-flash"),
-            Some(MAX_QUOTA_HISTORY as u16 + 2)
-        );
-
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn concurrent_health_updates_preserve_each_account_snapshot() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-
-        let workers = (0..12)
-            .map(|index| {
-                std::thread::spawn(move || {
-                    let label = format!("antigravity-concurrent-{index}");
-                    record_account_quota(
-                        "antigravity",
-                        &label,
-                        "gemini-3-flash",
-                        Some((index as u16 + 1) * 50),
-                        None,
-                    );
-                    label
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for worker in workers {
-            let label = worker.join().expect("health update worker should finish");
-            assert!(
-                account_quota_score_for_model("antigravity", &label, "gemini-3-flash").is_some(),
-                "concurrent update for {label} was lost"
-            );
-        }
-
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn account_request_scopes_serialize_same_provider_and_isolate_other_providers() {
-        let first = acquire_account_request_lease("openai")
-            .await
-            .expect("OpenAI should use an account request scope");
-        assert!(
-            try_acquire_account_request_lease("openai").is_none(),
-            "a synchronous account switch must not mutate an active request"
-        );
-
-        let second_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let second_started_task = std::sync::Arc::clone(&second_started);
-        let second = tokio::spawn(async move {
-            let lease = acquire_account_request_lease("openai")
-                .await
-                .expect("OpenAI should use an account request scope");
-            second_started_task.store(true, std::sync::atomic::Ordering::Release);
-            lease
-        });
-
-        for _ in 0..4 {
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            !second_started.load(std::sync::atomic::Ordering::Acquire),
-            "same-provider requests must wait for the prior request scope"
-        );
-
-        let other_provider = acquire_account_request_lease("claude").await;
-        assert!(
-            other_provider.is_some(),
-            "different account providers must retain independent request scopes"
-        );
-        drop(other_provider);
-        drop(first);
-
-        let second = second.await.expect("waiting request should finish");
-        assert!(second_started.load(std::sync::atomic::Ordering::Acquire));
-        drop(second);
-        assert!(
-            try_acquire_account_request_lease("openai").is_some(),
-            "the request scope must be reusable after the stream owner drops it"
-        );
-    }
-
-    #[test]
-    fn concurrent_account_upserts_preserve_each_account() {
-        let _lock = crate::storage::lock_test_env();
-        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
-        let previous_home = std::env::var_os("JCODE_HOME");
-        crate::env::set_var("JCODE_HOME", home.path());
-
-        let workers = (0..12)
-            .map(|index| {
-                std::thread::spawn(move || {
-                    upsert_account(
-                        "cursor",
-                        ManagedProviderAccount {
-                            id: format!("cursor-id-{index}"),
-                            label: format!("cursor-imported-{index}"),
-                            access_token: format!("access-{index}"),
-                            refresh_token: format!("refresh-{index}"),
-                            expires_at: 1,
-                            email: None,
-                            project_id: None,
-                        },
-                    )
-                    .expect("account upsert should succeed");
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for worker in workers {
-            worker.join().expect("account upsert worker should finish");
-        }
-
-        let accounts = list_accounts("cursor").expect("list accounts");
-        assert_eq!(accounts.len(), 12);
-        for index in 0..12 {
-            assert!(
-                accounts
-                    .iter()
-                    .any(|account| account.id == format!("cursor-id-{index}")),
-                "concurrent account {index} was lost"
-            );
-        }
-
-        match previous_home {
-            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
-            None => crate::env::remove_var("JCODE_HOME"),
-        }
-    }
-
-    #[test]
-    fn account_lease_excludes_concurrent_acquisition_and_releases_on_drop() {
-        let label = format!("lease-test-{}", std::process::id());
-        let first = try_acquire_account_lease("cursor", &label, Duration::from_secs(60))
-            .expect("first lease should be available");
-        assert!(try_acquire_account_lease("cursor", &label, Duration::from_secs(60)).is_none());
-
-        drop(first);
-        assert!(try_acquire_account_lease("cursor", &label, Duration::from_secs(60)).is_some());
-    }
-}
+#[path = "provider_pool_tests.rs"]
+mod tests;

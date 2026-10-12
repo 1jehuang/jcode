@@ -36,8 +36,8 @@ static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
 });
 static LAST_GOOD: LazyLock<Mutex<HashMap<String, (Instant, CursorUsageSnapshot)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-static IN_FLIGHT: LazyLock<Mutex<HashMap<String, (Instant, Arc<OnceCell<CursorFetchResult>>)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+type InFlightCells = HashMap<String, (Instant, Arc<OnceCell<CursorFetchResult>>)>;
+static IN_FLIGHT: LazyLock<Mutex<InFlightCells>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 const IN_FLIGHT_TTL: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
@@ -453,15 +453,9 @@ async fn endpoint_response(
 }
 
 fn fallback_error(statuses: &[StatusCode]) -> String {
-    if statuses
-        .iter()
-        .any(|status| *status == StatusCode::TOO_MANY_REQUESTS)
-    {
+    if statuses.contains(&StatusCode::TOO_MANY_REQUESTS) {
         "Cursor usage unavailable (rate limited; quota is unknown)".to_string()
-    } else if statuses
-        .iter()
-        .any(|status| *status == StatusCode::UNAUTHORIZED)
-    {
+    } else if statuses.contains(&StatusCode::UNAUTHORIZED) {
         "Cursor usage unavailable (authentication required; quota is unknown)".to_string()
     } else {
         "Cursor usage unavailable (quota is unknown)".to_string()
@@ -482,19 +476,16 @@ async fn fetch_live(token: &str, allow_web_summary: bool) -> CursorFetchResult {
     };
     let mut statuses = Vec::new();
     for endpoint in endpoints {
-        match endpoint_response(endpoint, token).await {
-            Ok((status, body)) => {
-                statuses.push(status);
-                if status.is_success() {
-                    if let Some(snapshot) = parse_snapshot(endpoint, &body) {
-                        return CursorFetchResult {
-                            snapshot: Some(snapshot),
-                            error: None,
-                        };
-                    }
-                }
+        if let Ok((status, body)) = endpoint_response(endpoint, token).await {
+            statuses.push(status);
+            if status.is_success()
+                && let Some(snapshot) = parse_snapshot(endpoint, &body)
+            {
+                return CursorFetchResult {
+                    snapshot: Some(snapshot),
+                    error: None,
+                };
             }
-            Err(_) => {}
         }
     }
     CursorFetchResult {
@@ -513,14 +504,14 @@ fn cached_snapshot(key: &str) -> Option<CursorUsageSnapshot> {
 
 fn remember_snapshot(key: String, snapshot: CursorUsageSnapshot) {
     if let Ok(mut cache) = LAST_GOOD.lock() {
-        if cache.len() >= MAX_CACHE_ENTRIES && !cache.contains_key(&key) {
-            if let Some(oldest) = cache
+        if cache.len() >= MAX_CACHE_ENTRIES
+            && !cache.contains_key(&key)
+            && let Some(oldest) = cache
                 .iter()
                 .min_by_key(|(_, (at, _))| *at)
                 .map(|(key, _)| key.clone())
-            {
-                cache.remove(&oldest);
-            }
+        {
+            cache.remove(&oldest);
         }
         cache.insert(key, (Instant::now(), snapshot));
     }
@@ -541,10 +532,11 @@ async fn fetch_deduplicated(
         {
             cells.remove(&key);
         }
-        if cells.len() >= MAX_CACHE_ENTRIES && !cells.contains_key(&key) {
-            if let Some(oldest) = cells.keys().next().cloned() {
-                cells.remove(&oldest);
-            }
+        if cells.len() >= MAX_CACHE_ENTRIES
+            && !cells.contains_key(&key)
+            && let Some(oldest) = cells.keys().next().cloned()
+        {
+            cells.remove(&oldest);
         }
         cells
             .entry(key)

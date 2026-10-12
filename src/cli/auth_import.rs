@@ -153,7 +153,12 @@ struct AccountView {
     expires_at: i64,
 }
 
-pub(crate) fn run_accounts(provider: &str, switch: Option<&str>, json: bool) -> Result<()> {
+pub(crate) fn run_accounts(
+    provider: &str,
+    switch: Option<&str>,
+    remove: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let provider = provider.trim().to_ascii_lowercase();
     let providers: Vec<&'static str> = match provider.as_str() {
         "all" => vec!["openai", "cursor", "antigravity"],
@@ -166,8 +171,20 @@ pub(crate) fn run_accounts(provider: &str, switch: Option<&str>, json: bool) -> 
             "Unsupported account-pool provider '{provider}'. Use openai, cursor, antigravity, or all."
         ),
     };
-    if switch.is_some() && providers.len() != 1 {
-        anyhow::bail!("--switch requires an explicit provider, not 'all'");
+    if (switch.is_some() || remove.is_some()) && providers.len() != 1 {
+        anyhow::bail!("--switch and --remove require an explicit provider, not 'all'");
+    }
+
+    if let Some(label) = remove.map(str::trim).filter(|label| !label.is_empty()) {
+        match providers[0] {
+            "cursor" | "antigravity" => {
+                crate::auth::provider_pool::remove_account(providers[0], label)?
+            }
+            "openai" => anyhow::bail!(
+                "Removing OpenAI accounts is not part of the managed Cursor/Antigravity pool"
+            ),
+            _ => unreachable!(),
+        }
     }
 
     if let Some(label) = switch.map(str::trim).filter(|label| !label.is_empty()) {

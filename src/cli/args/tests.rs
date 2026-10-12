@@ -877,11 +877,30 @@ fn auth_accounts_subcommand_parses_without_global_provider_collision() {
         Some(Command::Auth(AuthCommand::Accounts {
             pool_provider,
             switch,
+            remove,
             json,
         })) => {
             assert_eq!(pool_provider, "cursor");
             assert_eq!(switch.as_deref(), Some("cursor-PV"));
+            assert_eq!(remove, None);
             assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+
+    let removed = Args::try_parse_from([
+        "jcode",
+        "auth",
+        "accounts",
+        "antigravity",
+        "--remove",
+        "antigravity-old",
+    ])
+    .unwrap();
+    match removed.command {
+        Some(Command::Auth(AuthCommand::Accounts { remove, switch, .. })) => {
+            assert_eq!(remove.as_deref(), Some("antigravity-old"));
+            assert_eq!(switch, None);
         }
         other => panic!("unexpected command: {:?}", other),
     }
