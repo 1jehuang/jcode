@@ -506,3 +506,96 @@ fn test_model_picker_preview_enter_selects_model() {
     assert!(app.input().is_empty());
     assert_eq!(app.cursor_pos(), 0);
 }
+
+/// Regression (greptile P1, PR 1706): with a global swarm model configured,
+/// a session-scoped user must still be able to pick "inherit coordinator"
+/// (bypass the global default). The row must exist and save the explicit
+/// "inherit" sentinel both when the picker opens fresh and when a late
+/// catalog load rebuilds it, whether or not a session override is saved.
+#[test]
+fn test_session_scope_keeps_inherit_coordinator_row_with_global_model_set() {
+    with_temp_jcode_home(|| {
+        // Global default is a real model, so "inherit coordinator" differs
+        // from "use global default".
+        let mut cfg = crate::config::Config::load();
+        cfg.agents.swarm_model = Some("gpt-5.2-codex".to_string());
+        cfg.save().expect("save global swarm model");
+
+        let mut app = create_test_app();
+        configure_test_remote_models(&mut app);
+        assert!(!app.agent_models_global_scope);
+
+        // Case 1: no session override. The inherit row must exist and save
+        // the sentinel, not clear to the global default.
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        app.is_remote = false;
+        let picker = app
+            .inline_interactive_state
+            .as_mut()
+            .expect("swarm picker should be open");
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .expect("session picker must offer inherit coordinator with a global model set");
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.session
+                .agent_model_overrides
+                .get("swarm")
+                .map(String::as_str),
+            Some("inherit"),
+            "picking inherit coordinator must save the explicit sentinel, not clear to global"
+        );
+        assert_eq!(
+            crate::config::Config::load().agents.swarm_model.as_deref(),
+            Some("gpt-5.2-codex"),
+            "the global default must stay untouched"
+        );
+
+        // Case 2: a saved override that is still in the catalog. The inherit
+        // row must survive next to it.
+        app.is_remote = true;
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        app.is_remote = false;
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        assert!(
+            picker.entries.iter().any(|entry| entry.name == "inherit coordinator"),
+            "inherit coordinator must stay with a catalog-visible saved override"
+        );
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|idx| picker.entries[*idx].name == "inherit coordinator")
+            .unwrap();
+        app.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert_eq!(
+            app.session
+                .agent_model_overrides
+                .get("swarm")
+                .map(String::as_str),
+            Some("inherit")
+        );
+
+        // Case 3: the retag path after a catalog rebuild must keep the same
+        // configured view (session overrides, not the global default).
+        app.is_remote = true;
+        app.open_agent_model_picker(crate::tui::AgentModelTarget::Swarm);
+        app.is_remote = false;
+        app.retag_picker_for_agent_model_target(crate::tui::AgentModelTarget::Swarm);
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert!(
+            picker.entries.iter().any(|entry| entry.name == "inherit coordinator"),
+            "retag must keep the inherit coordinator row"
+        );
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "inherit" && entry.is_current),
+            "retag must mark the saved session sentinel as current, not the global model"
+        );
+    });
+}
