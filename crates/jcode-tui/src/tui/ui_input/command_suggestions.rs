@@ -4,10 +4,15 @@ pub(super) fn command_suggestion_lines(
     app: &dyn TuiState,
     suggestions: &[(String, &'static str)],
 ) -> Vec<Line<'static>> {
-    // Highlight the characters of each command that the typed query matched.
-    // We only highlight the command token itself (the part before the first
-    // space), matched against the corresponding leading token of the input.
-    let needle = command_suggestion_needle(app.input());
+    let mode = composer_mode(app.input(), app.is_remote_mode());
+    let is_file_mention = mode == ComposerMode::FileMention;
+
+    // For file mentions, extract the @ query for highlighting.
+    let needle = if is_file_mention {
+        extract_at_query(app.input()).map(|(_, q)| q)
+    } else {
+        command_suggestion_needle(app.input())
+    };
     let highlight = |cmd: &str, base: Style| -> Vec<Span<'static>> {
         highlight_command_spans(cmd, needle.as_deref(), base)
     };
@@ -20,9 +25,13 @@ pub(super) fn command_suggestion_lines(
         spans.push(Span::styled(format!("  {}", desc), base));
         lines.push(Line::from(spans));
     } else if !suggestions.is_empty() {
-        let selected = app
-            .command_suggestion_selected()
-            .min(suggestions.len().saturating_sub(1));
+        // In file-mention mode the selection may rest on a section-header
+        // sentinel; highlight the row Enter would actually accept.
+        let selected = effective_selected_row(
+            app.command_suggestion_selected(),
+            suggestions,
+            is_file_mention,
+        );
         let window_start = command_suggestion_window_start(selected, suggestions.len());
         let limited: Vec<_> = suggestions
             .iter()
@@ -35,18 +44,41 @@ pub(super) fn command_suggestion_lines(
 
         for (i, (cmd, desc)) in limited.iter().enumerate() {
             let is_selected = i == selected_visible;
+            let is_section_header = is_file_mention && cmd.is_empty();
+
+            // Section headers render as dimmed, non-selectable lines.
+            if is_section_header {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  {}", desc),
+                    Style::default()
+                        .fg(dim_color())
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                continue;
+            }
+
+            let is_dir = is_file_mention && cmd.ends_with('/');
+
             let description_style = if is_selected {
                 Style::default().fg(rgb(255, 213, 128))
             } else {
                 Style::default().fg(dim_color())
             };
+            // File mention mode: directories blue, files teal.
             let command_style = if is_selected {
                 Style::default().fg(rgb(255, 213, 128))
+            } else if is_dir {
+                Style::default().fg(rgb(120, 180, 220))
             } else {
                 Style::default().fg(rgb(128, 203, 196))
             };
             let mut spans = highlight(cmd, command_style);
-            spans.push(Span::styled(format!("  {}", desc), description_style));
+            if is_dir && !is_selected {
+                // Directory visual: just use blue styling, trailing / is enough.
+            }
+            if !desc.is_empty() {
+                spans.push(Span::styled(format!("  {}", desc), description_style));
+            }
             if i == 0 && window_start > 0 {
                 spans.push(Span::styled(
                     format!("  ↑{}", window_start),
@@ -64,6 +96,7 @@ pub(super) fn command_suggestion_lines(
     }
     lines
 }
+
 
 /// Build spans for a suggestion command, recoloring the characters that the
 /// fuzzy matcher aligned with the typed query. Falls back to a single

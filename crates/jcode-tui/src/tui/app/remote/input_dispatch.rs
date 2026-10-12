@@ -69,6 +69,7 @@ pub(in crate::tui::app) fn restore_prepared_remote_input(
     app.input = prepared.raw_input;
     app.cursor_pos = app.input.len();
     app.pending_images = prepared.images;
+    app.file_chips = prepared.file_chips;
 }
 
 pub(in crate::tui::app) fn history_matches_pending_startup_prompt(app: &App) -> bool {
@@ -259,6 +260,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
             raw_input: prepared.raw_input,
             expanded: expanded_prompt,
             images: prepared.images,
+            file_chips: prepared.file_chips,
         },
     )
     .await
@@ -291,6 +293,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                     raw_input: prepared.raw_input,
                     expanded: prompt.content,
                     images: prompt.images,
+                    file_chips: prepared.file_chips,
                 });
             app.pending_split_model_override = None;
             app.pending_split_provider_key_override = None;
@@ -313,6 +316,7 @@ pub(in crate::tui::app) async fn route_prepared_input_to_new_remote_session(
                 raw_input: prepared.raw_input,
                 expanded: prompt.content,
                 images: prompt.images,
+                file_chips: prepared.file_chips,
             });
         app.pending_split_model_override = None;
         app.pending_split_provider_key_override = None;
@@ -534,7 +538,7 @@ struct StashedDraft {
     cursor_pos: usize,
     pasted_contents: Vec<String>,
     pending_images: Vec<(String, String)>,
-    undo: Vec<(String, usize)>,
+    undo: Vec<app_mod::InputUndoEntry>,
 }
 
 fn stash_draft_for_voice(app: &mut App, transcript: &str) -> StashedDraft {

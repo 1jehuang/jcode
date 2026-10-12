@@ -962,9 +962,12 @@ async fn handle_remote_key_internal(
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
                 let prev = core::prev_char_boundary(&app.input, app.cursor_pos);
+                let drain_start =
+                    input::file_chip_backspace_start(&app.input, app.cursor_pos, &app.file_chips)
+                        .unwrap_or(prev);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.input.drain(drain_start..app.cursor_pos);
+                app.cursor_pos = drain_start;
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -972,8 +975,11 @@ async fn handle_remote_key_internal(
         KeyCode::Delete => {
             if app.cursor_pos < app.input.len() {
                 let next = core::next_char_boundary(&app.input, app.cursor_pos);
+                let drain_end =
+                    input::file_chip_delete_end(&app.input, app.cursor_pos, &app.file_chips)
+                        .unwrap_or(next);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.input.drain(app.cursor_pos..drain_end);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -1873,6 +1879,7 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             let images = std::mem::take(&mut app.pending_images);
             let prepared = input::PreparedInput {
                 raw_input: prompt.to_string(),
+                file_chips: Vec::new(),
                 expanded: prompt.to_string(),
                 images,
             };

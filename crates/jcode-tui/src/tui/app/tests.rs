@@ -62,6 +62,7 @@ include!("tests/issue_1685_bounded_auto_resume.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/merge_command.rs");
+include!("tests/file_mention_popover.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/remote_header_hint_facts.rs");
 include!("tests/slash_command_boundaries.rs");
