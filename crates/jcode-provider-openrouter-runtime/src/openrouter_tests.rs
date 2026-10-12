@@ -57,18 +57,9 @@ impl Drop for EnvVarGuard {
 }
 
 fn test_config_dir(temp: &TempDir) -> std::path::PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        temp.path().join("Library").join("Application Support")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        temp.path().join("AppData").join("Roaming")
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        temp.path().to_path_buf()
-    }
+    // These fixtures set JCODE_HOME, which takes precedence over platform
+    // HOME/XDG/APPDATA locations in app_config_dir().
+    temp.path().join("config")
 }
 
 fn write_test_api_key(temp: &TempDir, env_file: &str, env_key: &str, value: &str) {
@@ -1183,6 +1174,7 @@ fn autodetects_single_saved_openai_compatible_profile() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1208,6 +1200,7 @@ fn autodetects_single_saved_local_openai_compatible_profile() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1241,6 +1234,7 @@ fn openrouter_transport_state_distinguishes_runtime_identities() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1304,6 +1298,7 @@ fn does_not_guess_when_multiple_saved_openai_compatible_profiles_exist() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -1338,6 +1333,7 @@ fn autodetected_profile_seeds_default_model_and_cache_namespace() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _env = isolate_openrouter_autodetect_env();
 
@@ -2395,6 +2391,7 @@ fn named_openai_compatible_loads_api_key_from_env_file() {
     let temp = TempDir::new().expect("create temp dir");
     let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
     let _home = EnvVarGuard::set("HOME", temp.path());
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
     let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
     let _api_key = EnvVarGuard::remove("CUSTOM_API_KEY");

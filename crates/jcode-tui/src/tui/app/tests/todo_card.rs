@@ -410,7 +410,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
 }
 
 #[test]
-fn background_tasks_render_in_widget_data_not_the_pinned_band() {
+fn background_tasks_render_once_in_the_pinned_band_not_the_overview() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let mut app = create_test_app();
@@ -427,11 +427,9 @@ fn background_tasks_render_in_widget_data_not_the_pinned_band() {
         crate::tui::BackgroundTaskRowStatus::Failed,
     );
 
-    let info = crate::tui::TuiState::info_widget_data(&app)
-        .background_info
-        .expect("session task rows should feed the background widget");
+    assert!(crate::tui::TuiState::info_widget_data(&app).background_info.is_none());
     assert_eq!(
-        info.rows
+        app.background_task_rows_ref()
             .iter()
             .map(|row| row.task_id.as_str())
             .collect::<Vec<_>>(),
@@ -442,9 +440,11 @@ fn background_tasks_render_in_widget_data_not_the_pinned_band() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let rendered = render_and_snap(&app, &mut terminal);
     assert!(
-        !rendered.contains(" bg cargo test") && !rendered.contains(" bg integration tests"),
-        "background tasks must not render in the pinned todo band:\n{rendered}"
+        rendered.contains(" bg cargo test") && rendered.contains(" bg integration tests"),
+        "background tasks must retain the fork's compact pinned rows:\n{rendered}"
     );
+    assert_eq!(rendered.matches("cargo test").count(), 1, "{rendered}");
+    assert_eq!(rendered.matches("integration tests").count(), 1, "{rendered}");
     assert!(!rendered.contains("Background task started"));
     assert!(!rendered.contains("Background task progress"));
     assert!(!rendered.contains("Background task completed"));
@@ -633,7 +633,9 @@ fn pinned_todo_band_has_rounded_border_with_title() {
             pinned_band_todo("t3", "third boxed item", "pending"),
         ],
         70,
-        30,
+        // Leave room for the expanded onboarding header without its jump
+        // badge covering the first transcript row.
+        50,
     );
     let rows: Vec<&str> = text.lines().collect();
     let top = rows

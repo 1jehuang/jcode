@@ -23,6 +23,13 @@ fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
         super::download_image_url_content,
     );
     assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
+    let content = super::read_clipboard_for_paste_with(
+        &super::ClipboardPasteKind::Smart,
+        || Some("/home/me/screenshot.png".to_string()),
+        || panic!("SSH image path must stay text"),
+        |_| None,
+    );
+    assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
 }
 
 use super::{
@@ -31,6 +38,59 @@ use super::{
     shifted_printable_fallback, text_input_for_key,
 };
 use crossterm::event::{KeyCode, KeyModifiers};
+
+#[test]
+fn smart_paste_prefers_image_when_text_is_its_file_name() {
+    for name in [
+        "Screenshot 2026-09-24 at 10.41.00.png",
+        "/Users/me/Desktop/photo.JPG",
+        "file:///tmp/diagram.webp",
+        "'/tmp/with space.gif'",
+    ] {
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || Some(name.to_string()),
+            || Some(("image/png".to_string(), "base64".to_string())),
+            |_| None,
+        );
+        assert!(
+            matches!(content, ClipboardPasteContent::Image { .. }),
+            "{name}: {content:?}"
+        );
+    }
+}
+
+#[test]
+fn smart_paste_keeps_ordinary_text_without_probing_for_images() {
+    for text in [
+        "plain text",
+        "see screenshot.png and fix the layout",
+        "line one\n/tmp/a.png",
+        "https://example.com/a.png",
+    ] {
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || Some(text.to_string()),
+            || panic!("ordinary text must not wait on an image probe"),
+            |_| None,
+        );
+        assert!(
+            matches!(content, ClipboardPasteContent::Text(ref t) if t == text),
+            "{text}: {content:?}"
+        );
+    }
+}
+
+#[test]
+fn smart_paste_uses_text_when_no_image_is_available() {
+    let content = read_clipboard_for_paste_with(
+        &ClipboardPasteKind::Smart,
+        || Some("plain text".to_string()),
+        || None,
+        |_| None,
+    );
+    assert!(matches!(content, ClipboardPasteContent::Text(ref text) if text == "plain text"));
+}
 
 /// Drop parsing is disabled under SSH. Other tests set `JCODE_SSH_REMOTE`
 /// in-process while holding the env lock, so hold it too and run local.
