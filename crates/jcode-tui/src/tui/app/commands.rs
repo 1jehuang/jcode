@@ -163,11 +163,7 @@ pub(super) fn is_auto_poke_connectivity_error(error: &str) -> bool {
 /// rejected before the wording is checked.
 pub(super) fn is_provider_overload_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    let status = lower
-        .find("status:")
-        .map(|idx| lower[idx + "status:".len()..].trim_start())
-        .and_then(|rest| rest.get(..3))
-        .and_then(|code| code.parse::<u16>().ok());
+    let status = jcode_provider_core::parse_http_status_message(error);
     if matches!(status, Some(400 | 401 | 402 | 403 | 404 | 405 | 406 | 422))
         || is_fatal_model_endpoint_error(error)
     {
@@ -3835,3 +3831,7 @@ pub(super) fn handle_telemetry_command(app: &mut App, trimmed: &str) -> bool {
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "provider_recovery_status_tests.rs"]
+mod provider_recovery_status_tests;
