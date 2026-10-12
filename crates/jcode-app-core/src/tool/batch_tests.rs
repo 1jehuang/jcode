@@ -4,6 +4,46 @@ use std::sync::Arc;
 
 struct EchoTool;
 
+struct McpRoutingProbe;
+
+fn mcp_probe_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "server": {"type": "string"},
+            "tool": {"type": "string"},
+            "arguments": {"type": "object", "additionalProperties": true}
+        },
+        "required": ["server", "tool", "arguments"]
+    })
+}
+
+#[async_trait::async_trait]
+impl Tool for McpRoutingProbe {
+    fn name(&self) -> &str {
+        "mcp_call"
+    }
+    fn description(&self) -> &str {
+        "Offline MCP routing probe"
+    }
+    fn parameters_schema(&self) -> Value {
+        mcp_probe_schema()
+    }
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        #[derive(serde::Deserialize)]
+        struct Input {
+            server: String,
+            tool: String,
+            arguments: Value,
+        }
+        let parsed: Input = serde_json::from_value(input)?;
+        Ok(ToolOutput::new(format!(
+            "{}:{}:{}",
+            parsed.server, parsed.tool, parsed.arguments
+        )))
+    }
+}
+
 #[async_trait::async_trait]
 impl Tool for EchoTool {
     fn name(&self) -> &str {
@@ -129,6 +169,222 @@ fn description_is_compact_and_explains_flat_parallel_calls() {
     assert!(BATCH_DESCRIPTION.contains("tool, intent"));
     assert!(BATCH_DESCRIPTION.contains("Do not batch dependent calls or nest batch"));
     assert!(BATCH_DESCRIPTION.len() <= 200);
+}
+
+#[test]
+fn batch_schema_exposes_collision_free_parameters() {
+    let schema = generic_batch_schema();
+    let parameters = &schema["properties"]["tool_calls"]["items"]["properties"]["parameters"];
+    assert_eq!(parameters["type"], "object");
+    assert_eq!(parameters["additionalProperties"], true);
+    assert!(BATCH_DESCRIPTION.contains(r#""parameters""#));
+    assert!(BATCH_DESCRIPTION.contains(r#""tool":"mcp_call""#));
+}
+
+#[test]
+fn normalization_preserves_flat_arguments_and_routing_siblings() {
+    let input = json!({"tool_calls": [{
+        "tool": "mcp_call",
+        "server": "fixture",
+        "tool_name": "probe",
+        "arguments": {"id": "synthetic"}
+    }]});
+    let parsed: BatchInput = serde_json::from_value(normalize_batch_input(input)).unwrap();
+    let parameters = parsed.tool_calls[0].parameters.as_ref().unwrap();
+    assert_eq!(parameters["server"], "fixture");
+    assert_eq!(parameters["arguments"]["id"], "synthetic");
+}
+
+#[tokio::test]
+async fn batch_preserves_flat_native_arguments_at_dispatch() {
+    let registry = registry_with_batch_and_echo().await;
+    let output = registry
+        .execute(
+            "batch",
+            json!({"tool_calls": [{
+                "tool": "echo",
+                "intent": "Check native arguments remain child input",
+                "text": "native arguments preserved",
+                "arguments": {"id": "synthetic"}
+            }]}),
+            test_context(),
+        )
+        .await
+        .unwrap();
+    assert!(output.output.contains("native arguments preserved"));
+    assert!(output.output.contains("Completed: 1 succeeded, 0 failed"));
+}
+
+#[tokio::test]
+async fn batch_recovers_name_routed_mcp_without_duplicate_tool() {
+    let registry = registry_with_batch_and_echo().await;
+    registry
+        .tools
+        .write()
+        .await
+        .insert("mcp_call".into(), Arc::new(McpRoutingProbe));
+    for wrapper in ["mcp_call", "functions.mcp_call"] {
+        let output = registry
+            .execute(
+                "batch",
+                json!({"tool_calls": [{
+                    "name": wrapper,
+                    "tool": "probe",
+                    "server": "fixture",
+                    "arguments": {"id": "synthetic"},
+                    "intent": "Check independent wrapper and raw MCP selectors"
+                }]}),
+                test_context(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            output
+                .output
+                .contains("fixture:probe:{\"id\":\"synthetic\"}")
+        );
+        assert!(output.output.contains("Completed: 1 succeeded, 0 failed"));
+    }
+}
+
+#[tokio::test]
+async fn batch_nested_mcp_keeps_all_routing_fields() {
+    let registry = registry_with_batch_and_echo().await;
+    registry
+        .tools
+        .write()
+        .await
+        .insert("mcp_call".into(), Arc::new(McpRoutingProbe));
+    let output = registry.execute("batch", json!({"tool_calls": [{
+        "tool": "mcp_call",
+        "intent": "Check canonical MCP input envelope",
+        "parameters": {"server": "fixture", "tool": "probe", "arguments": {"id": "synthetic"}}
+    }]}), test_context()).await.unwrap();
+    assert!(
+        output
+            .output
+            .contains("fixture:probe:{\"id\":\"synthetic\"}")
+    );
+    assert!(output.output.contains("Completed: 1 succeeded, 0 failed"));
+}
+
+#[test]
+fn normalization_keeps_schema_declared_alias_fields_even_without_siblings() {
+    for alias in ["arguments", "args", "input"] {
+        let schemas = HashMap::from([(
+            "native".into(),
+            json!({"properties": {alias: {"type": "object"}}}),
+        )]);
+        let input = json!({"tool_calls": [{"tool": "native", alias: {"id": "synthetic"}}]});
+        let parsed: BatchInput =
+            serde_json::from_value(normalize_batch_input_with_schemas(input, &schemas).unwrap())
+                .unwrap();
+        assert_eq!(
+            parsed.tool_calls[0].parameters.as_ref().unwrap()[alias]["id"],
+            "synthetic"
+        );
+    }
+}
+
+#[test]
+fn normalization_preserves_alias_fields_declared_through_combiners_and_refs() {
+    for schema in [
+        json!({"allOf": [{"properties": {"arguments": {"type": "object"}}}]}),
+        json!({"anyOf": [{"type": "null"}, {"properties": {"arguments": {"type": "object"}}}]}),
+        json!({"$ref": "#/$defs/Input", "$defs": {"Input": {"properties": {"arguments": {"type": "object"}}}}}),
+        json!({"$ref": "#"}),
+        json!({"$ref": "https://example.invalid/input.schema.json"}),
+    ] {
+        let schemas = HashMap::from([("native".into(), schema)]);
+        let input = json!({"tool_calls": [{"tool": "native", "arguments": {"id": "synthetic"}}]});
+        let parsed: BatchInput =
+            serde_json::from_value(normalize_batch_input_with_schemas(input, &schemas).unwrap())
+                .unwrap();
+        assert_eq!(
+            parsed.tool_calls[0].parameters.as_ref().unwrap()["arguments"]["id"],
+            "synthetic"
+        );
+    }
+}
+
+#[test]
+fn unresolved_schema_does_not_authorize_name_based_rerouting() {
+    let schemas = HashMap::from([("possible_wrapper".into(), json!({"$ref": "#"}))]);
+    let input = json!({"tool_calls": [{"tool": "unknown_route", "name": "possible_wrapper", "arguments": {}}]});
+    let parsed: BatchInput =
+        serde_json::from_value(normalize_batch_input_with_schemas(input, &schemas).unwrap())
+            .unwrap();
+    assert_eq!(parsed.tool_calls[0].tool, "unknown_route");
+    assert_eq!(
+        parsed.tool_calls[0].parameters.as_ref().unwrap()["name"],
+        "possible_wrapper"
+    );
+}
+
+#[test]
+fn nested_schema_properties_are_not_root_argument_fields() {
+    let schema =
+        json!({"properties": {"payload": {"properties": {"arguments": {"type": "object"}}}}});
+    assert_eq!(
+        schema_property_declaration(&schema, "arguments"),
+        Some(false)
+    );
+}
+
+#[test]
+fn normalization_preserves_native_name_field() {
+    let input = json!({"tool_calls": [{"tool": "echo", "name": "project", "text": "value"}]});
+    let parsed: BatchInput = serde_json::from_value(normalize_batch_input(input)).unwrap();
+    assert_eq!(parsed.tool_calls[0].tool, "echo");
+    assert_eq!(
+        parsed.tool_calls[0].parameters.as_ref().unwrap()["name"],
+        "project"
+    );
+}
+
+#[test]
+fn normalization_rejects_two_callable_routes_before_dispatch() {
+    let schemas = HashMap::from([
+        ("mcp_call".into(), mcp_probe_schema()),
+        ("echo".into(), json!({"type": "object"})),
+    ]);
+    let input = json!({"tool_calls": [{"name": "mcp_call", "tool": "echo", "server": "fixture", "arguments": {}}]});
+    let error = normalize_batch_input_with_schemas(input, &schemas).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Ambiguous batch tool/name selectors")
+    );
+    assert!(error.to_string().contains("parameters"));
+}
+
+#[test]
+fn normalization_preserves_flat_input_with_null_parameters() {
+    let input = json!({"tool_calls": [{"tool": "echo", "parameters": null, "text": "retained"}]});
+    let parsed: BatchInput = serde_json::from_value(normalize_batch_input(input)).unwrap();
+    assert_eq!(
+        parsed.tool_calls[0].parameters.as_ref().unwrap()["text"],
+        "retained"
+    );
+}
+
+#[test]
+fn normalization_drops_only_redundant_non_native_name_selector() {
+    for native_name in [false, true] {
+        let properties = if native_name {
+            json!({"name": {"type": "string"}})
+        } else {
+            json!({})
+        };
+        let schemas = HashMap::from([("echo".into(), json!({"properties": properties}))]);
+        let input = json!({"tool_calls": [{"tool": "echo", "name": "echo", "text": "retained"}]});
+        let parsed: BatchInput =
+            serde_json::from_value(normalize_batch_input_with_schemas(input, &schemas).unwrap())
+                .unwrap();
+        let parameters = parsed.tool_calls[0].parameters.as_ref().unwrap();
+        assert_eq!(parameters.get("name").is_some(), native_name);
+        assert_eq!(parameters["text"], "retained");
+    }
 }
 
 #[test]
@@ -277,7 +533,10 @@ fn test_schema_only_requires_tool() {
         json!("Tool name.")
     );
     assert!(schema["properties"]["tool_calls"]["items"]["properties"]["intent"].is_object());
-    assert!(schema["properties"]["tool_calls"]["items"]["properties"]["parameters"].is_null());
+    assert_eq!(
+        schema["properties"]["tool_calls"]["items"]["properties"]["parameters"]["type"],
+        "object"
+    );
 }
 
 #[test]
@@ -290,7 +549,7 @@ fn test_schema_keeps_flat_generic_subcall_shape() {
         schema["properties"]["tool_calls"]["items"]["properties"]
             .as_object()
             .map(|props| props.len()),
-        Some(2)
+        Some(3)
     );
     assert!(schema["properties"]["tool_calls"]["items"]["oneOf"].is_null());
 }
