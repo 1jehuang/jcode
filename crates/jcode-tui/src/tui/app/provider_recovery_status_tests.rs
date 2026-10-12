@@ -30,7 +30,6 @@ fn handle_error(message: &str) -> App {
             id: 41,
             message: message.to_string(),
             retry_after_secs: None,
-            server_resumes: false,
         },
         &mut remote,
     );
