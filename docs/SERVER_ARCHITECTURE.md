@@ -89,9 +89,78 @@ so `mount-cloud/fabian` displays as `mount-cloud-fabian`.
 ### Server Shutdown
 
 The server shuts down when:
-- **Idle timeout**: no clients connected for 5 minutes (configurable)
+- **Idle timeout**: no clients connected and no live headless swarm workers for
+  5 minutes. The shared-server timeout is fixed at 300 seconds
+  (`IDLE_TIMEOUT_SECS` in `crates/jcode-app-core/src/server.rs`), not configurable
+  through `[server]`. The monitor checks every 10 seconds, so shutdown can occur
+  slightly later than five minutes.
 - **Manual**: server process is killed
 - **Reload**: server execs into a new binary (same socket path)
+
+Debug-control servers disable the shared-server idle monitor. Temporary servers
+use a separate lifecycle policy.
+
+### Headless `run` Sessions and Ephemeral Servers
+
+`jcode run` does not use a server at all: it builds an `Agent` in-process,
+sends one message, and exits. `--socket <path>` only selects which socket its
+tools dial, so for most runs nothing ever binds that path.
+
+One tool genuinely needs a server: `swarm` talks to the daemon over the socket
+because workers are server-hosted headless sessions. For a `run` session that
+used to fail outright ("jcode server is not running"), which made swarm
+unavailable to headless automation (issue #1748). Instead, the `run` command
+registers an on-demand server spawner
+(`crate::server_spawn::register_on_demand_server_spawner`), and the first swarm
+request that cannot reach a server starts one. On the shared socket that is the
+normal long-lived daemon; on a custom `--socket` it is a server owned by the
+run:
+
+```
+jcode run --socket /tmp/run.sock "spawn a worker that ..."
+   │
+   ├─▶ agent runs in-process; no server started
+   ├─▶ swarm tool dials /tmp/run.sock → not found
+   ├─▶ spawn `jcode serve --temporary-server --owner-pid <run pid>`
+   │      on /tmp/run.sock, using the *current* executable
+   └─▶ retry the request; the server exits within ~10s of the run
+```
+
+Properties worth knowing:
+
+- **Lazy.** Runs that never use `swarm` pay nothing; `jcode run` startup is
+  unchanged.
+- **Socket-directed.** Only a custom `--socket` gets the owned, temporary
+  server. Without `--socket` the run bootstraps the ordinary shared daemon:
+  an ephemeral server on the shared path would squat the socket every later
+  client uses and then vanish when the run exits.
+- **Owned.** The temporary lifecycle monitor shuts the server down once
+  `--owner-pid` is gone, so a one-shot run leaves no daemon behind: socket,
+  debug socket, daemon lock, build-hash sidecar and metadata file are all
+  removed. Workers live only as long as the run that spawned them; a `run`
+  that spawns workers and exits without awaiting them loses them by design.
+- **Current binary.** The owned path spawns `std::env::current_exe()`, not the
+  shared-server update candidate, so a `--socket`-isolated check of a locally
+  built binary is served by that binary (see AGENTS.md, "Verifying a change at
+  runtime").
+- **Only for `run`.** Interactive and client launches register no on-demand
+  spawner: they already bootstrap a daemon through their own startup path, and
+  a spawn triggered from deep inside a tool would race that logic.
+
+### Session Ownership Markers (`active_pids`)
+
+`~/.jcode/active_pids/<session_id>` contains the PID of the process that owns the
+session. In server mode this is the daemon PID, so multiple sessions can share
+the same PID. Despite the directory name, “active” means process ownership, not
+that a terminal window is open, a client is connected, or a model is generating.
+A daemon-held session can remain registered after its client disconnects.
+
+Markers are removed when sessions are closed or removed. They can be left behind
+after a process exits, so a marker alone does not prove its owner is alive.
+`active_session_ids()` lists marker names without checking PID liveness, whereas
+`session_presence()` filters out dead owners. These markers support lifecycle
+and crash recovery, not window tracking. Separate `streaming_pids` markers track
+model-response generation.
 
 ### Remote Client Working Directory
 
@@ -131,9 +200,15 @@ reload, network issue, etc.):
 
 ```
 /run/user/$UID/
-├── jcode.sock          # Main communication socket
-└── jcode-debug.sock    # Debug/testing socket
+├── jcode.sock              # Main communication socket
+├── jcode-debug.sock        # Debug/testing socket
+└── jcode-daemon.lock       # "one daemon on jcode.sock" flock
 ```
+
+A `--socket`/`JCODE_SOCKET` override gets its own sibling lock
+(`<socket>.daemon.lock`), so an isolated server can bind its socket while the
+shared daemon keeps running. One daemon per *socket*, not per runtime dir:
+the spawn lock has always been socket-scoped, and the daemon lock now matches.
 
 ## Self-Dev Mode
 
@@ -153,5 +228,7 @@ When running `jcode` inside the jcode repository:
 | Subsequent `jcode` | Connects to existing server |
 | Kill a client | Server + other clients unaffected |
 | `/reload` | Server execs new binary, clients reconnect |
-| All clients close | Server idle-timeout after 5 min |
+| All clients close | Shared-server idle timeout after 5 min without live headless swarm workers (unless debug control is enabled) |
 | Resume session | `jcode --resume fox` reconnects to existing session |
+| `jcode run` | Agent runs in-process; no server unless a tool needs one |
+| `jcode run` + `swarm` | Bootstraps the shared daemon, or a run-owned temporary server when `--socket` is custom |

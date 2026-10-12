@@ -29,7 +29,11 @@ pub(super) fn interrupt_request_log_fields(
             content.len(),
             content.chars().count()
         )),
-        Request::CancelSoftInterrupts { id } => Some(base("cancel_soft_interrupts", *id)),
+        Request::CancelSoftInterrupts { id, client_ids } => Some(format!(
+            "{} filtered_ids={:?}",
+            base("cancel_soft_interrupts", *id),
+            client_ids.as_ref().map(Vec::len)
+        )),
         Request::BackgroundTool { id } => Some(base("background_tool", *id)),
         _ => None,
     }
@@ -60,6 +64,7 @@ pub(super) fn request_type_is_read_only(kind: &str) -> bool {
             | "comm_read"
             | "comm_list"
             | "comm_list_channels"
+            | "comm_list_swarms"
             | "comm_channel_members"
             | "comm_summary"
             | "comm_status"

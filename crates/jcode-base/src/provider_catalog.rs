@@ -1,7 +1,7 @@
 pub use jcode_provider_env::{
     load_api_key_from_env_or_config, load_env_value_from_config_file,
     load_env_value_from_env_or_config, register_api_key_fallback_resolver,
-    save_env_value_to_env_file,
+    save_env_value_to_env_file, save_named_api_key,
 };
 pub use jcode_provider_metadata::*;
 use std::collections::{HashMap, HashSet};
@@ -34,6 +34,27 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     profile: OpenAiCompatibleProfile,
     api_key_hint: Option<&str>,
 ) -> ResolvedOpenAiCompatibleProfile {
+    let mut resolved = resolve_openai_compatible_profile_endpoint(profile, api_key_hint);
+    if profile.id != OPENAI_COMPAT_PROFILE.id
+        && let Some(newest_model) =
+            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
+    {
+        resolved.default_model = Some(newest_model);
+    }
+    resolved
+}
+
+/// Resolve a profile's endpoint and credential bindings (api base, key env,
+/// env file, `requires_api_key`) without picking a default model.
+///
+/// Choosing the default model reads the profile's cached model catalog from
+/// disk and ranks it, which costs milliseconds per profile. Credential checks
+/// (auth status, which runs on the TUI's first frame across every profile)
+/// never look at the model, so they use this cheaper path.
+fn resolve_openai_compatible_profile_endpoint(
+    profile: OpenAiCompatibleProfile,
+    api_key_hint: Option<&str>,
+) -> ResolvedOpenAiCompatibleProfile {
     let mut resolved = ResolvedOpenAiCompatibleProfile {
         id: profile.id.to_string(),
         display_name: profile.display_name.to_string(),
@@ -58,11 +79,6 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
     apply_profile_key_based_endpoint_overrides(profile, &mut resolved, api_key_hint);
 
     if profile.id != OPENAI_COMPAT_PROFILE.id {
-        if let Some(newest_model) =
-            newest_released_model_for_resolved_openai_compatible_profile(profile.id, &resolved)
-        {
-            resolved.default_model = Some(newest_model);
-        }
         return resolved;
     }
 
@@ -134,6 +150,22 @@ fn newest_released_model_for_resolved_openai_compatible_profile(
         == normalize_api_base(&resolved.api_base);
     if !source_matches {
         return None;
+    }
+
+    // Proxies with a curated flagship order (OpenRouter carries Claude/GPT
+    // under vendor prefixes) rank by quality first. Plain recency picks
+    // whatever shipped last; live, that put OpenRouter on
+    // `mistralai/mistral-large-4-0` over `anthropic/claude-opus-5.5`.
+    let chat_ids: Vec<&str> = cache
+        .models
+        .iter()
+        .map(|model| model.id.trim())
+        .filter(|id| !id.is_empty() && crate::provider::is_listable_model_name(id))
+        .collect();
+    if let Some(flagship) =
+        crate::auth::lifecycle::ranked_flagship_for_provider(profile_id, &chat_ids)
+    {
+        return Some(flagship);
     }
 
     cache
@@ -470,7 +502,10 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("inkling");
             push("inkling-small");
             push("nemotron-3-ultra");
-            push("nemotron-3-ultra-together");
+            // `nemotron-3-ultra-together` is absent from Conifer's public
+            // catalog (2026-09-16). Do not advertise an unverified route or
+            // borrow DeepInfra's limit. Explicit selection and live discovery
+            // remain supported. See docs/CONIFER_PROVIDER.md and issue #1274.
             push("nemotron-3-super-120b");
             push("nemotron-3.5-lightning");
             push("mistral-large-latest");
@@ -675,6 +710,8 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
     let model = model.trim().to_ascii_lowercase();
 
     match profile_id.as_str() {
+        "conifer" => conifer_context_limit(&model)
+            .or_else(|| jcode_provider_core::models::open_weight_family_context_limit(&model)),
         // The selected upstream model may vary. Use Jcode's conservative
         // compatible-provider context budget for the Belvedir auto router.
         "belvedir" if model == "auto" => Some(128_000),
@@ -689,6 +726,29 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
         // explicit user `context_window` override) is available.
         _ => jcode_provider_core::models::open_weight_family_context_limit(&model),
     }
+}
+
+/// Exact route-specific observations from https://api.conifer.build/v1/catalog
+/// on 2026-09-16. These fill gaps in the shared family classifier, not global
+/// model guarantees. Live/disk catalog metadata takes precedence at runtime,
+/// including for mutable `*-latest` aliases. See docs/CONIFER_PROVIDER.md.
+fn conifer_context_limit(model: &str) -> Option<usize> {
+    Some(match model {
+        "grok-4.6" | "grok-4.5" => 500_000,
+        "grok-4.3" => 1_000_000,
+        "seed-2.0-pro" | "seed-2.0-code" | "seed-2.0-mini" => 256_000,
+        "step-3.7-flash" | "step-3.7-flash-novita" => 262_144,
+        "hy3" | "hy3-tencent" | "hy3-novita" => 262_144,
+        "ling-3.0-flash" => 131_072,
+        "inkling" | "inkling-small" => 524_288,
+        "nemotron-3-ultra" | "nemotron-3-super-120b" | "nemotron-3.5-lightning" => 262_144,
+        "mistral-large-latest" | "mistral-medium-latest" | "mistral-small-latest" => 256_000,
+        "command-a-cohere" => 256_000,
+        "llama-4-maverick" => 1_048_576,
+        "llama-4-scout" => 327_680,
+        "gemma-4-31b" => 128_000,
+        _ => return None,
+    })
 }
 
 pub fn apply_openai_compatible_profile_env(profile: Option<OpenAiCompatibleProfile>) {
@@ -1124,7 +1184,7 @@ pub fn openai_compatible_profile_is_configured(profile: OpenAiCompatibleProfile)
         return configured;
     }
 
-    let resolved = resolve_openai_compatible_profile(profile);
+    let resolved = resolve_openai_compatible_profile_endpoint(profile, None);
     if load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file).is_some() {
         return true;
     }

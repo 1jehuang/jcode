@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 const INPUT_LIMIT: usize = 16 * 1024;
 const OUTPUT_LIMIT: usize = 64 * 1024;
 
+mod callback;
+
 #[derive(Clone, Debug)]
 pub struct AuthOptions {
     /// Trusted local executable. No shell is used.
@@ -124,6 +126,7 @@ impl AuthClient {
             finished: AtomicBool::new(false),
             state: Mutex::new(State::Created),
             child: Mutex::new(None),
+            callback: Mutex::new(None),
         })))
     }
 }
@@ -176,6 +179,7 @@ struct FlowInner {
     // Serializes begin/completion/cancel; cancel flag and child lock remain independent.
     state: Mutex<State>,
     child: Mutex<Option<Child>>,
+    callback: Mutex<Option<Arc<callback::CallbackListener>>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -206,6 +210,67 @@ fn failed(message: &'static str) -> Error {
 }
 fn cancelled() -> Error {
     failed("Login cancelled. Already issued credentials are not revoked.")
+}
+
+fn parse_login_response(bytes: &[u8], operation: Operation) -> Result<serde_json::Value> {
+    if let Ok(value) = serde_json::from_slice(bytes) {
+        return Ok(value);
+    }
+    // Older CLIs append a human auth-test report after the authenticated JSON
+    // line. Recover only this known completion shape, never search arbitrary
+    // child output for a success object or expose the trailing report.
+    if matches!(
+        operation,
+        Operation::Callback | Operation::Code | Operation::Complete
+    ) && let Some(newline) = bytes.iter().position(|byte| *byte == b'\n')
+        && bytes[newline + 1..].starts_with(b"=== auth-test: ")
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes[..newline])
+        && value["status"] == "authenticated"
+    {
+        return Ok(value);
+    }
+    Err(failed("Invalid login response. Update Jcode and retry."))
+}
+
+// Only fixed diagnostic messages cross the SDK boundary. Raw child output,
+// provider descriptions and callback query values stay private.
+fn login_process_failure(stderr: &[u8]) -> Error {
+    let text = String::from_utf8_lossy(stderr);
+    let message = if text.contains("OAuth state mismatch") {
+        "OAuth state mismatch. Start a new sign-in and use its latest callback URL."
+    } else if text.contains("login state expired") {
+        "The pending sign-in expired. Start a new sign-in."
+    } else if text.contains("No pending") && text.contains("login state") {
+        "The pending sign-in could not be found. Start a new sign-in."
+    } else if text.contains("Token exchange failed") {
+        "The provider rejected the authorization code during token exchange. Start a new sign-in."
+    } else if text.contains("unexpected argument") || text.contains("unrecognized option") {
+        "The installed Jcode executable does not support this login protocol. Update Jcode and retry."
+    } else if text.contains("Permission denied") {
+        "Jcode could not access its private login storage. Check local file permissions and retry."
+    } else if text.contains("error sending request") || text.contains("dns error") {
+        "Could not reach the authentication server. Check your connection and retry."
+    } else {
+        "The Jcode login process failed before completing authentication. Start a new sign-in or check your Jcode installation."
+    };
+    failed(message)
+}
+
+fn callback_provider_error(input: &str) -> Option<Error> {
+    let url = url::Url::parse(input).ok()?;
+    let error = url.query_pairs().find(|(key, _)| key == "error")?.1;
+    Some(failed(match error.as_ref() {
+        "access_denied" => {
+            "Browser authorization was denied. Start a new sign-in and approve access to continue."
+        }
+        "temporarily_unavailable" | "server_error" => {
+            "The authorization provider is temporarily unavailable. Try signing in again shortly."
+        }
+        "login_required" | "interaction_required" => {
+            "The provider requires you to sign in again. Start a new sign-in."
+        }
+        _ => "The provider returned an authorization error. Start a new sign-in.",
+    }))
 }
 
 impl AuthFlow {
@@ -246,6 +311,14 @@ impl AuthFlow {
             .as_str()
             .filter(|s| s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
             .map(str::to_owned);
+        if matches!(
+            input_kind,
+            AuthInputKind::CallbackUrl | AuthInputKind::AuthCodeOrCallbackUrl
+        ) {
+            // Bind before the caller can open the browser. A busy loopback port
+            // is not fatal: the existing manual callback input remains available.
+            *self.0.callback.lock().unwrap() = callback::CallbackListener::bind(&url).map(Arc::new);
+        }
         *state = State::Pending(input_kind);
         Ok(AuthPrompt {
             auth_url: auth_url.to_owned(),
@@ -263,6 +336,49 @@ impl AuthFlow {
     }
     pub fn complete_device(&self) -> Result<AuthResult> {
         self.complete(Operation::Complete, None)
+    }
+
+    /// Whether `start` bound the OAuth redirect's loopback port. If false, use
+    /// the prompt's manual input method. No listener is used for hosted redirects.
+    pub fn has_callback_listener(&self) -> bool {
+        self.0.callback.lock().unwrap().is_some()
+    }
+
+    /// Wait off the UI thread for a browser redirect and complete via the same
+    /// CLI exchange as manual input. Keep manual input and Cancel available.
+    /// Cancellation or manual completion interrupts the wait. Callback state is
+    /// checked here before forwarding and validated again by the CLI.
+    pub fn wait_for_callback(&self) -> Result<AuthResult> {
+        self.wait_for_callback_with_progress(|| {})
+    }
+
+    /// Like `wait_for_callback`, but reports when a validated browser callback
+    /// arrives, before the blocking token exchange. The callback runs on the
+    /// calling worker thread and must not expose the private callback URL.
+    pub fn wait_for_callback_with_progress(&self, received: impl FnOnce()) -> Result<AuthResult> {
+        let listener = self
+            .0
+            .callback
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| invalid("This login has no automatic browser callback"))?;
+        let input = match listener.wait(&self.0) {
+            Ok(input) => input,
+            Err(error) => {
+                self.0.close_callback();
+                return Err(error);
+            }
+        };
+        // A callback is one-shot even if exchange fails. Release the port so
+        // retries cannot inherit a listener with no remaining waiter.
+        listener.close();
+        self.0.close_callback();
+        if let Some(error) = callback_provider_error(&input) {
+            return Err(error);
+        }
+        received();
+        self.submit_callback(&input)
     }
 
     fn complete(&self, operation: Operation, input: Option<&str>) -> Result<AuthResult> {
@@ -298,6 +414,7 @@ impl AuthFlow {
         }
         *state = State::Completed;
         self.0.finished.store(true, Ordering::Release);
+        self.0.close_callback();
         if !success {
             // CLI validation errors happen after token persistence but before its
             // normal notification. Use the existing daemon control protocol so
@@ -314,8 +431,10 @@ impl AuthFlow {
     /// Cancellation is not logout and cannot roll back an already completed exchange.
     pub fn cancel(&self) -> Result<()> {
         self.0.cancelled.store(true, Ordering::Release);
+        self.0.close_callback();
         self.0.kill_child();
         let _state = self.0.state.lock().unwrap();
+        self.0.close_callback();
         let (value, success) = self.0.execute(Operation::Cancel, None)?;
         if !success || value["status"] != "cancelled" {
             return Err(failed("Could not clean up pending login"));
@@ -326,6 +445,12 @@ impl AuthFlow {
 }
 
 impl FlowInner {
+    fn close_callback(&self) {
+        if let Some(listener) = self.callback.lock().unwrap().take() {
+            listener.close();
+        }
+    }
+
     fn notify_daemon_best_effort(&self) {
         let socket = self
             .options
@@ -350,6 +475,7 @@ impl FlowInner {
 
     fn command(&self, operation: Operation) -> Command {
         let mut command = Command::new(&self.options.binary);
+        crate::process::no_console_window(&mut command);
         command.args(["--no-update", "--no-selfdev"]);
         if let Some(socket) = &self.options.socket {
             command.arg("--socket").arg(socket);
@@ -370,15 +496,15 @@ impl FlowInner {
         if matches!(operation, Operation::Callback | Operation::Code) {
             command.arg("-");
         }
-        if operation == Operation::Begin {
-            if let Some(account) = &self.account {
-                command.arg("--account").arg(account);
-            }
+        if operation == Operation::Begin
+            && let Some(account) = &self.account
+        {
+            command.arg("--account").arg(account);
         }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         command
     }
 
@@ -406,6 +532,20 @@ impl FlowInner {
         })?;
         let mut stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        // Never display raw stderr: provider responses can contain credentials.
+        // Drain it concurrently, retaining only a bounded diagnostic prefix.
+        let (error_tx, error_rx) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut prefix = Vec::new();
+            let _ = reader
+                .by_ref()
+                .take(OUTPUT_LIMIT as u64)
+                .read_to_end(&mut prefix);
+            let _ = std::io::copy(&mut reader, &mut std::io::sink());
+            let _ = error_tx.send(prefix);
+        });
         *self.child.lock().unwrap() = Some(child);
         // Writing even a bounded payload can block on a full pipe. Keep it off the
         // cancellation thread, and never format the payload or I/O error.
@@ -466,8 +606,17 @@ impl FlowInner {
                         .map_err(|_| failed("Could not wait for login process"))?;
                 }
                 if let (Some(bytes), Some(status)) = (&output, status) {
-                    let value: serde_json::Value = serde_json::from_slice(bytes)
-                        .map_err(|_| failed("Invalid login response. Update Jcode and retry."))?;
+                    let value = parse_login_response(bytes, operation).map_err(|error| {
+                        if status.success() {
+                            error
+                        } else {
+                            login_process_failure(
+                                &error_rx
+                                    .recv_timeout(Duration::from_secs(1))
+                                    .unwrap_or_default(),
+                            )
+                        }
+                    })?;
                     if value["provider"].as_str() != Some(self.provider) {
                         return Err(failed("Login provider mismatch"));
                     }
@@ -490,7 +639,10 @@ impl Drop for FlowInner {
             // Avoid blocking UI destruction. The cleanup process is bounded and reaped.
             let mut command = self.command(Operation::Cancel);
             std::thread::spawn(move || {
-                command.stdin(Stdio::null()).stdout(Stdio::null());
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
                 if let Ok(mut child) = command.spawn() {
                     let deadline = Instant::now() + Duration::from_secs(5);
                     while Instant::now() < deadline {

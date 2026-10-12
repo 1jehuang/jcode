@@ -82,7 +82,7 @@ def detect_pi_bin() -> str:
     candidate = Path(prefix) / "bin" / "pi"
     if candidate.exists():
         return str(candidate)
-    raise FileNotFoundError("could not find pi binary")
+    return "pi"
 
 
 def shutil_which(name: str) -> str | None:
@@ -103,6 +103,7 @@ def build_tool_specs() -> list[ToolSpec]:
             disable_selfdev=True,
         ),
         ToolSpec(name="pi", argv=[detect_pi_bin()]),
+        ToolSpec(name="prime_agent", argv=["prime-agent"]),
         ToolSpec(name="opencode", argv=["opencode"]),
         ToolSpec(name="codex", argv=["codex"]),
         ToolSpec(name="claude_code", argv=["claude"]),

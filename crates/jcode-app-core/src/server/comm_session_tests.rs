@@ -22,6 +22,38 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 struct MockProvider;
 
+struct RoutingProvider(std::sync::Mutex<String>);
+
+#[async_trait]
+impl Provider for RoutingProvider {
+    async fn complete(
+        &self,
+        _: &[Message],
+        _: &[ToolDefinition],
+        _: &str,
+        _: Option<&str>,
+    ) -> Result<EventStream> {
+        anyhow::bail!("routing regression must not make model calls")
+    }
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn model(&self) -> String {
+        self.0.lock().unwrap().clone()
+    }
+    fn set_model(&self, model: &str) -> Result<()> {
+        *self.0.lock().unwrap() = model
+            .rsplit_once(':')
+            .map(|(_, model)| model)
+            .unwrap_or(model)
+            .to_string();
+        Ok(())
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(std::sync::Mutex::new(self.model())))
+    }
+}
+
 #[async_trait]
 impl Provider for MockProvider {
     async fn complete(
@@ -789,7 +821,9 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     session.model = Some("claude-opus-4-6".to_string());
     session.provider_key = Some("claude-api".to_string());
     session.route_api_method = Some("claude-api".to_string());
-    session.save().expect("persist coordinator session");
+    session
+        .save_prepared()
+        .expect("persist coordinator session");
 
     // Hold the agent lock to simulate a coordinator mid-turn: the spawn path
     // must not block and must read the persisted identity instead of defaults.
@@ -806,6 +840,161 @@ async fn coordinator_identity_falls_back_to_persisted_session_when_agent_busy() 
     assert_eq!(identity.route_api_method.as_deref(), Some("claude-api"));
 
     crate::env::remove_var("JCODE_HOME");
+}
+
+#[tokio::test]
+async fn global_agent_model_request_updates_server_config_not_session() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let agent = test_agent_with_working_dir("routing_global", "/tmp/coord").await;
+    let overrides = crate::server::client_actions::set_global_agent_model(
+        &agent,
+        "routing_global",
+        "swarm",
+        Some("openai-api:gpt-5.5".into()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        overrides.is_empty(),
+        "a global change must not pin the session"
+    );
+    assert_eq!(
+        crate::config::Config::load().agents.swarm_model.as_deref(),
+        Some("openai-api:gpt-5.5")
+    );
+    crate::server::client_actions::set_global_agent_model(&agent, "routing_global", "swarm", None)
+        .await
+        .unwrap();
+    assert_eq!(crate::config::Config::load().agents.swarm_model, None);
+    assert!(
+        crate::server::client_actions::set_global_agent_model(
+            &agent,
+            "routing_global",
+            "bogus",
+            Some("m".into())
+        )
+        .await
+        .is_err()
+    );
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
+async fn session_agent_models_update_and_spawn_while_coordinator_busy() {
+    let _env = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let agent = test_agent_with_working_dir("routing_busy", "/tmp/coord").await;
+    let mut session = crate::session::Session::create_with_id("routing_busy".into(), None, None);
+    session.model = Some("claude-opus-4-6".into());
+    session.provider_key = Some("claude-api".into());
+    session.route_api_method = Some("claude-api".into());
+    session.save_prepared().unwrap();
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        "routing_busy".to_string(),
+        agent.clone(),
+    )])));
+    let held = agent.lock().await;
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        crate::server::client_actions::set_session_agent_model(
+            &agent,
+            "routing_busy",
+            "swarm",
+            Some("openai-api:gpt-5.5".into()),
+        ),
+    )
+    .await
+    .expect("setter must not await busy Agent lock")
+    .unwrap();
+    let coordinator = resolve_coordinator_spawn_identity("routing_busy", &sessions).await;
+    let configured =
+        super::session_swarm_model("routing_busy", &sessions, Some("global-model".into())).await;
+    let selection = resolve_swarm_spawn_selection(None, configured, &coordinator);
+    assert_eq!(selection.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(selection.provider_key.as_deref(), Some("openai-api-key"));
+    let provider: Arc<dyn Provider> = Arc::new(RoutingProvider(std::sync::Mutex::new(
+        "initial-model".into(),
+    )));
+    let state = crate::server::SwarmState::new(
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let mcp = Arc::new(crate::mcp::SharedMcpPool::new(
+        crate::mcp::McpConfig::default(),
+    ));
+    let child_id = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        super::spawn_swarm_agent(
+            "routing_busy",
+            "routing-swarm",
+            Some(temp.path().to_string_lossy().into_owned()),
+            None,
+            Some(crate::config::SwarmSpawnMode::Headless),
+            None,
+            None,
+            Some("routing test".into()),
+            &sessions,
+            &Arc::new(RwLock::new(String::new())),
+            &provider,
+            &state.members,
+            &state.swarms_by_id,
+            &state.coordinators,
+            &state.plans,
+            &Arc::new(RwLock::new(VecDeque::new())),
+            &Arc::new(AtomicU64::new(0)),
+            &broadcast::channel(16).0,
+            &mcp,
+            &Arc::new(RwLock::new(HashMap::new())),
+            &Arc::new(RwLock::new(HashMap::new())),
+        ),
+    )
+    .await
+    .expect("actual spawn must not await coordinator lock")
+    .unwrap();
+    let child = sessions.read().await.get(&child_id).cloned().unwrap();
+    let child = child.lock().await;
+    assert_eq!(child.provider_model(), "gpt-5.5");
+    assert_eq!(child.session_provider_key().as_deref(), Some("openai-api"));
+    drop(child);
+    crate::server::client_actions::set_session_agent_model(
+        &agent,
+        "routing_busy",
+        "swarm",
+        Some("inherit".into()),
+    )
+    .await
+    .unwrap();
+    let configured =
+        super::session_swarm_model("routing_busy", &sessions, Some("global-model".into())).await;
+    let selection = resolve_swarm_spawn_selection(None, configured, &coordinator);
+    assert_eq!(selection.model.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(selection.provider_key.as_deref(), Some("claude-api"));
+    crate::server::client_actions::set_session_agent_model(&agent, "routing_busy", "swarm", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        super::session_swarm_model("routing_busy", &sessions, Some("global-model".into()))
+            .await
+            .as_deref(),
+        Some("global-model")
+    );
+    drop(held);
+    if let Some(previous) = previous {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
 }
 
 #[tokio::test]
@@ -1204,4 +1393,23 @@ fn swarm_spawn_effort_prefers_explicit_then_config_pin_then_inherit() {
     // With neither, the worker inherits the provider-wide effort.
     assert_eq!(resolve_swarm_spawn_effort(None, None), None);
     assert_eq!(resolve_swarm_spawn_effort(Some(""), Some("")), None);
+}
+
+#[test]
+fn per_call_auto_spawn_mode_defers_to_configured_mode() {
+    use super::resolve_swarm_spawn_mode;
+    use crate::config::SwarmSpawnMode::{Auto, Headless, Inline, Visible};
+
+    // A model passing `auto` must not override an inline config with a
+    // visible-terminal attempt (workers opened outside VS Code).
+    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Inline), Inline);
+    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Headless), Headless);
+    assert_eq!(resolve_swarm_spawn_mode(None, Inline), Inline);
+    // A configured `auto` keeps its visible-then-headless behavior.
+    assert_eq!(resolve_swarm_spawn_mode(Some(Auto), Auto), Auto);
+    assert_eq!(resolve_swarm_spawn_mode(None, Auto), Auto);
+    // Explicit concrete modes still win over config.
+    assert_eq!(resolve_swarm_spawn_mode(Some(Visible), Inline), Visible);
+    assert_eq!(resolve_swarm_spawn_mode(Some(Headless), Visible), Headless);
+    assert_eq!(resolve_swarm_spawn_mode(Some(Inline), Visible), Inline);
 }

@@ -56,11 +56,26 @@ pub(super) async fn process_turn_with_input(
         return;
     }
 
+    // Commands queued with Ctrl+Enter run before queued prompts, matching the
+    // remote dispatcher. If one starts its own turn, the prompts wait for it.
+    if !app.queued_commands.is_empty() {
+        app.is_processing = false;
+        app.status = ProcessingStatus::Idle;
+        super::input::run_queued_commands_local(app);
+        if app.pending_turn || app.is_processing {
+            finish_turn(app);
+            return;
+        }
+    }
+
     app.process_queued_messages(terminal, event_stream).await;
     finish_turn(app);
 }
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
+    let reset_redraw = app.poll_usage_reset();
+    app.refresh_terminal_title_metrics();
+    app.sync_herdr_agent_state();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
     // the last phase that made progress.
     crate::logging::watchdog::beat("tui.idle_tick");
@@ -69,7 +84,8 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // draw site. Excluding it here instead would mean animation ticks request
     // no paint at all, which drops the animation to whatever unrelated events
     // happen to trigger (~4fps in practice).
-    let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    let mut needs_redraw = reset_redraw | crate::tui::periodic_redraw_required(app);
+    needs_redraw |= app.retire_expired_status_notice();
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();
@@ -78,16 +94,21 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.maybe_push_idle_cold_cache_warning();
     needs_redraw |= app.progress_copy_selection_edge_autoscroll();
     app.progress_mouse_scroll_animation();
-    needs_redraw |= app.update_chat_overscroll();
     needs_redraw |= app.update_pinned_images_auto_hide();
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
+    // Same for a resize: adopt the resolved row once the rewrap has rendered.
+    needs_redraw |= app.reconcile_resize_anchor();
     if app.submit_input_on_startup && !app.is_processing {
         app.submit_input_on_startup = false;
         app.submit_input();
+        needs_redraw = true;
+    }
+    if !app.is_processing && !app.pending_queued_dispatch && !app.queued_commands.is_empty() {
+        super::input::run_queued_commands_local(app);
         needs_redraw = true;
     }
     let ops = app.stream_buffer.flush();
@@ -196,6 +217,7 @@ pub(super) fn handle_bus_event(
             true
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
+        Ok(BusEvent::GitInfoRefreshed) => true,
         Ok(BusEvent::UsageReport(results)) => {
             app.handle_usage_report(results);
             true
@@ -238,7 +260,7 @@ pub(super) fn handle_bus_event(
             app.session.provider_session_id = None;
             app.upstream_provider = None;
             app.invalidate_model_picker_cache();
-            app.update_context_limit_for_model(&model);
+            app.update_context_limit_for_model(&model, None);
             app.session.provider_key = provider_key.or_else(|| {
                 crate::provider::MultiProvider::session_provider_key_after_model_switch(
                     &model,
@@ -288,6 +310,7 @@ pub(super) fn handle_bus_event(
             app.handle_dictation_failure(message);
             true
         }
+        Ok(BusEvent::VoiceInputWake) => app.handle_voice_input_wake_local(),
         Ok(BusEvent::CompactionFinished) => app.poll_compaction_completion(),
         Ok(BusEvent::SidePanelUpdated(update)) => {
             if update.session_id == app.session.id {
@@ -403,7 +426,7 @@ fn apply_terminal_event(
 ) -> Result<bool> {
     match event {
         Some(Ok(Event::FocusGained)) => {
-            crate::tui::reapply_configured_terminal_modes();
+            crate::tui::reapply_configured_terminal_modes_after_focus();
             let redraw = app.set_client_focused(true);
             app.note_client_focus(true);
             Ok(redraw)
@@ -413,10 +436,14 @@ fn apply_terminal_event(
             Ok(false)
         }
         Some(Ok(Event::Key(key))) => {
+            let key = jcode_tui_core::korean_input::normalize_key_event(key);
             crate::tui::ui::note_key_event_read();
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
-            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            app.observe_voice_key_release(&key);
+            if app.handle_voice_key_event(&key) {
+                // Voice keys work from every screen and never type.
+            } else if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 app.handle_key_press_event(key)?;
             }
             Ok(true)
@@ -613,6 +640,7 @@ fn handle_plugin_operation_completed(app: &mut App, result: PluginOperationCompl
 }
 
 pub(super) fn finish_turn(app: &mut App) {
+    app.remember_terminal_title_work();
     let turn_duration_secs = app.display_turn_duration_secs();
     app.token_accounting.total_input_tokens += app.streaming.streaming_input_tokens;
     app.token_accounting.total_output_tokens += app.streaming.streaming_output_tokens;

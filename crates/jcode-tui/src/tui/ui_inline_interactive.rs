@@ -186,10 +186,21 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
                 }
             )
         });
-    if is_swarm_agent_model_picker {
-        return Some(
-            " swarm routing is configured by a prompt · /swarm-prompt to edit the active file",
-        );
+    if let Some(global) = agent_models_scope(picker) {
+        return Some(match (global, is_swarm_agent_model_picker) {
+            (true, false) => {
+                " GLOBAL DEFAULT: changes every session without its own choice · Ctrl+G this session instead"
+            }
+            (false, false) => {
+                " THIS SESSION ONLY: other sessions keep the global default · Ctrl+G global default"
+            }
+            (true, true) => {
+                " GLOBAL DEFAULT (all sessions) · Ctrl+G this session · swarm routing: /swarm-prompt"
+            }
+            (false, true) => {
+                " THIS SESSION ONLY · Ctrl+G global default · swarm routing: /swarm-prompt"
+            }
+        });
     }
 
     // The favorite/default hotkeys now work in both the focused picker and the
@@ -207,6 +218,33 @@ fn model_picker_top_hint(picker: &crate::tui::InlineInteractiveState) -> Option<
     } else {
         None
     }
+}
+
+/// Scope of an open `/agents` view: `Some(true)` edits the global default,
+/// `Some(false)` this session, `None` when it is not an `/agents` view. Both
+/// views tag every row with its scope (`Swarm [session]` role rows,
+/// `[global] ...` model route details), so the scope is read from there.
+fn agent_models_scope(picker: &crate::tui::InlineInteractiveState) -> Option<bool> {
+    if picker.kind != crate::tui::PickerKind::Model {
+        return None;
+    }
+    let is_agents_view = picker.is_agent_target_picker()
+        || picker.entries.iter().any(|entry| {
+            matches!(
+                entry.action,
+                crate::tui::PickerAction::AgentModelChoice { .. }
+            )
+        });
+    if !is_agents_view {
+        return None;
+    }
+    Some(picker.entries.iter().any(|entry| {
+        entry.name.ends_with("[global]")
+            || entry
+                .options
+                .iter()
+                .any(|option| option.detail.starts_with("[global]"))
+    }))
 }
 
 fn account_picker_shows_provider_badge(picker: &crate::tui::InlineInteractiveState) -> bool {
@@ -381,6 +419,27 @@ pub(super) fn model_suggestion_lines(
         .min(available_rows - hint_rows - notice_rows)
         .min(picker.filtered.len());
     let start = selected.saturating_sub(visible - 1);
+    // Measure the visible rows, not the whole catalog: offscreen long names
+    // should not push the provider and method out of the suggestion surface.
+    let mut model_width = 0;
+    let mut provider_width = 0;
+    for &index in &picker.filtered[start..start + visible] {
+        let entry = &picker.entries[index];
+        model_width = model_width.max(
+            display_width(&picker_entry_display_name(entry))
+                + if entry.is_current {
+                    " current".len()
+                } else {
+                    0
+                },
+        );
+        if let Some(route) = entry.active_option() {
+            provider_width = provider_width.max(display_width(&route_provider_display(
+                &route.provider,
+                &route.api_method,
+            )));
+        }
+    }
     let mut lines = Vec::new();
     for row in start..start + visible {
         let entry = &picker.entries[picker.filtered[row]];
@@ -405,10 +464,20 @@ pub(super) fn model_suggestion_lines(
         }
         if let Some(route) = route {
             let route_style = if row == selected { style } else { dim };
+            let name_width = display_width(&picker_entry_display_name(entry))
+                + if entry.is_current {
+                    " current".len()
+                } else {
+                    0
+                };
+            spans.push(Span::raw(" ".repeat(model_width - name_width)));
             spans.push(Span::styled(
                 format!(
                     "  {}",
-                    route_provider_display(&route.provider, &route.api_method)
+                    pad_left_display(
+                        &route_provider_display(&route.provider, &route.api_method),
+                        provider_width,
+                    )
                 ),
                 if row == selected && !picker.preview && picker.column == 1 {
                     route_style.bold().underlined()
@@ -1030,6 +1099,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn model_suggestions_align_provider_and_method_columns() {
+        let mut picker = sample_picker();
+        picker.entries[0].is_default = true;
+        let mut other = picker.entries[0].clone();
+        other.name = "模型 (minimal)".into();
+        other.is_current = false;
+        other.is_default = false;
+        other.recommended = false;
+        other.created_date = Some("Sep 2026".into());
+        other.options[0].provider = "Anthropic".into();
+        other.options[0].api_method = "openai-api-key".into();
+        picker.entries.push(other);
+        picker.filtered.push(1);
+        for preview in [false, true] {
+            picker.preview = preview;
+            let lines = model_suggestion_lines(&picker, 3);
+            let texts: Vec<String> = lines
+                .iter()
+                .take(2)
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect()
+                })
+                .collect();
+            let column = |row: usize, label: &str| {
+                display_width(&texts[row][..texts[row].find(label).unwrap()])
+            };
+            assert_eq!(column(0, "openai"), column(1, "Anthropic"));
+            assert_eq!(column(0, "oauth"), column(1, "api key"));
+            assert!(texts[0].contains("default current"));
+            assert!(texts[1].contains("Sep 2026"));
+        }
+    }
+
+    #[test]
+    fn model_suggestions_measure_only_visible_filtered_rows() {
+        let mut picker = sample_picker();
+        let mut hidden = picker.entries[0].clone();
+        hidden.name = "x".repeat(200);
+        hidden.options[0].provider = "y".repeat(200);
+        picker.entries.push(hidden);
+        let baseline = model_suggestion_lines(&picker, 1);
+        picker.filtered.push(1);
+        let lines = model_suggestion_lines(&picker, 1);
+        // The only difference is the remaining-results indicator.
+        assert_eq!(
+            lines[0].spans[..lines[0].spans.len() - 1],
+            baseline[0].spans
+        );
+        picker.filtered = vec![1, 0];
+        picker.selected = 1;
+        let scrolled = model_suggestion_lines(&picker, 1);
+        assert_eq!(
+            scrolled[0].spans[..scrolled[0].spans.len() - 1],
+            baseline[0].spans
+        );
+        assert!(model_suggestion_lines(&picker, 0).is_empty());
+    }
+
     fn sample_account_picker(mixed_providers: bool) -> crate::tui::InlineInteractiveState {
         let mut models = vec![crate::tui::PickerEntry {
             name: "work".to_string(),
@@ -1294,7 +1425,49 @@ mod tests {
 
         let hint = model_picker_top_hint(&picker).expect("swarm picker should show prompt hint");
         assert!(hint.contains("/swarm-prompt"));
-        assert!(hint.contains("configured by a prompt"));
+        assert!(hint.contains("swarm routing"));
+    }
+
+    /// `/agents` must say which settings a choice changes and how to switch:
+    /// the hint follows the `[session]` / `[global]` tags on the rows.
+    #[test]
+    fn agents_pickers_name_their_scope_and_the_toggle() {
+        let mut picker = sample_picker();
+        for entry in &mut picker.entries {
+            entry.action = crate::tui::PickerAction::AgentModelChoice {
+                target: crate::tui::AgentModelTarget::Review,
+                clear_override: false,
+            };
+            for option in &mut entry.options {
+                option.detail = format!("[session] {}", option.detail);
+            }
+        }
+        let hint = model_picker_top_hint(&picker).expect("session hint");
+        assert!(hint.contains("THIS SESSION ONLY"), "{hint}");
+        assert!(hint.contains("Ctrl+G global default"), "{hint}");
+
+        for entry in &mut picker.entries {
+            for option in &mut entry.options {
+                option.detail = option.detail.replacen("[session]", "[global]", 1);
+            }
+        }
+        let hint = model_picker_top_hint(&picker).expect("global hint");
+        assert!(hint.contains("GLOBAL DEFAULT"), "{hint}");
+        assert!(hint.contains("Ctrl+G this session"), "{hint}");
+
+        // The role list carries the scope in its row names.
+        let mut roles = sample_picker();
+        for entry in &mut roles.entries {
+            entry.name = "Swarm [global]".to_string();
+            entry.action =
+                crate::tui::PickerAction::AgentTarget(crate::tui::AgentModelTarget::Swarm);
+        }
+        let hint = model_picker_top_hint(&roles).expect("role list hint");
+        assert!(hint.contains("GLOBAL DEFAULT"), "{hint}");
+
+        // The plain /model picker keeps its own key hint.
+        let hint = model_picker_top_hint(&sample_picker()).expect("model hint");
+        assert!(hint.contains("Ctrl+O set default"), "{hint}");
     }
 
     #[test]

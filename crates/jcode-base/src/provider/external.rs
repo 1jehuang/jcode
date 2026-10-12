@@ -30,16 +30,13 @@ pub const ANTIGRAVITY_RUNTIME: &str = "antigravity";
 /// Registry key for the GitHub Copilot provider runtime.
 pub const COPILOT_RUNTIME: &str = "copilot";
 
-/// Registry key for the deprecated Claude CLI provider runtime.
-pub const CLAUDE_CLI_RUNTIME: &str = "claude-cli";
-
 /// Registry key for the direct Anthropic API provider runtime.
 pub const ANTHROPIC_RUNTIME: &str = "anthropic";
 
 /// Registry key for the OpenAI (Codex) provider runtime.
 pub const OPENAI_RUNTIME: &str = "openai";
 
-/// Registry key for Grok Build's Grok CLI ACP runtime.
+/// Registry key for the Grok Build (Grok CLI subscription) HTTP runtime.
 pub const GROK_BUILD_RUNTIME: &str = "grok-build";
 
 /// Construction spec for the OpenRouter / OpenAI-compatible runtime family.

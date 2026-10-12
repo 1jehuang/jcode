@@ -13,6 +13,10 @@ pub enum ColorCapability {
 static CAPABILITY: OnceLock<ColorCapability> = OnceLock::new();
 
 pub fn color_capability() -> ColorCapability {
+    // This crate's unit tests assert exact truecolor output; never depend on the runner's COLORTERM.
+    if cfg!(test) {
+        return ColorCapability::TrueColor;
+    }
     *CAPABILITY.get_or_init(detect_color_capability)
 }
 

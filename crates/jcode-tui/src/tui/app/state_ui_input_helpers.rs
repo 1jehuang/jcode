@@ -1,7 +1,5 @@
 use super::*;
 use crate::tui::core;
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 #[derive(Clone, Copy)]
 struct RegisteredCommand {
@@ -68,6 +66,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/terminal-setup", "Fix Shift+Enter newlines"),
     RegisteredCommand::public("/commit", "Make logical commits from current changes"),
     RegisteredCommand::public(
+        "/merge",
+        "Merge current branch into main/master and switch to it (no push)",
+    ),
+    RegisteredCommand::public(
         "/commit-push",
         "Make logical commits from current changes, then push",
     ),
@@ -81,6 +83,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Publish a prepared macOS arm64 build immediately; CI adds other platforms",
     ),
     RegisteredCommand::public("/remote", "Reach this session from another machine"),
+    RegisteredCommand::public(
+        "/merge-remote-release",
+        "Merge into main/master, validate, push, and release remotely",
+    ),
     RegisteredCommand::public(
         "/remote-release",
         "Push the release tag immediately; CI builds and publishes every platform",
@@ -130,6 +136,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/refactor", "Run a safe refactor loop"),
     RegisteredCommand::public("/compact", "Compact context"),
     RegisteredCommand::public("/fix", "Recover when the model cannot continue"),
+    RegisteredCommand::public("/voice", "Voice input: speak, then send (Ctrl+Space)"),
     RegisteredCommand::public("/dictate", "Run configured external dictation command"),
     RegisteredCommand::public("/dictation", "Alias for /dictate"),
     RegisteredCommand::public("/memory", "Toggle memory feature"),
@@ -150,6 +157,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/version", "Show current version"),
     RegisteredCommand::public("/changelog", "Show recent changes in this build"),
     RegisteredCommand::public("/info", "Show session info and tokens"),
+    RegisteredCommand::public("/reset", "Review and confirm a banked OpenAI usage reset"),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
         "/productivity",
@@ -170,7 +178,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/keybindings", "Alias for /keys"),
     RegisteredCommand::public(
         "/diff",
-        "Cycle or set diff display mode (off/inline/full/pinned/file)",
+        "Cycle or set diff display mode (off/inline/full/file)",
     ),
     RegisteredCommand::public(
         "/onboarding-preview",
@@ -178,7 +186,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::public(
         "/onboarding-sim",
-        "Walk through every first-run onboarding screen (Alt+5 reset, Cmd+5 toggle)",
+        "Rehearse real first-run onboarding as a new user (Alt+5 restart, Cmd+5 toggle)",
     ),
     RegisteredCommand::public("/reload", "Reload into newest available binary"),
     RegisteredCommand::public("/restart", "Restart with current binary"),
@@ -186,6 +194,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/selfdev", "Open a new self-dev jcode session"),
     RegisteredCommand::public("/update", "Background update and auto reload"),
     RegisteredCommand::public("/update-sim", "Preview update UI safely (Alt+_)"),
+    RegisteredCommand::hidden(
+        "/update-rehearsal",
+        "Self-dev: run the real updater against a fake local release in a sandbox (Alt+Shift+U)",
+    ),
     RegisteredCommand::public("/resume", "Open session picker"),
     RegisteredCommand::public("/sessions", "Alias for /resume"),
     RegisteredCommand::public("/session", "Alias for /resume"),
@@ -197,7 +209,13 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/rename", "Rename current session"),
     RegisteredCommand::public("/fork", "Fork session into a new window (optional prompt)"),
     RegisteredCommand::hidden("/split", "Alias for /fork"),
+    RegisteredCommand::public("/desktop", "Open this session in Jcode Desktop"),
     RegisteredCommand::public("/transfer", "Compact context into a fresh handoff session"),
+    RegisteredCommand::public(
+        "/cloud",
+        "Move this session to a cloud machine and keep working",
+    ),
+    RegisteredCommand::public("/local", "Bring a cloud session back to this machine"),
     RegisteredCommand::public("/workspace", "Niri-style session workspace"),
     RegisteredCommand::public("/quit", "Exit jcode"),
     RegisteredCommand::public("/auth", "Show authentication status"),
@@ -205,7 +223,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/logout", "Log out of a provider"),
     RegisteredCommand::public("/account", "Open the combined account picker"),
     RegisteredCommand::public("/accounts", "Alias for /account"),
-    RegisteredCommand::public("/cache", "Show cache stats or set cache TTL"),
+    RegisteredCommand::public("/cache", "Show cache stats; extend/5m saves Anthropic TTL"),
     RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
     RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
     RegisteredCommand::public("/screenshot", "Capture a screenshot debug state"),
@@ -233,6 +251,10 @@ pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str
         .iter()
         .filter(|command| !command.hidden)
         .map(|command| (command.name, command.help))
+}
+
+pub(crate) fn registered_command_names() -> impl Iterator<Item = &'static str> {
+    REGISTERED_COMMANDS.iter().map(|command| command.name)
 }
 
 impl App {
@@ -505,6 +527,13 @@ impl App {
 
     /// Get command suggestions based on current input (or base input for cycling)
     pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
+        let cursor = if input == self.input {
+            self.cursor_pos.min(input.len())
+        } else {
+            input.len()
+        };
+        let input = super::slash_command_parser::active_token_before_cursor(input, cursor)
+            .map_or(input, |(start, end)| &input[start..end]);
         let input = input.trim_start();
 
         if crate::tui::is_ssh_remote() {
@@ -527,6 +556,28 @@ impl App {
 
         let prefix = input.to_lowercase();
         let prefix_trimmed = prefix.trim_end();
+
+        if prefix.starts_with("/reset ") {
+            return self.rank_suggestions(
+                // Keep the read-only command first even after a trailing space.
+                // Enter must not silently turn review into cancel or confirm.
+                input.trim_end(),
+                vec![
+                    (
+                        "/reset usage limits openai".into(),
+                        "Review an available banked reset (read-only)",
+                    ),
+                    (
+                        "/reset usage limits openai confirm".into(),
+                        "Spend the pending banked reset",
+                    ),
+                    (
+                        "/reset usage limits openai cancel".into(),
+                        "Clear the pending reset confirmation",
+                    ),
+                ],
+            );
+        }
 
         if prefix.starts_with("/model ") || prefix.starts_with("/models ") {
             if let Some(model_spec) = input
@@ -554,8 +605,22 @@ impl App {
                     ("/agents swarm".into(), "Configure swarm/subagent model"),
                     ("/agents review".into(), "Configure code review model"),
                     ("/agents judge".into(), "Configure judge model"),
-                    ("/agents memory".into(), "Configure memory sidecar model"),
-                    ("/agents ambient".into(), "Configure ambient model"),
+                    (
+                        "/agents memory".into(),
+                        "Configure optional memory extraction model",
+                    ),
+                    (
+                        "/agents ambient".into(),
+                        "Configure ambient model [session]",
+                    ),
+                    (
+                        "/agents default".into(),
+                        "Configure saved global agent defaults",
+                    ),
+                    (
+                        "/agents global".into(),
+                        "Configure saved global agent defaults",
+                    ),
                 ],
             );
         }
@@ -761,7 +826,17 @@ impl App {
         }
 
         if prefix.starts_with("/effort ") {
-            let efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+            let efforts = [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "swarm",
+                "swarm-deep",
+            ];
             return self.rank_suggestions(
                 input,
                 efforts
@@ -829,8 +904,9 @@ impl App {
             let suggestions = vec![
                 ("/cache stats".into(), "Show KV cache stats"),
                 ("/cache status".into(), "Alias for /cache stats"),
-                ("/cache 1h".into(), "Use 1 hour cache TTL"),
-                ("/cache 5m".into(), "Use 5 minute cache TTL"),
+                ("/cache extend".into(), "Save 1 hour Anthropic cache TTL"),
+                ("/cache 1h".into(), "Save 1 hour Anthropic cache TTL"),
+                ("/cache 5m".into(), "Save 5 minute Anthropic cache TTL"),
             ];
             return self.rank_suggestions(input, suggestions);
         }
@@ -1351,9 +1427,6 @@ impl App {
         if crate::tui::is_ssh_remote() {
             return false;
         }
-        if self.onboarding_preview_mode {
-            return true;
-        }
         // While the guided onboarding flow is driving the pre-suggestion phases
         // (model select / continue prompt), keep the welcome screen up even
         // though the server may have pushed scaffolding messages. The flow
@@ -1361,7 +1434,13 @@ impl App {
         if self.onboarding_flow_drives_welcome() {
             return true;
         }
-        if !self.display_messages.is_empty() || self.is_processing {
+        // Once the guided phases are done, onboarding lands on the regular
+        // new-session screen. The only remaining welcome body is the
+        // unauthenticated "log in" hint. The preview mimics an empty session,
+        // so it ignores the real transcript here.
+        if (!self.display_messages.is_empty() || self.is_processing)
+            && !self.onboarding_preview_mode
+        {
             return false;
         }
         !self.suggestion_prompts().is_empty()
@@ -1392,9 +1471,6 @@ impl App {
                         choosing: review.choosing,
                         summary_pill: match review.summary_pill {
                             SummaryPill::Continue => crate::tui::ImportSummaryPill::Continue,
-                            SummaryPill::Subscription => {
-                                crate::tui::ImportSummaryPill::Subscription
-                            }
                             SummaryPill::ImportLess => crate::tui::ImportSummaryPill::ImportLess,
                             SummaryPill::Telemetry => crate::tui::ImportSummaryPill::Telemetry,
                         },
@@ -1478,59 +1554,18 @@ impl App {
             return vec![("Log in to get started".to_string(), "/login".to_string())];
         }
 
-        if (!self.display_messages.is_empty() || self.is_processing) && !preview_mode {
-            return Vec::new();
-        }
-
-        let is_new_user = if preview_mode {
-            true
-        } else {
-            Self::is_new_user_install()
-        };
-
-        if !is_new_user {
-            return Vec::new();
-        }
-
-        let mut prompts = vec![
-            (
-                "Customize my terminal theme".to_string(),
-                "Find what terminal I'm using, then change its background color to pitch black and make it slightly transparent. Apply the changes for me.".to_string(),
-            ),
-            (
-                "Review something I've been working on".to_string(),
-                "Find a recent file or project I've been working on, read through it, and give me concrete suggestions on how I could improve it.".to_string(),
-            ),
-        ];
-
-        // macOS-only: offer to install ScrollWM, a scrolling window manager for
-        // macOS. The web installer downloads the latest release, strips the
-        // Gatekeeper quarantine, installs to ~/Applications, and launches it,
-        // with no sudo and no system files touched.
-        if cfg!(target_os = "macos") {
-            prompts.push((
-                "Install ScrollWM (scrolling window manager for macOS)".to_string(),
-                "Install ScrollWM, the scrolling window manager for macOS, by running its official one-line installer: `curl -fsSL https://raw.githubusercontent.com/1jehuang/scrollwm/main/scripts/web-install.sh | bash`. It downloads the latest release, removes the Gatekeeper quarantine, installs to ~/Applications, and launches it (no sudo, no system files touched). Run the command for me and report whether it succeeded.".to_string(),
-            ));
-        }
-
-        prompts.push((
-            "Continue my last Codex CLI / Claude Code session".to_string(),
-            latest_external_cli_continuation_prompt().unwrap_or_else(|| {
-                "Find my recent Codex or Claude Code sessions, identify the latest useful one, summarize what was happening, and continue from there.".to_string()
-            }),
-        ));
-
-        prompts.push((
-            "Find my social media and roast me".to_string(),
-            "Find a social media platform I use, look around at my profile and posts, then give me a brutally honest roast based on what you see.".to_string(),
-        ));
-
-        prompts
+        Vec::new()
     }
 
     /// Autocomplete current input - cycles through suggestions on repeated Tab
     pub fn autocomplete(&mut self) -> bool {
+        if let Some(range) =
+            super::slash_command_parser::active_token_before_cursor(&self.input, self.cursor_pos)
+        {
+            let suggestions = self.get_suggestions_for(&self.input);
+            return self.autocomplete_active_slash_token(range, suggestions);
+        }
+
         // Get suggestions for current input
         let current_suggestions = self.get_suggestions_for(&self.input);
 
@@ -1590,6 +1625,67 @@ impl App {
         true
     }
 
+    fn autocomplete_active_slash_token(
+        &mut self,
+        range: (usize, usize),
+        current_suggestions: Vec<(String, &'static str)>,
+    ) -> bool {
+        let current_token = self.input[range.0..range.1].to_string();
+
+        if let Some((ref base, idx)) = self.tab_completion_state.clone()
+            && super::slash_command_parser::active_token_before_cursor(base, base.len()).is_some()
+        {
+            let base_suggestions = self.get_suggestions_for(base);
+            if base_suggestions.len() > 1
+                && base_suggestions
+                    .iter()
+                    .any(|(command, _)| command == &current_token)
+            {
+                let next_index = (idx + 1) % base_suggestions.len();
+                let (command, _) = &base_suggestions[next_index];
+                self.remember_input_undo_state();
+                self.input.replace_range(range.0..range.1, command.as_str());
+                self.cursor_pos = range.0 + command.len();
+                self.tab_completion_state = Some((base.clone(), next_index));
+                return true;
+            }
+        }
+
+        if current_suggestions.is_empty() {
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        if current_suggestions.len() == 1 && current_suggestions[0].0 == current_token {
+            if Self::command_accepts_args(&current_token) {
+                self.remember_input_undo_state();
+                self.input
+                    .replace_range(range.0..range.1, &format!("{} ", current_token));
+                self.cursor_pos = range.1 + 1;
+                return true;
+            }
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        let selected = self
+            .command_suggestion_selected
+            .min(current_suggestions.len().saturating_sub(1));
+        let (command, _) = &current_suggestions[selected];
+        let base = self.input.clone();
+        let mut replacement = command.clone();
+        if current_suggestions.len() == 1 && Self::command_accepts_args(command) {
+            replacement.push(' ');
+        }
+        self.remember_input_undo_state();
+        self.input
+            .replace_range(range.0..range.1, replacement.as_str());
+        self.cursor_pos = range.0 + replacement.len();
+        self.tab_completion_state = Some((base, selected));
+        self.command_suggestion_selected = 0;
+        true
+    }
+
     /// Reset tab completion state (call when user types/modifies input)
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
@@ -1597,6 +1693,7 @@ impl App {
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
+        self.input_typing_undo = None;
         let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
         if self.input_undo_stack.last() == Some(&snapshot) {
             return;
@@ -1609,10 +1706,16 @@ impl App {
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.input_typing_undo = None;
+        self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
+        self.input_typing_undo = None;
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+            // The composer now holds a restored draft, so the copy stashed by a
+            // history jump is stale: a later Down must not resurrect it.
+            self.history_draft = None;
             self.input = input;
             self.cursor_pos = cursor_pos.min(self.input.len());
             self.reset_tab_completion();
@@ -1655,6 +1758,7 @@ impl App {
                 | "/account openai switch"
                 | "/account openai remove"
                 | "/usage"
+                | "/reset"
                 | "/subscription"
                 | "/poke"
                 | "/memory"
@@ -1684,384 +1788,9 @@ impl App {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ExternalCliSuggestionCandidate {
-    source: &'static str,
-    path: PathBuf,
-    modified: SystemTime,
-    session_id: Option<String>,
-    working_dir: Option<String>,
-    context: Option<String>,
-}
-
-/// How long a scan of the external-CLI session directories is reused before we
-/// re-scan. The onboarding welcome screen animates a donut, so it redraws at
-/// animation FPS and calls [`latest_external_cli_continuation_prompt`] multiple
-/// times per frame. Scanning `~/.codex/sessions` / `~/.claude/projects` (reading
-/// and JSON-parsing the newest transcripts) can cost hundreds of milliseconds
-/// for users with large histories, which would otherwise make first-run
-/// onboarding extremely laggy. A short TTL keeps the suggestion fresh while
-/// reducing the cost to a single scan per window.
-const EXTERNAL_CLI_PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Cached result of the external-CLI continuation-prompt scan, with the time it
-/// was computed. `None` value means "scanned, but nothing found".
-type ExternalCliPromptCache = std::sync::RwLock<Option<(Option<String>, std::time::Instant)>>;
-static EXTERNAL_CLI_PROMPT_CACHE: std::sync::LazyLock<ExternalCliPromptCache> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
-
-/// Cached front-end for [`latest_external_cli_continuation_prompt_uncached`].
-///
-/// See [`EXTERNAL_CLI_PROMPT_CACHE_TTL`] for why this is cached: the uncached
-/// scan reads and parses the newest external transcripts, which is expensive for
-/// large histories and would otherwise run several times per onboarding frame.
-fn latest_external_cli_continuation_prompt() -> Option<String> {
-    if let Ok(cache) = EXTERNAL_CLI_PROMPT_CACHE.read()
-        && let Some((ref value, ref when)) = *cache
-        && when.elapsed() < EXTERNAL_CLI_PROMPT_CACHE_TTL
-    {
-        return value.clone();
-    }
-
-    let value = latest_external_cli_continuation_prompt_uncached();
-
-    if let Ok(mut cache) = EXTERNAL_CLI_PROMPT_CACHE.write() {
-        *cache = Some((value.clone(), std::time::Instant::now()));
-    }
-
-    value
-}
-
-fn latest_external_cli_continuation_prompt_uncached() -> Option<String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let mut candidates = Vec::new();
-    candidates.extend(latest_jsonl_suggestion_candidates(
-        &home.join(".codex/sessions"),
-        "Codex",
-        32,
-    ));
-    candidates.extend(latest_jsonl_suggestion_candidates(
-        &home.join(".claude/projects"),
-        "Claude Code",
-        32,
-    ));
-    let candidate = candidates
-        .into_iter()
-        .max_by_key(|candidate| candidate.modified)?;
-    let location = candidate
-        .working_dir
-        .as_deref()
-        .map_or_else(String::new, |dir| {
-            let label = Path::new(dir)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(dir);
-            format!(" in {label}")
-        });
-    let cwd = candidate
-        .working_dir
-        .as_deref()
-        .map(|dir| format!(" cwd `{dir}`"))
-        .unwrap_or_default();
-    let session_id = candidate
-        .session_id
-        .as_deref()
-        .map(|id| format!(" session `{id}`"))
-        .unwrap_or_default();
-    let context = candidate
-        .context
-        .as_deref()
-        .map(|context| format!(": {}", compact_suggestion_text(context, 72)))
-        .unwrap_or_default();
-    Some(format!(
-        "Continue the latest {source} session{location}. Transcript: `{path}`.{session_id}{cwd}{context}. Read that transcript if needed, summarize the current state, then continue from there.",
-        source = candidate.source,
-        path = candidate.path.display(),
-    ))
-}
-
-fn latest_jsonl_suggestion_candidates(
-    root: &Path,
-    source: &'static str,
-    scan_limit: usize,
-) -> Vec<ExternalCliSuggestionCandidate> {
-    if !root.is_dir() {
-        return Vec::new();
-    }
-    let mut files = Vec::new();
-    collect_jsonl_suggestion_files(root, &mut files);
-    files.sort_by(|a, b| b.1.cmp(&a.1));
-    files.truncate(scan_limit);
-    files
-        .into_iter()
-        .filter_map(|(path, modified)| suggestion_candidate_from_jsonl(&path, source, modified))
-        .collect()
-}
-
-fn collect_jsonl_suggestion_files(root: &Path, files: &mut Vec<(PathBuf, SystemTime)>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if metadata.is_dir() {
-            collect_jsonl_suggestion_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            files.push((path, metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
-        }
-    }
-}
-
-fn suggestion_candidate_from_jsonl(
-    path: &Path,
-    source: &'static str,
-    modified: SystemTime,
-) -> Option<ExternalCliSuggestionCandidate> {
-    let content = std::fs::read_to_string(path).ok()?;
-    let mut working_dir = None;
-    let mut session_id = None;
-    let mut last_user_text = None;
-    let mut summary_text = None;
-    for line in content.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        if working_dir.is_none() {
-            working_dir = value
-                .get("cwd")
-                .or_else(|| value.get("payload").and_then(|payload| payload.get("cwd")))
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
-        }
-        if session_id.is_none() {
-            session_id = value
-                .get("sessionId")
-                .or_else(|| value.get("session_id"))
-                .or_else(|| {
-                    value
-                        .get("payload")
-                        .and_then(|payload| payload.get("session_id"))
-                })
-                .or_else(|| value.get("payload").and_then(|payload| payload.get("id")))
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
-        }
-        if summary_text.is_none() {
-            summary_text = value
-                .get("summary")
-                .or_else(|| value.get("lastPrompt"))
-                .or_else(|| {
-                    value
-                        .get("payload")
-                        .and_then(|payload| payload.get("summary"))
-                })
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-                .map(str::to_string);
-        }
-        if jsonl_suggestion_role(&value) == Some("user")
-            && let Some(text) = jsonl_suggestion_text(&value)
-            && !text.trim().is_empty()
-        {
-            last_user_text = Some(text);
-        }
-    }
-    if working_dir.is_none()
-        && session_id.is_none()
-        && last_user_text.is_none()
-        && summary_text.is_none()
-    {
-        return None;
-    }
-    Some(ExternalCliSuggestionCandidate {
-        source,
-        path: path.to_path_buf(),
-        modified,
-        session_id,
-        working_dir,
-        context: last_user_text.or(summary_text),
-    })
-}
-
-fn jsonl_suggestion_role(value: &serde_json::Value) -> Option<&str> {
-    value
-        .get("message")
-        .and_then(|message| message.get("role"))
-        .or_else(|| value.get("role"))
-        .or_else(|| value.get("payload").and_then(|payload| payload.get("role")))
-        .or_else(|| value.get("type"))
-        .and_then(|role| role.as_str())
-}
-
-fn jsonl_suggestion_text(value: &serde_json::Value) -> Option<String> {
-    let content = value
-        .get("message")
-        .and_then(|message| message.get("content"))
-        .or_else(|| value.get("lastPrompt"))
-        .or_else(|| value.get("content"))
-        .or_else(|| {
-            value
-                .get("payload")
-                .and_then(|payload| payload.get("content"))
-        })?;
-    if let Some(text) = content
-        .as_str()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    {
-        return Some(text.to_string());
-    }
-    let text = content
-        .as_array()?
-        .iter()
-        .filter_map(|block| {
-            block
-                .get("text")
-                .or_else(|| block.get("input_text"))
-                .or_else(|| block.get("output_text"))
-                .or_else(|| block.get("content"))
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!text.is_empty()).then_some(text)
-}
-
-fn compact_suggestion_text(text: &str, max_chars: usize) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-    let mut truncated = compact
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
-}
-
 #[cfg(test)]
-mod external_cli_suggestion_tests {
+mod command_registry_tests {
     use super::*;
-    use std::io::Write;
-
-    /// Faithful, real-home measurement of the per-frame onboarding cost.
-    /// Ignored by default (depends on local ~/.codex and ~/.claude contents).
-    /// Run with:
-    ///   cargo test -p jcode-tui --lib onboarding_suggestion_scan_cost -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn onboarding_suggestion_scan_cost() {
-        use std::time::Instant;
-
-        // Cold: the uncached scan that reads + JSON-parses the newest external
-        // transcripts. This is the work that used to run several times per frame.
-        let cold_start = Instant::now();
-        let cold = latest_external_cli_continuation_prompt_uncached();
-        let cold_ms = cold_start.elapsed().as_secs_f64() * 1000.0;
-
-        // Warm: the cached front-end the onboarding screen actually calls. Prime
-        // the cache once, then measure repeated calls (as a redrawing frame does).
-        let _ = latest_external_cli_continuation_prompt();
-        let runs = 1000;
-        let warm_start = Instant::now();
-        let mut warm = None;
-        for _ in 0..runs {
-            warm = latest_external_cli_continuation_prompt();
-        }
-        let warm_ms = warm_start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
-
-        eprintln!(
-            "external-cli continuation prompt: cold(uncached)={cold_ms:.1} ms, \
-             warm(cached, avg of {runs})={warm_ms:.4} ms; cold_some={}, warm_some={}",
-            cold.is_some(),
-            warm.is_some()
-        );
-    }
-
-    #[test]
-    fn parses_claude_code_jsonl_with_session_path_and_context() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("session.jsonl");
-        std::fs::write(
-            &path,
-            r#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-05-28T02:30:54.188Z","sessionId":"abc","content":"queued prompt"}
-{"type":"user","message":{"role":"user","content":"Organize my windows by project"},"cwd":"/home/jeremy","sessionId":"abc"}
-{"type":"last-prompt","lastPrompt":"fallback prompt","sessionId":"abc"}
-"#,
-        )
-        .expect("write fixture");
-
-        let candidate =
-            suggestion_candidate_from_jsonl(&path, "Claude Code", SystemTime::UNIX_EPOCH)
-                .expect("candidate");
-        assert_eq!(candidate.source, "Claude Code");
-        assert_eq!(candidate.path, path);
-        assert_eq!(candidate.session_id.as_deref(), Some("abc"));
-        assert_eq!(candidate.working_dir.as_deref(), Some("/home/jeremy"));
-        assert_eq!(
-            candidate.context.as_deref(),
-            Some("Organize my windows by project")
-        );
-    }
-
-    #[test]
-    fn parses_codex_input_text_blocks() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("codex.jsonl");
-        std::fs::write(
-            &path,
-            r#"{"type":"session_meta","payload":{"id":"sid","cwd":"/home/jeremy/jcode"}}
-{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"check in on jcode"}]}}
-"#,
-        )
-        .expect("write fixture");
-
-        let candidate = suggestion_candidate_from_jsonl(&path, "Codex", SystemTime::UNIX_EPOCH)
-            .expect("candidate");
-        assert_eq!(candidate.session_id.as_deref(), Some("sid"));
-        assert_eq!(candidate.working_dir.as_deref(), Some("/home/jeremy/jcode"));
-        assert_eq!(candidate.context.as_deref(), Some("check in on jcode"));
-    }
-
-    #[test]
-    fn discovery_sorts_after_collecting_nested_files() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let old_dir = temp.path().join("a");
-        let new_dir = temp.path().join("z/deep");
-        std::fs::create_dir_all(&old_dir).expect("old dir");
-        std::fs::create_dir_all(&new_dir).expect("new dir");
-        std::fs::write(
-            old_dir.join("old.jsonl"),
-            r#"{"type":"user","message":{"role":"user","content":"old"},"sessionId":"old"}"#,
-        )
-        .expect("old fixture");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-
-        let new_path = new_dir.join("new.jsonl");
-        std::fs::write(
-            &new_path,
-            r#"{"type":"user","message":{"role":"user","content":"new"},"sessionId":"new"}"#,
-        )
-        .expect("new fixture");
-        // Ensure the newer file has a strictly later mtime even on coarse filesystems.
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&new_path)
-            .expect("open new");
-        writeln!(file).expect("touch new");
-
-        let candidates = latest_jsonl_suggestion_candidates(temp.path(), "Claude Code", 1);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].context.as_deref(), Some("new"));
-    }
 
     /// Every slash command must be registered exactly once. Duplicate entries
     /// mean two different handlers claim the same name, so which one runs

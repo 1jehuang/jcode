@@ -342,3 +342,79 @@ async fn read_tool_prefers_end_line_over_limit() {
         output.output
     );
 }
+
+fn tiny_bmp_bytes() -> Vec<u8> {
+    // 2x2 24-bit BMP, rows padded to 4 bytes.
+    let row: [u8; 8] = [0, 0, 255, 0, 255, 0, 0, 0];
+    let pixels: Vec<u8> = row.iter().chain(row.iter()).copied().collect();
+    let mut out = Vec::new();
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(54 + pixels.len() as u32).to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&2i32.to_le_bytes());
+    out.extend_from_slice(&2i32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&pixels);
+    out
+}
+
+/// #1712: reading a BMP must attach a PNG, never `image/bmp`, which every
+/// provider rejects and which used to brick the session.
+#[tokio::test]
+async fn read_tool_converts_bmp_to_png_image_block() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("pic.bmp"), tiny_bmp_bytes()).expect("write bmp");
+
+    let output = ReadTool::new()
+        .execute(
+            json!({"file_path": "pic.bmp"}),
+            make_ctx(temp.path().to_path_buf()),
+        )
+        .await
+        .expect("read execution should succeed");
+
+    assert_eq!(output.images.len(), 1, "output={:?}", output.output);
+    assert_eq!(output.images[0].media_type, "image/png");
+    let bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &output.images[0].data,
+    )
+    .expect("valid base64");
+    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(
+        output.output.contains("Converted from BMP"),
+        "{}",
+        output.output
+    );
+}
+
+/// Garbage behind an image extension produces text only, with a reason.
+#[tokio::test]
+async fn read_tool_refuses_undecodable_image_without_image_block() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("fake.png"), b"not really a png").expect("write");
+
+    let output = ReadTool::new()
+        .execute(
+            json!({"file_path": "fake.png"}),
+            make_ctx(temp.path().to_path_buf()),
+        )
+        .await
+        .expect("read execution should succeed");
+
+    assert!(output.images.is_empty());
+    assert!(
+        output.output.contains("Not sent to the model"),
+        "{}",
+        output.output
+    );
+}

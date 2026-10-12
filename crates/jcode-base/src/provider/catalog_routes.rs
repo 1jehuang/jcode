@@ -10,8 +10,9 @@ use super::{
     build_openrouter_fallback_provider_route, configured_standard_openrouter_profile_routes,
     copilot, dedupe_model_routes, direct_openai_compatible_profile_routes,
     format_account_model_availability_detail, is_listable_model_name, known_anthropic_model_ids,
-    known_openai_model_ids, model_availability_for_account, openrouter,
-    openrouter_catalog_model_id, provider_for_model, standard_openrouter_profile_configured,
+    known_openai_model_ids_for_scope, model_availability_for_account, model_availability_for_scope,
+    openrouter, openrouter_catalog_model_id, provider_for_model,
+    standard_openrouter_profile_configured,
 };
 
 /// Build the fast local route snapshot used by the TUI model picker while the
@@ -173,35 +174,32 @@ pub fn append_simplified_anthropic_model_routes(
     auth: &AuthStatus,
 ) {
     let model = model.into();
-    if auth.anthropic.has_oauth {
+    for (oauth, configured) in [
+        (false, auth.anthropic.has_api_key),
+        (true, auth.anthropic.has_oauth),
+    ] {
+        // Keep both routes discoverable even before credentials are configured.
+        let (available, detail) = if !configured {
+            (
+                false,
+                if oauth {
+                    "no Claude login"
+                } else {
+                    "no API key"
+                }
+                .to_string(),
+            )
+        } else if oauth {
+            anthropic_oauth_route_availability(&model)
+        } else {
+            anthropic_api_key_route_availability(&model)
+        };
         routes.push(ModelRoute {
             model: model.clone(),
             provider: "Anthropic".to_string(),
-            api_method: "claude-oauth".to_string(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        });
-    }
-    if auth.anthropic.has_api_key {
-        routes.push(ModelRoute {
-            model: model.clone(),
-            provider: "Anthropic".to_string(),
-            api_method: "claude-api".to_string(),
-            available: true,
-            detail: String::new(),
-            usage: None,
-            cheapness: None,
-        });
-    }
-    if !auth.anthropic.has_oauth && !auth.anthropic.has_api_key {
-        routes.push(ModelRoute {
-            model,
-            provider: "Anthropic".to_string(),
-            api_method: "claude-oauth".to_string(),
-            available: false,
-            detail: "no credentials".to_string(),
+            api_method: if oauth { "claude-oauth" } else { "claude-api" }.to_string(),
+            available,
+            detail,
             usage: None,
             cheapness: None,
         });
@@ -329,70 +327,106 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
 }
 
 /// Anthropic models via OAuth and/or API key.
-fn append_anthropic_routes(
-    provider: &MultiProvider,
+pub(super) fn append_anthropic_routes(
+    _provider: &MultiProvider,
     routes: &mut Vec<ModelRoute>,
     has_oauth: bool,
     has_api_key: bool,
 ) {
-    let anthropic_models = if let Some(anthropic) = provider.anthropic_provider() {
-        anthropic.available_models_for_switching()
-    } else if let Some(claude) = provider.claude_provider() {
-        claude.available_models_for_switching()
-    } else {
-        known_anthropic_model_ids()
-    };
-
-    for model in anthropic_models {
-        let (available, detail) = if has_oauth && !has_api_key {
-            anthropic_oauth_route_availability(&model)
-        } else {
-            (true, String::new())
-        };
-
-        if has_oauth {
-            routes.push(build_anthropic_oauth_route(
-                &model,
-                available,
-                detail.clone(),
-            ));
-        }
-        if has_api_key {
-            let (ak_available, ak_detail) = anthropic_api_key_route_availability(&model);
-            routes.push(ModelRoute {
-                model: model.to_string(),
-                provider: "Anthropic".to_string(),
-                api_method: "claude-api".to_string(),
-                available: ak_available,
-                detail: ak_detail,
-                usage: None,
-                cheapness: cheapness_for_route(&model, "Anthropic", "claude-api"),
-            });
-        }
-        if !has_oauth && !has_api_key {
-            routes.push(ModelRoute {
-                model: model.to_string(),
-                provider: "Anthropic".to_string(),
-                api_method: "claude-oauth".to_string(),
-                available: false,
-                detail: "no credentials".to_string(),
-                usage: None,
-                cheapness: cheapness_for_route(&model, "Anthropic", "claude-oauth"),
-            });
+    for (oauth, configured) in [(false, has_api_key), (true, has_oauth)] {
+        let scope = super::anthropic_catalog_scope_for_route(oauth);
+        for model in super::known_anthropic_model_ids_for_scope(&scope) {
+            let (available, detail) = if !configured {
+                (
+                    false,
+                    if oauth {
+                        "no Claude login"
+                    } else {
+                        "no API key"
+                    }
+                    .to_string(),
+                )
+            } else if oauth {
+                anthropic_oauth_route_availability(&model)
+            } else {
+                anthropic_api_key_route_availability(&model)
+            };
+            if oauth {
+                routes.push(build_anthropic_oauth_route(&model, available, detail));
+            } else {
+                routes.push(ModelRoute {
+                    model: model.clone(),
+                    provider: "Anthropic".to_string(),
+                    api_method: "claude-api".to_string(),
+                    available,
+                    detail,
+                    usage: None,
+                    cheapness: cheapness_for_route(&model, "Anthropic", "claude-api"),
+                });
+            }
         }
     }
 }
 
 /// OpenAI models via OAuth and/or API key, with per-account availability.
+///
+/// The ChatGPT/Codex OAuth catalog and the platform API-key catalog list
+/// different models, so each route is offered only for models in its own
+/// credential's catalog and judged against that catalog's availability. Using
+/// one shared list advertised API-only models under OAuth (and vice versa),
+/// and the switch then failed against the other credential's catalog.
 fn append_openai_routes(
     provider: &MultiProvider,
     routes: &mut Vec<ModelRoute>,
     openai_auth: &crate::auth::AuthStatus,
 ) {
-    let openai_models = if let Some(openai) = provider.openai_provider() {
-        openai.available_models_for_switching()
+    let has_runtime = provider.openai_provider().is_some();
+    let oauth_scope = super::openai_catalog_scope_for_credential(true, "");
+    let api_scope =
+        crate::provider_catalog::load_api_key_from_env_or_config("OPENAI_API_KEY", "openai.env")
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .map(|key| super::openai_catalog_scope_for_credential(false, &key));
+
+    let oauth_models = known_openai_model_ids_for_scope(&oauth_scope);
+    let api_models = api_scope
+        .as_deref()
+        .filter(|_| openai_auth.openai_has_api_key)
+        .map(|scope| {
+            known_openai_model_ids_for_scope(scope)
+                .into_iter()
+                .filter(|model| is_listable_model_name(model))
+                .collect::<Vec<_>>()
+        });
+    let mut openai_models = if openai_auth.openai_has_oauth || api_models.is_none() {
+        oauth_models.clone()
     } else {
-        known_openai_model_ids()
+        Vec::new()
+    };
+    for model in api_models.iter().flatten() {
+        if !openai_models.contains(model) {
+            openai_models.push(model.clone());
+        }
+    }
+
+    let route_availability = |scope: &str, model: &str| -> (bool, String) {
+        if !has_runtime {
+            return (false, "no credentials".to_string());
+        }
+        let availability = model_availability_for_scope(scope, model);
+        match availability.state {
+            AccountModelAvailabilityState::Available => (true, String::new()),
+            AccountModelAvailabilityState::Unavailable => (
+                false,
+                format_account_model_availability_detail(&availability)
+                    .unwrap_or_else(|| "not available".to_string()),
+            ),
+            AccountModelAvailabilityState::Unknown => {
+                let detail = format_account_model_availability_detail(&availability)
+                    .unwrap_or_else(|| "availability unknown".to_string());
+                (true, detail)
+            }
+        }
     };
 
     for model in openai_models {
@@ -400,31 +434,13 @@ fn append_openai_routes(
             routes.push(build_chatgpt_web_route());
             continue;
         }
-        let availability = model_availability_for_account(&model);
-        let (available, detail) = if provider.openai_provider().is_none() {
-            (false, "no credentials".to_string())
-        } else {
-            match availability.state {
-                AccountModelAvailabilityState::Available => (true, String::new()),
-                AccountModelAvailabilityState::Unavailable => (
-                    false,
-                    format_account_model_availability_detail(&availability)
-                        .unwrap_or_else(|| "not available".to_string()),
-                ),
-                AccountModelAvailabilityState::Unknown => {
-                    let detail = format_account_model_availability_detail(&availability)
-                        .unwrap_or_else(|| "availability unknown".to_string());
-                    (true, detail)
-                }
-            }
-        };
         // GPT Pro models are platform-API-only: never offer an OAuth route
         // for them (the Codex backend rejects them for ChatGPT accounts).
         if jcode_provider_core::is_openai_api_only_pro_model(&model) {
             if openai_auth.openai_has_api_key {
                 routes.push(build_openai_api_key_route(
                     &model,
-                    provider.openai_provider().is_some(),
+                    has_runtime,
                     String::new(),
                 ));
             } else {
@@ -436,17 +452,19 @@ fn append_openai_routes(
             }
             continue;
         }
-        if openai_auth.openai_has_oauth {
-            routes.push(build_openai_oauth_route(&model, available, detail.clone()));
+        let in_oauth = oauth_models.contains(&model);
+        if openai_auth.openai_has_oauth && in_oauth {
+            let (available, detail) = route_availability(&oauth_scope, &model);
+            routes.push(build_openai_oauth_route(&model, available, detail));
         }
-        if openai_auth.openai_has_api_key {
-            routes.push(build_openai_api_key_route(
-                &model,
-                provider.openai_provider().is_some(),
-                String::new(),
-            ));
+        if let (Some(api_scope), Some(api_models)) = (api_scope.as_deref(), api_models.as_ref())
+            && api_models.contains(&model)
+        {
+            let (available, detail) = route_availability(api_scope, &model);
+            routes.push(build_openai_api_key_route(&model, available, detail));
         }
         if !openai_auth.openai_has_oauth && !openai_auth.openai_has_api_key {
+            let (_, detail) = route_availability(&oauth_scope, &model);
             routes.push(build_openai_oauth_route(&model, false, detail));
         }
     }
@@ -956,29 +974,8 @@ pub fn remote_model_routes_fallback(
         let mut added_any = false;
 
         if provider_for_model(model) == Some("claude") {
-            if auth.anthropic.has_oauth {
-                let (available, detail) = anthropic_oauth_route_availability(model);
-                routes.push(build_anthropic_oauth_route(model, available, detail));
-                added_any = true;
-            }
-            // An Anthropic API key is an equally valid direct route. Without
-            // this, a model that only reaches the picker via the names-only
-            // fallback path (e.g. a newly released model whose detailed route
-            // frame was oversized) shows an OAuth route but silently loses its
-            // API-key route even though the key works.
-            if auth.anthropic.has_api_key {
-                let (available, detail) = anthropic_api_key_route_availability(model);
-                routes.push(ModelRoute {
-                    model: model.clone(),
-                    provider: "Anthropic".to_string(),
-                    api_method: "claude-api".to_string(),
-                    available,
-                    detail,
-                    usage: None,
-                    cheapness: cheapness_for_route(model, "Anthropic", "claude-api"),
-                });
-                added_any = true;
-            }
+            append_simplified_anthropic_model_routes(&mut routes, model.clone(), &auth);
+            added_any = true;
         }
 
         if jcode_provider_core::model_id::matches_known_model(model, ALL_OPENAI_MODELS) {
@@ -1349,6 +1346,7 @@ mod tests {
                         context_length: None,
                         pricing: jcode_provider_openrouter::ModelPricing::default(),
                         created: None,
+                        ..Default::default()
                     })
                     .collect(),
             };
@@ -1447,12 +1445,20 @@ mod tests {
 
     #[test]
     fn simplified_anthropic_routes_preserve_oauth_vs_api_key_state_space() {
-        for (has_oauth, has_api_key, expected_methods) in [
-            (true, false, vec!["claude-oauth"]),
-            (false, true, vec!["claude-api"]),
-            (true, true, vec!["claude-oauth", "claude-api"]),
-            (false, false, vec!["claude-oauth"]),
+        let mut guard = EnvGuard::new();
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "JCODE_ANTHROPIC_AUTH",
+            "JCODE_ANTHROPIC_API_KEY_NAME",
+            "JCODE_ANTHROPIC_ENV_FILE",
         ] {
+            guard.vars.push((key, std::env::var_os(key)));
+            crate::env::remove_var(key);
+        }
+        super::super::models::reset_model_catalog_services_for_tests();
+        for (has_oauth, has_api_key) in [(true, false), (false, true), (true, true), (false, false)]
+        {
             let auth = AuthStatus {
                 anthropic: ProviderAuth {
                     state: if has_oauth || has_api_key {
@@ -1474,7 +1480,9 @@ mod tests {
 
             append_simplified_anthropic_model_routes(
                 &mut routes,
-                "claude-opus-4-6".to_string(),
+                // Test credential state independently of Opus subscription
+                // policy and optional long-context extra-usage requirements.
+                "claude-sonnet-4-6".to_string(),
                 &auth,
             );
 
@@ -1483,15 +1491,23 @@ mod tests {
                 .map(|route| route.api_method.as_str())
                 .collect::<Vec<_>>();
             assert_eq!(
-                methods, expected_methods,
+                methods,
+                vec!["claude-api", "claude-oauth"],
                 "oauth={has_oauth} api={has_api_key}"
             );
             assert!(routes.iter().all(|route| route.provider == "Anthropic"));
+            assert_eq!(routes[0].available, has_api_key);
+            assert_eq!(routes[1].available, has_oauth);
             assert_eq!(
-                routes.iter().all(|route| route.available),
-                has_oauth || has_api_key
+                routes[0].detail,
+                if has_api_key { "" } else { "no API key" }
+            );
+            assert_eq!(
+                routes[1].detail,
+                if has_oauth { "" } else { "no Claude login" }
             );
         }
+        super::super::models::reset_model_catalog_services_for_tests();
     }
 
     /// Issue #694 through the real path a user hits: a custom
@@ -1664,6 +1680,7 @@ mod tests {
                     context_length: None,
                     pricing: jcode_provider_openrouter::ModelPricing::default(),
                     created: None,
+                    ..Default::default()
                 })
                 .collect(),
         };

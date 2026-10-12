@@ -651,6 +651,12 @@ impl BackgroundTaskManager {
         let output_path = self.output_dir.join(format!("{}.output", task_id));
         let status_path = self.output_dir.join(format!("{}.status.json", task_id));
 
+        // Retain an output artifact before publishing the running task or
+        // returning its ID. Adopted work buffers its output until completion,
+        // when the wrapper below replaces this initially empty file. Create it
+        // before spawning that wrapper so a fast completion cannot be truncated.
+        let _ = std::fs::write(&output_path, "");
+
         let initial_status = TaskStatusFile {
             task_id: task_id.clone(),
             tool_name: tool_name.to_string(),

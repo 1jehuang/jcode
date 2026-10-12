@@ -62,6 +62,7 @@ fn named_profile_static_models_survive_live_catalog_refresh() {
             context_length: Some(128_000),
             pricing: Default::default(),
             created: None,
+            ..Default::default()
         }];
         cache.fetched = true;
         cache.cached_at = Some(1);
@@ -173,6 +174,60 @@ context_window = 128000
     assert!(
         models.iter().any(|m| m == "vendor-live-model"),
         "live catalog models must still be offered: {models:?}"
+    );
+}
+
+/// A pinned `<model>@<Provider>` variant is routing syntax, not the catalog id.
+/// OpenRouter's `/models` lists `stealth/space-bunny-alpha` while the pinned runtime
+/// model is `stealth/space-bunny-alpha@Stealth`. Matching only the pinned form missed
+/// every catalog entry, so `context_window()` fell through to the 200K default even
+/// though the catalog entry carries `context_length` 1000000. Measured live: the panel
+/// reported 200K while the on-disk catalog already carried the correct number.
+#[tokio::test]
+async fn pinned_variant_suffix_still_matches_the_catalog_entry() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_str().expect("utf8 temp path"));
+
+    let api_base = spawn_models_server(
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "stealth/space-bunny-alpha", "object": "model", "context_length": 1000000}
+            ]
+        }"#,
+    );
+
+    let toml_src = format!(
+        r#"
+base_url = "{api_base}"
+auth = "none"
+model_catalog = true
+default_model = "stealth/space-bunny-alpha"
+"#
+    );
+    let profile: jcode_base::config::NamedProviderConfig =
+        toml::from_str(&toml_src).expect("config.toml profile should parse");
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("orvariant", &profile)
+        .expect("named profile should initialize");
+
+    provider
+        .fetch_models()
+        .await
+        .expect("live catalog fetch should succeed");
+
+    // The pinned form the runtime actually carries.
+    {
+        let mut model = provider.model.try_write().expect("model lock");
+        *model = "stealth/space-bunny-alpha@Stealth".to_string();
+    }
+
+    assert_eq!(
+        provider.context_window(),
+        1_000_000,
+        "a pinned @Provider suffix must not hide the model from the catalog"
     );
 }
 

@@ -50,25 +50,93 @@ pub fn is_openai_encrypted_content_too_large_error(error: &str) -> bool {
 pub fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
-        .map(|t| {
-            let compatible_schema = openai_compatible_schema(&t.input_schema);
-            let supports_strict = schema_supports_strict(&compatible_schema);
-            let parameters = if supports_strict {
-                strict_normalize_schema(&compatible_schema)
-            } else {
-                compatible_schema
-            };
-            serde_json::json!({
-                "type": "function",
-                "name": t.name,
-                // Prompt-visible. Approximate token cost for this field:
-                // t.description_token_estimate().
-                "description": t.description,
-                "strict": supports_strict,
-                "parameters": parameters,
-            })
-        })
+        .filter(|t| !t.defer_loading)
+        .map(build_tool)
         .collect()
+}
+
+/// Build the Responses API function definition for one tool.
+pub fn build_tool(t: &ToolDefinition) -> Value {
+    let compatible_schema = openai_compatible_schema(&t.input_schema);
+    let supports_strict = schema_supports_strict(&compatible_schema);
+    let parameters = if supports_strict {
+        strict_normalize_schema(&compatible_schema)
+    } else {
+        compatible_schema
+    };
+    serde_json::json!({
+        "type": "function",
+        "name": t.name,
+        // Prompt-visible. Approximate token cost for this field:
+        // t.description_token_estimate().
+        "description": t.description,
+        "strict": supports_strict,
+        "parameters": parameters,
+    })
+}
+
+/// Insert Responses `additional_tools` items for `ContentBlock::ToolReference`
+/// blocks.
+///
+/// Deferred definitions are omitted from the top-level `tools` array (which
+/// is part of the cached prefix). Each referenced deferred tool is instead
+/// loaded at the point in the conversation where it was referenced, right
+/// after the matching `function_call_output`, so earlier input items and the
+/// cached prefix are unchanged. References to tools not in `tools` (for
+/// example a server that has since disconnected) are dropped.
+pub fn insert_additional_tools(
+    input: &mut Vec<Value>,
+    messages: &[ChatMessage],
+    tools: &[ToolDefinition],
+) {
+    let deferred: HashMap<&str, &ToolDefinition> = tools
+        .iter()
+        .filter(|t| t.defer_loading)
+        .map(|t| (t.name.as_str(), t))
+        .collect();
+    if deferred.is_empty() {
+        return;
+    }
+    let mut by_call: Vec<(String, Vec<&ToolDefinition>)> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for msg in messages {
+        for block in &msg.content {
+            let ContentBlock::ToolReference {
+                tool_use_id,
+                tool_name,
+            } = block
+            else {
+                continue;
+            };
+            let Some(def) = deferred.get(tool_name.as_str()) else {
+                continue;
+            };
+            if !seen.insert(def.name.as_str()) {
+                continue;
+            }
+            let call_id = sanitize_tool_id(tool_use_id);
+            match by_call.iter_mut().find(|(id, _)| *id == call_id) {
+                Some((_, defs)) => defs.push(def),
+                None => by_call.push((call_id, vec![def])),
+            }
+        }
+    }
+    for (call_id, defs) in by_call {
+        let Some(pos) = input.iter().position(|item| {
+            item.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
+                && item.get("call_id").and_then(|v| v.as_str()) == Some(call_id.as_str())
+        }) else {
+            continue;
+        };
+        input.insert(
+            pos + 1,
+            serde_json::json!({
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": defs.into_iter().map(build_tool).collect::<Vec<_>>(),
+            }),
+        );
+    }
 }
 
 fn orphan_tool_output_to_user_message(item: &Value, missing_output: &str) -> Option<Value> {
@@ -99,6 +167,29 @@ fn orphan_tool_output_to_user_message(item: &Value, missing_output: &str) -> Opt
 
 pub fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     build_responses_input_with_logger(messages, |_, _| {})
+}
+
+/// Replace stored hosted-search `web_search_call` items with their labelled
+/// text summary. Used when the request does not declare the hosted
+/// `web_search` tool (native search off, Codex model, custom gateway, Copilot,
+/// compaction), so the request never carries hosted-tool history it does not
+/// declare.
+pub fn downgrade_web_search_calls(input: &mut [Value]) {
+    use jcode_message_types::provider_native::{
+        PROVIDER_NATIVE_OPENAI, provider_native_text_fallback,
+    };
+    for item in input.iter_mut() {
+        if item.get("type").and_then(Value::as_str) != Some("web_search_call") {
+            continue;
+        }
+        let text = provider_native_text_fallback(PROVIDER_NATIVE_OPENAI, item, None)
+            .unwrap_or_else(|| "[web_search] (earlier provider-side search)".to_string());
+        *item = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": text }]
+        });
+    }
 }
 
 pub fn build_responses_input_with_logger(
@@ -226,6 +317,24 @@ pub fn build_responses_input_with_logger(
             Role::Assistant => {
                 for block in &msg.content {
                     match block {
+                        ContentBlock::ProviderNative { provider, item } => {
+                            use jcode_message_types::provider_native;
+                            let is_web_search_call = provider
+                                == provider_native::PROVIDER_NATIVE_OPENAI
+                                && item.get("type").and_then(Value::as_str)
+                                    == Some("web_search_call");
+                            if is_web_search_call {
+                                items.push(item.clone());
+                            } else if let Some(text) =
+                                provider_native::provider_native_text_fallback(provider, item, None)
+                            {
+                                items.push(serde_json::json!({
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{ "type": "output_text", "text": text }]
+                                }));
+                            }
+                        }
                         ContentBlock::Text { text, .. } => {
                             items.push(serde_json::json!({
                                 "type": "message",
@@ -583,6 +692,7 @@ mod tests {
                     }
                 ]
             }),
+            defer_loading: false,
         }];
 
         let api_tools = build_tools(&defs);
@@ -654,6 +764,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_responses_input_replays_web_search_calls_and_downgrades_foreign_items() {
+        let web_search_call = json!({
+            "type": "web_search_call", "id": "ws_1", "status": "completed",
+            "action": {"type": "search", "query": "jcode"}
+        });
+        let messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ProviderNative {
+                    provider: "openai".to_string(),
+                    item: web_search_call.clone(),
+                },
+                ContentBlock::ProviderNative {
+                    provider: "anthropic".to_string(),
+                    item: json!({"type": "web_search_tool_result", "tool_use_id": "s", "content": [
+                        {"type": "web_search_result", "url": "https://a.example", "title": "A", "encrypted_content": "ENC"}
+                    ]}),
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        }];
+
+        let items = build_responses_input(&messages);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], web_search_call);
+        assert_eq!(items[1]["type"], json!("message"));
+        let text = items[1]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("https://a.example"), "{text}");
+        assert!(!text.contains("ENC"));
+    }
+
     /// Integration-level regression test for issue #687: the payload actually
     /// sent to OpenAI must not carry `uniqueItems`.
     ///
@@ -681,6 +825,7 @@ mod tests {
                 },
                 "required": ["ids"]
             }),
+            defer_loading: false,
         }];
 
         let api_tools = build_tools(&defs);
@@ -707,5 +852,105 @@ mod tests {
                 .contains(&json!("ids")),
             "ids must stay required"
         );
+    }
+
+    fn deferred_def(name: &str) -> ToolDefinition {
+        ToolDefinition::new(name, "d", json!({"type":"object","properties":{}})).deferred()
+    }
+
+    fn msg(role: Role, content: Vec<ContentBlock>) -> ChatMessage {
+        ChatMessage {
+            role,
+            content,
+            timestamp: None,
+            tool_duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn build_tools_omits_deferred_definitions() {
+        let defs = vec![
+            ToolDefinition::new("bash", "b", json!({"type":"object","properties":{}})),
+            deferred_def("mcp__weather__forecast"),
+        ];
+        let tools = build_tools(&defs);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], json!("bash"));
+    }
+
+    #[test]
+    fn tool_reference_inserts_additional_tools_after_its_output() {
+        let messages = vec![
+            msg(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "mcp_search".into(),
+                    input: json!({"query": "weather"}),
+                    thought_signature: None,
+                }],
+            ),
+            msg(
+                Role::User,
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: "found".into(),
+                        is_error: None,
+                    },
+                    ContentBlock::ToolReference {
+                        tool_use_id: "call_1".into(),
+                        tool_name: "mcp__weather__forecast".into(),
+                    },
+                    ContentBlock::ToolReference {
+                        tool_use_id: "call_1".into(),
+                        tool_name: "mcp__gone__tool".into(),
+                    },
+                ],
+            ),
+            msg(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "go".into(),
+                    cache_control: None,
+                }],
+            ),
+        ];
+        let tools = vec![deferred_def("mcp__weather__forecast")];
+        let mut input = build_responses_input(&messages);
+        let before = input.clone();
+        insert_additional_tools(&mut input, &messages, &tools);
+
+        assert_eq!(input.len(), before.len() + 1);
+        let pos = input
+            .iter()
+            .position(|item| item["type"] == json!("additional_tools"))
+            .expect("additional_tools item");
+        assert_eq!(input[pos - 1]["type"], json!("function_call_output"));
+        assert_eq!(input[pos]["role"], json!("developer"));
+        let loaded: Vec<&str> = input[pos]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(loaded, vec!["mcp__weather__forecast"]);
+        // Everything before the insertion point is unchanged (cache prefix).
+        assert_eq!(&input[..pos], &before[..pos]);
+    }
+
+    #[test]
+    fn tool_reference_without_deferred_definition_is_ignored() {
+        let messages = vec![msg(
+            Role::User,
+            vec![ContentBlock::ToolReference {
+                tool_use_id: "call_1".into(),
+                tool_name: "mcp__weather__forecast".into(),
+            }],
+        )];
+        let mut input = build_responses_input(&messages);
+        let before = input.clone();
+        insert_additional_tools(&mut input, &messages, &[]);
+        assert_eq!(input, before);
     }
 }

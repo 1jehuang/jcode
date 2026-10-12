@@ -48,32 +48,76 @@ pub(super) async fn resolve_debug_session(
     session_id: &Arc<RwLock<String>>,
     requested: Option<String>,
 ) -> Result<(String, Arc<Mutex<Agent>>)> {
-    let mut target = requested;
-    if target.is_none() {
-        let current = session_id.read().await.clone();
-        if !current.is_empty() {
-            target = Some(current);
-        }
-    }
-
     let sessions_guard = sessions.read().await;
-    if let Some(id) = target {
-        let agent = sessions_guard
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Unknown session_id '{}'", id))?;
+    if let Some(id) = requested.filter(|id| !id.trim().is_empty()) {
+        let agent = sessions_guard.get(&id).cloned().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown session_id '{}'. Live sessions: {}",
+                id,
+                describe_live_session_ids(&sessions_guard)
+            )
+        })?;
         return Ok((id, agent));
     }
+    drop(sessions_guard);
 
-    if sessions_guard.len() == 1
-        && let Some((id, agent)) = sessions_guard.iter().next()
-    {
-        return Ok((id.clone(), Arc::clone(agent)));
+    let id = default_debug_session_id(sessions, session_id).await?;
+    let sessions_guard = sessions.read().await;
+    let agent = sessions_guard.get(&id).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Session '{}' ended while resolving the debug target. Live sessions: {}",
+            id,
+            describe_live_session_ids(&sessions_guard)
+        )
+    })?;
+    Ok((id, agent))
+}
+
+/// Resolve the session a debug command targets when it names none.
+///
+/// The server-wide "current session" is the id the most recent connection was
+/// created with. A client that then resumes another session leaves that id
+/// behind as a temporary, so it can name a session that no longer exists
+/// (issue #1650: `agent:info` failed with a freshly minted dead id). Only a
+/// live current session is used. Otherwise a sole live session is the
+/// unambiguous default, and anything else is an error naming the valid ids.
+pub(super) async fn default_debug_session_id(
+    sessions: &SessionAgents,
+    session_id: &Arc<RwLock<String>>,
+) -> Result<String> {
+    let current = session_id.read().await.clone();
+    let sessions_guard = sessions.read().await;
+    if !current.is_empty() && sessions_guard.contains_key(&current) {
+        return Ok(current);
     }
-
+    if sessions_guard.len() == 1
+        && let Some(id) = sessions_guard.keys().next()
+    {
+        return Ok(id.clone());
+    }
+    if sessions_guard.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No active session found. Connect a client or provide session_id."
+        ));
+    }
     Err(anyhow::anyhow!(
-        "No active session found. Connect a client or provide session_id."
+        "No active session found as the default target ({}). Provide session_id. Live sessions: {}",
+        if current.is_empty() {
+            "none recorded".to_string()
+        } else {
+            format!("last recorded session '{}' is no longer live", current)
+        },
+        describe_live_session_ids(&sessions_guard)
     ))
+}
+
+fn describe_live_session_ids(sessions: &HashMap<String, Arc<Mutex<Agent>>>) -> String {
+    if sessions.is_empty() {
+        return "none".to_string();
+    }
+    let mut ids: Vec<&str> = sessions.keys().map(String::as_str).collect();
+    ids.sort_unstable();
+    ids.join(", ")
 }
 
 pub(super) fn debug_message_timeout_secs() -> Option<u64> {
@@ -372,6 +416,18 @@ pub(super) async fn execute_debug_command(
         .to_string());
     }
 
+    if trimmed == "agent:context:prepare" {
+        let mut agent = agent.lock().await;
+        return Ok(serde_json::to_string_pretty(
+            &agent.prepare_debug_context().await,
+        )?);
+    }
+
+    if trimmed == "agent:context" {
+        let agent = agent.lock().await;
+        return Ok(serde_json::to_string_pretty(&agent.debug_context().await)?);
+    }
+
     if trimmed == "agent:info" {
         let agent = agent.lock().await;
         let info = agent.debug_info();
@@ -516,7 +572,7 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, agent:info, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, agent:info, agent:context, agent:context:prepare, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -641,7 +697,7 @@ mod tests {
     use jcode_agent_runtime::InterruptSignal;
     use std::collections::HashMap;
     use std::ffi::OsString;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
@@ -704,6 +760,78 @@ mod tests {
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(Self)
         }
+    }
+
+    #[tokio::test]
+    async fn debug_agent_context_inspects_modes_without_inference_or_locking() {
+        let _env_lock = lock_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path().to_str().unwrap());
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent =
+            Agent::new_with_initial_working_dir(provider, registry, home.path().to_str());
+        agent.set_system_prompt("debug context sentinel");
+        let agent = Arc::new(AsyncMutex::new(agent));
+        let jobs = Arc::new(RwLock::new(HashMap::new()));
+        let before = agent.lock().await.debug_info()["session"].clone();
+        for _ in 0..2 {
+            let output =
+                execute_debug_command(agent.clone(), "agent:context", jobs.clone(), None, None)
+                    .await
+                    .unwrap();
+            let context: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(context["mode"], "regular");
+            assert_eq!(context["system_prompt"]["static"], "debug context sentinel");
+            assert_eq!(context["system_prompt"]["dynamic"], "");
+            assert_eq!(context["tools_locked"], false);
+            assert!(context["locked_tool_names"].is_null());
+            assert_eq!(context["effective_tools"], context["current_tools"]);
+            assert_eq!(agent.lock().await.debug_info()["session"], before);
+        }
+        let output = execute_debug_command(
+            agent.clone(),
+            "agent:context:prepare",
+            jobs.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let prepared: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(prepared["tools_locked"], true);
+        assert_eq!(prepared["prepared_tools"], prepared["effective_tools"]);
+        let inspected = agent.lock().await.debug_context().await;
+        assert_eq!(inspected["effective_tools"], prepared["prepared_tools"]);
+        assert_eq!(
+            inspected["locked_tool_names"],
+            prepared["locked_tool_names"]
+        );
+        agent.lock().await.set_canary("self-dev");
+        assert_eq!(agent.lock().await.debug_context().await["mode"], "cli");
+
+        let desktop = home.path().join("desktop-checkout");
+        std::fs::create_dir_all(desktop.join("crates/jcode-desktop-ui/src")).unwrap();
+        std::fs::write(
+            desktop.join("Cargo.toml"),
+            "[package]\nname = \"jcode-desktop\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            desktop.join("crates/jcode-desktop-ui/Cargo.toml"),
+            "[package]\nname = \"jcode-desktop-ui\"\n",
+        )
+        .unwrap();
+        agent
+            .lock()
+            .await
+            .set_working_dir(desktop.to_str().unwrap());
+        let context = agent.lock().await.debug_context().await;
+        assert_eq!(
+            context["mode"], "desktop",
+            "Desktop takes priority over canary"
+        );
+        assert_eq!(context["tools_locked"], false);
     }
 
     #[tokio::test]

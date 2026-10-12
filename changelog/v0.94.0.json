@@ -1,0 +1,22 @@
+{
+  "version": "0.94.0",
+  "date": "2026-10-10",
+  "title": "Queued commands",
+  "highlights": [
+    "Ctrl+Enter queues slash and ! commands to run after the current turn, and /clear drops anything still queued",
+    "Alt+G opens the project's git commit log, and diff cycling moves to /diff",
+    "Harness API clients can observe and cancel messages sent mid-turn"
+  ],
+  "improvements": [
+    "The startup frame settles immediately instead of popping in over about 200ms, with session facts shown on the first frame",
+    "The Overview widget stays visible after startup",
+    "Onboarding is cleaner: side-by-side start choice, no starter prompt cards, and the home directory is labeled '~ (home)'",
+    "Onboarding detects accounts you are signed in with in Cursor, other AI tools, and stored Jcode agent logins",
+    "Restored transcripts and the session picker preview no longer show a redundant 'tool:' summary line"
+  ],
+  "fixes": [
+    "Escaped single-word brackets like \\[workspace\\] are no longer rendered as display math",
+    "Onboarding's Import option no longer commits when pressing Enter, and toggling preview no longer flickers the screen",
+    "Sleep inhibition keeps its lock across refreshes and retries after helper failures"
+  ]
+}

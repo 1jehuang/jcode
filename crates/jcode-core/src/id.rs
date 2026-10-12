@@ -264,22 +264,40 @@ pub fn new_memorable_session_id_avoiding(used_names: &HashSet<String>) -> (Strin
     let ts = Utc::now().timestamp_millis();
     let rand: u64 = rand::random();
 
-    let cursor = session_name_cursor();
-    let word = (0..SESSION_NAMES.len())
-        .find_map(|_| {
-            let idx = cursor.fetch_add(1, Ordering::Relaxed) % SESSION_NAMES.len();
-            let (word, _) = SESSION_NAMES[idx];
-            (!used_names.contains(word)).then_some(word)
-        })
-        .unwrap_or_else(|| {
-            let idx = cursor.fetch_add(1, Ordering::Relaxed) % SESSION_NAMES.len();
-            SESSION_NAMES[idx].0
-        });
+    let word = select_available_session_name(used_names, session_name_cursor(), |_| {});
 
     let short_name = word.to_string();
     let full_id = format!("session_{}_{ts}_{rand:016x}", word);
 
     (full_id, short_name)
+}
+
+fn select_available_session_name(
+    used_names: &HashSet<String>,
+    cursor: &AtomicUsize,
+    mut after_candidate: impl FnMut(usize),
+) -> &'static str {
+    (0..SESSION_NAMES.len())
+        .find_map(|_| {
+            let idx = cursor.fetch_add(1, Ordering::Relaxed) % SESSION_NAMES.len();
+            let (word, _) = SESSION_NAMES[idx];
+            // A competing allocator can advance the cursor before our next check.
+            // The no-op production callback lets the regression test force that interleaving.
+            after_candidate(idx);
+            (!used_names.contains(word)).then_some(word)
+        })
+        // Concurrent creators advance the shared cursor between our steps, so the loop above can
+        // skip every free name; scan deterministically before falling back to reuse.
+        .or_else(|| {
+            SESSION_NAMES
+                .iter()
+                .map(|(word, _)| *word)
+                .find(|word| !used_names.contains(*word))
+        })
+        .unwrap_or_else(|| {
+            let idx = cursor.fetch_add(1, Ordering::Relaxed) % SESSION_NAMES.len();
+            SESSION_NAMES[idx].0
+        })
 }
 
 /// Try to extract the memorable name from a session ID
@@ -296,9 +314,52 @@ pub fn extract_session_name(session_id: &str) -> Option<&str> {
     None
 }
 
+/// True when `value` has the exact shape of a generated storage session id:
+/// `session_<name>_<millis>` or `session_<name>_<millis>_<hex>`.
+///
+/// Such ids are never valid short names or titles, so callers resolving a
+/// user query can skip expensive fuzzy scans when the id is not on disk.
+pub fn is_generated_session_id(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("session_") else {
+        return false;
+    };
+    let mut parts = rest.split('_');
+    let (Some(name), Some(ts)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return false;
+    }
+    if ts.len() < 10 || !ts.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match (parts.next(), parts.next()) {
+        (None, _) => true,
+        (Some(rand), None) => !rand.is_empty() && rand.bytes().all(|b| b.is_ascii_hexdigit()),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_session_id_detection() {
+        assert!(is_generated_session_id(
+            "session_butterfly_1790191044353_621ff7b98fbf962b"
+        ));
+        assert!(is_generated_session_id("session_fox_1234567890"));
+        let (full_id, _) = new_memorable_session_id();
+        assert!(is_generated_session_id(&full_id));
+        assert!(!is_generated_session_id("fox"));
+        assert!(!is_generated_session_id("session_fox"));
+        assert!(!is_generated_session_id("session_fox_abc"));
+        assert!(!is_generated_session_id("session_fox_1234567890_xyz"));
+        assert!(!is_generated_session_id("session_fox_1234567890_ab_cd"));
+        assert!(!is_generated_session_id("imported_codex_123"));
+        assert!(!is_generated_session_id("fix the reload bug"));
+    }
 
     #[test]
     fn test_new_memorable_session_id() {
@@ -390,6 +451,29 @@ mod tests {
         let (id, reused) = new_memorable_session_id_avoiding(&used);
         assert!(id.starts_with(&format!("session_{reused}_")));
         assert!(used.contains(&reused));
+    }
+
+    #[test]
+    fn avoiding_allocator_finds_the_last_free_identity_while_others_advance_the_cursor() {
+        let free_index = SESSION_NAMES.len() / 2;
+        let free = SESSION_NAMES[free_index].0;
+        let used: HashSet<String> = SESSION_NAMES
+            .iter()
+            .map(|(word, _)| word.to_string())
+            .filter(|word| word != free)
+            .collect();
+        let cursor = AtomicUsize::new(0);
+        let mut advanced = false;
+        let name = select_available_session_name(&used, &cursor, |index| {
+            if index + 1 == free_index && !advanced {
+                // Simulate another creator consuming the sole free candidate
+                // between this creator's candidate checks, independent of CPU scheduling.
+                cursor.fetch_add(1, Ordering::Relaxed);
+                advanced = true;
+            }
+        });
+        assert!(advanced, "the competing cursor advance must occur");
+        assert_eq!(name, free, "reused an occupied identity while one was free");
     }
 
     /// Returns true for emoji that commonly fail to render as a single glyph on

@@ -25,6 +25,11 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::io::Write;
 
 const STATUS_SPINNER_FPS: f32 = 12.5;
+/// How long the first remote frame waits for the git probe. The probe takes
+/// ~20ms on a typical repo and has already been running since app
+/// construction, so this mostly costs nothing; it is capped so a pathological
+/// repo never delays first paint noticeably.
+const FIRST_FRAME_GIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
 pub(super) const STATUS_SPINNER_ONLY_INTERVAL: Duration = Duration::from_millis(80);
 
 pub(super) fn redraw_timer(period: Duration) -> tokio::time::Interval {
@@ -119,7 +124,7 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
 }
 
 fn is_slash_command_input(input: &str) -> bool {
-    input.trim_start().starts_with('/')
+    super::has_safe_slash_command_token(input)
 }
 
 /// Whether the floating command-suggestion palette may be on screen for the
@@ -467,6 +472,8 @@ impl StatusSpinnerRenderer {
     ) -> Result<()> {
         // Painting a frame is progress, including during long streaming turns.
         crate::logging::watchdog::beat("tui.draw");
+        app.refresh_terminal_title_metrics();
+        app.sync_herdr_agent_state();
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -623,8 +630,9 @@ fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol
         1,
         // The spinner cell is patched outside the full-frame draw, so apply
         // light-theme adaptation here explicitly (no-op on dark themes).
-        Style::default().fg(jcode_tui_style::adapt_color_for_theme(
+        Style::default().fg(jcode_tui_style::adapt_foreground_for_display(
             jcode_tui_style::theme::ai_color(),
+            ratatui::style::Color::Reset,
         )),
     );
 }
@@ -757,6 +765,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: Some(self.session.id.clone()),
         })
@@ -798,6 +807,13 @@ impl App {
                 }
             }
             if needs_redraw {
+                if !first_frame_reported {
+                    // The git probe was kicked off when the app was built. Let
+                    // it land (bounded) so the first frame already has the
+                    // branch, dirty counts, and commits rather than growing
+                    // them a frame later.
+                    super::helpers::prime_git_info(FIRST_FRAME_GIT_BUDGET);
+                }
                 status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
                 if !first_frame_reported {
                     first_frame_reported = true;
@@ -991,6 +1007,7 @@ impl App {
             rebuild_session: self.rebuild_requested.take(),
             update_session: self.update_requested.take(),
             restart_session: self.restart_requested.take(),
+            cloud_handoff: self.cloud_handoff_requested.take(),
             exit_code: self.requested_exit_code,
             session_id: if self.is_remote {
                 self.remote_session_id.clone()

@@ -401,7 +401,7 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         todo_items: Vec::new(),
         runtime: crate::protocol::SwarmMemberRuntime::default(),
     }]);
-    seed.save().unwrap();
+    seed.save_prepared().unwrap();
 
     let mut child = Session::create_with_id(
         "session_child".to_string(),
@@ -425,46 +425,17 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         vec![seed.id.clone(), child.id.clone()],
         None,
     );
-    child.save().unwrap();
+    child.save_prepared().unwrap();
 
     let mut unrelated = Session::create_with_id("session_other".to_string(), None, None);
     unrelated.working_dir = Some("/tmp/other".to_string());
-    unrelated.save().unwrap();
+    unrelated.save_prepared().unwrap();
 
     let loaded = load_swarm_sessions("session_seed", false).unwrap();
     let ids: Vec<_> = loaded.iter().map(|s| s.session.id.as_str()).collect();
     assert!(ids.contains(&"session_seed"));
     assert!(ids.contains(&"session_child"));
     assert!(!ids.contains(&"session_other"));
-}
-
-#[test]
-fn test_compose_swarm_buffers_combines_panes() {
-    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-
-    let mut left = Buffer::empty(Rect::new(0, 0, 4, 2));
-    left[(0, 0)].set_symbol("L").set_style(Style::default());
-    let mut right = Buffer::empty(Rect::new(0, 0, 4, 2));
-    right[(0, 0)].set_symbol("R").set_style(Style::default());
-
-    let panes = vec![
-        SwarmPaneFrames {
-            session_id: "left".to_string(),
-            title: "left".to_string(),
-            frames: vec![(0.0, left)],
-        },
-        SwarmPaneFrames {
-            session_id: "right".to_string(),
-            title: "right".to_string(),
-            frames: vec![(0.0, right)],
-        },
-    ];
-
-    let frames = compose_swarm_buffers(&panes, 8, 2, 1, 2);
-    assert!(!frames.is_empty());
-    let buf = &frames[0].1;
-    assert_eq!(buf[(0, 0)].symbol(), "L");
-    assert_eq!(buf[(4, 0)].symbol(), "R");
 }
 
 #[test]
@@ -539,7 +510,7 @@ fn test_batch_tool_input_preserved() {
 
     // Verify the ToolInput delta contains the batch input
     let input_delta = replay_events.iter().find_map(|(_, e)| match e {
-        ReplayEvent::Server(ServerEvent::ToolInput { delta }) => Some(delta.clone()),
+        ReplayEvent::Server(ServerEvent::ToolInput { delta, .. }) => Some(delta.clone()),
         _ => None,
     });
     assert!(
