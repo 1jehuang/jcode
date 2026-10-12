@@ -20,10 +20,23 @@ pre_tool_timeout_ms = 5000
 post_tool_feedback_timeout_ms = 10000
 ```
 
+Every hook key accepts either a single command or an **array of commands**:
+
+```toml
+[hooks]
+post_tool = ["~/bin/jcode-event-log", "~/bin/other-plugin"]
+```
+
+Commands in an array run in declaration order, independently (one hook's
+failure never affects the others). This lets several integrations register
+against the same hook without overwriting each other.
+
 Env overrides (always win; empty value disables a config hook):
-`JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
-`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`,
-`JCODE_HOOK_POST_TOOL_FEEDBACK`, `JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS`.
+`JCODE_HOOK_TURN_START`, `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`,
+`JCODE_HOOK_SESSION_END`, `JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_PRE_TOOL_TRANSFORM`,
+`JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS`, `JCODE_HOOK_POST_TOOL`,
+`JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`, `JCODE_HOOK_POST_TOOL_FEEDBACK`,
+`JCODE_HOOK_POST_TOOL_FEEDBACK_TIMEOUT_MS`.
 
 ## Common contract
 
@@ -35,7 +48,7 @@ Env overrides (always win; empty value disables a config hook):
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
+| `JCODE_HOOK_EVENT` | `turn_start`, `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
 | `JCODE_HOOK_SESSION_ID` | Session the event belongs to |
 | `JCODE_HOOK_CWD` | Session working directory |
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
@@ -43,9 +56,19 @@ Env overrides (always win; empty value disables a config hook):
 
 ## Observer hooks
 
-`turn_end`, `session_start`, `session_end`, and `post_tool` are
+`turn_start`, `turn_end`, `session_start`, `session_end`, and `post_tool` are
 **observers**: spawned detached, fire-and-forget. They can never block or slow
 the agent; failures are only logged.
+
+### `turn_start`
+
+Fires when an agent turn begins: after the user message is added and before
+the model starts generating, and before the first `pre_tool` of the turn. It
+lets integrations detect that the agent is actively working during the
+think/stream window before any tool call runs.
+
+Extra fields: `JCODE_HOOK_MODEL` and `JCODE_HOOK_SOURCE` (`chat`, `resume`,
+or `ambient`).
 
 ### `turn_end`
 
