@@ -931,6 +931,12 @@ fn test_handle_post_connect_marker_without_reload_context_does_not_queue_selfdev
     crate::env::set_var("JCODE_HOME", temp_home.path());
 
     let mut app = create_test_app();
+    // This fixture exercises marker recovery, not client binary replacement.
+    // Concurrent release builds must not turn the reconnect into a re-exec.
+    app.client_binary_mtime = Some(
+        std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+    );
+    assert!(!app.has_newer_binary());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _enter = rt.enter();
     let backend = ratatui::backend::TestBackend::new(80, 24);
@@ -1001,6 +1007,11 @@ fn test_handle_post_connect_defers_reload_followup_to_server_history_payload() {
     .expect("save reload context");
 
     let mut app = create_test_app();
+    // Keep this history-recovery fixture independent of release builds on disk.
+    app.client_binary_mtime = Some(
+        std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+    );
+    assert!(!app.has_newer_binary());
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _enter = rt.enter();
     let backend = ratatui::backend::TestBackend::new(80, 24);
@@ -1059,6 +1070,11 @@ fn test_handle_post_connect_clears_deferred_dispatch_before_reload_followup() {
     .expect("save reload context");
 
     let mut app = create_test_app();
+    // Exercise queued continuation dispatch without taking the binary-reload arm.
+    app.client_binary_mtime = Some(
+        std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+    );
+    assert!(!app.has_newer_binary());
     app.pending_queued_dispatch = true;
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _enter = rt.enter();
