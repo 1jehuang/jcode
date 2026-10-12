@@ -23,3 +23,12 @@ pub(crate) fn run(command: Command) -> Result<()> {
         _ => anyhow::bail!("not a build-store maintenance command"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn maintenance_handler_rejects_unrelated_commands() {
+        let error = super::run(crate::cli::args::Command::Usage { json: false }).unwrap_err();
+        assert_eq!(error.to_string(), "not a build-store maintenance command");
+    }
+}
