@@ -979,16 +979,16 @@ fn test_side_panel_button_close_stays_closed_after_split_view_refresh() {
 }
 
 #[test]
-fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
+fn test_side_panel_close_keeps_inline_diff_visible_and_restores_composer() {
     let _render_lock = scroll_render_test_lock();
-    let (mut app, _) = make_edit_badge_test_app(30);
+    let (mut app, mut terminal) = make_edit_badge_test_app(30);
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
-    app.diff_mode = crate::config::DiffDisplayMode::File;
+    app.diagram_pane_enabled = false;
+    // Diffs stay in the transcript. Only the side-panel page owns a pane.
+    app.diff_mode = crate::config::DiffDisplayMode::FullInline;
     app.side_panel = test_side_panel_snapshot("plan", "Plan");
     app.diff_pane_focus = true;
 
-    let backend = ratatui::backend::TestBackend::new(80, 16);
-    let mut terminal = ratatui::Terminal::new(backend).unwrap();
     render_and_snap(&app, &mut terminal);
     let pane = crate::tui::ui::last_layout_snapshot()
         .unwrap()
@@ -1003,15 +1003,18 @@ fn test_side_panel_close_keeps_visible_file_diff_focused_and_scrollable() {
     });
 
     assert!(app.side_panel.focused_page().is_none());
-    assert!(app.diff_pane_visible(), "File diff should remain visible");
-    assert!(app.diff_pane_focus, "visible File diff should retain focus");
-    render_and_snap(&app, &mut terminal);
+    assert!(!app.diff_pane_visible(), "inline diffs must not allocate a pane");
+    assert!(!app.diff_pane_focus, "closed pane must release composer focus");
+    let text = render_and_snap(&app, &mut terminal);
+    assert!(crate::tui::ui::last_layout_snapshot()
+        .unwrap()
+        .diff_pane_area
+        .is_none());
+    assert!(text.contains("new line 0"), "inline diff must remain visible:\n{text}");
     app.handle_key(KeyCode::Char('j'), KeyModifiers::empty())
         .unwrap();
-    assert!(
-        app.diff_pane_scroll > 0,
-        "j should still scroll the File diff"
-    );
+    assert_eq!(app.input, "j", "typing must return to the composer");
+    assert_eq!(app.diff_pane_scroll, 0, "no hidden pane should scroll");
     app.input = "/side".to_string();
     app.submit_input();
     assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("plan"));
@@ -1582,7 +1585,14 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
-    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
+    // A label click both expands the image and reports the copy outcome.
+    // Headless runners may have no clipboard, but must still report that.
+    let notice = app.status_notice().expect("image click must report its actions");
+    assert!(
+        matches!(notice.as_str(),
+            "Image size: large · Image copied" | "Image size: large · Could not copy image"),
+        "size and copy feedback must both be present: {notice}"
+    );
 }
 
 /// The inline-image placeholder marker row must never reach the terminal as

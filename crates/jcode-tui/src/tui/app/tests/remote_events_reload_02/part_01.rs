@@ -770,16 +770,18 @@ fn test_handle_server_event_notification_background_task_scope_uses_failed_row()
         .display_messages()
         .iter()
         .any(|message| message.role == "background_task"));
+    let task_rows = app.background_task_rows_ref();
+    assert_eq!(task_rows.len(), 1);
+    assert_eq!(task_rows[0].task_id, "abc123");
+    assert_eq!(task_rows[0].label, "bash");
     assert_eq!(
-        app.background_task_rows_ref()[0].status,
+        task_rows[0].status,
         crate::tui::BackgroundTaskRowStatus::Failed
     );
-    let widget_rows = crate::tui::TuiState::info_widget_data(&app)
+    // Session task rows are pinned compactly, not duplicated in the overview.
+    assert!(crate::tui::TuiState::info_widget_data(&app)
         .background_info
-        .expect("failed task should feed the background widget")
-        .rows;
-    assert_eq!(widget_rows.len(), 1);
-    assert_eq!(widget_rows[0].label, "bash");
+        .is_none());
     assert!(
         !text.contains("Background task failed") && !text.contains("[stderr] line one"),
         "unexpected expanded background task card:\n{text}"

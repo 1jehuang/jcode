@@ -183,29 +183,58 @@ fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
 #[test]
 fn test_mouse_scroll_events_are_classified_as_scroll_only() {
     let _lock = scroll_render_test_lock();
-    let mut app = create_test_app();
+    let (mut app, mut terminal) = create_scroll_test_app(50, 12, 0, 36);
+    app.is_processing = true;
+    app.status = ProcessingStatus::Streaming;
 
-    // The fork renders file diffs inline. Exercise a real chat pane rather
-    // than a stale pinned-diff rectangle that cannot consume mouse scroll.
-    crate::tui::ui::record_layout_snapshot(
-        Rect::new(0, 0, 40, 20),
-        None,
-        None,
-        None,
+    let before_chat = render_and_snap(&app, &mut terminal);
+    assert!(
+        crate::tui::ui::last_max_scroll() > 2,
+        "chat fixture must have real rendered scrollable content"
     );
 
+    // Chat scrolling intentionally redraws immediately while streaming. A
+    // changed offset and rendered viewport distinguish this from an ignored
+    // wheel event or a wheel event sent to an empty, unrendered transcript.
+    let chat_scroll_only = app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(app.auto_scroll_paused);
+    assert!(app.scroll_offset > 0, "chat wheel must move the viewport");
+    assert!(
+        !chat_scroll_only,
+        "chat wheel events should request immediate redraw during streaming"
+    );
+    let after_chat = render_and_snap(&app, &mut terminal);
+    assert_ne!(after_chat, before_chat, "chat scroll must be visible");
+
+    // Overlays retain the deferrable scroll-only classification. Keep a
+    // positive classification check as well as actual scrolling so this test
+    // cannot pass if every event simply returns false or does nothing.
+    app.help_scroll = Some(0);
+    let before_help = render_and_snap(&app, &mut terminal);
     let scroll_only = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::ScrollDown,
         column: 10,
         row: 5,
         modifiers: KeyModifiers::empty(),
     });
-
     assert!(
         scroll_only,
-        "scroll wheel events should be deferrable during streaming"
+        "help overlay wheel events should remain deferrable during streaming"
     );
+    assert!(
+        app.help_scroll.is_some_and(|offset| offset > 0),
+        "help wheel must move the overlay"
+    );
+    let after_help = render_and_snap(&app, &mut terminal);
+    assert_ne!(after_help, before_help, "help scroll must be visible");
 
+    app.help_scroll = None;
+    render_and_snap(&app, &mut terminal);
     let non_scroll = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 10,

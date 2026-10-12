@@ -1032,8 +1032,28 @@ fn covered_resident_rehomes_immediately_when_content_is_settled() {
     );
     assert_placements_sane("re-homed", area, &settled.visible);
 
-    // While content is churning (streaming / scrolling), it waits in place.
+    // The fork's sticky residents dodge a covered row as a whole, even
+    // during churn, when another slot can fit them without splitting.
     margins.content_churning = true;
+    let dodging = calculate_placements_anchored(area, &margins, &data, true, &first.anchors);
+    let moved = dodging
+        .visible
+        .iter()
+        .find(|p| p.kind == anchored.kind)
+        .expect("churning cover with a nearby pocket keeps the resident visible");
+    assert!(
+        !(moved.rect.y..moved.rect.y + moved.rect.height).contains(&covered),
+        "resident must dodge the covered row: {moved:?}"
+    );
+    assert!(
+        moved.rect.height >= anchored.rect.height,
+        "resident must stay whole while dodging"
+    );
+    assert_placements_sane("churning dodge", area, &dodging.visible);
+
+    // With no nearby pocket, churn still hides in place and retains the
+    // anchor, so the resident returns when the obstruction passes.
+    margins.right_widths.fill(10);
     let churning = calculate_placements_anchored(area, &margins, &data, true, &first.anchors);
     assert!(
         !churning.visible.iter().any(|p| p.kind == anchored.kind),
