@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -375,6 +375,20 @@ impl Session {
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
         let journal_path = session_journal_path_from_snapshot(&path);
+        // KCode fork: ensure the parent `sessions/` directory exists before
+        // writing. `kcode_dir()` honors `KCODE_HOME`, but a fresh test temp
+        // dir or a first-ever real install won't have a `sessions/` subdir,
+        // and the write below fails with ENOENT without this. The dir is
+        // a no-op when it already exists.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "create session parent dir `{}` before saving `{}`",
+                    parent.display(),
+                    self.id
+                )
+            })?;
+        }
 
         // A newly opened panel contains only its hidden session-context message.
         // Do not turn that implementation detail into a transcript on disk. Once
@@ -396,6 +410,21 @@ impl Session {
             && self.custom_title.is_none()
             && self.title.is_none()
             && self.parent_id.is_none()
+            // KCode fork: spawn-coordinator sessions frequently set model,
+            // provider_key, route_api_method, or reasoning_effort without
+            // yet having a visible message. Those are caller-chosen state
+            // (same as `title` and `parent_id` above) and must persist so
+            // the headed client can restore them when it attaches.
+            && self.model.is_none()
+            && self.provider_key.is_none()
+            && self.route_api_method.is_none()
+            && self.reasoning_effort.is_none()
+            // KCode fork: a session with *any* message (including a
+            // <system-reminder> block) is no longer a transient blank panel;
+            // downstream consumers (e.g. session_search) must be able to load
+            // it by id. Saving a blank panel is still suppressed by the
+            // empty-messages check above.
+            && self.messages.is_empty()
         {
             return Ok(());
         }

@@ -713,6 +713,27 @@ mod tests {
         let _debug_control = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
 
         let mut reload_rx = crate::server::subscribe_reload_signal_for_tests();
+        // The reload signal channel is process-global (OnceLock<watch::channel>),
+        // so a prior test may have left `Some(stale_signal)` in the slot. We
+        // must skip any pre-existing value and only ack the *next* signal this
+        // test itself sends via `do_reload` → `send_reload_signal`. `changed()`
+        // on a freshly-cloned watch receiver fires immediately for the unseen
+        // current value (verified against `tokio::sync::watch` semantics: a
+        // new receiver has no "last seen" version, so the existing slot value
+        // counts as a change). To skip the stale value we must call
+        // `borrow_and_update()` first to mark it as seen; only then does the
+        // `changed()` await wait for an actual new send. The mirror pattern
+        // lives in `tool/selfdev/tests.rs::build_reload_waits_for_build_then_reloads`
+        // (which pre-acks the current value then loops on `changed()`).
+        let stale_at_subscribe = reload_rx.borrow_and_update().clone();
+        if let Some(signal) = stale_at_subscribe {
+            // Acknowledge the stale signal so a later `wait_for_reload_ack`
+            // (matched on `request_id`) does not return a leftover ack for a
+            // test that has already finished; otherwise it would skip its
+            // `changed()` wait and report a false-positive ack. The `do_reload`
+            // path inside `selfdev` will still wait for *its* request_id.
+            crate::server::acknowledge_reload_signal(&signal);
+        }
 
         let provider: Arc<dyn Provider> = Arc::new(TestProvider);
         let registry = Registry::new(provider.clone()).await;
@@ -725,15 +746,25 @@ mod tests {
         let debug_jobs = Arc::new(RwLock::new(HashMap::new()));
         let started = Instant::now();
         let ack_task = tokio::spawn(async move {
+            // The pre-existing value (if any) was already marked seen and acked
+            // above, so `changed()` now only fires on the *next* send. That next
+            // send is the one `do_reload` → `send_reload_signal` will perform
+            // when `execute_debug_command` reaches it; we then mirror that signal
+            // to the ack channel so `wait_for_reload_ack` (which `do_reload`
+            // awaits synchronously) returns promptly.
             loop {
+                if reload_rx
+                    .changed()
+                    .await
+                    .is_err()
+                {
+                    // Sender dropped; nothing to ack.
+                    return;
+                }
                 if let Some(signal) = reload_rx.borrow_and_update().clone() {
                     crate::server::acknowledge_reload_signal(&signal);
                     return;
                 }
-                reload_rx
-                    .changed()
-                    .await
-                    .expect("reload signal channel should remain open");
             }
         });
         let output = tokio::time::timeout(

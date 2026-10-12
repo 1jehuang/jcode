@@ -169,8 +169,30 @@ impl ScopedEnvVar {
     fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let prev = std::env::var_os(key);
         crate::env::set_var(key, value);
+        // KCode fork: jcode-core::env::set_var is a thin unsafe wrapper around
+        // std::env::set_var and does NOT invalidate the config cache. The
+        // server-wide wake-mode test relies on a fresh config snapshot
+        // (wake_mode=external) after this call; without the explicit
+        // invalidation, the cached value from a prior test in the same
+        // `cargo test` process wins and the assertion fires. Only invalidate
+        // for keys that drive the config snapshot, to avoid disturbing tests
+        // that expect config to be stable across env-var mutations.
+        if is_config_driven_key(key) {
+            jcode_base::config::invalidate_config_cache();
+        }
         Self { key, prev }
     }
+}
+
+/// True if `key` participates in `jcode_base::config::CONFIG_ENV_KEYS`.
+///
+/// `CONFIG_ENV_KEYS` is module-private; the test code here only needs the
+/// subset of keys that affect the config snapshot under test (notably
+/// `JCODE_WAKE_MODE`, which gates whether background-task completion starts
+/// a new turn or emits a wake request). Adding a key here is safe as long
+/// as the corresponding test asserts the post-mutation config value.
+fn is_config_driven_key(key: &str) -> bool {
+    matches!(key, "JCODE_WAKE_MODE")
 }
 
 impl Drop for ScopedEnvVar {
@@ -179,6 +201,12 @@ impl Drop for ScopedEnvVar {
             crate::env::set_var(self.key, value);
         } else {
             crate::env::remove_var(self.key);
+        }
+        // KCode fork: mirror the set-side invalidation so the next test in the
+        // same process doesn't observe a stale cached value. Only invalidate
+        // for keys that drive the config snapshot.
+        if is_config_driven_key(self.key) {
+            jcode_base::config::invalidate_config_cache();
         }
     }
 }
@@ -323,6 +351,16 @@ fn persisted_headless_member(
 
 #[tokio::test]
 async fn background_task_wake_runs_live_session_immediately_when_idle() {
+    // KCode fork: take the test-env mutex so this test serializes with
+    // `external_background_task_wake_emits_request_without_starting_turn` (and
+    // any other test that mutates `JCODE_WAKE_MODE`). Without the lock, the
+    // external test can set `JCODE_WAKE_MODE=external` while this test is
+    // still running on a parallel `--test-threads>1` worker; the cache will
+    // hand us `WakeMode::External`, `emit_external_wake` will short-circuit
+    // `run_live_turn_if_idle`, and the asserted `TextDelta` never arrives.
+    // The mutex is the existing process-wide serialization point for
+    // env-mutating tests in this crate, so we use it here too.
+    let _env_lock = crate::storage::lock_test_env();
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
         StreamEvent::TextDelta("Build result processed.".to_string()),

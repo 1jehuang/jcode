@@ -39,9 +39,15 @@ impl Agent {
     pub(super) fn log_env_snapshot(&mut self, reason: &str) {
         let snapshot = self.build_env_snapshot(reason, self.env_snapshot_detail());
         self.session.record_env_snapshot(snapshot.clone());
-        if !self.session.messages.is_empty() {
-            self.persist_session_best_effort("environment snapshot");
-        }
+        // KCode fork: the env snapshot is recorded in memory and will be
+        // flushed by whatever next `Session::save()` call writes the session
+        // (first user-visible message, explicit caller-state save, etc.).
+        // Persisting here would force a disk write for a freshly-spawned
+        // agent's otherwise-blank panel, breaking the "blank session is
+        // in-memory until the user does something" contract that the
+        // `client_*_unsaved` and `grace_*_unsaved_idle` tests rely on. The
+        // `Session::save()` no-op for blank panels is intentional, and
+        // `log_env_snapshot` no longer tries to override it.
         if let Ok(json) = serde_json::to_string(&snapshot) {
             logging::info(&format!("ENV_SNAPSHOT {}", json));
         } else {

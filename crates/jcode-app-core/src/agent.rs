@@ -1006,7 +1006,21 @@ impl Agent {
         self.finish_concurrency_tracking();
         self.persist_soft_interrupt_snapshot();
         self.session.mark_closed();
-        if !self.session.messages.is_empty() {
+        // KCode fork: `Agent::new_with_session` always stamps `model`/
+        // `provider_key` and installs the hidden session-context header, so
+        // `messages` is never empty for an agent-held session and the upstream
+        // `!messages.is_empty()` guard never fires. Persisting on close is only
+        // correct when there is something on disk to update: real (model-visible)
+        // conversation content, or a session file that already exists (so the
+        // Closed status and any buffered env snapshots get flushed into it).
+        // A blank in-memory panel must stay invisible on close — materializing
+        // a transcript file here would break the "unsaved session never
+        // persists" contract that the disconnect-grace tests
+        // (`grace_tests::*unsaved_idle*`) rely on, mirroring the
+        // `log_env_snapshot` fix.
+        if self.visible_conversation_message_count() > 0
+            || crate::session::session_exists(self.session_id())
+        {
             self.persist_session_best_effort("session close state");
         }
         self.upload_transcript_telemetry(crate::telemetry::SessionEndReason::NormalExit);
