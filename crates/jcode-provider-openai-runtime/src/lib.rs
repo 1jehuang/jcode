@@ -50,7 +50,7 @@ const ORIGINATOR: &str = "codex_cli_rs";
 pub(crate) const CHATGPT_WEB_MODEL: &str = jcode_provider_core::CHATGPT_WEB_MODEL;
 
 pub(crate) fn is_chatgpt_web_model(model: &str) -> bool {
-    model.trim() == CHATGPT_WEB_MODEL
+    jcode_provider_core::is_chatgpt_web_model(model)
 }
 
 /// Whether the hosted `image_generation` tool can be attached for `model_id`.
@@ -807,7 +807,17 @@ impl OpenAIProvider {
 
         // Check for model override from environment
         let mut model = if browser_only {
-            CHATGPT_WEB_MODEL.to_string()
+            std::env::var("JCODE_OPENAI_MODEL")
+                .ok()
+                .map(|model| model.trim().to_string())
+                .filter(|model| is_chatgpt_web_model(model))
+                .or_else(|| {
+                    jcode_base::provider::chatgpt_web::cached_models()
+                        .into_iter()
+                        .find(|model| model.available)
+                        .map(|model| model.model)
+                })
+                .unwrap_or_else(|| CHATGPT_WEB_MODEL.to_string())
         } else {
             std::env::var("JCODE_OPENAI_MODEL")
                 .unwrap_or_else(|_| DEFAULT_MODEL.to_string())
@@ -1049,6 +1059,12 @@ impl OpenAIProvider {
     /// when they want deeper reasoning. Every other model keeps the model's
     /// own API-side default (no forced effort).
     fn default_reasoning_effort_for_model(model: &str) -> Option<String> {
+        if is_chatgpt_web_model(model) {
+            return jcode_base::provider::chatgpt_web::cached_reasoning_options(model)
+                .iter()
+                .any(|effort| effort.available && effort.value == "medium")
+                .then(|| "medium".to_string());
+        }
         let key = jcode_provider_core::model_id::canonical(model);
         if key.starts_with("gpt-5.6-sol") {
             Some("low".to_string())

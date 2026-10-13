@@ -1,4 +1,14 @@
 #[test]
+fn chatgpt_web_runtime_classifies_all_safe_web_model_routes() {
+    for model in ["gpt-6[web]", "gpt-5.6-sol[web]", "gpt-5.5[web]"] {
+        assert!(is_chatgpt_web_model(model), "missing browser routing for {model}");
+    }
+    for model in ["gpt-6", "gpt-5.6-sol", "gpt-6[web]/../", "[web]"] {
+        assert!(!is_chatgpt_web_model(model), "unsafe or API route accepted: {model}");
+    }
+}
+
+#[test]
 fn test_openai_supports_codex_models() {
     let _guard = jcode_base::storage::lock_test_env();
     jcode_base::auth::codex::set_active_account_override(Some(
@@ -79,9 +89,10 @@ fn test_chatgpt_web_model_bypasses_live_api_catalog() {
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
     assert_eq!(provider.transport().as_deref(), Some("browser"));
     assert!(
-        provider
+        !provider
             .available_models_for_switching()
-            .contains(&CHATGPT_WEB_MODEL.to_string())
+            .contains(&CHATGPT_WEB_MODEL.to_string()),
+        "An unobserved legacy web model must not be advertised as available"
     );
     provider.set_model("gpt-5.6-sol").unwrap();
     provider.set_model(CHATGPT_WEB_MODEL).unwrap();
@@ -96,11 +107,12 @@ fn test_chatgpt_browser_only_runtime_rejects_api_models_and_uses_local_compactio
     let provider = OpenAIProvider::new_browser_only();
 
     assert_eq!(provider.model(), CHATGPT_WEB_MODEL);
-    assert_eq!(provider.available_models(), vec![CHATGPT_WEB_MODEL]);
-    assert_eq!(
-        provider.available_models_for_switching(),
-        vec![CHATGPT_WEB_MODEL.to_string()]
-    );
+    assert!(provider.available_models().is_empty());
+    assert!(!provider.available_models_for_switching().contains(&CHATGPT_WEB_MODEL.to_string()));
+    for model in ["gpt-6[web]", "gpt-5.6-sol[web]", "gpt-5.5[web]"] {
+        provider.set_model(model).unwrap();
+        assert_eq!(provider.transport().as_deref(), Some("browser"));
+    }
     assert!(provider.supports_compaction());
     assert!(provider.uses_jcode_compaction());
     assert_eq!(provider.available_transports(), vec!["browser"]);
