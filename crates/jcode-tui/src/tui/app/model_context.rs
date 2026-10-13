@@ -125,6 +125,12 @@ impl App {
     }
 
     fn handle_provider_failover_prompt(&mut self, prompt: crate::provider::ProviderFailoverPrompt) {
+        // The provider already exhausted its usable accounts. Do not let todo
+        // pokes or held retries resend on the same unavailable route while a
+        // manual switch or configured countdown awaits a decision.
+        super::commands::disable_auto_poke(self);
+        self.overnight_auto_poke = None;
+        self.clear_pending_remote_retry();
         let input_summary = Self::format_failover_input_summary(&prompt);
         let manual_message = format!(
             "⚠ {} became unavailable - jcode did not resend your prompt to {} automatically.\n\nReason: {}\n\nRetrying elsewhere would send {}.\n\nTo switch manually now, use /model and pick a model from {}, then resend. {}",

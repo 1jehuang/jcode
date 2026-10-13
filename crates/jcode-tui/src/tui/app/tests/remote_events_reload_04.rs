@@ -513,6 +513,11 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     app.is_remote = true;
+    app.auto_poke_incomplete_todos = true;
+    app.auto_poke_default_on = true;
+    app.queued_messages
+        .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
+    app.pending_queued_dispatch = true;
     app.remote_provider_name = Some("Anthropic".to_string());
     app.remote_provider_model = Some("claude-sonnet-4".to_string());
     app.remote_model_options = vec![
@@ -553,6 +558,11 @@ fn test_remote_account_failover_prompt_does_not_hold_or_retry_same_account() {
 
     assert!(app.rate_limit_reset.is_none());
     assert!(app.rate_limit_pending_message.is_none());
+    assert!(!app.auto_poke_incomplete_todos);
+    assert!(!app.auto_poke_default_on);
+    assert!(app.queued_messages.is_empty());
+    assert!(!app.pending_queued_dispatch);
+    assert!(!app.schedule_turn_end_followups());
     assert_eq!(app.input, "hi");
     assert!(app.pending_provider_failover.is_none());
     let offer = app
