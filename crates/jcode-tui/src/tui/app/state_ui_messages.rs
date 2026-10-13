@@ -20,6 +20,11 @@ fn display_message_from_stored_message(
     if is_background_task_lifecycle_message(&text) {
         return None;
     }
+    if !matches!(message.role, Role::Assistant)
+        && let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(&text)
+    {
+        return Some(swarm);
+    }
     match message.display_role {
         Some(crate::session::StoredDisplayRole::System) => Some(DisplayMessage::system(text)),
         Some(crate::session::StoredDisplayRole::BackgroundTask) => None,

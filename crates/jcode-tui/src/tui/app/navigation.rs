@@ -278,7 +278,8 @@ impl App {
         if message.role != "swarm" {
             return false;
         }
-        let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&message.content)
+        let normalized = jcode_tui_messages::collapse_long_swarm_content(&message.content);
+        let Some(toggled) = jcode_tui_messages::toggle_collapsible_swarm_content(&normalized)
         else {
             return false;
         };

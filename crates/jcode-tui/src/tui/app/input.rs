@@ -1960,6 +1960,10 @@ impl App {
             return;
         }
         if !super::commands::is_poke_message(text) {
+            if let Some(swarm) = super::remote_notifications::swarm_delivery_display_message(text) {
+                self.push_display_message(swarm);
+                return;
+            }
             self.push_display_message(DisplayMessage::user(text.to_string()));
             return;
         }

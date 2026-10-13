@@ -2903,7 +2903,10 @@ fn render_compact_agent_notification(
 ) -> Option<Vec<Line<'static>>> {
     let notification = compact_swarm_notification(title)?;
     let icon = crate::id::session_icon(notification.sender);
-    let collapsible = jcode_tui_messages::parse_collapsible_swarm_content(content);
+    // Plain (legacy or unencoded) long content renders as a collapsed preview
+    // too, so nothing agent-authored is ever dumped inline by default.
+    let normalized = jcode_tui_messages::collapse_long_swarm_content(content);
+    let collapsible = jcode_tui_messages::parse_collapsible_swarm_content(&normalized);
     let (body, badge) = match collapsible {
         Some(parsed) if parsed.expanded => (
             format!("{}\n{}", parsed.tldr, parsed.body.trim()),
@@ -2932,6 +2935,47 @@ fn render_compact_agent_notification(
     let icon_style = Style::default().fg(rgb(255, 200, 100));
     let body_style = Style::default().fg(text_color);
     let max_width = width.max(1) as usize;
+
+    // Collapsed (or plain) content is always exactly one row: the preview is
+    // truncated with an ellipsis so the badge stays the trailing token.
+    let expanded = collapsible.is_some_and(|parsed| parsed.expanded);
+    if !expanded {
+        let preview = jcode_tui_messages::swarm_preview_line(&body, usize::MAX);
+        let mut prefix = if notification.marker_before_icon {
+            vec![Span::styled(
+                format!("{}{} ", notification.marker, icon),
+                body_style,
+            )]
+        } else {
+            let mut spans = vec![Span::styled(format!("{} ", icon), icon_style)];
+            if !notification.marker.is_empty() {
+                spans.push(Span::styled(notification.marker.clone(), body_style));
+            }
+            spans
+        };
+        let badge_text = badge.map(|badge| format!("  {badge}"));
+        let badge_width = badge_text
+            .as_deref()
+            .map(UnicodeWidthStr::width)
+            .unwrap_or(0);
+        prefix.push(Span::styled(preview, body_style));
+        let mut line = super::truncate_line_with_ellipsis_to_width(
+            &Line::from(prefix),
+            max_width.saturating_sub(badge_width).max(1),
+        );
+        if let Some(badge_text) = badge_text {
+            line.spans.push(Span::styled(
+                badge_text,
+                Style::default().fg(text_color).dim(),
+            ));
+        }
+        let mut lines = vec![line];
+        if markdown::center_code_blocks() {
+            left_pad_lines_for_centered_mode(&mut lines, width);
+        }
+        return Some(lines);
+    }
+
     let body_width = max_width.saturating_sub(3).max(1);
     let mut rendered_body = if body.is_empty() {
         vec![Line::from(Span::styled(String::new(), body_style))]
@@ -3125,14 +3169,23 @@ pub(crate) fn render_swarm_message(
         } else {
             SWARM_EXPAND_BADGE
         };
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(tldr.clone(), body_style),
-            Span::styled(
-                format!("  {}", badge),
-                Style::default().fg(rail_color).dim(),
-            ),
-        ]));
+        let badge_text = format!("  {}", badge);
+        let badge_width = UnicodeWidthStr::width(badge_text.as_str());
+        let mut line = super::truncate_line_with_ellipsis_to_width(
+            &Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    jcode_tui_messages::swarm_preview_line(tldr, usize::MAX),
+                    body_style,
+                ),
+            ]),
+            (width.max(1) as usize).saturating_sub(badge_width).max(1),
+        );
+        line.spans.push(Span::styled(
+            badge_text,
+            Style::default().fg(rail_color).dim(),
+        ));
+        lines.push(line);
     }
 
     let mut body_lines = if content.is_empty() {

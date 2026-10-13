@@ -2071,7 +2071,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         ));
                         drop(messages);
                     } else {
-                        let restored_messages = messages
+                        let mut restored_messages: Vec<DisplayMessage> = messages
                             .into_iter()
                             .map(|msg| DisplayMessage {
                                 role: msg.role,
@@ -2082,6 +2082,9 @@ pub(in crate::tui::app) fn handle_server_event(
                                 tool_data: msg.tool_data,
                             })
                             .collect();
+                        super::super::remote_notifications::normalize_swarm_delivery_messages(
+                            &mut restored_messages,
+                        );
                         app.replace_display_messages(restored_messages);
                         // A same-session forced re-apply (rewind / rewind-undo
                         // truncation, or a deferred bootstrap) rebuilds the
@@ -2709,6 +2712,14 @@ pub(in crate::tui::app) fn handle_server_event(
                     );
                     app.finish_background_task(completed.task_id, label, status);
                 }
+            } else if let Some(swarm) =
+                super::super::remote_notifications::swarm_delivery_display_message(&content)
+            {
+                // A delivered swarm message: the notification card already
+                // shows it as one row. Never dump the full model-facing text.
+                if !recent_swarm_card_matches(app, &swarm) {
+                    app.push_display_message(swarm);
+                }
             } else {
                 app.push_display_message(DisplayMessage {
                     role,
@@ -3112,6 +3123,18 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         _ => false,
     }
+}
+
+/// True when one of the recent transcript rows is already the swarm card for
+/// the same delivered message (same title and full body).
+fn recent_swarm_card_matches(app: &App, candidate: &DisplayMessage) -> bool {
+    use super::super::remote_notifications::swarm_display_full_body;
+    let body = swarm_display_full_body(&candidate.content);
+    app.display_messages().iter().rev().take(40).any(|message| {
+        message.role == "swarm"
+            && message.title == candidate.title
+            && swarm_display_full_body(&message.content) == body
+    })
 }
 
 fn runtime_activity_status_notice(message: &str) -> String {
