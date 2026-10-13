@@ -1015,6 +1015,26 @@ pub(crate) fn render_todos_message(
     width: u16,
     diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
+    render_todos_message_with_cap(msg, width, diff_mode, true)
+}
+
+/// Todo card for the pinned band at the top of the viewport. The band owns
+/// its full rows (info widgets never dock beside it), so the card spans the
+/// whole available width instead of the transcript's readability cap.
+pub(crate) fn render_pinned_todos_message(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+) -> Vec<Line<'static>> {
+    render_todos_message_with_cap(msg, width, diff_mode, false)
+}
+
+fn render_todos_message_with_cap(
+    msg: &DisplayMessage,
+    width: u16,
+    diff_mode: crate::config::DiffDisplayMode,
+    cap_width: bool,
+) -> Vec<Line<'static>> {
     let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
         return render_system_message(msg, width, diff_mode);
     };
@@ -1022,10 +1042,11 @@ pub(crate) fn render_todos_message(
 
     let centered = markdown::center_code_blocks();
     let meta_style = Style::default().fg(todo_meta_color());
-    let card_width = if centered {
-        (width.saturating_sub(4) as usize).min(120)
-    } else {
-        (width.saturating_sub(2) as usize).min(100)
+    let card_width = match (centered, cap_width) {
+        (true, true) => (width.saturating_sub(4) as usize).min(120),
+        (true, false) => width.saturating_sub(4) as usize,
+        (false, true) => (width.saturating_sub(2) as usize).min(100),
+        (false, false) => width.saturating_sub(2) as usize,
     }
     .max(1);
     let base_indent = if centered { "" } else { "  " };

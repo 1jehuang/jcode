@@ -1413,7 +1413,7 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
 
 /// Lines for the pinned todo band. Background tasks render in the
 /// `background` info widget, not here.
-pub(super) fn pinned_todo_band_lines(
+pub(crate) fn pinned_todo_band_lines(
     app: &dyn TuiState,
     width: u16,
     viewport_height: u16,
@@ -1425,12 +1425,15 @@ pub(super) fn pinned_todo_band_lines(
     let card_lines = if crate::config::config().display.pin_todos {
         app.pinned_todos_payload()
             .map(|payload| {
-                let msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                // Distinct title keeps the line cache from sharing entries with
+                // the width-capped inline transcript card.
+                let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                msg.title = Some("Pinned todos".to_string());
                 super::messages::get_cached_message_lines(
                     &msg,
                     width,
                     app.diff_mode(),
-                    super::messages::render_todos_message,
+                    super::messages::render_pinned_todos_message,
                 )
             })
             .unwrap_or_default()
