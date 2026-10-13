@@ -194,6 +194,17 @@ impl App {
             return false;
         }
 
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| {
+                matches!(picker.kind, PickerKind::Account | PickerKind::Model)
+                    && picker.filtered.is_empty()
+            })
+        {
+            return true;
+        }
+
         if let Some(ref mut picker) = self.inline_interactive_state {
             picker.preview = false;
         }
