@@ -23,6 +23,18 @@ return (async () => {
   }
   const effortNames = { instant: 'none', medium: 'medium', high: 'high', 'extra high': 'xhigh', pro: 'max' };
   const trigger = () => one('button[aria-label="Select ChatGPT model"]');
+  // The live legacy data-selected-reasoning-effort attribute aliases Extra
+  // High to "max" and Pro to "medium". It is not proof of the Power choice.
+  // Corroborate the labeled slider with the independently rendered closed
+  // trigger label instead, keeping all five observed Power levels distinct.
+  const closedTriggerEffort = model => {
+    let label = (trigger()?.innerText || '').trim().toLowerCase();
+    // Older checked GPT rows render a version badge, e.g. "5.6 Medium".
+    // Remove only the exact version of the independently checked model.
+    const version = model?.match(/^GPT-(\d+(?:\.\d+)*)(?: |$)/)?.[1];
+    if (version && label.startsWith(`${version} `)) label = label.slice(version.length + 1);
+    return effortNames[label] || '';
+  };
   const editorSelector = '[contenteditable="true"][data-composer-markdown], [contenteditable="true"][aria-label="Chat with ChatGPT"]';
   const submitSelector = 'button[type="submit"][aria-label="Send"], #composer-submit-button';
   const rowLabel = e => (e.innerText || '').split('\n').map(s => s.trim()).find(Boolean) || '';
@@ -94,8 +106,8 @@ return (async () => {
       await closeMenu();
       await openPicker(false);
       const power = powerState();
-      const advertised = trigger()?.getAttribute('data-selected-reasoning-effort') || '';
-      if (!power.value || power.value !== advertised) throw Error('ChatGPT thinking effort slider and trigger disagree');
+      await closeMenu();
+      if (!power.value || power.value !== closedTriggerEffort(model)) throw Error(`ChatGPT thinking effort slider and trigger label disagree: slider '${power.label}' at ${power.index}, trigger '${(trigger()?.innerText || '').trim()}' for '${model}'`);
       return { model, effort: power.value, temporary: temporary() };
     } finally { await closeMenu(); }
   }
@@ -108,6 +120,7 @@ return (async () => {
     } finally { await closeMenu(); }
     const selected = await observation();
     if (selected.model !== label) throw Error(`ChatGPT model selection mismatch: '${selected.model}' instead of '${label}'`);
+    return selected;
   }
   function powerState() {
     const control = one('[data-reasoning-slider="true"]');
@@ -139,7 +152,7 @@ return (async () => {
     }
     throw Error('ChatGPT thinking effort selection exceeded its bound');
   }
-  async function efforts(target = null) {
+  async function efforts(target = null, model = null) {
     if (target !== null && !Object.values(effortNames).includes(target)) throw Error(`Unsupported ChatGPT web thinking effort '${target}'`);
     await openPicker(false);
     const start = powerState();
@@ -160,7 +173,7 @@ return (async () => {
       try { await movePower(start.index); } catch (restoreError) { throw Error(`${error.message}. Thinking effort restoration also failed: ${restoreError.message}`); }
       throw error;
     } finally { await closeMenu(); }
-    if (target !== null && trigger()?.getAttribute('data-selected-reasoning-effort') !== target) throw Error('ChatGPT did not commit the exact thinking effort');
+    if (target !== null && closedTriggerEffort(model) !== target) throw Error('ChatGPT did not commit the exact thinking effort');
     return choices.map(({ index, ...choice }) => choice);
   }
   async function restore(original) {
@@ -168,8 +181,8 @@ return (async () => {
     restoring = true;
     try {
       if (!original?.model || !original?.effort) throw Error('ChatGPT preference restoration lacks verified original state');
-      await selectModel(original.model);
-      if (trigger()?.getAttribute('data-selected-reasoning-effort') !== original.effort) await efforts(original.effort);
+      const selected = await selectModel(original.model);
+      if (selected.effort !== original.effort) await efforts(original.effort, original.model);
       const current = await observation();
       if (current.model !== original.model || current.effort !== original.effort) throw Error('ChatGPT original preferences were not restored');
       return current;
@@ -251,10 +264,10 @@ return (async () => {
     const original = await observation();
     if (request.op === 'prepare') {
       try {
-        await selectModel(request.label);
-        const target = request.effort || trigger()?.getAttribute('data-selected-reasoning-effort');
+        const selected = await selectModel(request.label);
+        const target = request.effort || selected.effort;
         if (!target) throw Error('ChatGPT current thinking effort is unknown');
-        if (trigger()?.getAttribute('data-selected-reasoning-effort') !== target) await efforts(target);
+        if (selected.effort !== target) await efforts(target, request.label);
         const current = await observation();
         requireTemporary(true);
         if (current.model !== request.label || current.effort !== target) throw Error('ChatGPT exact selection verification failed');

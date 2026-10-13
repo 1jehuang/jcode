@@ -45,15 +45,17 @@ function fixture({ temporary=true, hiddenDuplicate=false, locked=false, wrongSel
   const labels = ['GPT-6', 'GPT-5.6 Sol', 'GPT-5.5'];
   let selected = 'GPT-6';
   let index = 1;
-  const efforts = ['none', 'medium', 'high', 'xhigh', 'max'];
+  // Actual live Power values: the legacy attribute is not the Power label.
+  const efforts = ['none', 'medium', 'high', 'max', 'medium'];
   const effortLabels = ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
   const trigger = new Element('button', { 'aria-label':'Select ChatGPT model', 'data-selected-reasoning-effort':'medium' }, 'Medium');
+  const renderTrigger = () => `${selected === 'GPT-6' ? '' : selected === 'GPT-5.6 Sol' ? '5.6 ' : '5.5 '}${effortLabels[index]}`;
   const desc = new Element('span', { id:'power-status', role:'status' }, 'Medium, 2 of 5.');
   const thumb = new Element('span', { role:'slider', 'aria-valuemin':'0', 'aria-valuemax':'4', 'aria-valuenow':'1', 'aria-hidden':'true' });
   const power = new Element('div', { 'data-reasoning-slider':'true', 'aria-describedby':'power-status', role:'menuitem' }, '', [thumb]);
-  power.onKey = e => { index = Math.max(0, Math.min(4, index+(e.key === 'ArrowRight' ? 1 : -1))); thumb.setAttribute('aria-valuenow', index); trigger.setAttribute('data-selected-reasoning-effort', efforts[index]); trigger.text = effortLabels[index]; desc.text = `${effortLabels[index]}, ${index+1} of 5.`; };
+  power.onKey = e => { index = Math.max(0, Math.min(4, index+(e.key === 'ArrowRight' ? 1 : -1))); thumb.setAttribute('aria-valuenow', index); trigger.setAttribute('data-selected-reasoning-effort', efforts[index]); trigger.text = renderTrigger(); desc.text = `${effortLabels[index]}, ${index+1} of 5.`; };
   const rows = labels.map(label => new Element('div', { role:'menuitemradio', 'aria-checked': String(label === selected), ...(locked && label === 'GPT-5.6 Sol' ? {'aria-disabled':'true', 'aria-describedby':'locked'} : {}) }, label));
-  for (const row of rows) row.onClick = () => { if (!wrongSelection) { selected=row.text; for(const other of rows) other.setAttribute('aria-checked', String(other===row)); } close(); };
+  for (const row of rows) row.onClick = () => { if (!wrongSelection) { selected=row.text; for(const other of rows) other.setAttribute('aria-checked', String(other===row)); trigger.text=renderTrigger(); } close(); };
   const simple = new Element('div', { 'data-active':'true', 'aria-hidden':'false' }, '', []);
   const advanced = new Element('div', { 'data-active':'false', 'aria-hidden':'true', inert:'' }, '', rows);
   const toggle = new Element('div', { 'data-model-picker-view-toggle':'true' }, 'Select model');
@@ -133,9 +135,26 @@ test('a clicked model that did not become checked fails closed',async()=>{
 test('unknown effort never guesses a numeric slider position',async()=>{
   const f=fixture();await assert.rejects(run({op:'prepare',label:'GPT-6',effort:'low'},f),/effort|support/i);assert.equal(f.submits(),0);
 });
-test('stale trigger effort cannot override independently observed slider state',async()=>{
-  const f=fixture();f.power.onKey({key:'ArrowLeft'});f.trigger.setAttribute('data-selected-reasoning-effort','medium');
+test('stale closed trigger label cannot override independently observed slider state',async()=>{
+  const f=fixture();f.power.onKey({key:'ArrowLeft'});f.trigger.setAttribute('data-selected-reasoning-effort','medium');f.trigger.text='Medium';
   await assert.rejects(run({op:'prepare',label:'GPT-6',effort:'medium'},f),/effort.*(disagree|mismatch)/i);assert.equal(f.submits(),0);
+});
+test('all five observed Power labels remain distinct despite the legacy attribute aliases',async()=>{
+  for(const effort of ['none','medium','high','xhigh','max']) {
+    const f=fixture();
+    const result=await run({op:'prepare',label:'GPT-6',effort},f);
+    assert.equal(result.effort,effort);
+    const verified=await run({op:'verify',label:'GPT-6',effort},f);
+    assert.equal(verified.effort,effort);
+    const restored=await run({op:'restore',original:result.original},f);
+    assert.equal(restored.effort,'medium');
+    assert.equal(f.submits(),0);
+  }
+});
+test('a closed trigger version badge must agree with the independently checked model',async()=>{
+  const f=fixture();f.trigger.text='5.5 Medium';
+  await assert.rejects(run({op:'verify',label:'GPT-6',effort:'medium'},f),/effort.*disagree/i);
+  assert.equal(f.submits(),0);
 });
 test('new composer fingerprint includes UTF-16 and verifies Send button',async()=>{
   const f=fixture();f.editor.text='🙂漢';const result=await run({op:'prompt'},f);assert.equal(result.length,3);assert.equal(result.submitDisabled,false);
