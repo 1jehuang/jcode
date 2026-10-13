@@ -383,10 +383,15 @@ mod tests {
             "models": [{"slug": "gpt-5.6", "supported_reasoning_efforts":
                 ["max", "medium", "minimal", "high"]}]
         }));
-        assert_eq!(catalog.reasoning_efforts.get("gpt-5.6"), Some(&vec![
-            "minimal".to_string(), "medium".to_string(),
-            "high".to_string(), "max".to_string()
-        ]));
+        assert_eq!(
+            catalog.reasoning_efforts.get("gpt-5.6"),
+            Some(&vec![
+                "minimal".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ])
+        );
     }
 }
 

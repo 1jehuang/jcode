@@ -184,6 +184,15 @@ pub fn analyze_frames_with_scroll(
     frames: &[Vec<PlacedRect>],
     scroll_tops: &[i64],
 ) -> StabilityReport {
+    analyze_frames_with_viewport_rows(frames, scroll_tops, None)
+}
+
+/// Analyze scroll drift using each captured frame's actual usable rows.
+pub fn analyze_frames_with_viewport_rows(
+    frames: &[Vec<PlacedRect>],
+    scroll_tops: &[i64],
+    viewport_rows: Option<&[std::ops::Range<u16>]>,
+) -> StabilityReport {
     let mut report = StabilityReport {
         frames: frames.len(),
         steps: frames.len().saturating_sub(1),
@@ -266,11 +275,14 @@ pub fn analyze_frames_with_scroll(
                     // are per-frame jiggle (drift against the text); a large residual
                     // means the widget jumped to a different pocket (a recycle), which
                     // is counted separately so it doesn't masquerade as smooth travel.
-                    // A widget that did not move at all is holding a fixed screen
-                    // row (stuck at the viewport edge after its line scrolled out),
-                    // which is deliberate, so it is not counted as drift.
+                    // Holding still is intentional only at a verified viewport edge.
                     let signed_dy = c.y as i64 - p.y as i64;
-                    let residual = if signed_dy == 0 {
+                    let at_edge = viewport_rows
+                        .and_then(|rows| rows.get(step + 1))
+                        .is_some_and(|rows| {
+                            c.y <= rows.start || c.y.saturating_add(c.height) >= rows.end
+                        });
+                    let residual = if signed_dy == 0 && at_edge {
                         0
                     } else {
                         (signed_dy + scroll_delta).abs()
@@ -573,7 +585,8 @@ pub fn measure_scroll(
     data: &InfoWidgetData,
 ) -> StabilityReport {
     let frames = simulate_scroll(content_widths, area_width, viewport_height, data);
-    analyze_frames(&frames)
+    let scroll_tops: Vec<i64> = (0..frames.len() as i64).collect();
+    analyze_frames_with_viewport(&frames, &scroll_tops, Some(viewport_height))
 }
 
 /// Convenience: simulate a scroll in a specific mode and return the report.
@@ -585,7 +598,18 @@ pub fn measure_scroll_mode(
     mode: SimMode,
 ) -> StabilityReport {
     let frames = simulate_scroll_mode(content_widths, area_width, viewport_height, data, mode);
-    analyze_frames(&frames)
+    let scroll_tops: Vec<i64> = (0..frames.len() as i64).collect();
+    analyze_frames_with_viewport(&frames, &scroll_tops, Some(viewport_height))
+}
+
+/// Analyze synthetic frames with a constant viewport height.
+pub fn analyze_frames_with_viewport(
+    frames: &[Vec<PlacedRect>],
+    scroll_tops: &[i64],
+    viewport_height: Option<u16>,
+) -> StabilityReport {
+    let rows = viewport_height.map(|height| vec![0..height; frames.len()]);
+    analyze_frames_with_viewport_rows(frames, scroll_tops, rows.as_deref())
 }
 
 fn abs_diff(a: u16, b: u16) -> u16 {

@@ -116,7 +116,8 @@ impl App {
 
     pub(super) fn remember_remote_effort_before_request(&mut self) {
         if self.remote_reasoning_effort_before_request.is_none() {
-            self.remote_reasoning_effort_before_request = Some(self.remote_reasoning_effort.clone());
+            self.remote_reasoning_effort_before_request =
+                Some(self.remote_reasoning_effort.clone());
         }
     }
 

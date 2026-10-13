@@ -52,7 +52,48 @@ use tokio::sync::RwLock;
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
 /// OpenAI ChatGPT usage endpoint
+#[cfg(not(test))]
 const OPENAI_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+
+#[cfg(test)]
+static TEST_OPENAI_USAGE_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn openai_usage_url() -> Option<String> {
+    #[cfg(test)]
+    {
+        TEST_OPENAI_USAGE_URL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+    #[cfg(not(test))]
+    {
+        Some(OPENAI_USAGE_URL.to_string())
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct OpenAiUsageUrlGuard(Option<String>);
+
+#[cfg(test)]
+impl Drop for OpenAiUsageUrlGuard {
+    fn drop(&mut self) {
+        *TEST_OPENAI_USAGE_URL
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = self.0.take();
+    }
+}
+
+/// Only an explicitly supplied loopback endpoint can be contacted by unit tests.
+#[cfg(test)]
+pub(crate) fn override_openai_usage_url_for_tests(url: String) -> OpenAiUsageUrlGuard {
+    assert!(url.starts_with("http://127.0.0.1:"));
+    let previous = TEST_OPENAI_USAGE_URL
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .replace(url);
+    OpenAiUsageUrlGuard(previous)
+}
 
 /// Cache duration (refresh every 5 minutes - usage data is slow-changing)
 const CACHE_DURATION: Duration = Duration::from_secs(300);

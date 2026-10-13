@@ -163,6 +163,43 @@ impl Config {
         Ok(())
     }
 
+    /// Persist a named OpenAI-compatible model's default reasoning effort.
+    pub fn set_named_provider_model_reasoning_effort(
+        profile: &str,
+        model: &str,
+        value: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        let provider = cfg
+            .providers
+            .iter_mut()
+            .find(|(id, _)| id.eq_ignore_ascii_case(profile))
+            .map(|(_, provider)| provider)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Named provider profile `{profile}` is not in the config file")
+            })?;
+        anyhow::ensure!(
+            provider.provider_type == NamedProviderType::OpenAiCompatible,
+            "Named provider profile `{profile}` does not support OpenAI-compatible reasoning efforts"
+        );
+        let model = model.trim();
+        anyhow::ensure!(!model.is_empty(), "Model must not be empty");
+        match provider
+            .models
+            .iter_mut()
+            .find(|entry| entry.id.trim().eq_ignore_ascii_case(model))
+        {
+            Some(entry) => entry.reasoning_effort = value.map(str::to_string),
+            None if value.is_some() => provider.models.push(NamedProviderModelConfig {
+                id: model.to_string(),
+                reasoning_effort: value.map(str::to_string),
+                ..Default::default()
+            }),
+            None => {}
+        }
+        cfg.save()
+    }
+
     /// Persist the Anthropic cache duration for clients and the shared daemon.
     pub fn set_anthropic_cache_ttl_1h(enabled: bool) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
