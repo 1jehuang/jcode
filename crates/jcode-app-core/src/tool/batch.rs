@@ -58,7 +58,7 @@ pub(crate) fn generic_batch_schema() -> Value {
                         "parameters": {
                             "type": "object",
                             "additionalProperties": true,
-                            "description": "The complete child tool input. Keep child fields such as tool, name, arguments, args, and input inside this object, not beside the batch routing tool."
+                            "description": "Complete child input. Nest native tool, name, arguments, args, and input fields here."
                         }
                     },
                     "additionalProperties": true
@@ -215,6 +215,7 @@ fn normalize_batch_input_with_schemas(
                     if tool == name && !schema_may_declare_property(tool_schema, "name") {
                         obj.remove("name");
                     } else if !obj.contains_key("parameters")
+                        && !schema_declares_property(tool_schema, "name")
                         && schema_declares_property(tool_schemas.get(name), "tool")
                     {
                         // A legacy name-routed wrapper can carry a child's own
@@ -223,7 +224,8 @@ fn normalize_batch_input_with_schemas(
                             tool_schema.is_none(),
                             "Ambiguous batch tool/name selectors. Use {{\"tool\":\"<wrapper>\",\"parameters\":{{\"tool\":\"<child>\"}}}}."
                         );
-                        let wrapper = obj.remove("name").unwrap();
+                        obj.remove("name");
+                        let wrapper = Value::String(name.clone());
                         let parameters = std::mem::take(obj);
                         obj.insert("tool".to_string(), wrapper);
                         obj.insert("parameters".to_string(), Value::Object(parameters));
