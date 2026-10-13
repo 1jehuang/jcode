@@ -3,6 +3,9 @@ use std::os::unix::net::UnixListener;
 
 #[test]
 fn session_child_drops_only_verified_gate_descriptor() {
+    // A concurrent fork can temporarily retain another fixture's vnode lock
+    // before exec closes its descriptors. Coordinate these real child probes.
+    let _guard = crate::storage::lock_test_env();
     use std::os::{fd::AsRawFd, unix::process::CommandExt};
     let gate = tempfile::NamedTempFile::new().unwrap();
     let unrelated = tempfile::NamedTempFile::new().unwrap();
@@ -36,6 +39,7 @@ fn session_child_drops_only_verified_gate_descriptor() {
 
 #[test]
 fn session_child_cannot_retain_parent_gate_lock() {
+    let _guard = crate::storage::lock_test_env();
     use std::os::{fd::AsRawFd, unix::process::CommandExt};
     let gate = tempfile::NamedTempFile::new().unwrap();
     let owner = std::fs::OpenOptions::new()
