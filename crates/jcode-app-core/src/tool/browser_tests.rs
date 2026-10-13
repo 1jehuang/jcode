@@ -438,3 +438,8 @@ fn nested_scroll_uses_container_delta_without_escaping_scope() {
     assert!(script.contains("top:600"));
     assert!(script.contains("return {scrolled:true"));
 }
+
+// #1743 live acceptance (ignored by default; see the module docs).
+#[cfg(unix)]
+#[path = "browser_live_1743_tests.rs"]
+mod browser_live_1743_tests;

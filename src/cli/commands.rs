@@ -2006,6 +2006,9 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                 "  compatibility: {}",
                 if status.compatible {
                     "ok"
+                } else if !status.responding {
+                    // Nothing answered, so there is no extension to compare.
+                    "unknown (bridge not responding)"
                 } else {
                     "extension/bridge mismatch"
                 }
@@ -2031,6 +2034,9 @@ pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
                     name,
                     target.kind.extensions_page()
                 );
+                if let Some(diagnosis) = browser::diagnose_silent_chromium_bridge(target.kind) {
+                    println!("{diagnosis}");
+                }
             } else {
                 println!("\nRun `jcode browser setup` to install or repair it.");
             }
