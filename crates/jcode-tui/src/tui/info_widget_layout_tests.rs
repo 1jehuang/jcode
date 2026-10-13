@@ -957,20 +957,33 @@ fn remerge_keeps_slot_of_widget_hidden_below_top_band() {
         ov > 2 && ov < mem_h,
         "natural overview {ov} must fit below natural memory {mem_h}"
     );
+    let part_h = calculate_widget_height(WidgetKind::ModelInfo, &data, 40, u16::MAX) as usize;
+    assert!(part_h > 2 && part_h < ov);
     let band = mem_h + 2;
-    let rows = band + 5 * (ov + 1);
+    let rows = band + ov + 1 + 5 * (part_h + 1);
     let area = Rect::new(0, 0, 140, rows as u16);
     let widths_with = |covered: bool| -> Vec<u16> {
         (0..rows)
             .map(|r| {
-                if r < band || (covered && (r - band) % (ov + 1) == ov) {
-                    0
-                } else {
-                    40
-                }
+                let blocked = r < band
+                    || (covered
+                        && if r < band + ov {
+                            false
+                        } else {
+                            r == band + ov || (r - band - ov - 1) % (part_h + 1) == part_h
+                        });
+                if blocked { 0 } else { 40 }
             })
             .collect()
     };
+    assert_eq!(
+        widths_with(true)
+            .windows(ov)
+            .filter(|rows| rows.iter().all(|width| *width == 40))
+            .count(),
+        1,
+        "the only natural Overview-sized pocket must intersect held memory"
+    );
     let margins = |covered: bool, scroll_top: usize| Margins {
         right_widths: widths_with(covered),
         right_reliable: widths_with(covered),
@@ -1019,6 +1032,13 @@ fn remerge_keeps_slot_of_widget_hidden_below_top_band() {
             p
         );
     }
+    assert!(
+        hidden
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::ModelInfo),
+        "held memory leaves only natural split-part pockets, not an Overview pocket"
+    );
     let cleared =
         calculate_placements_anchored(area, &margins(false, 200), &data, true, &hidden.anchors);
     assert_placements_sane("cleared frame", area, &cleared.visible);

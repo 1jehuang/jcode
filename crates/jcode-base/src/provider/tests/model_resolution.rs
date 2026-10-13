@@ -2073,6 +2073,8 @@ fn test_provider_for_model_cursor() {
 
 #[test]
 fn test_context_limit_spark_vs_codex() {
+    let _env = crate::storage::lock_test_env();
+    let _cache = models::ContextLimitCacheGuardForTests::new();
     assert_eq!(
         context_limit_for_model("gpt-5.3-codex-spark"),
         Some(128_000)
@@ -2085,6 +2087,8 @@ fn test_context_limit_spark_vs_codex() {
 
 #[test]
 fn test_context_limit_gpt_5_4() {
+    let _env = crate::storage::lock_test_env();
+    let _cache = models::ContextLimitCacheGuardForTests::new();
     assert_eq!(context_limit_for_model("gpt-5.4"), Some(1_000_000));
     assert_eq!(context_limit_for_model("gpt-5.4-pro"), Some(1_000_000));
     assert_eq!(context_limit_for_model("gpt-5.4[1m]"), Some(1_000_000));
@@ -2092,6 +2096,8 @@ fn test_context_limit_gpt_5_4() {
 
 #[test]
 fn test_context_limit_respects_provider_hint() {
+    let _env = crate::storage::lock_test_env();
+    let _cache = models::ContextLimitCacheGuardForTests::new();
     assert_eq!(
         context_limit_for_model_with_provider("gpt-5.4", Some("openai")),
         Some(1_000_000)
@@ -2108,6 +2114,8 @@ fn test_context_limit_respects_provider_hint() {
 
 #[test]
 fn test_resolve_model_capabilities_uses_provider_hint() {
+    let _env = crate::storage::lock_test_env();
+    let _cache = models::ContextLimitCacheGuardForTests::new();
     let openai = resolve_model_capabilities("gpt-5.4", Some("openai"));
     assert_eq!(openai.provider.as_deref(), Some("openai"));
     assert_eq!(openai.context_window, Some(1_000_000));
