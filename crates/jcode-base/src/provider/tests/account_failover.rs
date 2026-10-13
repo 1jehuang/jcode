@@ -8,6 +8,50 @@
 
 use jcode_provider_core::{AccountPin, AccountProviderKind};
 
+fn serve_openai_usage(rt: &tokio::runtime::Runtime, body: &'static str,
+    hits: Arc<std::sync::atomic::AtomicUsize>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let url = format!("http://{}/wham/usage", listener.local_addr().unwrap());
+    rt.spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf).await;
+            let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    url
+}
+
+#[test]
+fn openai_rotation_rechecks_a_marked_alternative_live() {
+    with_account_failover_env(|| {
+        crate::usage::reset_openai_exhaustion_revalidation_for_tests();
+        assert_eq!(store_openai_accounts(2), ["openai-otter", "openai-fox"]);
+        let world = Arc::new(FakeAccountWorld::default());
+        let a = account_session(&world, "A", ActiveProvider::OpenAI, false);
+        let rt = enter_test_runtime();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _endpoint = crate::usage::override_openai_usage_url_for_tests(serve_openai_usage(&rt,
+            r#"{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":3,"limit_window_seconds":18000},"secondary_window":{"used_percent":10,"limit_window_seconds":604800}}}"#,
+            Arc::clone(&hits)));
+        let far = chrono::Utc::now().timestamp() + 5 * 3600;
+        for label in ["openai-otter", "openai-fox"] {
+            crate::provider::account_failover::record_account_exhausted(AccountProviderKind::OpenAi, label, Some(far));
+        }
+        crate::usage::mark_openai_exhaustion_revalidated_for_tests("openai-otter");
+        let text = complete_text(&rt, &a);
+        crate::usage::forget_openai_usage_for_label_for_tests("openai-fox");
+        assert_eq!(text.expect("the reset alternative takes the request"), "hi from openai-fox");
+        assert_eq!(world.labels_for("A"), ["openai-fox"]);
+        assert!(hits.load(std::sync::atomic::Ordering::SeqCst) >= 1, "live usage fetch must occur");
+        assert_eq!(a.account_pin(AccountProviderKind::OpenAi).unwrap().label, "openai-fox");
+    });
+}
+
+
 #[derive(Clone, Debug)]
 enum FakeAccountBehavior {
     /// Streams "hi from <label>".

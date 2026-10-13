@@ -428,6 +428,60 @@ pub(crate) fn reasoning_effort_picker_label(effort: &str) -> &str {
 
 /// The saved default reasoning effort for the provider family of `route`
 /// (`anthropic_reasoning_effort` / `openai_reasoning_effort`), if any.
+fn named_model_default_effort(
+    config: &crate::config::Config,
+    key: &str,
+    model: &str,
+) -> Option<String> {
+    let profile_id = key.strip_prefix("openai-compatible:").unwrap_or(key);
+    let (_, profile) = config
+        .providers
+        .iter()
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(profile_id))?;
+    if profile.provider_type != crate::config::NamedProviderType::OpenAiCompatible {
+        return None;
+    }
+    profile
+        .models
+        .iter()
+        .find(|entry| entry.id.trim().eq_ignore_ascii_case(model.trim()))?
+        .reasoning_effort
+        .clone()
+}
+
+fn persist_default_reasoning_effort(
+    config: &crate::config::Config,
+    key: Option<&str>,
+    model: &str,
+    effort: &str,
+) -> Option<anyhow::Result<()>> {
+    match key? {
+        "claude-oauth" | "claude-api" => Some(
+            crate::config::Config::set_anthropic_reasoning_effort(Some(effort)),
+        ),
+        "openai-oauth" | "openai-api" => Some(crate::config::Config::set_openai_reasoning_effort(
+            Some(effort),
+        )),
+        key => {
+            let profile_id = key.strip_prefix("openai-compatible:").unwrap_or(key);
+            let (id, profile) = config
+                .providers
+                .iter()
+                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(profile_id))?;
+            if profile.provider_type != crate::config::NamedProviderType::OpenAiCompatible {
+                return None;
+            }
+            Some(
+                crate::config::Config::set_named_provider_model_reasoning_effort(
+                    id,
+                    model,
+                    Some(effort),
+                ),
+            )
+        }
+    }
+}
+
 fn saved_default_reasoning_effort(model: &str, route: &PickerOption) -> Option<String> {
     // Provider defaults of an SSH-remote session are not the local config's.
     if crate::tui::is_ssh_remote() {
@@ -446,7 +500,8 @@ fn saved_default_reasoning_effort(model: &str, route: &PickerOption) -> Option<S
         Some("openai-oauth") | Some("openai-api") => {
             config.provider.openai_reasoning_effort.clone()
         }
-        _ => None,
+        Some(key) => named_model_default_effort(config, key, model),
+        None => None,
     }
 }
 
@@ -3573,8 +3628,17 @@ impl App {
                 }
             }
         }
-        if let Some(effort) = effort {
-            let _ = self.provider.set_reasoning_effort(&effort);
+        if let Some(effort) = effort.as_deref()
+            && !self.is_remote
+            && let Err(error) = self.provider.set_reasoning_effort(effort)
+        {
+            self.push_display_message(DisplayMessage::error(format!(
+                "Switched to {}, but reasoning level `{}` was not applied: {}",
+                entry.name, effort, error
+            )));
+            self.set_status_notice(format!("Model → {} · level unchanged", entry.name));
+            self.onboarding_after_model_select();
+            return;
         }
         if !route_detail.is_empty() {
             self.push_display_message(DisplayMessage::system(format!(
@@ -3650,36 +3714,30 @@ impl App {
         } else {
             (bare_name.clone(), None)
         };
-        let effort_suffix = effort
+        let mut effort_suffix = effort
             .map(|effort| format!(" ({})", reasoning_effort_picker_label(effort)))
             .unwrap_or_default();
-
-        let notice = format!(
-            "Default → {}{} via {}",
-            model_spec,
-            effort_suffix,
-            provider_key.as_deref().unwrap_or("auto")
-        );
 
         match crate::config::Config::set_default_model(Some(&model_spec), provider_key.as_deref()) {
             Ok(()) => {
                 // Persist the level picked in the reasoning step so the
                 // default survives restarts with its effort (issue #675).
                 if let Some(effort) = effort {
-                    let save_result = match provider_key.as_deref() {
-                        Some("claude-oauth") | Some("claude-api") => Some(
-                            crate::config::Config::set_anthropic_reasoning_effort(Some(effort)),
-                        ),
-                        Some("openai-oauth") | Some("openai-api") => Some(
-                            crate::config::Config::set_openai_reasoning_effort(Some(effort)),
-                        ),
-                        _ => None,
-                    };
-                    if let Some(Err(e)) = save_result {
-                        self.push_display_message(DisplayMessage::error(format!(
-                            "Saved default model, but failed to save effort: {}",
-                            e
-                        )));
+                    match persist_default_reasoning_effort(
+                        crate::config::config(),
+                        provider_key.as_deref(),
+                        &bare_name,
+                        effort,
+                    ) {
+                        Some(Ok(())) => {}
+                        Some(Err(e)) => {
+                            effort_suffix.clear();
+                            self.push_display_message(DisplayMessage::error(format!(
+                                "Saved default model, but failed to save effort: {}",
+                                e
+                            )));
+                        }
+                        None => effort_suffix.clear(),
                     }
                 }
                 self.invalidate_model_picker_cache();
@@ -3697,7 +3755,12 @@ impl App {
                     effort_suffix,
                     provider_key.as_deref().unwrap_or("auto")
                 )));
-                self.set_status_notice(notice)
+                self.set_status_notice(format!(
+                    "Default → {}{} via {}",
+                    model_spec,
+                    effort_suffix,
+                    provider_key.as_deref().unwrap_or("auto")
+                ))
             }
             Err(e) => self.set_status_notice(format!("Failed to save default: {}", e)),
         }
@@ -4688,6 +4751,229 @@ mod tests {
 
     fn picker_option(provider: &str) -> PickerOption {
         picker_option_with_method(provider, "test")
+    }
+
+    struct ConfigHomeGuard(Option<std::ffi::OsString>);
+
+    impl Drop for ConfigHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+
+    #[test]
+    fn named_profile_default_level_is_persisted_per_model() {
+        let _env = crate::storage::lock_test_env();
+        let _home = ConfigHomeGuard(std::env::var_os("JCODE_HOME"));
+        let dir = tempfile::TempDir::new().unwrap();
+        crate::env::set_var("JCODE_HOME", dir.path());
+        crate::config::Config::invalidate_cache();
+        std::fs::write(dir.path().join("config.toml"),
+            "[providers.custom]\ntype = \"openai-compatible\"\nbase_url = \"https://example.invalid/v1\"\n").unwrap();
+        let mut app = crate::tui::app::tests::create_test_app();
+        let mut entry = picker_entry("kimi-k3", "custom", 0);
+        entry.options = vec![picker_option_with_method(
+            "custom",
+            "openai-compatible:custom",
+        )];
+        app.save_model_picker_default(0, &entry, Some("high"));
+        crate::config::Config::invalidate_cache();
+        let saved = crate::config::Config::load();
+        let effort = saved.providers["custom"]
+            .models
+            .iter()
+            .find(|model| model.id == "kimi-k3")
+            .and_then(|model| model.reasoning_effort.as_deref());
+        assert_eq!(effort, Some("high"));
+        assert_eq!(
+            super::saved_default_reasoning_effort("kimi-k3", &entry.options[0]).as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn named_profile_effort_preserves_case_trim_fields_and_clear_semantics() {
+        let _env = crate::storage::lock_test_env();
+        let _home = ConfigHomeGuard(std::env::var_os("JCODE_HOME"));
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("JCODE_HOME", dir.path());
+        }
+        std::fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[providers.Custom]
+type = "openai-compatible"
+base_url = "https://example.invalid/v1"
+[[providers.Custom.models]]
+id = " Kimi-K3 "
+context_window = 123456
+reasoning = true
+reasoning_effort = "low"
+"#,
+        )
+        .unwrap();
+        crate::config::invalidate_config_cache();
+        crate::config::Config::set_named_provider_model_reasoning_effort(
+            "custom",
+            " kimi-k3 ",
+            Some("high"),
+        )
+        .unwrap();
+        let loaded = crate::config::Config::load();
+        assert_eq!(loaded.providers["Custom"].models.len(), 1);
+        assert_eq!(
+            loaded.providers["Custom"].models[0].context_window,
+            Some(123456)
+        );
+        assert_eq!(loaded.providers["Custom"].models[0].reasoning, Some(true));
+        assert_eq!(
+            super::named_model_default_effort(&loaded, "openai-compatible:CUSTOM", "KIMI-K3")
+                .as_deref(),
+            Some("high")
+        );
+        crate::config::Config::set_named_provider_model_reasoning_effort("CUSTOM", "kimi-k3", None)
+            .unwrap();
+        assert!(
+            crate::config::Config::load().providers["Custom"].models[0]
+                .reasoning_effort
+                .is_none()
+        );
+        crate::config::Config::set_named_provider_model_reasoning_effort("custom", "unknown", None)
+            .unwrap();
+        assert_eq!(
+            crate::config::Config::load().providers["Custom"]
+                .models
+                .len(),
+            1
+        );
+        assert!(
+            crate::config::Config::set_named_provider_model_reasoning_effort(
+                "missing",
+                "kimi-k3",
+                Some("high")
+            )
+            .is_err()
+        );
+        assert!(
+            crate::config::Config::set_named_provider_model_reasoning_effort(
+                "custom",
+                " ",
+                Some("high")
+            )
+            .is_err()
+        );
+        std::fs::write(dir.path().join("config.toml"), "[broken").unwrap();
+        assert!(
+            crate::config::Config::set_named_provider_model_reasoning_effort(
+                "custom",
+                "kimi-k3",
+                Some("high")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("config.toml")).unwrap(),
+            "[broken"
+        );
+    }
+
+    #[test]
+    fn unsupported_default_effort_does_not_claim_saved_level() {
+        let _env = crate::storage::lock_test_env();
+        let _home = ConfigHomeGuard(std::env::var_os("JCODE_HOME"));
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("JCODE_HOME", dir.path());
+        }
+        crate::config::invalidate_config_cache();
+        let mut app = crate::tui::app::tests::create_test_app();
+        let mut entry = picker_entry("example-model", "unknown", 0);
+        entry.options = vec![picker_option_with_method("unknown", "unknown")];
+        app.save_model_picker_default(0, &entry, Some("high"));
+        assert!(app.status_notice.as_ref().is_some_and(
+            |(notice, _)| notice.starts_with("Default →") && !notice.contains("(high)")
+        ));
+        assert!(
+            !app.display_messages()
+                .iter()
+                .any(|m| m.content.contains("(high)"))
+        );
+    }
+
+    struct LevelRejectingProvider;
+
+    #[async_trait::async_trait]
+    impl crate::provider::Provider for LevelRejectingProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> anyhow::Result<crate::provider::EventStream> {
+            unimplemented!("no inference in picker regression")
+        }
+        fn name(&self) -> &str {
+            "custom"
+        }
+        fn model(&self) -> String {
+            "deepseek-v4".into()
+        }
+        fn set_route_selection(
+            &self,
+            _selection: &crate::provider::RouteSelection,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn set_reasoning_effort(&self, effort: &str) -> anyhow::Result<()> {
+            if effort == "high" {
+                Ok(())
+            } else {
+                anyhow::bail!("unsupported effort {effort}")
+            }
+        }
+        fn fork(&self) -> std::sync::Arc<dyn crate::provider::Provider> {
+            std::sync::Arc::new(Self)
+        }
+    }
+
+    #[test]
+    fn rejected_reasoning_level_is_reported_instead_of_claimed() {
+        let _env = crate::storage::lock_test_env();
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.provider = std::sync::Arc::new(LevelRejectingProvider);
+        let mut entry = picker_entry("deepseek-v4", "custom", 0);
+        entry.options = vec![picker_option_with_method(
+            "custom",
+            "openai-compatible:custom",
+        )];
+        app.apply_model_picker_choice(entry.clone(), Some("xhigh".into()));
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("`xhigh` was not applied")
+        );
+        assert!(
+            app.status_notice
+                .as_ref()
+                .is_some_and(|(notice, _)| notice.contains("level unchanged"))
+        );
+        app.apply_model_picker_choice(entry, Some("high".into()));
+        assert!(
+            app.status_notice
+                .as_ref()
+                .is_some_and(|(notice, _)| !notice.contains("level unchanged"))
+        );
     }
 
     #[test]

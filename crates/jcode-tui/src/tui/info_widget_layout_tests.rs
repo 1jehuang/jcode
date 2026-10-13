@@ -929,6 +929,107 @@ fn contended_overview_data() -> InfoWidgetData {
     }
 }
 
+#[test]
+fn remerge_keeps_slot_of_widget_hidden_below_top_band() {
+    let mut data = InfoWidgetData {
+        session_name: Some("slot-review".into()),
+        memory_info: Some(MemoryInfo {
+            total_count: 4,
+            activity: Some(crate::tui::info_widget::MemoryActivity {
+                state: crate::tui::info_widget::MemoryState::Embedding,
+                state_since: std::time::Instant::now(),
+                pipeline: None,
+                recent_events: Vec::new(),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mem_h = calculate_widget_height(WidgetKind::MemoryActivity, &data, 40, u16::MAX) as usize;
+    data.cache_hit_info = Some(CacheHitInfo {
+        reported_input_tokens: 2_000,
+        prompt_tokens: Some(2_000),
+        read_tokens: 1_500,
+        ..Default::default()
+    });
+    let ov = calculate_widget_height(WidgetKind::Overview, &data, 40, u16::MAX) as usize;
+    assert!(
+        ov > 2 && ov < mem_h,
+        "natural overview {ov} must fit below natural memory {mem_h}"
+    );
+    let band = mem_h + 2;
+    let rows = band + 5 * (ov + 1);
+    let area = Rect::new(0, 0, 140, rows as u16);
+    let widths_with = |covered: bool| -> Vec<u16> {
+        (0..rows)
+            .map(|r| {
+                if r < band || (covered && (r - band) % (ov + 1) == ov) {
+                    0
+                } else {
+                    40
+                }
+            })
+            .collect()
+    };
+    let margins = |covered: bool, scroll_top: usize| Margins {
+        right_widths: widths_with(covered),
+        right_reliable: widths_with(covered),
+        scroll_top,
+        content_start_row: band,
+        content_churning: true,
+        ..Default::default()
+    };
+    let mut initial_data = data.clone();
+    initial_data.cache_hit_info = None;
+    let initial = calculate_placements_anchored(area, &margins(false, 0), &initial_data, true, &[]);
+    let initial_memory = initial
+        .anchors
+        .iter()
+        .find(|a| a.placement.kind == WidgetKind::MemoryActivity)
+        .expect("real first frame must place active memory");
+    assert_eq!(initial_memory.placement.rect.height as usize, mem_h);
+    assert!(
+        initial
+            .anchors
+            .iter()
+            .any(|a| a.placement.kind != WidgetKind::MemoryActivity),
+        "real split part must trigger remerge"
+    );
+    let hidden =
+        calculate_placements_anchored(area, &margins(true, 200), &data, true, &initial.anchors);
+    assert_placements_sane("hidden frame", area, &hidden.visible);
+    let held = hidden
+        .anchors
+        .iter()
+        .find(|a| a.placement.kind == WidgetKind::MemoryActivity)
+        .expect("transient obstruction must hold memory anchor");
+    assert!(held.hidden_frames > 0);
+    assert!(
+        !hidden
+            .visible
+            .iter()
+            .any(|p| p.kind == WidgetKind::MemoryActivity)
+    );
+    let slot = (band, band + mem_h);
+    for p in &hidden.visible {
+        let (start, end) = (p.rect.y as usize, (p.rect.y + p.rect.height) as usize);
+        assert!(
+            end <= slot.0 || start >= slot.1,
+            "{:?} stole hidden slot {slot:?}",
+            p
+        );
+    }
+    let cleared =
+        calculate_placements_anchored(area, &margins(false, 200), &data, true, &hidden.anchors);
+    assert_placements_sane("cleared frame", area, &cleared.visible);
+    let back = cleared
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::MemoryActivity)
+        .unwrap_or_else(|| panic!("memory stayed hidden: {:?}", cleared.visible));
+    assert_eq!(back.rect.y as usize, band);
+}
+
 /// Content that grows under a resident widget must not make it vanish.
 ///
 /// Startup repro: the Overview is placed for {usage, changes}, then History

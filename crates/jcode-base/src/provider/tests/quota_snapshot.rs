@@ -147,6 +147,26 @@ fn accepted_snapshot_preserves_non_quota_cooldown() {
 }
 
 #[test]
+fn accepted_snapshot_clears_older_rate_limit_cooldown() {
+    with_account_failover_env(|| {
+        store_openai_accounts(1);
+        record_provider_unavailable_for_label("openai", LABEL, "OpenAI API error (429): too many requests");
+        store_available();
+        assert_eq!(provider_unavailability_detail_for_label("openai", LABEL), None);
+    });
+}
+
+#[test]
+fn accepted_snapshot_preserves_auth_cooldown_mentioning_quota() {
+    with_account_failover_env(|| {
+        store_openai_accounts(1);
+        record_provider_unavailable_for_label("openai", LABEL, "OpenAI API error (401 Unauthorized): quota unavailable until authentication succeeds");
+        store_available();
+        assert!(provider_unavailability_detail_for_label("openai", LABEL).is_some());
+    });
+}
+
+#[test]
 fn accepted_snapshot_clears_marker_quota_cooldown() {
     with_account_failover_env(|| {
         store_openai_accounts(1);

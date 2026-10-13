@@ -494,9 +494,8 @@ pub async fn revalidate_openai_account_exhaustion(label: &str) {
     else {
         return;
     };
-    // Unit tests use fake credentials. They exercise the store hook directly
-    // instead of reaching the real usage endpoint.
-    if cfg!(test) {
+    // Fake credentials may only reach an explicitly configured loopback test endpoint.
+    if super::openai_usage_url().is_none() {
         return;
     }
     super::cache::forget_openai_usage_for_label(label);
@@ -513,6 +512,14 @@ pub async fn revalidate_openai_account_exhaustion(label: &str) {
     );
     // Never hold a turn hostage to a slow usage endpoint.
     let _ = tokio::time::timeout(Duration::from_secs(8), fetch).await;
+}
+
+#[cfg(test)]
+pub(crate) fn mark_openai_exhaustion_revalidated_for_tests(label: &str) {
+    OPENAI_EXHAUSTION_REVALIDATED_AT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(label.to_string(), Instant::now());
 }
 
 #[cfg(test)]
