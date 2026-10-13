@@ -280,7 +280,10 @@ pub(super) async fn handle_get_model_catalog(
                 agent_guard.active_resolved_credential(),
                 agent_guard.provider_handle().service_tier(),
                 agent_guard.provider_handle().reasoning_effort(),
-                crate::session_accounts::account_infos(agent_guard.provider_handle().as_ref()),
+                crate::session_accounts::account_infos_with_pins(
+                    agent_guard.provider_handle().as_ref(),
+                    agent_guard.account_pins(),
+                ),
                 "live",
             ),
             Err(_) => {
@@ -751,8 +754,10 @@ async fn send_history_with_guard(
     supports_pdf_panels: bool,
 ) -> Result<()> {
     let history_start = Instant::now();
-    let account_labels =
-        crate::session_accounts::account_infos(agent_guard.provider_handle().as_ref());
+    let account_labels = crate::session_accounts::account_infos_with_pins(
+        agent_guard.provider_handle().as_ref(),
+        agent_guard.account_pins(),
+    );
     let catalog_provider = include_model_catalog.then(|| agent_guard.provider_handle());
     let (
         messages,

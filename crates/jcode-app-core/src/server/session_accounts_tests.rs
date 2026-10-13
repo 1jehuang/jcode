@@ -19,6 +19,7 @@ type PinCalls = Arc<StdMutex<Vec<(AccountProviderKind, Option<String>)>>>;
 struct PinRecordingProvider {
     pin: Arc<StdMutex<BTreeMap<AccountProviderKind, AccountPin>>>,
     calls: PinCalls,
+    reports_pins: bool,
 }
 
 use std::collections::BTreeMap;
@@ -28,6 +29,7 @@ impl PinRecordingProvider {
         Self {
             pin: Arc::new(StdMutex::new(BTreeMap::new())),
             calls: Arc::new(StdMutex::new(Vec::new())),
+            reports_pins: true,
         }
     }
 }
@@ -53,18 +55,26 @@ impl Provider for PinRecordingProvider {
         Arc::new(Self {
             pin: Arc::new(StdMutex::new(self.pin.lock().unwrap().clone())),
             calls: Arc::clone(&self.calls),
+            reports_pins: self.reports_pins,
         })
     }
     fn fork_for_new_session(&self) -> Arc<dyn Provider> {
         Arc::new(Self {
             pin: Arc::new(StdMutex::new(BTreeMap::new())),
             calls: Arc::clone(&self.calls),
+            reports_pins: self.reports_pins,
         })
     }
     fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+        if !self.reports_pins {
+            return None;
+        }
         self.pin.lock().unwrap().get(&kind).cloned()
     }
     fn set_account_pin(&self, kind: AccountProviderKind, pin: Option<AccountPin>) -> Result<()> {
+        if !self.reports_pins {
+            return Ok(());
+        }
         self.calls
             .lock()
             .unwrap()
@@ -468,6 +478,86 @@ async fn subscribe_account_pins_pin_the_new_session_and_history_reports_it() {
             is_default: false,
         }]
     );
+    crate::env::remove_var("JCODE_RUNTIME_DIR");
+}
+
+#[tokio::test]
+async fn direct_runtime_persisted_pin_is_reported_in_account_event_catalog_and_history() {
+    let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+    let runtime = tempfile::TempDir::new().expect("runtime");
+    crate::env::set_var("JCODE_RUNTIME_DIR", runtime.path());
+    store_three_claude_accounts();
+    let mut provider = PinRecordingProvider::new();
+    // Direct compatible runtimes inherit the trait's no-op setter and cannot
+    // report a native OAuth account. Their session still persists its choice.
+    provider.reports_pins = false;
+    let server = test_server(Arc::new(provider));
+    let (_task, stream) = (server.connect)();
+    let mut client = TestClient::new(stream);
+    let session_id = client.subscribe(10, sandbox.root(), true).await;
+    client
+        .send(serde_json::json!({
+            "type": "set_session_account", "id": 20,
+            "provider": "claude", "label": "claude-fox",
+        }))
+        .await;
+    let changed = client
+        .until(|event| matches!(event, ServerEvent::SessionAccountChanged { .. }))
+        .await;
+    assert!(matches!(changed, ServerEvent::SessionAccountChanged {
+        label: Some(label), pinned: true, is_default: false, ..
+    } if label == "claude-fox"));
+    client
+        .until(|event| matches!(event, ServerEvent::Done { id: 20 }))
+        .await;
+    let agent = server
+        .sessions
+        .read()
+        .await
+        .get(&session_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        agent.lock().await.account_pins()["claude"].label,
+        "claude-fox"
+    );
+    assert_eq!(
+        session_pin(&server, &session_id).await,
+        None,
+        "the direct runtime cannot report the session's persisted pin"
+    );
+    for (request, id) in [("get_model_catalog", 21), ("get_history", 22)] {
+        client
+            .send(serde_json::json!({"type": request, "id": id}))
+            .await;
+        let event = client.until(|event| matches!(event, ServerEvent::History { id: response, .. } if *response == id)).await;
+        let ServerEvent::History { account_labels, .. } = event else {
+            unreachable!()
+        };
+        assert_eq!(
+            account_labels,
+            vec![crate::protocol::SessionAccountInfo {
+                provider: "claude".to_string(),
+                label: Some("claude-fox".to_string()),
+                pinned: true,
+                is_default: false,
+            }]
+        );
+    }
+    client
+        .send(serde_json::json!({"type": "set_session_account", "id": 23, "provider": "claude"}))
+        .await;
+    let changed = client
+        .until(|event| matches!(event, ServerEvent::SessionAccountChanged { .. }))
+        .await;
+    assert!(matches!(changed, ServerEvent::SessionAccountChanged {
+        label: Some(label), pinned: false, is_default: true, ..
+    } if label == "claude-otter"));
+    client
+        .until(|event| matches!(event, ServerEvent::Done { id: 23 }))
+        .await;
+    assert!(agent.lock().await.account_pins().is_empty());
+    assert_eq!(session_pin(&server, &session_id).await, None);
     crate::env::remove_var("JCODE_RUNTIME_DIR");
 }
 
