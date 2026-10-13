@@ -1103,6 +1103,109 @@ fn test_account_ux_center_does_not_duplicate_provider_settings() {
                 .unwrap(),
             crate::tui::account_picker::OverlayAction::Execute(_)
         ));
+        picker
+            .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+            .unwrap();
+        for character in "Usage & provider settings".chars() {
+            picker
+                .handle_overlay_key(KeyCode::Char(character), KeyModifiers::empty())
+                .unwrap();
+        }
+        assert_eq!(picker.debug_memory_profile()["filtered_count"], 1);
+        assert!(matches!(
+            picker
+                .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                .unwrap(),
+            crate::tui::account_picker::OverlayAction::Execute(
+                crate::tui::account_picker::AccountPickerCommand::SubmitInput(command)
+            ) if command == "/account openai settings"
+        ));
+    });
+}
+
+#[test]
+fn test_account_ux_add_and_refresh_render_exact_target_and_masked_identity() {
+    with_temp_jcode_home(|| {
+        let _render_lock = crate::tui::ui::render_state_test_lock();
+        let (claude_label, _) = store_two_claude_accounts();
+        let openai_label = crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+            label: "openai-otter".to_string(),
+            access_token: "synthetic-access".into(),
+            refresh_token: "synthetic-refresh".into(),
+            id_token: None,
+            account_id: None,
+            expires_at: None,
+            email: Some("otter@example.invalid".to_string()),
+        })
+        .unwrap();
+        let mut app = create_test_app();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(300, 50)).unwrap();
+
+        for (provider, label, email, masked_email) in [
+            (
+                "claude",
+                claude_label,
+                "first@example.com",
+                "f***t@example.com",
+            ),
+            (
+                "openai",
+                openai_label,
+                "otter@example.invalid",
+                "o***r@example.invalid",
+            ),
+        ] {
+            for (filter, expected_detail, command) in [
+                (
+                    "Add new account".to_string(),
+                    "Existing saved accounts are kept.".to_string(),
+                    format!("/account {provider} add"),
+                ),
+                (
+                    format!("Refresh account {label}"),
+                    format!(
+                        "Sign in again as {masked_email}. Replaces the saved login for {label}."
+                    ),
+                    format!("/account {provider} add {label}"),
+                ),
+            ] {
+                app.open_account_add_replace_flow(Some(provider));
+                {
+                    let mut picker = app.account_picker_overlay.as_ref().unwrap().borrow_mut();
+                    for character in filter.chars() {
+                        picker
+                            .handle_overlay_key(KeyCode::Char(character), KeyModifiers::empty())
+                            .unwrap();
+                    }
+                    assert_eq!(picker.debug_memory_profile()["filtered_count"], 1);
+                }
+                terminal
+                    .draw(|frame| crate::tui::ui::draw(frame, &app))
+                    .unwrap();
+                let text = buffer_to_text(&terminal);
+                assert!(text.contains(&filter), "action title missing:\n{text}");
+                assert!(
+                    text.contains(&expected_detail),
+                    "action scope or exact masked identity missing:\n{text}"
+                );
+                assert!(!text.contains(email), "raw email exposed:\n{text}");
+                // Inspect the emitted command without dispatching it or starting OAuth.
+                assert!(matches!(
+                    app.account_picker_overlay
+                        .as_ref()
+                        .unwrap()
+                        .borrow_mut()
+                        .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
+                        .unwrap(),
+                    crate::tui::account_picker::OverlayAction::Execute(
+                        crate::tui::account_picker::AccountPickerCommand::SubmitInput(actual)
+                    ) if actual == command
+                ));
+            }
+        }
+        assert_eq!(crate::auth::claude::list_accounts().unwrap().len(), 2);
+        assert_eq!(crate::auth::codex::list_accounts().unwrap().len(), 1);
     });
 }
 
