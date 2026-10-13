@@ -2519,6 +2519,9 @@ impl App {
         if !is_preview {
             return Ok(false);
         }
+        if self.handle_account_default_shortcut(*code, modifiers) {
+            return Ok(true);
+        }
         match code {
             KeyCode::Down => {
                 if let Some(picker) = self.inline_interactive_state.as_mut() {
@@ -2562,6 +2565,9 @@ impl App {
             KeyCode::Enter => {
                 if let Some(ref mut picker) = self.inline_interactive_state {
                     if picker.filtered.is_empty() {
+                        if matches!(picker.kind, PickerKind::Account | PickerKind::Model) {
+                            return Ok(true);
+                        }
                         self.inline_interactive_state = None;
                         self.input.clear();
                         self.cursor_pos = 0;
@@ -3974,6 +3980,48 @@ impl App {
         }
     }
 
+    fn handle_account_default_shortcut(&mut self, code: KeyCode, modifiers: KeyModifiers) -> bool {
+        if !key_char_eq_ignore_ascii_case(code, 'd')
+            || !modifiers.contains(KeyModifiers::CONTROL)
+            || !self
+                .inline_interactive_state
+                .as_ref()
+                .is_some_and(|picker| picker.kind == PickerKind::Account)
+        {
+            return false;
+        }
+        let action = self
+            .inline_interactive_state
+            .as_ref()
+            .and_then(|picker| picker.selected_entry())
+            .and_then(|entry| match &entry.action {
+                PickerAction::Account(AccountPickerAction::Switch { provider_id, label })
+                    if matches!(provider_id.as_str(), "claude" | "openai") =>
+                {
+                    Some(AccountPickerAction::SetDefault {
+                        provider_id: provider_id.clone(),
+                        label: label.clone(),
+                    })
+                }
+                _ => None,
+            });
+        let Some(action) = action else {
+            self.set_status_notice("Select a saved Claude or OpenAI login to set the default");
+            return true;
+        };
+        if self
+            .inline_interactive_state
+            .as_ref()
+            .is_some_and(|picker| picker.preview)
+        {
+            self.input.clear();
+            self.cursor_pos = 0;
+        }
+        self.inline_interactive_state = None;
+        self.handle_account_picker_selection(action);
+        true
+    }
+
     pub(super) fn handle_inline_interactive_key(
         &mut self,
         code: KeyCode,
@@ -4010,20 +4058,7 @@ impl App {
         }
         // Account picker: Ctrl+D on a saved account makes it the default for
         // new windows (Enter uses it in this window). Bare letters search.
-        if key_char_eq_ignore_ascii_case(code, 'd')
-            && modifiers.contains(KeyModifiers::CONTROL)
-            && let Some(picker) = self.inline_interactive_state.as_ref()
-            && picker.kind == crate::tui::PickerKind::Account
-            && let Some(&idx) = picker.filtered.get(picker.selected)
-            && let PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) =
-                &picker.entries[idx].action
-        {
-            let action = AccountPickerAction::SetDefault {
-                provider_id: provider_id.clone(),
-                label: label.clone(),
-            };
-            self.inline_interactive_state = None;
-            self.handle_account_picker_selection(action);
+        if self.handle_account_default_shortcut(code, modifiers) {
             return Ok(());
         }
         match code {
@@ -4397,8 +4432,7 @@ impl App {
                     let selected_entry = picker.selected_entry_index();
                     if picker.filter.pop().is_some() {
                         Self::apply_inline_interactive_filter(picker);
-                        if picker.filter.is_empty()
-                            && let Some(selected_entry) = selected_entry
+                        if let Some(selected_entry) = selected_entry
                             && let Some(position) = picker
                                 .filtered
                                 .iter()

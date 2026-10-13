@@ -14,6 +14,13 @@ use jcode_provider_core::{AccountPin, AccountProviderKind};
 /// provider/login name.
 pub(crate) fn account_family(provider: &str) -> Option<&'static str> {
     let normalized = provider.trim().to_ascii_lowercase();
+    // Compatible endpoints use their own API credentials, not native OpenAI logins.
+    if normalized.starts_with("openai-compatible")
+        || normalized.starts_with("openai_compatible")
+        || normalized.starts_with("openai compatible")
+    {
+        return None;
+    }
     // Claude Code instances are a separate family: check before `claude*`.
     if matches!(
         normalized.as_str(),
@@ -250,23 +257,15 @@ impl App {
         if self.is_remote {
             return None;
         }
-        // Local session: the provider's pin, else the stored default.
+        // Local sessions share the server's runtime-first metadata policy.
         let kind = AccountProviderKind::from_key(family)?;
-        let default = stored_default_label(family);
-        match self.provider.account_pin(kind) {
-            Some(pin) => Some(SessionAccountInfo {
-                provider: family.to_string(),
-                is_default: default.as_deref() == Some(pin.label.as_str()),
-                label: Some(pin.label),
-                pinned: true,
-            }),
-            None => default.map(|label| SessionAccountInfo {
-                provider: family.to_string(),
-                label: Some(label),
-                pinned: false,
-                is_default: true,
-            }),
-        }
+        let info = crate::session_accounts::account_info_with_pins(
+            self.provider.as_ref(),
+            &self.session.account_pins,
+            kind,
+        );
+        info.label.as_ref()?;
+        Some(info)
     }
 
     /// Label this window uses for `family`, falling back to the default.

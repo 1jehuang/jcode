@@ -692,3 +692,154 @@ fn automatic_move_onto_overtaken_request_is_explained() {
         assert!(!last.contains("otter") || last.contains("out of usage"), "contradicts badge: {last}");
     });
 }
+#[test]
+fn standalone_account_metadata_uses_persisted_pin_without_runtime_report() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.is_remote = false;
+        app.window_accounts.clear();
+        app.session.account_pins.insert(
+            "openai".to_string(),
+            crate::provider::AccountPin {
+                label: "openai-fox".to_string(),
+                identity: None,
+            },
+        );
+        let info = app.window_account("openai").expect("persisted pin metadata");
+        assert_eq!(info.label.as_deref(), Some("openai-fox"));
+        assert!(info.pinned);
+    });
+}
+
+#[test]
+fn compatible_api_does_not_claim_native_openai_account_family() {
+    for provider in ["openai-compatible", "OpenAI Compatible", "openai_compatible"] {
+        assert_eq!(super::window_account::account_family(provider), None);
+    }
+    assert_eq!(super::window_account::account_family("OpenAI"), Some("openai"));
+    assert_eq!(super::window_account::account_family("openai-api"), Some("openai"));
+}
+
+#[test]
+fn empty_account_preview_enter_preserves_search() {
+    with_temp_jcode_home(|| {
+        for direct_activation in [false, true] {
+            let mut app = create_test_app();
+            let input = "/account openai zzz-not-found";
+            type_into(&mut app, input);
+            assert!(app.inline_interactive_state.as_ref().unwrap().filtered.is_empty());
+            if direct_activation {
+                assert!(app.activate_picker_from_preview());
+            } else {
+                press(&mut app, KeyCode::Enter);
+            }
+            let picker = app.inline_interactive_state.as_ref().expect("empty account preview stays open");
+            assert!(picker.preview);
+            assert!(picker.filtered.is_empty());
+            assert_eq!(picker.filter, "zzz-not-found");
+            assert_eq!(app.input(), input);
+        }
+    });
+}
+
+#[test]
+fn account_preview_ctrl_d_sets_default_without_changing_window_pin() {
+    with_temp_jcode_home(|| {
+        let (first, second) = store_two_claude_accounts();
+        for remote_mode in [false, true] {
+            crate::auth::claude::set_active_account(&first).unwrap();
+            let mut app = create_test_app();
+            app.session.account_pins.insert(
+                "claude".to_string(),
+                crate::provider::AccountPin::new(&first, None),
+            );
+            type_into(&mut app, &format!("/account claude {}", second.trim_start_matches("claude-")));
+            assert!(app.inline_interactive_state.as_ref().unwrap().preview);
+            assert!(matches!(
+                &app.inline_interactive_state.as_ref().unwrap().selected_entry().unwrap().action,
+                crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch { label, .. })
+                    if label == &second
+            ));
+            app.is_remote = remote_mode;
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let _guard = rt.enter();
+            if remote_mode {
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                rt.block_on(app.handle_remote_key(
+                    KeyCode::Char('d'),
+                    KeyModifiers::CONTROL,
+                    &mut remote,
+                ))
+                .unwrap();
+                assert!(matches!(
+                    app.pending_account_picker_action.as_ref(),
+                    Some(crate::tui::AccountPickerAction::SetDefault { provider_id, label })
+                        if provider_id == "claude" && label == &second
+                ));
+                assert_eq!(crate::auth::claude::default_account_label(), Some(first.clone()));
+            } else {
+                app.handle_key(KeyCode::Char('d'), KeyModifiers::CONTROL).unwrap();
+                assert_eq!(crate::auth::claude::default_account_label(), Some(second.clone()));
+            }
+            assert!(app.inline_interactive_state.is_none(), "default action closes the picker");
+            assert!(app.input().is_empty(), "handled shortcut consumes the command preview");
+            assert_eq!(app.session.account_pins["claude"].label, first);
+            assert!(app.quit_pending.is_none());
+        }
+    });
+}
+
+#[test]
+fn account_preview_ctrl_d_without_saved_account_preserves_query() {
+    with_temp_jcode_home(|| {
+        let actions = [
+            None,
+            Some(crate::tui::AccountPickerAction::Add { provider_id: "claude".to_string() }),
+            Some(crate::tui::AccountPickerAction::Replace {
+                provider_id: "claude".to_string(), label: "claude-otter".to_string(),
+            }),
+            Some(crate::tui::AccountPickerAction::OpenCenter { provider_filter: None }),
+            Some(crate::tui::AccountPickerAction::Switch {
+                provider_id: "claude-code".to_string(), label: "work".to_string(),
+            }),
+        ];
+        for remote_mode in [false, true] {
+            for preview in [false, true] {
+                for action in &actions {
+                    let mut app = create_test_app();
+                    let input = "/account claude new account";
+                    let mut picker = model_browser_state(preview);
+                    picker.kind = crate::tui::PickerKind::Account;
+                    picker.filter = "new account".to_string();
+                    picker.entries.truncate(1);
+                    picker.filtered = vec![0];
+                    if let Some(action) = action {
+                        picker.entries[0].action = crate::tui::PickerAction::Account(action.clone());
+                    } else {
+                        picker.filtered.clear();
+                    }
+                    app.inline_interactive_state = Some(picker);
+                    app.input = input.to_string();
+                    app.cursor_pos = 1;
+                    app.is_remote = remote_mode;
+                    if remote_mode {
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        let _guard = rt.enter();
+                        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                        rt.block_on(app.handle_remote_key(
+                            KeyCode::Char('D'), KeyModifiers::CONTROL | KeyModifiers::SHIFT, &mut remote,
+                        )).unwrap();
+                    } else {
+                        app.handle_key(KeyCode::Char('d'), KeyModifiers::CONTROL).unwrap();
+                    }
+                    assert_eq!(app.input(), input, "picker shortcut must not forward-delete the query");
+                    let picker = app.inline_interactive_state.as_ref().unwrap();
+                    assert_eq!(picker.preview, preview);
+                    assert_eq!(picker.filter, "new account", "invalid shortcut must not append a search letter");
+                    assert!(app.pending_account_picker_action.is_none());
+                    assert!(app.quit_pending.is_none());
+                }
+            }
+        }
+    });
+}

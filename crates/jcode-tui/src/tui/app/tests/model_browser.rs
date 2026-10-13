@@ -35,6 +35,71 @@ fn backspace_clearing_model_search_preserves_selected_identity() {
 }
 
 #[test]
+fn backspace_broadening_model_search_preserves_selected_identity_and_route() {
+    let mut app = create_test_app();
+    let mut picker = model_browser_state(false);
+    picker.entries = vec![
+        model_browser_entry(
+            "ux-alpha",
+            &[("OpenAI-compatible", "openai-compatible:openai-compatible")],
+        ),
+        model_browser_entry(
+            "ux-beta",
+            &[
+                ("OpenAI-compatible", "openai-compatible:openai-compatible"),
+                ("OpenRouter", "openrouter"),
+            ],
+        ),
+    ];
+    picker.entries[0].is_current = true;
+    picker.entries[0].usage_score = 100;
+    picker.filtered = vec![0, 1];
+    app.inline_interactive_state = Some(picker);
+    type_into(&mut app, "ux-beta");
+    {
+        let picker = app.inline_interactive_state.as_mut().unwrap();
+        let index = picker.selected_entry_index().unwrap();
+        picker.choose_route(index, 1);
+    }
+    for _ in 0.."ux-beta".len() {
+        press(&mut app, KeyCode::Backspace);
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        let selected = picker.selected_entry().unwrap();
+        assert_eq!(selected.name, "ux-beta", "filter={}", picker.filter);
+        assert_eq!(selected.active_option().unwrap().api_method, "openrouter");
+    }
+    assert!(
+        app.inline_interactive_state
+            .as_ref()
+            .unwrap()
+            .filter
+            .is_empty()
+    );
+}
+
+#[test]
+fn empty_model_search_preview_enter_preserves_query() {
+    for direct_activation in [false, true] {
+        let mut app = create_test_app();
+        configure_available_model_browser_routes(&mut app);
+        let input = "/model zzz-not-found";
+        type_into(&mut app, input);
+        assert!(app.inline_interactive_state.as_ref().unwrap().filtered.is_empty());
+        if direct_activation {
+            assert!(app.activate_picker_from_preview());
+        } else {
+            press(&mut app, KeyCode::Enter);
+        }
+        let picker = app.inline_interactive_state.as_ref().expect("empty model preview stays open");
+        assert!(picker.preview);
+        assert!(picker.filtered.is_empty());
+        assert_eq!(picker.filter, "zzz-not-found");
+        assert_eq!(app.input(), input);
+        assert!(app.pending_route_selection.is_none());
+    }
+}
+
+#[test]
 fn unavailable_model_enter_keeps_search_and_explains_why() {
     let mut app = create_test_app();
     let mut picker = model_browser_state(false);
