@@ -120,6 +120,8 @@ fn model_suggestions_replace_box_above_input_in_preview_and_focused_modes() {
     for preview in [true, false] {
         let mut state = model_picker_state();
         state.inline_interactive_state.as_mut().unwrap().preview = preview;
+        state.input = "/model".to_string();
+        state.command_suggestions = vec![("/model legacy".to_string(), "Generic hint")];
         assert_eq!(crate::tui::ui::inline_ui::inline_ui_height(&state), 0);
         let lines = render_model_suggestions(&state, 120, 20, 12);
         let text = lines.join("\n");
@@ -127,6 +129,7 @@ fn model_suggestions_replace_box_above_input_in_preview_and_focused_modes() {
         assert!(text.contains("openai"), "{text}");
         assert!(text.contains("current"), "{text}");
         assert!(text.contains("Ctrl+N favorite"), "{text}");
+        assert!(!text.contains("/model legacy"), "{text}");
         assert!(!text.contains('╭') && !text.contains('│'), "{text}");
         assert!(lines[12..].iter().all(|line| line.trim().is_empty()));
     }
@@ -190,6 +193,69 @@ fn non_model_pickers_still_reserve_inline_panel_height() {
             .iter()
             .all(|line| line.trim().is_empty())
     );
+}
+
+#[test]
+fn account_picker_rows_survive_late_command_overlay() {
+    for preview in [true, false] {
+        let mut state = model_picker_state();
+        state.input = "/account openai".to_string();
+        state.command_suggestions = vec![
+            (
+                "/account openai add".to_string(),
+                "Add a new OpenAI account",
+            ),
+            ("/account openai login".to_string(), "Refresh login"),
+            ("/account openai settings".to_string(), "Provider settings"),
+        ];
+        let picker = state.inline_interactive_state.as_mut().unwrap();
+        picker.kind = crate::tui::PickerKind::Account;
+        picker.preview = preview;
+        picker.entries[0].name = "openai-otter".to_string();
+        picker.entries[0].action =
+            crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
+                provider_id: "openai".to_string(),
+                label: "openai-otter".to_string(),
+            });
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                let panel_height = crate::tui::ui::inline_ui::inline_ui_height(&state);
+                let panel = Rect::new(0, 18 - panel_height, 100, panel_height);
+                crate::tui::ui::inline_ui::draw_inline_ui(frame, &state, panel);
+                crate::tui::ui::input_ui::draw_command_suggestions_overlay(
+                    frame,
+                    &state,
+                    Rect::new(0, 18, 100, 2),
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let text = (0..20)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("openai-otter"), "preview={preview}:\n{text}");
+        assert!(
+            !text.contains("/account openai add"),
+            "preview={preview}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn generic_slash_suggestions_remain_visible_without_picker() {
+    let state = TestState {
+        input: "/account openai".to_string(),
+        command_suggestions: vec![(
+            "/account openai add".to_string(),
+            "Add a new OpenAI account",
+        )],
+        ..Default::default()
+    };
+    let text = render_model_suggestions(&state, 100, 20, 18).join("\n");
+    assert!(text.contains("/account openai add"), "{text}");
+    assert!(text.contains("Add a new OpenAI account"), "{text}");
 }
 
 #[test]

@@ -121,6 +121,9 @@ fn command_suggestions_overlay_rect(
 fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'static str)]) -> bool {
     let mode = composer_mode(app.input(), app.is_remote_mode());
     !suggestions.is_empty()
+        // Interactive pickers own this surface. Models render their choices in
+        // the overlay pass, while other pickers already have an inline panel.
+        && app.inline_interactive_state().is_none()
         && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing())
 }
