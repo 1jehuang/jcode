@@ -12,7 +12,8 @@ files, so you can tune agent behavior without rebuilding.
    checkout automatically receive the Desktop prompt and `desktop_selfdev` tool,
    separate from CLI/TUI self-dev flags, `selfdev`, and `debug_socket`.
 4. `AGENTS.md` — project `./AGENTS.md` and global `~/AGENTS.md`.
-5. Prompt overlay — `./.jcode/prompt-overlay.md` and `~/.jcode/prompt-overlay.md`.
+5. Prompt overlay — `./.jcode/prompt-overlay.md` and `~/.jcode/prompt-overlay.md`,
+   plus any `[prompt] overlay_files` (see below).
 6. Preferred tools — `./.jcode/preferred-tools.md` and `~/.jcode/preferred-tools.md`.
 7. Memory and the active skill prompt (dynamic, not cached).
 
@@ -28,6 +29,20 @@ resolve to the same canonical path (for example, when working in `$HOME` or usin
 symlink aliases), the file is included once under its project heading. Distinct
 files are still both included, even when their contents match. The global
 `.jcode` directory respects `JCODE_HOME` when set.
+
+## Extra overlay files from config
+
+Plugins and other tools can register their own guidance file without editing the
+shared overlay files:
+
+```toml
+# ~/.jcode/config.toml
+[prompt]
+# A single path or a list. Loaded in order, after the conventional
+# ./.jcode/prompt-overlay.md and ~/.jcode/prompt-overlay.md. Missing files are
+# skipped; a leading ~/ is expanded.
+overlay_files = ["~/.jcode/overlays/oh-am.md"]
+```
 
 ## Replacing the base prompt
 
