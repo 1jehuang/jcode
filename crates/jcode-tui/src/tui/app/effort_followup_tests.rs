@@ -1,4 +1,13 @@
 use super::{cycled_effort_index, named_profile_reasoning_efforts};
+
+#[test]
+fn default_effort_bar_index_excludes_swarm_without_changing_cycling() {
+    assert_eq!(super::default_effort_bar_index(&["low", "high", "swarm", "swarm-deep"]), Some(1));
+    assert_eq!(super::default_effort_bar_index(&["swarm", "high", "swarm-deep"]), Some(1));
+    assert_eq!(super::default_effort_bar_index(&["swarm", "swarm-deep"]), Some(1));
+    assert_eq!(super::default_effort_bar_index(&["high"]), Some(0));
+    assert_eq!(super::default_effort_bar_index(&[]), None);
+}
 use crate::config::{Config, NamedProviderConfig, NamedProviderModelConfig};
 use jcode_provider_core::{
     DEEPSEEK_SELECTABLE_EFFORTS as DEEPSEEK, OPENAI_SELECTABLE_EFFORTS as OPENAI,

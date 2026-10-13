@@ -1164,6 +1164,120 @@ fn forward_pending_reasoning_effort_sends_effort_request_to_server() {
     );
 }
 
+#[test]
+fn staged_effort_rejection_restores_last_confirmed_including_default() {
+    let _env = crate::storage::lock_test_env();
+    for confirmed in [None, Some("high")] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openai".into());
+        app.remote_provider_model = Some("gpt-5.5".into());
+        app.remote_reasoning_effort = confirmed.map(str::to_string);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        for level in ["xhigh", "max"] {
+            app.pending_reasoning_effort = Some(level.into());
+            rt.block_on(super::forward_pending_reasoning_effort(&mut app, &mut remote));
+            assert_eq!(app.remote_reasoning_effort.as_deref(), Some(level));
+        }
+        app.handle_server_event(ServerEvent::ReasoningEffortChanged {
+            id: 1, effort: None, error: Some("unsupported effort".into()),
+        }, &mut remote);
+        assert_eq!(app.remote_reasoning_effort.as_deref(), confirmed,
+            "multiple optimistic requests must restore first confirmed state");
+        app.pending_reasoning_effort = Some("medium".into());
+        rt.block_on(super::forward_pending_reasoning_effort(&mut app, &mut remote));
+        app.handle_server_event(ServerEvent::ReasoningEffortChanged {
+            id: 3, effort: Some("medium".into()), error: None,
+        }, &mut remote);
+        app.handle_server_event(ServerEvent::ReasoningEffortChanged {
+            id: 4, effort: None, error: Some("late failure".into()),
+        }, &mut remote);
+        assert_eq!(app.remote_reasoning_effort.as_deref(), Some("medium"));
+    }
+}
+
+#[test]
+fn remote_effort_hotkey_restores_confirmed_state_on_rejection_and_send_failure() {
+    let _env = crate::storage::lock_test_env();
+    for send_failure in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openai".into());
+        app.remote_provider_model = Some("gpt-5.5".into());
+        app.remote_reasoning_effort = Some("high".into());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        if send_failure {
+            drop(remote.take_dummy_peer().unwrap());
+            assert!(rt.block_on(super::key_handling::apply_remote_effort_direction(
+                &mut app, &mut remote, 1)).is_err());
+        } else {
+            for _ in 0..2 {
+                rt.block_on(super::key_handling::apply_remote_effort_direction(
+                    &mut app, &mut remote, 1)).unwrap();
+            }
+            assert_eq!(app.remote_reasoning_effort.as_deref(), Some("max"));
+            app.handle_server_event(ServerEvent::ReasoningEffortChanged {
+                id: 1, effort: None, error: Some("unsupported effort".into()),
+            }, &mut remote);
+        }
+        assert_eq!(app.remote_reasoning_effort.as_deref(), Some("high"));
+    }
+}
+
+#[test]
+fn authoritative_effort_reports_clear_stale_picker_rollback() {
+    let _env = crate::storage::lock_test_env();
+    for (kind, authoritative) in [("model_changed", Some("high")), ("model_changed", None), ("history", Some("high"))] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("openai".into());
+        app.remote_provider_model = Some("gpt-5.5".into());
+        app.remote_session_id = Some("effort-authority".into());
+        app.remote_reasoning_effort = Some("low".into());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        app.pending_reasoning_effort = Some("max".into());
+        rt.block_on(super::forward_pending_reasoning_effort(&mut app, &mut remote));
+        let event: ServerEvent = serde_json::from_value(serde_json::json!({
+            "type": kind, "id": 2, "model": "gpt-5.5",
+            "provider_name": "openai", "provider_model": "gpt-5.5",
+            "session_id": "effort-authority", "messages": [],
+            "reasoning_effort": authoritative, "context_window": 200000
+        })).unwrap();
+        app.handle_server_event(event, &mut remote);
+        assert_eq!(app.remote_reasoning_effort.as_deref(), authoritative);
+        app.handle_server_event(ServerEvent::ReasoningEffortChanged {
+            id: 1, effort: None, error: Some("stale rejection".into()),
+        }, &mut remote);
+        assert_eq!(app.remote_reasoning_effort.as_deref(), authoritative);
+    }
+}
+
+#[test]
+fn staged_effort_send_failure_preserves_confirmed_chip() {
+    let _env = crate::storage::lock_test_env();
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.remote_reasoning_effort = Some("high".into());
+    app.pending_reasoning_effort = Some("max".into());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    drop(remote.take_dummy_peer().unwrap());
+    rt.block_on(super::forward_pending_reasoning_effort(&mut app, &mut remote));
+    assert_eq!(app.remote_reasoning_effort.as_deref(), Some("high"));
+    assert!(app.pending_reasoning_effort.is_none());
+    assert!(app.display_messages().iter().any(|m| m.content.contains("Failed to request reasoning effort")));
+}
+
 /// The dispatcher must be a no-op when no level was staged (routes without a
 /// reasoning ladder switch without a level step).
 #[test]

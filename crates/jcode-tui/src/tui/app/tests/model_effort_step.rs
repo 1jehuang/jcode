@@ -34,6 +34,10 @@ impl Provider for EffortRecordingProvider {
         self.effort.lock().unwrap().clone()
     }
 
+    fn available_efforts(&self) -> Vec<&'static str> {
+        vec!["low", "medium", "high", "swarm", "swarm-deep"]
+    }
+
     fn set_reasoning_effort(&self, effort: &str) -> Result<()> {
         *self.effort.lock().unwrap() = Some(effort.to_string());
         Ok(())
@@ -57,6 +61,16 @@ fn effort_step_names(app: &App) -> Vec<String> {
         .iter()
         .map(|&i| picker.entries[i].name.clone())
         .collect()
+}
+
+#[test]
+fn effort_command_unknown_default_bar_uses_highest_reasoning_rung() {
+    let _guard = crate::storage::lock_test_env();
+    let mut app = create_test_app();
+    app.provider = Arc::new(EffortRecordingProvider::default());
+    assert!(super::model_context::handle_model_command(&mut app, "/effort default"));
+    assert_eq!(app.status_notice.as_ref().map(|(text, _)| text.as_str()),
+        Some(format!("Effort: default {}", super::helpers::effort_bar(2, 5)).as_str()));
 }
 
 fn selected_row_name(app: &App) -> String {

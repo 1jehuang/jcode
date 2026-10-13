@@ -114,6 +114,19 @@ impl App {
         (provider, model)
     }
 
+    pub(super) fn remember_remote_effort_before_request(&mut self) {
+        if self.remote_reasoning_effort_before_request.is_none() {
+            self.remote_reasoning_effort_before_request = Some(self.remote_reasoning_effort.clone());
+        }
+    }
+
+    pub(super) fn restore_rejected_remote_effort(&mut self) {
+        if let Some(confirmed) = self.remote_reasoning_effort_before_request.take() {
+            self.remote_reasoning_effort = confirmed;
+            self.invalidate_model_picker_cache();
+        }
+    }
+
     /// Best-known current reasoning effort for the remote session. Falls back
     /// to the configured provider-family default when the server has not
     /// reported one yet, so pre-settle effort cycling starts from the value the
