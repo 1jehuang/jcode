@@ -1,4 +1,8 @@
-//! MCP management tool - connect, disconnect, list, reload MCP servers
+//! MCP management tool - stdio/remote connections and noninteractive OAuth management
+
+#[cfg(test)]
+#[path = "mcp_remote_management_tests.rs"]
+mod remote_management_tests;
 
 use crate::mcp::{ContentBlock, McpManager, McpServerConfig, dispatch_name};
 use crate::tool::{Tool, ToolContext, ToolOutput};
@@ -482,6 +486,86 @@ struct McpToolInput {
     args: Option<Vec<String>>,
     #[serde(default)]
     env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    transport: Option<String>,
+}
+
+fn connection_config(
+    params: &McpToolInput,
+    configured: Option<McpServerConfig>,
+) -> Result<McpServerConfig> {
+    if params.command.is_some() && params.url.is_some() {
+        anyhow::bail!("Supply either 'command' for stdio or 'url' for remote MCP, not both");
+    }
+    if params.command.is_none() && params.url.is_none() {
+        if params.args.is_some()
+            || params.env.is_some()
+            || params.headers.is_some()
+            || params.transport.is_some()
+        {
+            anyhow::bail!(
+                "Connection overrides require an explicit 'command' or 'url'; omit them to use the configured server"
+            );
+        }
+        return configured.ok_or_else(|| anyhow::anyhow!("'command' or 'url' is required for connect action (server is not in the MCP config)"));
+    }
+    if params.url.is_some() {
+        if params.args.is_some() || params.env.is_some() {
+            anyhow::bail!("'args' and 'env' are only supported for stdio MCP servers");
+        }
+        let transport = params.transport.as_deref().unwrap_or("http");
+        if !matches!(transport, "http" | "streamable-http" | "sse") {
+            anyhow::bail!("Remote 'transport' must be 'http', 'streamable-http', or 'sse'");
+        }
+        validate_remote_url(params.url.as_deref().expect("remote URL"))?;
+    } else {
+        if params
+            .command
+            .as_deref()
+            .is_none_or(|command| command.trim().is_empty())
+        {
+            anyhow::bail!("'command' must not be empty");
+        }
+        if params.headers.is_some()
+            || params
+                .transport
+                .as_deref()
+                .is_some_and(|transport| transport != "stdio")
+        {
+            anyhow::bail!("'headers' and remote transports require 'url'");
+        }
+    }
+    Ok(McpServerConfig {
+        command: params.command.clone().unwrap_or_default(),
+        args: params.args.clone().unwrap_or_default(),
+        env: params.env.clone().unwrap_or_default(),
+        shared: true,
+        transport: params.transport.clone(),
+        url: params.url.clone(),
+        headers: params.headers.clone().unwrap_or_default(),
+        enabled: None,
+        disabled: None,
+        timeout_secs: None,
+    })
+}
+
+fn validate_remote_url(value: &str) -> Result<()> {
+    let url = url::Url::parse(value).map_err(|_| anyhow::anyhow!("Invalid remote MCP URL"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!(
+            "Remote MCP URL must be HTTP(S), without embedded user credentials or a fragment"
+        );
+    }
+    Ok(())
 }
 
 pub struct McpManagementTool {
@@ -510,7 +594,7 @@ impl Tool for McpManagementTool {
     }
 
     fn description(&self) -> &str {
-        "Manage MCP (Model Context Protocol) servers."
+        "Manage MCP (Model Context Protocol) servers, including HTTP/SSE connections and local OAuth status/logout. Interactive login requires the explicit CLI command `jcode mcp login <configured-server>`."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -520,7 +604,7 @@ impl Tool for McpManagementTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["list", "connect", "disconnect", "reload"],
+                    "enum": ["list", "connect", "disconnect", "reload", "status", "logout"],
                     "description": "Action."
                 },
                 "server": {
@@ -529,7 +613,7 @@ impl Tool for McpManagementTool {
                 },
                 "command": {
                     "type": "string",
-                    "description": "Server command."
+                    "description": "Stdio server command. Mutually exclusive with url."
                 },
                 "args": {
                     "type": "array",
@@ -540,6 +624,20 @@ impl Tool for McpManagementTool {
                     "type": "object",
                     "additionalProperties": {"type": "string"},
                     "description": "Server env."
+                },
+                "url": {
+                    "type": "string",
+                    "description": "HTTP(S) MCP endpoint for an ad hoc remote connect, or OAuth status/logout. Omit command/url to connect a configured server by name."
+                },
+                "headers": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "HTTP headers for an ad hoc remote connect. A static Authorization header overrides stored OAuth credentials."
+                },
+                "transport": {
+                    "type": "string",
+                    "enum": ["stdio", "http", "streamable-http", "sse"],
+                    "description": "Ad hoc transport. Remote URLs default to Streamable HTTP with legacy SSE fallback."
                 }
             },
             "required": ["action"]
@@ -567,8 +665,12 @@ impl Tool for McpManagementTool {
             "connect" => self.connect_server(params, &ctx.session_id).await,
             "disconnect" => self.disconnect_server(params).await,
             "reload" => self.reload_config(&ctx.session_id).await,
+            "status" | "logout" => self.oauth_action(params).await,
+            "login" => anyhow::bail!(
+                "Interactive MCP OAuth login is CLI-only. Run `jcode mcp login <configured-server>` in a terminal (add --no-browser to print the authorization URL). No browser was opened."
+            ),
             _ => Ok(ToolOutput::new(format!(
-                "Unknown action: {}. Use 'list', 'connect', 'disconnect', or 'reload'.",
+                "Unknown action: {}. Use 'list', 'connect', 'disconnect', 'reload', 'status', or 'logout'.",
                 params.action
             ))),
         };
@@ -613,6 +715,61 @@ impl McpManagementTool {
 }
 
 impl McpManagementTool {
+    async fn oauth_action(&self, params: McpToolInput) -> Result<ToolOutput> {
+        let configured =
+            if let Some(name) = params.server.as_deref().filter(|_| params.url.is_none()) {
+                self.manager
+                    .read()
+                    .await
+                    .config()
+                    .servers
+                    .get(name)
+                    .cloned()
+            } else {
+                None
+            };
+        if params.url.is_none()
+            && configured
+                .as_ref()
+                .is_some_and(|server| !server.is_remote())
+        {
+            anyhow::bail!("OAuth status/logout is only supported for remote MCP servers");
+        }
+        let url = params
+            .url
+            .as_deref()
+            .or_else(|| configured.as_ref().and_then(|server| server.url.as_deref()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Supply a configured remote 'server' or its 'url' for OAuth status/logout"
+                )
+            })?;
+        validate_remote_url(url)?;
+        if params.action == "logout" {
+            let removed = crate::mcp::oauth::logout(url)?;
+            return Ok(ToolOutput::new(format!("{}. Static headers and existing connections are unchanged. This only forgets local OAuth credentials, not server-side authorization. Disconnect/reconnect active servers to stop using the old token.",
+                if removed { "Removed local OAuth credentials" } else { "No local OAuth credentials stored" }))
+                .with_title("MCP: OAuth logout"));
+        }
+        let static_auth = params
+            .headers
+            .as_ref()
+            .or_else(|| configured.as_ref().map(|server| &server.headers))
+            .is_some_and(|headers| {
+                headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case("authorization"))
+            });
+        let status = if static_auth {
+            "Static Authorization header configured (takes precedence over OAuth)"
+        } else if crate::mcp::oauth::status(url)?.logged_in {
+            "OAuth credentials stored (not a connection or token-validity check)"
+        } else {
+            "No OAuth credentials stored. To sign in, run `jcode mcp login <configured-server>` in a terminal."
+        };
+        Ok(ToolOutput::new(status).with_title("MCP: OAuth status"))
+    }
+
     async fn list_servers(&self) -> Result<ToolOutput> {
         let manager = self.manager.read().await;
         let servers = manager.connected_servers().await;
@@ -709,36 +866,20 @@ impl McpManagementTool {
     async fn connect_server(&self, params: McpToolInput, session_id: &str) -> Result<ToolOutput> {
         let server_name = params
             .server
+            .clone()
             .ok_or_else(|| anyhow::anyhow!("'server' is required for connect action"))?;
 
-        // With an explicit command this is an ad-hoc connect. Without one, fall
-        // back to the configured server of that name, which also lets disabled
-        // configured servers be connected on demand, session-scoped, without
-        // rewriting config (issue #436).
-        let config = if let Some(command) = params.command {
-            McpServerConfig {
-                command,
-                args: params.args.unwrap_or_default(),
-                env: params.env.unwrap_or_default(),
-                shared: true,
-                transport: None,
-                url: None,
-                headers: std::collections::HashMap::new(),
-                enabled: None,
-                disabled: None,
-                timeout_secs: None,
-            }
-        } else {
-            let manager = self.manager.read().await;
-            let configured = manager.config().servers.get(&server_name).cloned();
-            drop(manager);
-            configured.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "'command' is required for connect action ('{}' is not in the MCP config)",
-                    server_name
-                )
-            })?
-        };
+        // Explicit command/URL is ad hoc. Otherwise use the named config,
+        // including disabled entries, without changing persistent configuration.
+        let configured = self
+            .manager
+            .read()
+            .await
+            .config()
+            .servers
+            .get(&server_name)
+            .cloned();
+        let config = connection_config(&params, configured)?;
 
         let manager = self.manager.read().await;
 
@@ -818,6 +959,18 @@ impl McpManagementTool {
                     .with_metadata(json!({ "tool_references": references })))
             }
             Err(e) => {
+                let auth_hint = if config.is_remote()
+                    && !config
+                        .headers
+                        .keys()
+                        .any(|key| key.eq_ignore_ascii_case("authorization"))
+                {
+                    format!(
+                        "\nIf authentication is required, configure this server and run `jcode mcp login {server_name}` in a terminal, then reconnect. Login never runs automatically."
+                    )
+                } else {
+                    String::new()
+                };
                 crate::logging::event_warn(
                     "MCP_LIFECYCLE",
                     vec![
@@ -827,10 +980,11 @@ impl McpManagementTool {
                         ("error", e.to_string()),
                     ],
                 );
-                Ok(
-                    ToolOutput::new(format!("Failed to connect to '{}': {}", server_name, e))
-                        .with_title("MCP: Connection failed"),
-                )
+                Ok(ToolOutput::new(format!(
+                    "Failed to connect to '{}': {}{}",
+                    server_name, e, auth_hint
+                ))
+                .with_title("MCP: Connection failed"))
             }
         }
     }

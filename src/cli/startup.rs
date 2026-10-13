@@ -24,12 +24,12 @@ pub async fn run() -> Result<()> {
     super::login::install_terminal_login_presenter();
     // Snapshot user-supplied provider env before provider init rewrites it.
     super::provider_init::capture_user_openrouter_model_env();
-    // Credential import must refuse existing stores without normal startup
-    // hardening, migrations, telemetry, or provider discovery touching them.
+    // Credential import and explicit MCP management do not need normal agent
+    // startup hardening, migrations, telemetry, or provider discovery.
     if args.ssh.is_none()
         && matches!(
             args.command,
-            Some(Command::Auth(super::args::AuthCommand::Import { .. }))
+            Some(Command::Auth(super::args::AuthCommand::Import { .. }) | Command::Mcp { .. })
         )
     {
         if let Some(cwd) = &args.cwd {

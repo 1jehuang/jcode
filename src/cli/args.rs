@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use super::provider_init::ProviderChoice;
 
 mod google;
+mod mcp;
+pub(crate) use mcp::McpCommand;
 #[allow(unused_imports)]
 pub(crate) use google::{GoogleAccessTierArg, GoogleLoginArgs};
 
@@ -148,6 +150,12 @@ pub(crate) struct Args {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// List configured MCP servers or manage remote-server OAuth credentials
+    Mcp {
+        #[command(subcommand)]
+        action: McpCommand,
+    },
+
     /// Start the agent server (background daemon)
     Serve {
         /// Internal: mark this server as temporary so it can self-clean when its owner exits.

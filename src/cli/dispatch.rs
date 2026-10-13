@@ -83,6 +83,14 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     if let Some(Command::Auth(AuthCommand::Import { json, .. })) = &args.command {
         return super::auth_import::run(&args.provider, *json);
     }
+    // Explicit MCP management is independent of provider profiles, sessions,
+    // and the daemon. In particular, list must remain offline and scriptable.
+    if matches!(args.command, Some(Command::Mcp { .. })) {
+        let Some(Command::Mcp { action }) = args.command else {
+            unreachable!("MCP command checked above");
+        };
+        return super::mcp::run(action).await;
+    }
     resolve_resume_arg(&mut args)?;
 
     // One-time config migration: users whose config.toml still carries the old
@@ -135,6 +143,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     }
 
     match args.command {
+        Some(Command::Mcp { action }) => super::mcp::run(action).await?,
         Some(Command::Serve {
             temporary_server,
             owner_pid,
