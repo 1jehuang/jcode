@@ -6,6 +6,7 @@ pub mod antigravity;
 pub mod bedrock;
 mod catalog_routes;
 pub mod catalog_scheduler;
+pub mod chatgpt_web;
 pub mod copilot;
 pub mod cursor;
 mod dispatch;
@@ -1710,6 +1711,19 @@ impl Default for MultiProvider {
     }
 }
 
+async fn prefetch_openai_or_web_catalog<F>(
+    openai: Option<Arc<dyn Provider>>,
+    browser_refresh: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    match openai {
+        Some(provider) => provider.prefetch_models().await,
+        None => browser_refresh.await,
+    }
+}
+
 #[async_trait]
 impl Provider for MultiProvider {
     async fn prewarm(&self, tools: &[ToolDefinition], system_static: &str) {
@@ -2266,10 +2280,10 @@ impl Provider for MultiProvider {
                 }
             },
             async {
-                match openai {
-                    Some(provider) => provider.prefetch_models().await,
-                    None => Ok(()),
-                }
+                prefetch_openai_or_web_catalog(openai, async {
+                    chatgpt_web::refresh_models().await.map(|_| ())
+                })
+                .await
             },
             async {
                 match openrouter {

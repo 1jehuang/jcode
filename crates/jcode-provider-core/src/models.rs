@@ -28,9 +28,137 @@ pub const ALL_CLAUDE_MODELS: &[&str] = &[
     "claude-sonnet-4-20250514",
 ];
 
-/// Available OpenAI models used by model lists and provider routing.
-/// The list is curated best-first; position 0 is the quality-first default.
+/// Historical browser route ID retained for compatibility, not an assertion
+/// that the current ChatGPT picker offers this model.
 pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
+
+/// Recognize canonical browser route identifiers, not upstream API slugs.
+pub fn is_chatgpt_web_model(model: &str) -> bool {
+    if model.len() > 96 {
+        return false;
+    }
+    let Some(stem) = model.strip_suffix("[web]") else {
+        return false;
+    };
+    let (stem, allow_dots) = if let Some(stem) = stem.strip_prefix("gpt-") {
+        (stem, true)
+    } else if let Some(stem) = stem.strip_prefix('o') {
+        (stem, false)
+    } else {
+        return false;
+    };
+    let mut parts = stem.split('-');
+    let version = parts.next().unwrap_or_default();
+    !version.is_empty()
+        && (allow_dots || !version.contains('.'))
+        && version
+            .split('.')
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        && parts.all(|p| {
+            !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+}
+
+/// Convert an observed picker label to a safe local route ID. This does not
+/// assert that the label corresponds to any particular response dataset slug.
+pub fn normalize_chatgpt_web_model_label(label: &str) -> Option<String> {
+    if label.len() > 90 || label.chars().any(char::is_control) {
+        return None;
+    }
+    let model = format!(
+        "{}[web]",
+        label
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("-")
+            .to_ascii_lowercase()
+    );
+    is_chatgpt_web_model(&model).then_some(model)
+}
+
+#[cfg(test)]
+mod chatgpt_web_tests {
+    use super::*;
+
+    #[test]
+    fn chatgpt_web_o_series_routes_require_safe_suffix_without_static_availability() {
+        for (label, expected) in [
+            ("o3", "o3[web]"),
+            ("o4-mini", "o4-mini[web]"),
+            ("O4 Mini", "o4-mini[web]"),
+        ] {
+            assert_eq!(
+                normalize_chatgpt_web_model_label(label).as_deref(),
+                Some(expected)
+            );
+            assert!(is_chatgpt_web_model(expected));
+            assert_eq!(provider_for_model(expected), Some("openai"));
+            assert!(!ALL_OPENAI_MODELS.contains(&expected));
+        }
+        for invalid in [
+            "o3",
+            "o4-mini",
+            "o[web]",
+            "o-3[web]",
+            "o3.1[web]",
+            "o3--mini[web]",
+            "o3-[web]",
+            "o3;alert[web]",
+            "openai/o3[web]",
+            "o3[web][web]",
+            "o3[WEB]",
+        ] {
+            assert!(!is_chatgpt_web_model(invalid), "accepted {invalid:?}");
+        }
+        assert_eq!(provider_for_model("o3"), None, "do not invent an API route");
+        assert_eq!(
+            provider_for_model("o4-mini"),
+            None,
+            "do not invent an API route"
+        );
+    }
+
+    #[test]
+    fn chatgpt_web_labels_normalize_without_assuming_upstream_slugs() {
+        for (label, expected) in [
+            ("GPT-6", "gpt-6[web]"),
+            ("GPT-5.6 Sol", "gpt-5.6-sol[web]"),
+            ("GPT-5.5", "gpt-5.5[web]"),
+        ] {
+            assert_eq!(
+                normalize_chatgpt_web_model_label(label).as_deref(),
+                Some(expected)
+            );
+            assert!(is_chatgpt_web_model(expected));
+        }
+        assert!(is_chatgpt_web_model(CHATGPT_WEB_MODEL));
+    }
+
+    #[test]
+    fn chatgpt_web_ids_reject_unsafe_or_noncanonical_names() {
+        for model in [
+            "gpt-6",
+            "GPT-6[web]",
+            " gpt-6[web]",
+            "gpt-6[web] ",
+            "openai/gpt-6[web]",
+            "gpt-6[web][web]",
+            "gpt-6;alert[web]",
+            "gpt--6[web]",
+            "gpt-6..2[web]",
+            "gpt-6-[web]",
+            "gpt-x[web]",
+            "gpt-6\n[web]",
+            "gpt-6_foo[web]",
+        ] {
+            assert!(!is_chatgpt_web_model(model), "accepted {model:?}");
+        }
+        assert_eq!(normalize_chatgpt_web_model_label("Thinking effort"), None);
+        assert_eq!(normalize_chatgpt_web_model_label("GPT-6/evil"), None);
+    }
+}
 
 /// GPT Pro reasoning models. These are exposed only on the OpenAI platform
 /// API (`api.openai.com` with an `OPENAI_API_KEY`); the ChatGPT/Codex OAuth
@@ -59,6 +187,7 @@ pub fn is_openai_api_only_pro_model(model: &str) -> bool {
                 .any(|pro| trimmed.to_ascii_lowercase().starts_with(&format!("{pro}-"))))
 }
 
+/// Curated API/OAuth fallback models. Browser routes are discovered separately.
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     // GPT-6 Astra: newest OpenAI flagship (live on api.openai.com and
     // OpenRouter as of 2026-09). Listed explicitly because the frontier
@@ -66,10 +195,6 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
     "gpt-5.6-sol",
     "gpt-5.6-pro",
-    // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
-    // jcode model id so it can never be mistaken for an API/Codex model with
-    // the same upstream slug.
-    CHATGPT_WEB_MODEL,
     "gpt-5.6",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -107,7 +232,6 @@ mod gpt_5_6_catalog_tests {
             "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-pro",
-            "gpt-5.6-pro[web]",
             "gpt-5.6",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -201,7 +325,7 @@ pub fn provider_for_model_with_hint(
         Some("openrouter")
     } else if ALL_CLAUDE_MODELS.contains(&model) {
         Some("claude")
-    } else if ALL_OPENAI_MODELS.contains(&model) {
+    } else if ALL_OPENAI_MODELS.contains(&model) || is_chatgpt_web_model(model) {
         Some("openai")
     } else if model.contains('/') {
         Some("openrouter")
