@@ -547,11 +547,15 @@ async fn firefox_status(
         metadata["browser_running"] = json!(running);
         metadata["firefox_running"] = json!(crate::browser::is_firefox_running());
         let body = if running {
+            let diagnosis = crate::browser::diagnose_silent_chromium_bridge(target.kind)
+                .map(|d| format!(" {d}"))
+                .unwrap_or_default();
             format!(
-                "Browser bridge binaries are installed and {} is running, but the live bridge is not responding. Check that the Browser Agent Bridge extension is enabled in {} ({}). Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task.",
+                "Browser bridge binaries are installed and {} is running, but the live bridge is not responding. Check that the Browser Agent Bridge extension is enabled in {} ({}).{} Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task.",
                 name,
                 name,
-                target.kind.extensions_page()
+                target.kind.extensions_page(),
+                diagnosis
             )
         } else {
             format!(
@@ -647,6 +651,10 @@ async fn ensure_firefox_ready(
         message.push_str(&format!("{} was not running, so it was launched automatically, but the browser bridge is still not responding. The Browser Agent Bridge extension may be disabled or missing in this {} profile. This is not fixed by re-running setup unless the extension is actually missing.\n", name, name));
     } else if crate::browser::is_browser_running(target.kind) {
         message.push_str(&format!("{} is running, but the browser bridge extension is not responding. Check that the Browser Agent Bridge extension is installed and enabled ({}). Do not re-run setup just because the bridge is silent.\n", name, target.kind.extensions_page()));
+        if let Some(diagnosis) = crate::browser::diagnose_silent_chromium_bridge(target.kind) {
+            message.push_str(&diagnosis);
+            message.push('\n');
+        }
     } else {
         message.push_str(&format!("{} is not running, so the browser bridge is not responding. Start {}, then retry the browser action. Setup is one-time and is not needed again.\n", name, name));
     }

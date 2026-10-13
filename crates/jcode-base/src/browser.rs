@@ -180,8 +180,11 @@ pub use browser_session::{
     browser_session_running, ensure_browser_session, ensure_browser_session_for,
     ensure_browser_session_for_async, is_stale_session_target_error, reset_browser_session_for,
 };
+#[path = "browser_chromium_diag.rs"]
+mod browser_chromium_diag;
 #[path = "browser_update.rs"]
 mod browser_update;
+pub use browser_chromium_diag::{ChromiumExtensionState, diagnose_silent_chromium_bridge};
 pub use browser_update::{
     BridgeUpdate, auto_update_before_action, installed_bridge_version, update_bridge_if_newer,
 };
@@ -471,6 +474,10 @@ pub async fn ensure_browser_setup_for(target: BrowserDetection) -> Result<String
         ));
     } else if final_status.binary_installed {
         log.push_str(&format!("\nSetup is not complete yet. Browser bridge binaries are installed, but the {} extension/bridge is not responding.\n", name));
+        if let Some(diagnosis) = diagnose_silent_chromium_bridge(kind) {
+            log.push_str(&diagnosis);
+            log.push('\n');
+        }
         log.push_str(
             "Use `jcode browser status` to re-check readiness after any manual browser step.\n",
         );
