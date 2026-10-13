@@ -138,12 +138,19 @@ pub fn dropped_pin_reason(kind: AccountProviderKind, pin: &AccountPin) -> String
 /// ", this window uses X" for the account `provider` uses right now. Built
 /// when a notice is sent, so a pin applied after it was queued is reflected.
 pub fn current_use_suffix(provider: &dyn Provider, kind: AccountProviderKind) -> String {
-    match provider.account_pin(kind) {
-        Some(pin) => format!(", this window uses {}", pin.label),
-        None => match default_label(kind) {
-            Some(default) => format!(", this window uses the default {default}"),
-            None => ", this window uses the default account".to_string(),
-        },
+    current_use_suffix_with_pins(provider, &BTreeMap::new(), kind)
+}
+
+pub fn current_use_suffix_with_pins(
+    provider: &dyn Provider,
+    pins: &BTreeMap<String, AccountPin>,
+    kind: AccountProviderKind,
+) -> String {
+    let info = account_info_with_pins(provider, pins, kind);
+    match (info.label, info.pinned) {
+        (Some(label), true) => format!(", this window uses {label}"),
+        (Some(label), false) => format!(", this window uses the default {label}"),
+        (None, _) => ", this window uses the default account".to_string(),
     }
 }
 
@@ -243,10 +250,32 @@ pub fn kind_for_request(provider: &str, label: Option<&str>) -> Option<AccountPr
 
 /// What one provider instance uses for `kind`.
 pub fn account_info(provider: &dyn Provider, kind: AccountProviderKind) -> SessionAccountInfo {
-    let pin = provider.account_pin(kind);
+    account_info_with_pins(provider, &BTreeMap::new(), kind)
+}
+
+/// Snapshot for every provider family that has a stored account or a pin.
+pub fn account_infos(provider: &dyn Provider) -> Vec<SessionAccountInfo> {
+    account_infos_with_pins(provider, &BTreeMap::new())
+}
+
+/// Live runtime reports are authoritative, including a resolved default after
+/// unpinning or failover. Direct compatible runtimes cannot report native OAuth
+/// accounts, so their persisted session pin supplies that family's metadata.
+/// This fallback changes only presentation, never the active API credentials.
+pub fn account_info_with_pins(
+    provider: &dyn Provider,
+    pins: &BTreeMap<String, AccountPin>,
+    kind: AccountProviderKind,
+) -> SessionAccountInfo {
+    let runtime_pin = provider.account_pin(kind);
+    let resolved = provider.resolved_account_label(kind);
+    let pin = if runtime_pin.is_none() && resolved.is_none() {
+        pins.get(kind.key()).cloned()
+    } else {
+        runtime_pin
+    };
     let default = default_label(kind);
-    let label = provider
-        .resolved_account_label(kind)
+    let label = resolved
         .or_else(|| {
             pin.as_ref()
                 .map(|pin| resolve_pin(kind, pin).unwrap_or_else(|| pin.label.clone()))
@@ -260,13 +289,38 @@ pub fn account_info(provider: &dyn Provider, kind: AccountProviderKind) -> Sessi
     }
 }
 
-/// Snapshot for every provider family that has a stored account or a pin.
-pub fn account_infos(provider: &dyn Provider) -> Vec<SessionAccountInfo> {
+/// Snapshot used by live History and model-catalog responses. When no runtime
+/// account state is available, this agrees with the persisted busy snapshot.
+pub fn account_infos_with_pins(
+    provider: &dyn Provider,
+    pins: &BTreeMap<String, AccountPin>,
+) -> Vec<SessionAccountInfo> {
     AccountProviderKind::ALL
         .into_iter()
-        .filter(|kind| provider.account_pin(*kind).is_some() || !stored_accounts(*kind).is_empty())
-        .map(|kind| account_info(provider, kind))
+        .filter(|kind| {
+            provider.account_pin(*kind).is_some()
+                || pins.contains_key(kind.key())
+                || !stored_accounts(*kind).is_empty()
+        })
+        .map(|kind| account_info_with_pins(provider, pins, kind))
         .collect()
+}
+
+/// Account-change notification using the same metadata as History/catalog.
+pub fn account_changed_event_with_pins(
+    provider: &dyn Provider,
+    pins: &BTreeMap<String, AccountPin>,
+    kind: AccountProviderKind,
+    reason: Option<String>,
+) -> crate::protocol::ServerEvent {
+    let info = account_info_with_pins(provider, pins, kind);
+    crate::protocol::ServerEvent::SessionAccountChanged {
+        provider: info.provider,
+        label: info.label,
+        pinned: info.pinned,
+        is_default: info.is_default,
+        reason,
+    }
 }
 
 /// Snapshot for a persisted session whose live provider is not at hand (the
@@ -297,14 +351,7 @@ pub fn account_changed_event(
     kind: AccountProviderKind,
     reason: Option<String>,
 ) -> crate::protocol::ServerEvent {
-    let info = account_info(provider, kind);
-    crate::protocol::ServerEvent::SessionAccountChanged {
-        provider: info.provider,
-        label: info.label,
-        pinned: info.pinned,
-        is_default: info.is_default,
-        reason,
-    }
+    account_changed_event_with_pins(provider, &BTreeMap::new(), kind, reason)
 }
 
 /// A manual account choice (or unpin with `None`): pin the provider and the
@@ -402,8 +449,9 @@ pub fn sync_pins_after_stream(
             }
         }
         changed = true;
-        events.push(account_changed_event(
+        events.push(account_changed_event_with_pins(
             provider,
+            &session.account_pins,
             kind,
             Some(format!("{from} is out of usage, this window moved to {to}")),
         ));
@@ -433,14 +481,153 @@ pub fn return_home_if_reset(
             }
         }
         session.account_failover_home.remove(key);
-        let label = account_info(provider, kind)
+        let label = account_info_with_pins(provider, &session.account_pins, kind)
             .label
             .unwrap_or_else(|| "the preferred account".to_string());
-        events.push(account_changed_event(
+        events.push(account_changed_event_with_pins(
             provider,
+            &session.account_pins,
             kind,
             Some(format!("{label} reset, back to preferred account")),
         ));
     }
     events
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::EventStream;
+    use async_trait::async_trait;
+
+    #[derive(Clone, Default)]
+    struct MetadataProvider {
+        pin: Option<AccountPin>,
+        resolved: Option<String>,
+    }
+
+    #[async_trait]
+    impl Provider for MetadataProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            anyhow::bail!("metadata tests must not invoke inference")
+        }
+
+        fn name(&self) -> &str {
+            "direct-compatible"
+        }
+
+        fn fork(&self) -> std::sync::Arc<dyn Provider> {
+            std::sync::Arc::new(self.clone())
+        }
+
+        fn account_pin(&self, kind: AccountProviderKind) -> Option<AccountPin> {
+            (kind == AccountProviderKind::OpenAi)
+                .then(|| self.pin.clone())
+                .flatten()
+        }
+
+        fn resolved_account_label(&self, kind: AccountProviderKind) -> Option<String> {
+            (kind == AccountProviderKind::OpenAi)
+                .then(|| self.resolved.clone())
+                .flatten()
+        }
+    }
+
+    fn store_openai_accounts() {
+        crate::auth::codex::save_auth_file(&crate::auth::codex::JcodeOpenAiAuthFile {
+            openai_accounts: ["otter", "fox", "panda"]
+                .into_iter()
+                .map(|name| crate::auth::codex::OpenAiAccount {
+                    label: format!("openai-{name}"),
+                    access_token: format!("access-{name}"),
+                    refresh_token: format!("refresh-{name}"),
+                    id_token: None,
+                    account_id: None,
+                    expires_at: Some(chrono::Utc::now().timestamp() + 3600),
+                    email: Some(format!("{name}@example.invalid")),
+                })
+                .collect(),
+            active_openai_account: Some("openai-otter".to_string()),
+        })
+        .unwrap();
+    }
+
+    fn persisted_fox_pin() -> BTreeMap<String, AccountPin> {
+        BTreeMap::from([(
+            "openai".to_string(),
+            AccountPin::new("openai-fox", Some("fox@example.invalid".to_string())),
+        )])
+    }
+
+    #[test]
+    fn direct_runtime_persisted_pin_metadata_reaches_changed_event_and_history() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        store_openai_accounts();
+        let provider = MetadataProvider::default();
+        let pins = persisted_fox_pin();
+        let info = account_info_with_pins(&provider, &pins, AccountProviderKind::OpenAi);
+        assert_eq!(info.label.as_deref(), Some("openai-fox"));
+        assert!(info.pinned);
+        assert!(!info.is_default);
+        let snapshot = account_infos_with_pins(&provider, &pins);
+        assert_eq!(
+            snapshot.iter().find(|row| row.provider == "openai"),
+            Some(&info)
+        );
+        assert_eq!(account_infos_from_pins(&pins), snapshot);
+        let event = account_changed_event_with_pins(
+            &provider,
+            &pins,
+            AccountProviderKind::OpenAi,
+            Some("pin changed".to_string()),
+        );
+        assert!(
+            matches!(event, crate::protocol::ServerEvent::SessionAccountChanged {
+            label: Some(label), pinned: true, is_default: false, reason: Some(reason), ..
+        } if label == "openai-fox" && reason == "pin changed")
+        );
+    }
+
+    #[test]
+    fn direct_runtime_unpin_metadata_follows_default() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        store_openai_accounts();
+        let provider = MetadataProvider::default();
+        let info = account_info_with_pins(&provider, &BTreeMap::new(), AccountProviderKind::OpenAi);
+        assert_eq!(info.label.as_deref(), Some("openai-otter"));
+        assert!(!info.pinned);
+        assert!(info.is_default);
+    }
+
+    #[test]
+    fn runtime_resolved_pin_and_failover_metadata_override_persisted_pin() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().unwrap();
+        store_openai_accounts();
+        let pins = persisted_fox_pin();
+        let provider = MetadataProvider {
+            pin: Some(AccountPin::new("openai-panda", None)),
+            resolved: Some("openai-panda".to_string()),
+        };
+        let info = account_info_with_pins(&provider, &pins, AccountProviderKind::OpenAi);
+        assert_eq!(info.label.as_deref(), Some("openai-panda"));
+        assert!(info.pinned);
+        let provider = MetadataProvider {
+            pin: None,
+            resolved: Some("openai-otter".to_string()),
+        };
+        let info = account_info_with_pins(&provider, &pins, AccountProviderKind::OpenAi);
+        assert_eq!(info.label.as_deref(), Some("openai-otter"));
+        assert!(
+            !info.pinned,
+            "an authoritative live unpin must not be resurrected"
+        );
+        assert!(info.is_default);
+    }
 }

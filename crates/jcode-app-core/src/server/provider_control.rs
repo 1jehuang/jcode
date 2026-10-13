@@ -1439,11 +1439,14 @@ async fn handle_set_session_account(
             Ok(()) => {
                 if send_account_event {
                     let provider = agent_guard.provider_handle();
-                    let _ = client_event_tx.send(crate::session_accounts::account_changed_event(
-                        provider.as_ref(),
-                        kind,
-                        reason,
-                    ));
+                    let _ = client_event_tx.send(
+                        crate::session_accounts::account_changed_event_with_pins(
+                            provider.as_ref(),
+                            agent_guard.account_pins(),
+                            kind,
+                            reason,
+                        ),
+                    );
                 }
                 true
             }
@@ -1531,8 +1534,9 @@ pub(super) async fn handle_set_default_account(
     }
     if supports_session_accounts && let Ok(agent_guard) = agent.try_lock() {
         let provider = agent_guard.provider_handle();
-        let _ = client_event_tx.send(crate::session_accounts::account_changed_event(
+        let _ = client_event_tx.send(crate::session_accounts::account_changed_event_with_pins(
             provider.as_ref(),
+            agent_guard.account_pins(),
             kind,
             Some(format!("{label} is now the default account")),
         ));
@@ -1584,8 +1588,11 @@ pub(super) async fn apply_subscribe_account_pins(
     }
     for (kind, label) in rejected {
         let known = crate::session_accounts::stored_labels(kind);
-        let info =
-            crate::session_accounts::account_info(agent_guard.provider_handle().as_ref(), kind);
+        let info = crate::session_accounts::account_info_with_pins(
+            agent_guard.provider_handle().as_ref(),
+            agent_guard.account_pins(),
+            kind,
+        );
         let uses = info
             .label
             .as_deref()
@@ -1599,8 +1606,9 @@ pub(super) async fn apply_subscribe_account_pins(
         } else {
             format!("saved: {}", known.join(", "))
         };
-        let _ = client_event_tx.send(crate::session_accounts::account_changed_event(
+        let _ = client_event_tx.send(crate::session_accounts::account_changed_event_with_pins(
             agent_guard.provider_handle().as_ref(),
+            agent_guard.account_pins(),
             kind,
             Some(format!(
                 "--account {label} was not found on the server ({saved}), {uses}"

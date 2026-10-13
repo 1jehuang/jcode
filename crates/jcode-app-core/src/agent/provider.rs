@@ -302,10 +302,14 @@ impl Agent {
         std::mem::take(&mut self.pending_account_notices)
             .into_iter()
             .map(|(kind, what)| {
-                let uses =
-                    crate::session_accounts::current_use_suffix(self.provider.as_ref(), kind);
-                crate::session_accounts::account_changed_event(
+                let uses = crate::session_accounts::current_use_suffix_with_pins(
                     self.provider.as_ref(),
+                    &self.session.account_pins,
+                    kind,
+                );
+                crate::session_accounts::account_changed_event_with_pins(
+                    self.provider.as_ref(),
+                    &self.session.account_pins,
                     kind,
                     Some(format!("{what}{uses}")),
                 )
