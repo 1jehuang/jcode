@@ -831,3 +831,53 @@ async fn batch_preserves_images_in_input_order_across_failures() {
     assert_eq!(output.images[1].media_type, "image/png");
     assert!(output.output.contains("Completed: 2 succeeded, 1 failed"));
 }
+
+#[tokio::test]
+async fn flat_batch_skill_manage_load_preserves_native_name() {
+    const SKILL_NAME: &str = "optimization";
+    const MARKER: &str = "BATCH_SKILL_NATIVE_NAME_FIXTURE_CONTENT";
+    let project_dir = tempfile::tempdir().expect("isolated project directory");
+    let skill_path = project_dir
+        .path()
+        .join(".jcode/skills")
+        .join(SKILL_NAME)
+        .join("SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &skill_path,
+        format!("---\nname: {SKILL_NAME}\ndescription: Synthetic batch dispatch fixture\n---\n{MARKER}\n"),
+    )
+    .unwrap();
+
+    let registry = registry_with_batch_and_echo().await;
+    let skills = Arc::new(tokio::sync::RwLock::new(
+        crate::skill::SkillRegistry::default(),
+    ));
+    registry.tools.write().await.insert(
+        "skill_manage".into(),
+        Arc::new(super::super::skill::SkillTool::new(skills)),
+    );
+
+    let output = registry
+        .execute(
+            "batch",
+            json!({"tool_calls": [{
+                "tool": "skill_manage",
+                "intent": "Load the synthetic skill through batch child dispatch",
+                "action": "load",
+                "name": SKILL_NAME
+            }]}),
+            ToolContext {
+                working_dir: Some(project_dir.path().to_path_buf()),
+                ..test_context()
+            },
+        )
+        .await
+        .expect("batch dispatch to SkillTool should succeed");
+    assert!(output.output.contains(MARKER), "{}", output.output);
+    assert!(
+        output.output.contains("Completed: 1 succeeded, 0 failed"),
+        "{}",
+        output.output
+    );
+}
