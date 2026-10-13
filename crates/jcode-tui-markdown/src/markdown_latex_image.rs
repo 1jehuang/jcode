@@ -10,6 +10,10 @@ use std::sync::{LazyLock, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
+#[path = "latex_fallback_log.rs"]
+pub(crate) mod latex_fallback_log;
+pub(crate) use latex_fallback_log::{report_error, set_log_hook};
+
 // Bump whenever rendering output changes so stale images are not reused.
 const RENDERER_VERSION: u8 = 6;
 const MAX_SOURCE_BYTES: usize = 32 * 1024;
@@ -21,8 +25,6 @@ const MAX_RENDER_DPI: u16 = 480;
 const DPI_PER_CELL_PIXEL: u16 = 9;
 const DPI_QUANTUM: u16 = 12;
 
-static LOG_HOOK: LazyLock<Mutex<fn(&str)>> = LazyLock::new(|| Mutex::new(|_| {}));
-static LAST_REPORTED_ERROR: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 const COPY_SOURCE_CACHE_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,29 +220,6 @@ pub(super) fn test_render_attempts() -> u64 {
 #[cfg(test)]
 pub(super) fn test_toolchain_runs() -> u64 {
     TEST_TOOLCHAIN_RUNS.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub(crate) fn set_log_hook(hook: fn(&str)) {
-    if let Ok(mut current) = LOG_HOOK.lock() {
-        *current = hook;
-    }
-}
-
-pub(crate) fn report_error(error: &str) {
-    let should_report = LAST_REPORTED_ERROR
-        .lock()
-        .map(|mut last| {
-            if last.as_deref() == Some(error) {
-                false
-            } else {
-                *last = Some(error.to_string());
-                true
-            }
-        })
-        .unwrap_or(false);
-    if should_report && let Ok(hook) = LOG_HOOK.lock() {
-        hook(error);
-    }
 }
 
 fn handterm_terminal_name(term_program: Option<&str>) -> bool {
